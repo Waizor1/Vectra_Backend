@@ -1,26 +1,26 @@
 services:
-  cyberdog_db:
+  bloobcat_db:
     image: postgres:16-alpine
-    container_name: cyberdog_db
+    container_name: bloobcat_db
     restart: always
     environment:
       POSTGRES_PASSWORD: postgres
     ports:
       - "59132:5432"
     volumes:
-      - cyberdog-db-volume:/var/lib/postgresql/data
+      - bloobcat-db-volume:/var/lib/postgresql/data
     networks:
-      - cyberdog_network
+      - bloobcat_network
 
-  cyberdog:
+  bloobcat:
     env_file:
       - .env
     environment:
-      - SCRIPT_DB=postgres://postgres:postgres@cyberdog_db:5432/postgres
+      - SCRIPT_DB=postgres://postgres:postgres@bloobcat_db:5432/postgres
       - PYTHONUNBUFFERED=1
     ports:
       - "33083:33083"
-    container_name: cyberdog
+    container_name: bloobcat
     restart: always
     build:
       context: .
@@ -28,11 +28,11 @@ services:
     volumes:
       - ./logs:/app/logs
     networks:
-      - cyberdog_network
+      - bloobcat_network
 
   pgadmin:
     image: dpage/pgadmin4
-    container_name: cyberdog_pgadmin
+    container_name: bloobcat_pgadmin
     restart: always
     environment:
       PGADMIN_DEFAULT_EMAIL: admin@admin.com
@@ -40,13 +40,13 @@ services:
     ports:
       - "5050:80"
     networks:
-      - cyberdog_network
+      - bloobcat_network
     depends_on:
-      - cyberdog_db
+      - bloobcat_db
 
 networks:
-  cyberdog_network:
+  bloobcat_network:
     driver: bridge
 
 volumes:
-  cyberdog-db-volume:
+  bloobcat-db-volume:

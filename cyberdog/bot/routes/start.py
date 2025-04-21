@@ -2,6 +2,7 @@ from aiogram import Router
 from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import CommandObject, CommandStart
 from aiogram.types import CallbackQuery, Message
+from langdetect import detect, LangDetectException
 
 from cyberdog.bot.keyboard import webapp_inline_button
 from cyberdog.db.users import Users
@@ -11,31 +12,46 @@ router = Router()
 
 @router.message(CommandStart())
 async def command_start_handler(message: Message, command: CommandObject):
-    # Просто получаем или создаем пользователя, без обработки аргументов команды
-    # Обработка referral ID и UTM теперь происходит в validate при запуске WebApp
-    await Users.get_user(message.from_user)
+    user = message.from_user
+    # Получаем или создаем пользователя
+    await Users.get_user(user)
+
+    # Определяем язык пользователя
+    lang_code = user.language_code
+    detected_lang = "en"  # По умолчанию английский
+    if lang_code:
+        try:
+            # Используем language_code для определения языка
+            if lang_code.startswith("ru"):
+                 detected_lang = "ru"
+        except LangDetectException:
+            pass
+            
+    # Тексты приветствий (минималистичные)
+    welcome_texts = {
+        "ru": "Привет! 👋 Нажми кнопку ниже, чтобы запустить BloopCat.",
+        "en": "Hi! 👋 Press the button below to launch BloopCat."
+    }
+    
+    button_texts = {
+        "ru": "Запустить",
+        "en": "Launch"
+    }
+
+    # Выбираем текст и текст кнопки в зависимости от языка
+    response_text = welcome_texts.get(detected_lang, welcome_texts["en"])
+    button_text = button_texts.get(detected_lang, button_texts["en"])
 
     # Отправляем стикер и приветственное сообщение с кнопкой WebApp
     try:
         await message.answer_sticker(
-            "CAACAgIAAxkBAAEM07Fm6envLIjKfJExwf9VZOXzI8K2WwACMTQAAugboErSr6fEZiaivDYE"
+            "AAMCAgADGQEAATQDs2gGqXiHiPkkNPdsFAKgw0_gVxKDAAJvAAPb234AAZlbUKh7k4B0AQAHbQADNgQ"
         )
     except TelegramAPIError:
         pass
     await message.answer(
-        """🐶 Добро пожаловать в CyberDog VPN! 🚀 
-
-Ты только что сделал первый шаг к свободному и безопасному интернету! 🎉  
-
-🔹 Что ты получаешь с CyberDog VPN?  
-✅ YouTube и Instagram без рекламы  
-✅ Безлимитный трафик и скорость
-✅ Полная анонимность и защита данных  
-✅ Самый надежный VPN-протокол
-✅ Бесплатный тестовый период!  
-
-🔥 Нажми кнопку «Запустить» ниже и подключайся прямо сейчас! 🔥""",
-        reply_markup=await webapp_inline_button("Запустить"),
+        response_text,
+        reply_markup=await webapp_inline_button(button_text), # Используем локализованный текст кнопки
     )
 
 

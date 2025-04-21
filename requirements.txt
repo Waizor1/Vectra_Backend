@@ -46,4 +46,5 @@ typing-extensions==4.10.0
 tzlocal==5.2
 uvicorn==0.27.1
 yarl==1.9.4
-yookassa>=2.5.0 
+yookassa>=2.5.0
+langdetect 
