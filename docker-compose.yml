@@ -1,0 +1,52 @@
+services:
+  cyberdog_db:
+    image: postgres:16-alpine
+    container_name: cyberdog_db
+    restart: always
+    environment:
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "59132:5432"
+    volumes:
+      - cyberdog-db-volume:/var/lib/postgresql/data
+    networks:
+      - cyberdog_network
+
+  cyberdog:
+    env_file:
+      - .env
+    environment:
+      - SCRIPT_DB=postgres://postgres:postgres@cyberdog_db:5432/postgres
+      - PYTHONUNBUFFERED=1
+    ports:
+      - "33083:33083"
+    container_name: cyberdog
+    restart: always
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - ./logs:/app/logs
+    networks:
+      - cyberdog_network
+
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: cyberdog_pgadmin
+    restart: always
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@admin.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5050:80"
+    networks:
+      - cyberdog_network
+    depends_on:
+      - cyberdog_db
+
+networks:
+  cyberdog_network:
+    driver: bridge
+
+volumes:
+  cyberdog-db-volume:
