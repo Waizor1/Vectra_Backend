@@ -27,6 +27,7 @@ websockets = "^14.2"
 yookassa = "^2.5.0"
 loguru = "^0.7.2"
 pydantic = { extras = ["email"], version = "^2.0" }
+langdetect = "^1.0.9"
 
 
 

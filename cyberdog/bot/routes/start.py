@@ -1,8 +1,7 @@
-from aiogram import Router
+from aiogram import Router, F
 from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import CommandObject, CommandStart
 from aiogram.types import CallbackQuery, Message
-from langdetect import detect, LangDetectException
 
 from cyberdog.bot.keyboard import webapp_inline_button
 from cyberdog.db.users import Users
@@ -14,19 +13,15 @@ router = Router()
 async def command_start_handler(message: Message, command: CommandObject):
     user = message.from_user
     # Получаем или создаем пользователя
-    await Users.get_user(user)
+   # await Users.get_user(user)
 
     # Определяем язык пользователя
-    lang_code = user.language_code
-    detected_lang = "en"  # По умолчанию английский
-    if lang_code:
-        try:
-            # Используем language_code для определения языка
-            if lang_code.startswith("ru"):
-                 detected_lang = "ru"
-        except LangDetectException:
-            pass
-            
+    lang_code = message.from_user.language_code
+
+    detected_lang = "en"
+    if lang_code and lang_code.lower().startswith("ru"):
+        detected_lang = "ru"
+
     # Тексты приветствий (минималистичные)
     welcome_texts = {
         "ru": "Привет! 👋 Нажми кнопку ниже, чтобы запустить BloopCat.",
@@ -45,10 +40,10 @@ async def command_start_handler(message: Message, command: CommandObject):
     # Отправляем стикер и приветственное сообщение с кнопкой WebApp
     try:
         await message.answer_sticker(
-            "AAMCAgADGQEAATQDs2gGqXiHiPkkNPdsFAKgw0_gVxKDAAJvAAPb234AAZlbUKh7k4B0AQAHbQADNgQ"
+            "CAACAgIAAxkBAAE0A7NoBql4h4j5JDT3bBQCoMNP4FcSgwACbwAD29t-AAGZW1Coe5OAdDYE"
         )
-    except TelegramAPIError:
-        pass
+    except TelegramAPIError as e:
+        print(f"Error sending sticker: {e}")
     await message.answer(
         response_text,
         reply_markup=await webapp_inline_button(button_text), # Используем локализованный текст кнопки
