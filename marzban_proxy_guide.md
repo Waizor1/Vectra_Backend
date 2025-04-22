@@ -26,7 +26,7 @@ from zlib import crc32  # Для генерации хеша
 def get_connect_url(user_id) -> str:
     """Генерирует уникальную ссылку для подключения на основе ID пользователя"""
     return (
-        crc32(f"{user_id}connect") + crc32(f"connect {user_id}") + "cyberdog"
+        crc32(f"{user_id}connect") + crc32(f"connect {user_id}") + "bloobcat"
     )
 
 class Users(models.Model):
@@ -82,9 +82,9 @@ marzban_settings = MarzbanSettings()
 ```python
 # client.py
 from httpx import AsyncClient
-from cyberdog.settings import marzban_settings
-from cyberdog.db.users import Users
-from cyberdog.logger import get_logger
+from bloobcat.settings import marzban_settings
+from bloobcat.db.users import Users
+from bloobcat.logger import get_logger
 
 logger = get_logger("marzban_client")
 
@@ -215,9 +215,9 @@ class MarzbanClient:
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from httpx import AsyncClient
-from cyberdog.logger import get_logger
+from bloobcat.logger import get_logger
 
-from cyberdog.db.users import Users
+from bloobcat.db.users import Users
 from .client import MarzbanClient
 
 logger = get_logger("marzban_connect")

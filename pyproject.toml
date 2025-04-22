@@ -1,10 +1,10 @@
 [tool.aerich]
 tortoise_orm = "clients.TORTOISE_ORM"
 location = "./migrations"
-src_folder = "./cyberdog"
+src_folder = "./bloobcat"
 
 [tool.poetry]
-name = "cyberdog"
+name = "bloobcat"
 version = "0.1.0"
 description = ""
 authors = ["Your Name <you@example.com>"]
