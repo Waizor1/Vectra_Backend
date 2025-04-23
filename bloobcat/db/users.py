@@ -1,9 +1,10 @@
 import zlib
 from datetime import date, timedelta
-from typing import TYPE_CHECKING, Optional
+from typing import Optional, Any
 
 from aiogram.types import User
 from aiogram.utils.web_app import WebAppUser
+from fastapi import Request
 from fastadmin import TortoiseModelAdmin, register
 from tortoise import fields, models
 from tortoise.contrib.pydantic import pydantic_model_creator
@@ -13,11 +14,10 @@ from bloobcat.config import referral_percent
 
 import logging
 
-logger = logging.getLogger(__name__)
+from bloobcat.settings import marzban_settings, remnawave_settings
+from bloobcat.logger import get_logger
 
-# Используем TYPE_CHECKING для MarzbanClient, чтобы избежать циклического импорта
-if TYPE_CHECKING:
-    from bloobcat.routes.marzban.client import MarzbanClient
+logger = get_logger("users_db")
 
 
 def crc32(a: str):
@@ -56,6 +56,65 @@ class Users(models.Model):
     used_trial = fields.BooleanField(default=False)
     notification_2h_sent = fields.BooleanField(default=False)
     notification_24h_sent = fields.BooleanField(default=False)
+    remnawave_uuid = fields.UUIDField(null=True)  # UUID пользователя в RemnaWave
+
+    async def _ensure_remnawave_user(self) -> bool:
+        """
+        Создает пользователя в RemnaWave, если он еще не создан.
+        Возвращает True, если пользователь был создан, False - если уже существовал.
+        """
+        if self.remnawave_uuid:
+            # Пользователь уже создан в RemnaWave
+            logger.info(f"Пользователь {self.id} уже имеет UUID в RemnaWave: {self.remnawave_uuid}")
+            return False
+        
+        try:
+            # Импортируем здесь, чтобы избежать циклических импортов
+            from bloobcat.routes.remnawave.client import RemnaWaveClient
+            from bloobcat.settings import remnawave_settings
+            
+            remnawave = RemnaWaveClient(remnawave_settings.url, remnawave_settings.token.get_secret_value())
+            
+            # Определяем дату истечения
+            expire_at_date = self.expired_at
+            if expire_at_date is None:
+                # Если даты нет и триал не использован, назначаем триал 
+                if not self.used_trial:
+                    expire_at_date = date.today() + timedelta(days=3)  # 3 дня триал
+                    self.is_trial = True
+                    self.used_trial = True
+                    self.expired_at = expire_at_date
+                    logger.info(f"Назначен триал для {self.id} до {expire_at_date}")
+                else:
+                    # Если триал использован, устанавливаем дату на сегодня
+                    expire_at_date = date.today()
+                    logger.warning(f"Пользователь {self.id} уже использовал триал, дата истечения: {expire_at_date}")
+            
+            # Базовый лимит устройств
+            hwid_limit = 1
+            
+            # Создаем пользователя в RemnaWave
+            response = await remnawave.users.create_user(
+                username=str(self.id),
+                expire_at=expire_at_date,
+                telegram_id=self.id,
+                email=self.email,
+                description=f"Telegram: {self.name()}",
+                hwid_device_limit=hwid_limit
+            )
+            
+            # Сохраняем UUID
+            self.remnawave_uuid = response["response"]["uuid"]
+            self.is_registered = True
+            await self.save()
+            
+            logger.info(f"Пользователь {self.id} успешно создан в RemnaWave с UUID: {self.remnawave_uuid}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Ошибка при создании пользователя {self.id} в RemnaWave: {str(e)}")
+            # Не перевыбрасываем исключение, чтобы не блокировать работу приложения
+            return False
 
     @classmethod
     async def get_user(
@@ -126,6 +185,12 @@ class Users(models.Model):
                 logger.info(f"Пользователь {user.id} не сохранялся, изменений не было. Текущий UTM: {user.utm}")
                 
             await user.count_referrals()
+
+            # Создаем пользователя в RemnaWave, если он еще не создан
+            # Это будет происходить при первом обращении к /user эндпоинту
+            if is_new or not user.remnawave_uuid:
+                await user._ensure_remnawave_user()
+            
             return user
             
         except Exception as e:
@@ -173,6 +238,24 @@ class Users(models.Model):
         self.referrals = referrals
         await self.save()
 
+    async def delete_model(self):
+        """Удаляет пользователя из RemnaWave и локальной базы данных"""
+        try:
+            if self.remnawave_uuid:
+                from bloobcat.routes.remnawave.client import RemnaWaveClient
+                from bloobcat.settings import remnawave_settings
+
+                client = RemnaWaveClient(remnawave_settings.url, remnawave_settings.token.get_secret_value())
+                await client.users.delete_user(self.remnawave_uuid)
+                logger.info(f"Пользователь {self.id} удален из RemnaWave")
+
+            # Вызываем стандартный метод delete модели Tortoise
+            await self.delete()
+            logger.info(f"Пользователь {self.id} удален из локальной базы данных")
+        except Exception as e:
+            logger.error(f"Ошибка при удалении пользователя {self.id}: {e}")
+            raise
+
     class PydanticMeta:
         computed = ["expires", "name", "referral_percent"]
         exclude = ["country_code"]
@@ -180,23 +263,9 @@ class Users(models.Model):
 
 User_Pydantic = pydantic_model_creator(Users, name="User")
 
-# Создаем экземпляр клиента Marzban один раз на уровне модуля
-# Это ленивая инициализация, фактическое создание произойдет при первом обращении
-marzban_client_instance: Optional["MarzbanClient"] = None
-
-def get_marzban_client() -> "MarzbanClient":
-    """Возвращает синглтон экземпляр MarzbanClient."""
-    global marzban_client_instance
-    if marzban_client_instance is None:
-        from bloobcat.routes.marzban.client import MarzbanClient
-        marzban_client_instance = MarzbanClient()
-        logger.info("Экземпляр MarzbanClient создан для UsersModelAdmin")
-    return marzban_client_instance
-
 @register(Users)
 class UsersModelAdmin(TortoiseModelAdmin):
     search_fields = ("username", "id", "full_name")
-
     list_display = (
         "username",
         "id",
@@ -223,7 +292,7 @@ class UsersModelAdmin(TortoiseModelAdmin):
         """Переопределенный метод удаления пользователя.
 
         Сначала получает объект пользователя по pk, затем пытается удалить
-        пользователя из Marzban и после этого удаляет из БД.
+        пользователя из RemnaWave и после этого удаляет из БД.
         """
         logger.info(f"Запрос на удаление пользователя с ID {pk} из админ-панели")
         
@@ -232,32 +301,35 @@ class UsersModelAdmin(TortoiseModelAdmin):
         
         if not user_obj:
             logger.warning(f"Пользователь с ID {pk} не найден в БД. Удаление невозможно.")
-            # Возможно, стоит вернуть ошибку или просто прервать выполнение
-            # super().delete_model(pk) все равно может сработать, если fastadmin 
-            # не проверяет существование объекта перед вызовом delete_model.
-            # На всякий случай вызываем super, чтобы fastadmin получил ожидаемый результат.
+            # Вызываем super, чтобы fastadmin получил ожидаемый результат.
             await super().delete_model(pk)
             return
             
         logger.info(f"Найден пользователь {user_obj.id} ({user_obj.name()}) для удаления")
 
-        # Пытаемся удалить из Marzban
-        try:
-            marzban = get_marzban_client()
-            success = await marzban.users.delete_user(user_obj)
-            if not success:
+        # Пытаемся удалить из RemnaWave
+        if user_obj.remnawave_uuid:
+            try:
+                # Импортируем RemnaWaveClient здесь, чтобы избежать циклического импорта
+                from bloobcat.routes.remnawave.client import RemnaWaveClient
+                # Создаем экземпляр клиента RemnaWave
+                remnawave = RemnaWaveClient(remnawave_settings.url, remnawave_settings.token.get_secret_value())
+                logger.info(f"Попытка удаления пользователя {user_obj.id} (UUID: {user_obj.remnawave_uuid}) из RemnaWave...")
+                await remnawave.users.delete_user(user_obj.remnawave_uuid)
+                logger.info(f"Пользователь {user_obj.id} успешно удален/отсутствовал в RemnaWave.")
+                await remnawave.close() # Закрываем сессию клиента
+            except Exception as e:
+                # Логируем ошибку, но продолжаем удаление из локальной БД
                 logger.error(
-                    f"Не удалось удалить пользователя {user_obj.id} из Marzban, "
-                    f"но он все равно будет удален из локальной БД."
+                    f"Исключение при попытке удаления пользователя {user_obj.id} (UUID: {user_obj.remnawave_uuid}) из RemnaWave: {str(e)}. "
+                    f"Пользователь все равно будет удален из локальной БД.",
+                    exc_info=True # Добавляем трейсбек для детальной диагностики
                 )
-            else:
-                logger.info(f"Пользователь {user_obj.id} успешно удален/отсутствовал в Marzban.")
-        except Exception as e:
-            logger.error(
-                f"Исключение при попытке удаления пользователя {user_obj.id} из Marzban: {str(e)}. "
-                f"Пользователь все равно будет удален из локальной БД.",
-                exc_info=True
-            )
+                # Убедимся, что сессия закрыта даже в случае ошибки
+                if 'remnawave' in locals() and remnawave.session:
+                    await remnawave.close()
+        else:
+            logger.warning(f"У пользователя {user_obj.id} отсутствует remnawave_uuid. Пропускаем удаление из RemnaWave.")
         
         # Выполняем стандартное удаление из базы данных, передавая pk
         await super().delete_model(pk)

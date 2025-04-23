@@ -29,6 +29,13 @@ class MarzbanSettings(BaseSettings):
     token: SecretStr
 
 
+class RemnaWaveSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="REMNAWAVE_")
+
+    url: str
+    token: SecretStr
+
+
 class ScriptSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="SCRIPT_")
 
@@ -53,5 +60,6 @@ class AdminSettings(BaseSettings):
 telegram_settings = TelegramSettings()
 yookassa_settings = YookassaSettings()
 marzban_settings = MarzbanSettings()
+remnawave_settings = RemnaWaveSettings()
 script_settings = ScriptSettings()
 admin_settings = AdminSettings()

@@ -8,6 +8,7 @@ class Tariffs(models.Model):
     name = fields.CharField(max_length=100)
     months = fields.IntField()
     price = fields.IntField()
+    hwid_limit = fields.IntField(default=1, description="Лимит количества устройств")
 
 
 Tariffs_Pydantic = pydantic_model_creator(Tariffs, name="Tariffs")
@@ -15,6 +16,6 @@ Tariffs_Pydantic = pydantic_model_creator(Tariffs, name="Tariffs")
 
 @register(Tariffs)
 class UsersModelAdmin(TortoiseModelAdmin):
-    list_display = ("name", "months", "price")
+    list_display = ("name", "months", "price", "hwid_limit")
     verbose_name = "Тарифы"
     verbose_name_plural = "Тарифы"

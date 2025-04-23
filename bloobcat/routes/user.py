@@ -1,8 +1,14 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, EmailStr
+from typing import Dict, Any
 
 from bloobcat.db.users import User_Pydantic, Users
 from bloobcat.funcs.validate import validate
+from bloobcat.routes.remnawave.client import RemnaWaveClient
+from bloobcat.settings import remnawave_settings
+from bloobcat.logger import get_logger
+
+logger = get_logger("routes.user")
 
 router = APIRouter(
     prefix="/user",
@@ -14,9 +20,43 @@ class UserUpdate(BaseModel):
     email: EmailStr
 
 
+# --- Инициализируем клиент RemnaWave один раз ---
+remnawave_client = RemnaWaveClient(remnawave_settings.url, remnawave_settings.token.get_secret_value())
+
 @router.get("")
-async def check(user: Users = Depends(validate)):
-    return await User_Pydantic.from_tortoise_orm(user)
+async def check(user: Users = Depends(validate)) -> Dict[str, Any]:
+    """
+    Возвращает данные пользователя и URL подписки RemnaWave.
+    Создает пользователя в RemnaWave при первом обращении.
+    """
+    subscription_url = None
+    error_getting_url = None
+    
+    # Убеждаемся, что пользователь есть в RemnaWave (вызов уже был в Users.get_user)
+    if not user.remnawave_uuid:
+        logger.error(f"Пользователь {user.id} прошел валидацию, но не был создан в RemnaWave (_ensure_remnawave_user не сработал?).")
+        # Не прерываем, вернем пользователя без URL
+        error_getting_url = "Failed to initialize user account."
+    else:
+        try:
+            # Получаем URL подписки
+            logger.info(f"Получаем URL подписки для {user.id} внутри эндпоинта /user")
+            subscription_url = await remnawave_client.users.get_subscription_url(user)
+            logger.info(f"Пользователь {user.id} получил URL подписки RemnaWave: {subscription_url[:20]}...")
+        except Exception as e:
+            error_getting_url = f"Failed to get subscription URL: {str(e)}"
+            logger.error(f"Ошибка при получении URL подписки для пользователя {user.id} в эндпоинте /user: {error_getting_url}")
+            # Не прерываем запрос, вернем данные пользователя с ошибкой URL
+
+    # Получаем стандартные данные пользователя
+    user_data = await User_Pydantic.from_tortoise_orm(user)
+    user_dict = user_data.model_dump()
+
+    # Добавляем URL и возможную ошибку в ответ
+    user_dict["subscription_url"] = subscription_url
+    user_dict["subscription_url_error"] = error_getting_url
+
+    return user_dict
 
 
 @router.patch("")
@@ -29,11 +69,19 @@ async def update_user_profile(
     """
     user.email = update_data.email
     await user.save()
-    return await User_Pydantic.from_tortoise_orm(user)
+    # Можно вернуть новый формат ответа, как в check, или оставить старый
+    user_data = await User_Pydantic.from_tortoise_orm(user)
+    user_dict = user_data.model_dump()
+    # Опционально: добавить сюда получение URL, если нужно
+    # user_dict["subscription_url"] = await remnawave_client.users.get_subscription_url(user)
+    return user_dict
 
 
 @router.post("/unsubscribe")
 async def unsubscribe(user: Users = Depends(validate)):
+    """
+    Отписывает пользователя от рассылки (но не влияет на подписку VPN).
+    """
     user.is_subscribed = False
     await user.save()
     return {"status": "ok"}

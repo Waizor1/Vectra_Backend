@@ -1,14 +1,13 @@
 from fastapi import APIRouter
 
-from .marzban.connect import router as marzban_connect_router
+from .remnawave.connect import router as remnawave_connect_router
 from .payment import router as payment_router
 from .tv_connect import router as tv_router
 from .user import router as user_router
 
 main_router = APIRouter()
 
-
-main_router.include_router(marzban_connect_router)
+main_router.include_router(remnawave_connect_router)
 main_router.include_router(payment_router)
 main_router.include_router(user_router)
 

@@ -2,12 +2,13 @@ from fastapi import APIRouter, HTTPException
 from httpx import AsyncClient
 
 from bloobcat.db.users import Users
-from bloobcat.routes.marzban.client import MarzbanClient
+from bloobcat.routes.remnawave.client import RemnaWaveClient
+from bloobcat.settings import remnawave_settings
 
 router = APIRouter(prefix="/tv")
 requests = AsyncClient()
 
-marzban = MarzbanClient()
+remnawave = RemnaWaveClient(remnawave_settings.url, remnawave_settings.token.get_secret_value())
 
 
 def param(string, par):
@@ -61,7 +62,7 @@ async def tv_code_(tv_code: str):
     user = await Users.get(tv_connect=tv_code)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    url = await marzban.get_url(user)
+    url = await remnawave.users.get_subscription_url(user.remnawave_uuid)
     configs_ = await requests.get(url + "/info")
     configs = configs_.json()["links"]
     return [
@@ -158,7 +159,6 @@ async def tv_code_(tv_code: str):
                     "settings": {"response": {"type": "http"}},
                     "tag": "block",
                 },
-                # get_outbound(configs[1], tag="ru_proxy"),
             ],
             "remarks": "🇳🇱 NL",
         }

@@ -7,7 +7,7 @@ from .trials import check_trial_users
 from .helpers import periodic_task, daily_task
 
 # Импортируем внешние задачи (полные пути)
-from bloobcat.routes.marzban.catcher import marzban_updater # , reset_expired_users # Закомментировано, как в оригинале
+from bloobcat.routes.remnawave.catcher import remnawave_updater
 from bloobcat.bot.alerts import alerts_worker
 
 # Инициализируем логгер для модуля расписаний
@@ -32,12 +32,9 @@ def start_scheduler():
     # Импорты внешних функций перенесены на уровень модуля
     
     # Создаем и запускаем задачи
-    marzban_task = asyncio.create_task(
-        periodic_task(marzban_updater, 300, "marzban_updater")  # Каждые 5 минут
+    remnawave_task = asyncio.create_task(
+        periodic_task(remnawave_updater, 300, "remnawave_updater")  # Каждые 5 минут
     )
-    # reset_task = asyncio.create_task(
-    #     periodic_task(reset_expired_users, 1800, "reset_expired_users")  # Каждые 30 минут
-    # )
     alerts_task = asyncio.create_task(
         daily_task(alerts_worker, hour=7, minute=0, task_name="alerts_worker")
     )
@@ -49,7 +46,7 @@ def start_scheduler():
     )
     
     # Сохраняем задачи для возможности их отмены
-    active_tasks = [marzban_task, alerts_task, subscriptions_task, trial_users_task]  # Убираем reset_task из списка
+    active_tasks = [remnawave_task, alerts_task, subscriptions_task, trial_users_task]
     
     logger.info("Фоновые задачи запущены")
     
