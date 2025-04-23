@@ -62,7 +62,7 @@ async def fast_update(user_id: int):
         return {"status": "error", "detail": str(e)}
 
 async def remnawave_updater():
-    """Основной процесс обновления данных RemnaWave"""
+    """Основной процесс синхронизации дат истечения из БД в RemnaWave"""
     global update_in_progress
     
     if update_in_progress:
@@ -72,92 +72,207 @@ async def remnawave_updater():
     update_in_progress = True
     start_time = datetime.now()
     logger.info(f"Запуск remnawave_updater в {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
-    success = 0
+    updated = 0
     errors = 0
-    registered = 0
+    
+    # Константы для повторных попыток
+    max_retry_time = 30  # максимальное время для повторных попыток в секундах
+    retry_interval = 3   # интервал между попытками в секундах
     
     try:
-        max_retry_time = 30
-        retry_interval = 3
+        # Проверка соединения с API с повторными попытками
+        remnawave_nodes = None
         start_retry_time = datetime.now()
+        retry_attempt = 0
         
+        while remnawave_nodes is None:
+            try:
+                retry_attempt += 1
+                remnawave_nodes = await remnawave.nodes.get_nodes()
+            except Exception as e:
+                elapsed_retry_time = (datetime.now() - start_retry_time).total_seconds()
+                
+                if elapsed_retry_time > max_retry_time:
+                    logger.error(f"Превышено максимальное время повторных попыток ({max_retry_time} сек) для API. Последняя ошибка: {str(e)}")
+                    return
+                
+                logger.warning(f"Ошибка при проверке соединения с API (попытка {retry_attempt}): {str(e)}. Повторная попытка через {retry_interval} сек.")
+                await asyncio.sleep(retry_interval)
+        
+        # Проверка соединения с БД с повторными попытками
         users = None
+        start_retry_time = datetime.now()
         retry_attempt = 0
         
         while users is None:
             try:
-                users = await Users.all()
-                logger.info(f"Получено {len(users)} пользователей для обработки")
-            except Exception as e:
                 retry_attempt += 1
+                users = await Users.all()
+                if users is None:
+                    raise Exception("Результат запроса users is None")
+                logger.info(f"Получено {len(users)} пользователей из БД")
+            except Exception as e:
                 elapsed_retry_time = (datetime.now() - start_retry_time).total_seconds()
                 
                 if elapsed_retry_time > max_retry_time:
-                    logger.error(f"Превышено максимальное время повторных попыток ({max_retry_time} сек). Последняя ошибка: {str(e)}")
-                    raise
+                    logger.error(f"Превышено максимальное время повторных попыток ({max_retry_time} сек) для БД. Последняя ошибка: {str(e)}")
+                    return
                 
-                logger.warning(f"Ошибка при получении пользователей (попытка {retry_attempt}): {str(e)}. Повторная попытка через {retry_interval} сек.")
+                logger.warning(f"Ошибка при получении пользователей из БД (попытка {retry_attempt}): {str(e)}. Повторная попытка через {retry_interval} сек.")
+                await asyncio.sleep(retry_interval)
+            
+        # Проверка пользователей    
+        users_with_uuid = [u for u in users if u.remnawave_uuid and hasattr(u, 'expired_at') and u.expired_at]
+        if not users_with_uuid:
+            logger.warning("Не найдено пользователей с UUID и датой истечения")
+            return
+            
+        logger.info(f"Найдено {len(users_with_uuid)} пользователей с UUID и датой истечения")
+        
+        # Получаем данные из RemnaWave с повторными попытками
+        remnawave_users = []
+        start_retry_time = datetime.now()
+        retry_attempt = 0
+        
+        # Размер страницы и начальное смещение
+        page_size = 100
+        start_index = 0
+        total_users = None
+        
+        while total_users is None or start_index < total_users:
+            try:
+                retry_attempt += 1
+                logger.info(f"Получение списка пользователей из RemnaWave (страница {start_index//page_size + 1})")
+                
+                remnawave_users_response = await remnawave.users.get_users(size=page_size, start=start_index)
+                
+                if not remnawave_users_response:
+                    raise Exception("Пустой ответ от RemnaWave API при получении пользователей")
+                    
+                if "response" not in remnawave_users_response:
+                    raise Exception(f"Некорректный ответ от RemnaWave API: {remnawave_users_response}")
+                    
+                if "users" not in remnawave_users_response["response"]:
+                    raise Exception(f"В ответе от RemnaWave API отсутствует поле users: {remnawave_users_response}")
+                
+                # Обновляем общее количество пользователей если не было известно
+                if total_users is None and "total" in remnawave_users_response["response"]:
+                    total_users = remnawave_users_response["response"]["total"]
+                    logger.info(f"Всего пользователей в RemnaWave: {total_users}")
+                    
+                page_users = remnawave_users_response["response"]["users"]
+                if page_users is None:
+                    raise Exception("Поле users в ответе RemnaWave API равно None")
+                
+                # Добавляем пользователей текущей страницы в общий список
+                remnawave_users.extend(page_users)
+                logger.info(f"Получено {len(page_users)} пользователей на странице {start_index//page_size + 1}")
+                
+                # Если страница пустая или мы получили меньше, чем размер страницы - прерываем
+                if not page_users or len(page_users) < page_size:
+                    break
+                    
+                # Увеличиваем смещение для следующей страницы
+                start_index += page_size
+                
+                # Если мы получили все, прерываем цикл
+                if len(remnawave_users) >= total_users:
+                    break
+                    
+            except Exception as e:
+                elapsed_retry_time = (datetime.now() - start_retry_time).total_seconds()
+                
+                if elapsed_retry_time > max_retry_time:
+                    logger.error(f"Превышено максимальное время повторных попыток ({max_retry_time} сек) для получения пользователей RemnaWave. Последняя ошибка: {str(e)}")
+                    if not remnawave_users:  # Если не получили ни одного пользователя
+                        return
+                    break  # Если получили хотя бы часть пользователей, продолжаем с тем, что есть
+                
+                logger.warning(f"Ошибка при получении списка пользователей из RemnaWave (попытка {retry_attempt}): {str(e)}. Повторная попытка через {retry_interval} сек.")
                 await asyncio.sleep(retry_interval)
         
-        if users is None:
-            logger.error("Не удалось получить пользователей после всех попыток")
-            return
+        logger.info(f"Всего получено {len(remnawave_users)} пользователей из RemnaWave")
         
-        try:
-            logger.info("Начинаем получение списка пользователей из RemnaWave")
-            remnawave_users_response = await remnawave.users.get_users(size=100)
-            remnawave_users = remnawave_users_response.get("response", {}).get("users", [])
-            total_users = remnawave_users_response.get("response", {}).get("total", 0)
-            logger.info(f"Получено {len(remnawave_users)} пользователей из RemnaWave (всего: {total_users})")
+        # Создаем словарь с UUID в качестве ключей
+        remnawave_users_dict = {}
+        for user in remnawave_users:
+            uuid_key = user.get('uuid')
+            if uuid_key:
+                remnawave_users_dict[uuid_key] = user
+                
+        # Выполним проверку пользователей
+        not_found_users = []
+        for user in users_with_uuid:
+            # Получаем UUID пользователя как строку
+            user_uuid_str = str(user.remnawave_uuid)
             
-            remnawave_users_dict = {user['uuid']: user for user in remnawave_users}
-            logger.info(f"Словарь пользователей RemnaWave создан с {len(remnawave_users_dict)} записями")
-        except Exception as e:
-            logger.error(f"Ошибка при получении списка пользователей из RemnaWave: {str(e)}")
-            logger.warning("Продолжаем работу без предварительно загруженного списка пользователей RemnaWave")
-            remnawave_users_dict = {}
-        
-        priority_users = [u for u in users if u.connected_at and not u.is_registered]
-        if priority_users:
-            logger.info(f"Найдено {len(priority_users)} приоритетных пользователей")
-            sem = asyncio.Semaphore(10)
-            
-            async def process_with_semaphore(user):
-                async with sem:
-                    return await process_user_safe(user, remnawave_users_dict)
-            
-            priority_results = await asyncio.gather(
-                *[process_with_semaphore(user) for user in priority_users], 
-                return_exceptions=True
-            )
-            
-            for result in priority_results:
-                if result is True:
-                    success += 1
-                    registered += 1
-                elif result is False:
+            if user_uuid_str in remnawave_users_dict:
+                remnawave_user = remnawave_users_dict[user_uuid_str]
+                
+                try:
+                    remnawave_expire_at = datetime.fromisoformat(remnawave_user['expireAt'].replace('Z', '+00:00'))
+                    db_expire_at = user.expired_at
+                    
+                    # Нормализуем даты для корректного сравнения
+                    if hasattr(remnawave_expire_at, 'date'):
+                        remnawave_expire_date = remnawave_expire_at.date()
+                    else:
+                        remnawave_expire_date = remnawave_expire_at
+                        
+                    if hasattr(db_expire_at, 'date'):
+                        db_expire_date = db_expire_at.date()
+                    else:
+                        db_expire_date = db_expire_at
+                    
+                    if db_expire_date != remnawave_expire_date:
+                        logger.info(f"Обновление даты истечения в RemnaWave для пользователя {user.id}: {remnawave_expire_at} -> {db_expire_at}")
+                        expire_at_str = db_expire_at.strftime('%Y-%m-%dT%H:%M:%S.%fZ')[:-4] + 'Z'
+                        
+                        # Повторные попытки обновления пользователя
+                        update_success = False
+                        update_retry_attempt = 0
+                        update_start_time = datetime.now()
+                        
+                        while not update_success:
+                            try:
+                                update_retry_attempt += 1
+                                result = await remnawave.users.update_user(user_uuid_str, expireAt=expire_at_str)
+                                update_success = True
+                                updated += 1
+                            except Exception as e:
+                                elapsed_update_time = (datetime.now() - update_start_time).total_seconds()
+                                
+                                if elapsed_update_time > max_retry_time:
+                                    logger.error(f"Превышено максимальное время повторных попыток ({max_retry_time} сек) для обновления пользователя {user.id}. Последняя ошибка: {str(e)}")
+                                    break
+                                
+                                logger.warning(f"Ошибка при обновлении пользователя {user.id} (попытка {update_retry_attempt}): {str(e)}. Повторная попытка через {retry_interval} сек.")
+                                await asyncio.sleep(retry_interval)
+                    else:
+                        logger.info(f"Даты истечения совпадают для пользователя {user.id}. Обновление не требуется.")
+                except Exception as e:
+                    logger.error(f"Ошибка при обработке пользователя {user.id}: {str(e)}")
                     errors += 1
+            else:
+                logger.warning(f"Пользователь {user.id} с UUID {user_uuid_str} не найден в RemnaWave")
+                not_found_users.append(user)
+                
+        if not_found_users:
+            logger.warning(f"Найдено {len(not_found_users)} пользователей, которые есть в БД, но отсутствуют в RemnaWave")
+            
+            # Попробуем получить каждого пользователя напрямую по UUID
+            for user in not_found_users:
+                try:
+                    user_response = await remnawave.users.get_user_by_uuid(user.remnawave_uuid)
+                    if user_response and "response" in user_response:
+                        remnawave_users_dict[user.remnawave_uuid] = user_response["response"]
+                        logger.info(f"Пользователь {user.id} успешно получен по прямому запросу")
+                except Exception as e:
+                    logger.warning(f"Не удалось получить пользователя {user.id} по UUID {user.remnawave_uuid}: {str(e)}")
         
-        regular_users = [u for u in users if u not in priority_users]
-        if regular_users:
-            batch_size = 20
-            for i in range(0, len(regular_users), batch_size):
-                batch = regular_users[i:i+batch_size]
-                logger.info(f"Обработка пакета пользователей {i+1}-{i+len(batch)} из {len(regular_users)}")
-                
-                batch_results = await asyncio.gather(
-                    *[process_user_safe(user, remnawave_users_dict) for user in batch], 
-                    return_exceptions=True
-                )
-                
-                for result in batch_results:
-                    if result is True:
-                        success += 1
-                    elif result is False:
-                        errors += 1
-                
         elapsed = (datetime.now() - start_time).total_seconds()
-        logger.info(f"Обработка завершена за {elapsed:.2f} секунд. Успешно: {success}, зарегистрировано: {registered}, ошибок: {errors}")
+        logger.info(f"Синхронизация завершена за {elapsed:.2f} секунд. Обновлено: {updated}, ошибок: {errors}")
+        
     except Exception as e:
         logger.error(f"Критическая ошибка в remnawave_updater: {str(e)}")
     finally:

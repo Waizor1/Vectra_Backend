@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 from bloobcat.logger import get_logger
 from bloobcat.db.users import Users
 from bloobcat.db.payments import ProcessedPayments
+from bloobcat.db.connections import Connections
 from tortoise.expressions import Q
 
 # Импорты уведомлений перенесены внутрь функции для избежания циклического импорта
@@ -19,7 +20,7 @@ async def check_trial_users():
         logger.info("Начало проверки пользователей с пробным периодом")
         
         # Импортируем функции уведомлений здесь, чтобы избежать циклического импорта
-        from bloobcat.bot.notifications.user import notify_trial_ended, notify_no_trial_taken, on_disabled
+        from bloobcat.bot.notifications.user import notify_trial_ended, notify_no_trial_taken, on_disabled, notify_trial_extended
         
         # Текущее время
         now = datetime.now()
@@ -53,6 +54,38 @@ async def check_trial_users():
             # Если result все еще None после всех попыток
             logger.error(f"Не удалось выполнить '{description}' после всех попыток")
             return None
+        
+        # Проверяем пользователей с истекающим пробным периодом в ближайшие 12 часов
+        twelve_hours_later = now + timedelta(hours=12)
+        expiring_trial_users = await db_request_with_retry(
+            lambda: Users.filter(
+                is_registered=True,
+                is_trial=True,
+                expired_at__gt=today,
+                expired_at__lte=twelve_hours_later.date(),
+                connected_at__isnull=True  # Добавляем проверку на отсутствие подключений
+            ),
+            "получение пользователей с истекающим пробным периодом без подключений"
+        )
+        
+        if expiring_trial_users is None:
+            expiring_trial_users = []
+        
+        logger.info(f"Найдено {len(expiring_trial_users)} пользователей с истекающим пробным периодом без подключений")
+        
+        # Продлеваем триал для пользователей без подключений
+        for user in expiring_trial_users:
+            try:
+                # Продлеваем триал на 5 дней
+                user.expired_at = user.expired_at + timedelta(days=5)
+                await user.save()
+                
+                # Отправляем уведомление о продлении
+                await notify_trial_extended(user, 5)
+                logger.info(f"Триал продлен на 5 дней для пользователя {user.id} без подключений")
+            except Exception as e:
+                logger.error(f"Ошибка при обработке пользователя {user.id} с истекающим пробным периодом: {str(e)}")
+                continue
         
         # 1. Проверяем пользователей с истекшим пробным периодом
         # Получаем пользователей с пробным периодом, который истек сегодня
