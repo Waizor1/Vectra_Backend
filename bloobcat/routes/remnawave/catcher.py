@@ -205,6 +205,8 @@ async def remnawave_updater():
                                 referrer_id=referrer.id if referrer else None,
                                 referrer_name=referrer.full_name if referrer else None
                             )
+                            user.is_registered = True
+                            await user.save()
                             logger.info(f"Первое подключение пользователя {user.id}, отправлено уведомление")
                         
                         # Обновляем только если время онлайна новее или connected_at отсутствует

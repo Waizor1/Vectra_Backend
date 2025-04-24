@@ -110,7 +110,6 @@ class Users(models.Model):
                 
                 # Сохраняем UUID
                 self.remnawave_uuid = response["response"]["uuid"]
-                self.is_registered = True
                 await self.save()
                 
                 logger.info(f"Пользователь {self.id} успешно создан в RemnaWave с UUID: {self.remnawave_uuid}")

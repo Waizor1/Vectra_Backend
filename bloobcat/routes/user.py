@@ -11,6 +11,7 @@ from bloobcat.logger import get_logger
 from fastapi import FastAPI
 from starlette.background import BackgroundTask
 from bloobcat.routes.remnawave.hwid_utils import cleanup_user_hwid_devices
+from bloobcat.db.active_tariff import ActiveTariffs
 
 logger = get_logger("routes.user")
 
@@ -71,6 +72,33 @@ async def check(user: Users = Depends(validate)) -> Dict[str, Any]:
     # Добавляем URL и возможную ошибку в ответ
     user_dict["subscription_url"] = subscription_url
     user_dict["subscription_url_error"] = error_getting_url
+
+    # Добавляем количество HWID устройств для пользователя
+    devices_count = 0
+    if user.remnawave_uuid:
+        try:
+            raw_resp = await remnawave_client.users.get_user_hwid_devices(str(user.remnawave_uuid))
+            devices_list = []
+            if isinstance(raw_resp, list):
+                devices_list = raw_resp
+            elif isinstance(raw_resp, dict):
+                resp = raw_resp.get("response")
+                if isinstance(resp, list):
+                    devices_list = resp
+                elif isinstance(resp, dict) and isinstance(resp.get("devices"), list):
+                    devices_list = resp.get("devices")
+            devices_count = len(devices_list)
+        except Exception as e:
+            logger.error(f"Ошибка получения списка устройств для пользователя {user.id}: {e}")
+    user_dict["devices_count"] = devices_count
+
+    # Добавляем лимит устройств из активного тарифа или 1 по умолчанию
+    devices_limit = 1
+    if user.active_tariff_id:
+        tariff = await ActiveTariffs.get_or_none(id=user.active_tariff_id)
+        if tariff:
+            devices_limit = tariff.hwid_limit
+    user_dict["devices_limit"] = devices_limit
 
     return user_dict
 

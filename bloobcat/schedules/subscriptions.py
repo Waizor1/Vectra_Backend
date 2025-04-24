@@ -26,7 +26,8 @@ async def check_subscriptions():
         users_with_auto_renewal = await Users.filter(
             is_subscribed=True,
             renew_id__not_isnull=True,
-            expired_at__not_isnull=True
+            expired_at__not_isnull=True,
+            is_trial=False
         )
         
         logger.debug(f"Найдено {len(users_with_auto_renewal)} пользователей с автопродлением")
@@ -55,9 +56,9 @@ async def check_subscriptions():
         # Получаем пользователей без автопродления, но с активной подпиской
         users_without_auto_renewal = await Users.filter(
             is_registered=True,
-            expired_at__not_isnull=True
-        ).filter(
-            is_subscribed=False
+            expired_at__not_isnull=True,
+            is_subscribed=False,
+            is_trial=False
         ).all()
         
         logger.debug(f"Найдено {len(users_without_auto_renewal)} пользователей без автопродления")
@@ -71,17 +72,13 @@ async def check_subscriptions():
         for user in users_without_auto_renewal:
             try:
                 days_remaining = (user.expired_at - datetime.now().date()).days
-                # Логируем информацию о подписке пользователя
                 logger.info(f"Проверка подписки для пользователя {user.id} без автопродления: истекает через {days_remaining} дней")
                 
-                # Проверяем, что подписка еще не истекла
                 if days_remaining <= 0:
                     logger.info(f"Подписка пользователя {user.id} уже истекла или истекает сегодня, уведомление не отправляется")
                     continue
                 
-                # Отправляем уведомления за 1, 2 и 3 дня до истечения подписки
                 if days_remaining in [1, 2, 3]:
-                    # Уведомляем пользователя о скором истечении подписки
                     logger.info(f"Отправка уведомления о скором истечении подписки пользователю {user.id} (осталось {days_remaining} дн.)")
                     await notify_expiring_subscription(user)
             except Exception as e:
