@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, EmailStr
 from typing import Dict, Any
+from datetime import datetime, timedelta, timezone
 
 from bloobcat.db.users import User_Pydantic, Users
 from bloobcat.funcs.validate import validate
@@ -9,6 +10,7 @@ from bloobcat.settings import remnawave_settings
 from bloobcat.logger import get_logger
 from fastapi import FastAPI
 from starlette.background import BackgroundTask
+from bloobcat.routes.remnawave.hwid_utils import cleanup_user_hwid_devices
 
 logger = get_logger("routes.user")
 
@@ -97,5 +99,20 @@ async def unsubscribe(user: Users = Depends(validate)):
     Отписывает пользователя от рассылки (но не влияет на подписку VPN).
     """
     user.is_subscribed = False
+    await user.save()
+    return {"status": "ok"}
+
+@router.post("/reset_devices")
+async def reset_devices(user: Users = Depends(validate)):
+    """
+    Ручной сброс HWID устройств пользователя. Доступен не чаще, чем раз в 24 часа.
+    """
+    now = datetime.now(timezone.utc)
+    if user.last_hwid_reset and (now - user.last_hwid_reset) < timedelta(hours=24):
+        raise HTTPException(status_code=400, detail="Сброс устройств можно выполнять не чаще, чем раз в 24 часа")
+    if not user.remnawave_uuid:
+        raise HTTPException(status_code=400, detail="У пользователя нет RemnaWave UUID")
+    await cleanup_user_hwid_devices(user.id, user.remnawave_uuid)
+    user.last_hwid_reset = now
     await user.save()
     return {"status": "ok"}

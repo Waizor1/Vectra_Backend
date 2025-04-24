@@ -24,6 +24,7 @@ from bloobcat.db.payments import ProcessedPayments
 from bloobcat.logger import get_payment_logger
 from bloobcat.db.active_tariff import ActiveTariffs
 from bloobcat.routes.remnawave.client import RemnaWaveClient
+from bloobcat.routes.remnawave.hwid_utils import cleanup_user_hwid_devices
 
 # Инициализируем клиент ЮKассы
 Configuration.account_id = yookassa_settings.shop_id
@@ -317,6 +318,10 @@ async def yookassa_webhook(request: Request, secret: str):
                             await old_active_tariff.delete()
                         else:
                             logger.warning(f"Не найден активный тариф {user.active_tariff_id} для удаления у пользователя {user.id}")
+                    
+                    # При смене тарифа удаляем все HWID устройства пользователя в RemnaWave
+                    if user.remnawave_uuid:
+                        await cleanup_user_hwid_devices(user.id, user.remnawave_uuid)
                     
                     # Create a new active tariff entry with random ID
                     active_tariff = await ActiveTariffs.create(
