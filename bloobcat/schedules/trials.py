@@ -121,7 +121,6 @@ async def check_trial_users():
                 continue
         
         # 2. Проверяем пользователей, которые не взяли пробную подписку
-        # Получаем пользователей, которые зарегистрировались, но не активировали пробный период
         two_hours_ago = now - timedelta(hours=2)
         one_day_ago = now - timedelta(days=1)
         three_days_ago = now - timedelta(days=3)
@@ -142,12 +141,12 @@ async def check_trial_users():
         # Пользователи, которые зарегистрировались 2 часа назад
         users_2h = await db_request_with_retry(
             lambda: Users.filter(
-                is_registered=False,
+                is_trial=True,
+                connected_at__isnull=True,
                 created_at__lte=two_hours_ago,
-                created_at__gt=one_day_ago,
-                expired_at__isnull=True  # Только пользователи, у которых никогда не было подписки
+                created_at__gt=one_day_ago
             ).exclude(
-                id__in=users_with_payments  # Исключаем пользователей с платежами
+                id__in=users_with_payments
             ),
             "получение пользователей, не взявших пробную подписку за 2 часа"
         )
@@ -176,12 +175,12 @@ async def check_trial_users():
         # Пользователи, которые зарегистрировались сутки назад
         users_24h = await db_request_with_retry(
             lambda: Users.filter(
-                is_registered=False,
+                is_trial=True,
+                connected_at__isnull=True,
                 created_at__lte=one_day_ago,
-                created_at__gt=three_days_ago,
-                expired_at__isnull=True  # Только пользователи, у которых никогда не было подписки
+                created_at__gt=three_days_ago
             ).exclude(
-                id__in=users_with_payments  # Исключаем пользователей с платежами
+                id__in=users_with_payments
             ),
             "получение пользователей, не взявших пробную подписку за сутки"
         )
