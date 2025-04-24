@@ -7,7 +7,6 @@ from tortoise.functions import Count
 from bloobcat.bot.routes.admin.functions import IsAdmin, search_user
 from bloobcat.schedules import check_subscriptions, check_trial_users
 from bloobcat.routes.remnawave.catcher import remnawave_updater
-from bloobcat.processing.remnawave_processor import process_user
 from bloobcat.bot.alerts import alerts_worker
 from bloobcat.db.users import Users
 from bloobcat.db.payments import ProcessedPayments
@@ -301,63 +300,7 @@ async def admin_user_info(message: Message):
         logger.error(error_message)
 
 
-@router.message(Command("set_registered"), IsAdmin())
-async def admin_set_registered(message: Message):
-    """
-    Хендлер для ручного обновления статуса регистрации пользователя.
-    Команда: /set_registered [user_id] [status]
-    status: 1 - зарегистрирован, 0 - не зарегистрирован
-    """
-    try:
-        # Получаем аргументы команды
-        args = message.text.split()
-        if len(args) < 3 or not args[1].isdigit() or args[2] not in ['0', '1']:
-            await message.answer(
-                "Ошибка: Неверный формат команды.\n"
-                "Пример: /set_registered 123456789 1\n"
-                "Где 1 - зарегистрирован, 0 - не зарегистрирован"
-            )
-            return
-        
-        user_id = int(args[1])
-        is_registered = args[2] == '1'
-        
-        # Получаем пользователя
-        user = await Users.get_or_none(id=user_id)
-        
-        if not user:
-            await message.answer(f"Пользователь с ID {user_id} не найден.")
-            return
-        
-        # Сохраняем предыдущее состояние для логирования
-        previous_state = user.is_registered
-        
-        # Обновляем статус регистрации
-        user.is_registered = is_registered
-        await user.save()
-        
-        # Если пользователь был отмечен как зарегистрированный, запускаем process_user
-        if is_registered and not previous_state:
-            await message.answer(f"Статус регистрации пользователя {user_id} изменен на 'Зарегистрирован'. Запускаю process_user...")
-            try:
-                # Запускаем process_user для обновления пользователя в RemnaWave
-                await process_user(user)
-                await message.answer(f"Пользователь {user_id} успешно обработан функцией process_user.")
-            except Exception as e:
-                await message.answer(f"Ошибка при обработке пользователя: {str(e)}")
-                logger.error(f"Ошибка при обработке пользователя {user_id} через process_user: {str(e)}")
-        else:
-            status_text = "Зарегистрирован" if is_registered else "Не зарегистрирован"
-            await message.answer(f"Статус регистрации пользователя {user_id} изменен на '{status_text}'.")
-        
-        logger.info(
-            f"Администратор {message.from_user.id} изменил статус регистрации пользователя {user_id} "
-            f"с '{previous_state}' на '{is_registered}'"
-        )
-    except Exception as e:
-        error_message = f"Ошибка при обновлении статуса регистрации пользователя: {str(e)}"
-        await message.answer(error_message)
-        logger.error(error_message)
+
 
 
 @router.message(Command("set_auto_renewal"), IsAdmin())
@@ -527,96 +470,6 @@ async def admin_check_trial(message: Message):
         logger.error(error_message)
 
 
-@router.message(Command("set_trial"), IsAdmin())
-async def admin_set_trial(message: Message):
-    """
-    Хендлер для ручной установки пробного периода для пользователя.
-    Команда: /set_trial [user_id] [days=3] [force]
-    
-    Параметры:
-    - user_id: ID пользователя
-    - days: Количество дней пробного периода (по умолчанию 3)
-    - force: Принудительная установка пробного периода, даже если пользователь уже использовал его
-    """
-    try:
-        # Получаем аргументы команды
-        args = message.text.split()
-        if len(args) < 2 or not args[1].isdigit():
-            await message.answer(
-                "Ошибка: Неверный формат команды.\n"
-                "Пример: /set_trial 123456789 3 force\n"
-                "Где 3 - количество дней пробного периода (по умолчанию 3), force - принудительная установка"
-            )
-            return
-        
-        user_id = int(args[1])
-        days = 3  # По умолчанию 3 дня
-        force = False  # По умолчанию не принудительно
-        
-        # Если указано количество дней, используем его
-        if len(args) > 2 and args[2].isdigit():
-            days = int(args[2])
-        
-        # Проверяем наличие флага force
-        if len(args) > 3 and args[3].lower() == "force":
-            force = True
-            logger.warning(f"Администратор {message.from_user.id} использует принудительную установку пробного периода для пользователя {user_id}")
-        
-        # Получаем пользователя
-        user = await Users.get_or_none(id=user_id)
-        
-        if not user:
-            await message.answer(f"Пользователь с ID {user_id} не найден.")
-            return
-        
-        # Проверяем, использовал ли пользователь уже пробный период
-        if user.used_trial and not force:
-            await message.answer(
-                f"⚠️ <b>Внимание!</b> Пользователь {user_id} уже использовал пробный период.\n"
-                f"Вы уверены, что хотите установить ему новый пробный период?\n\n"
-                f"Для подтверждения используйте команду:\n"
-                f"<code>/set_trial {user_id} {days} force</code>",
-                parse_mode="HTML"
-            )
-            logger.warning(f"Администратор {message.from_user.id} попытался установить повторный пробный период для пользователя {user_id}")
-            return
-        
-        # Устанавливаем пробный период
-        today = datetime.now().date()
-        user.expired_at = today + timedelta(days=days)
-        user.is_trial = True
-        user.used_trial = True
-        
-        # Если пользователь еще не зарегистрирован, регистрируем его
-        if not user.is_registered:
-            user.is_registered = True
-            await message.answer(f"Пользователь {user_id} автоматически зарегистрирован (is_registered=True).")
-        
-        await user.save()
-        
-        # Запускаем process_user для обновления пользователя в RemnaWave
-        try:
-            await process_user(user)
-            await message.answer(f"Пользователь {user_id} успешно обработан функцией process_user.")
-        except Exception as e:
-            await message.answer(f"Предупреждение: Ошибка при обработке пользователя: {str(e)}")
-            logger.error(f"Ошибка при обработке пользователя {user_id} через process_user: {str(e)}")
-        
-        await message.answer(
-            f"Пробный период для пользователя {user_id} установлен на {days} дней.\n"
-            f"Дата истечения: {user.expired_at.strftime('%d.%m.%Y')}"
-            f"{' (повторно)' if force else ''}"
-        )
-        
-        logger.info(
-            f"Администратор {message.from_user.id} установил пробный период для пользователя {user_id} "
-            f"на {days} дней (до {user.expired_at})"
-            f"{' (повторно)' if force else ''}"
-        )
-    except Exception as e:
-        error_message = f"Ошибка при установке пробного периода: {str(e)}"
-        await message.answer(error_message)
-        logger.error(error_message)
 
 
 @router.message(Command("reset_trial"), IsAdmin())

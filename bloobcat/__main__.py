@@ -12,7 +12,6 @@ from tortoise.contrib.fastapi import RegisterTortoise # type: ignore
 from bloobcat.bot import bot, router, setup_router
 from bloobcat.clients import TORTOISE_ORM
 from bloobcat.db.admins import Admin
-from bloobcat.remnawave_online import online_worker_tasks
 from bloobcat.routes import main_router, include_bot_router
 from bloobcat.routes import app_info # Добавляем импорт нового роутера
 from bloobcat.schedules import start_scheduler
@@ -58,12 +57,10 @@ async def lifespan(fastapi_app: FastAPI):
         add_exception_handlers=True,
     ):
         start_scheduler()
-        online_tasks = await online_worker_tasks()
         logger.info("Фоновые задачи запущены")
         yield
     
-    for task in online_tasks:
-        task.cancel()
+
     logger.info("Приложение остановлено")
 
 

@@ -10,7 +10,6 @@ from bloobcat.db.payments import ProcessedPayments
 from bloobcat.logger import get_logger
 from .client import RemnaWaveClient
 from bloobcat.settings import remnawave_settings
-from bloobcat.processing.remnawave_processor import process_user_safe, process_user
 
 router = APIRouter(prefix="/remnawave", tags=["remnawave"])
 logger = get_logger("remnawave_catcher")
@@ -33,33 +32,6 @@ async def webhook():
         logger.error(f"Ошибка в обработчике вебхука: {str(e)}")
         return {"status": "error", "detail": str(e)}
 
-@router.get("/fast_update/{user_id}")
-async def fast_update(user_id: int):
-    """Быстрое обновление для конкретного пользователя"""
-    try:
-        logger.info(f"Получен запрос на быстрое обновление для пользователя {user_id}")
-        user = await Users.get_or_none(id=user_id)
-        if not user:
-            return {"status": "error", "detail": "Пользователь не найден"}
-        
-        try:
-            if user.remnawave_uuid:
-                remnawave_user = await remnawave.users.get_user_by_uuid(user.remnawave_uuid)
-                remnawave_users_dict = {user.remnawave_uuid: remnawave_user["response"]}
-                logger.info(f"Получены данные о пользователе {user_id} из RemnaWave")
-            else:
-                logger.info(f"У пользователя {user_id} нет UUID RemnaWave")
-                remnawave_users_dict = {}
-            
-            await process_user(user, remnawave_users_dict)
-        except Exception as e:
-            logger.error(f"Ошибка при получении данных из RemnaWave: {str(e)}")
-            await process_user(user)
-        
-        return {"status": "ok"}
-    except Exception as e:
-        logger.error(f"Ошибка в обработчике быстрого обновления для пользователя {user_id}: {str(e)}")
-        return {"status": "error", "detail": str(e)}
 
 async def remnawave_updater():
     """Основной процесс синхронизации дат истечения из БД в RemnaWave"""
