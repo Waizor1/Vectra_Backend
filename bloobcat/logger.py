@@ -31,7 +31,6 @@ def setup_logging():
         "Обновлено время подключения для пользователя",
         "Не удалось получить статус пользователя",
         "Пользователь еще не подключался, но уже имеет статус",
-        "User not found in Marzban",
         "Ответ на GET запрос к /user/"
     ]
     
@@ -47,12 +46,6 @@ def setup_logging():
             if phrase in record["message"]:
                 return False
                 
-        # Дополнительные фильтры для модуля marzban
-        if record["name"] == "bloobcat.routes.marzban.catcher" and "process_user" in record["function"]:
-            if (record["level"].no <= logger.level("INFO").no and 
-                ("Текущий статус пользователя" in record["message"] or 
-                 "Обработка пользователя" in record["message"])):
-                return False
                 
         return True
     
@@ -165,8 +158,7 @@ def setup_logging():
     for logger_name in ['tortoise.db_client', 'websockets.client']:
         logging.getLogger(logger_name).setLevel(logging.INFO)
     
-    # Установка более высокого уровня логирования для часто повторяющихся сообщений модуля marzban
-    logging.getLogger('bloobcat.routes.marzban.client').setLevel(logging.WARNING)
+
     
     return logger
 

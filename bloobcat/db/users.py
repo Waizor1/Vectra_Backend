@@ -13,7 +13,7 @@ from bloobcat.config import referral_percent
 
 import logging
 
-from bloobcat.settings import marzban_settings, remnawave_settings
+from bloobcat.settings import remnawave_settings
 from bloobcat.logger import get_logger
 
 logger = get_logger("users_db")

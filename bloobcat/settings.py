@@ -22,13 +22,6 @@ class YookassaSettings(BaseSettings):
     webhook_secret: str
 
 
-class MarzbanSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="MARZBAN_")
-
-    url: str
-    token: SecretStr
-
-
 class RemnaWaveSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="REMNAWAVE_")
 
@@ -59,7 +52,6 @@ class AdminSettings(BaseSettings):
 
 telegram_settings = TelegramSettings()
 yookassa_settings = YookassaSettings()
-marzban_settings = MarzbanSettings()
 remnawave_settings = RemnaWaveSettings()
 script_settings = ScriptSettings()
 admin_settings = AdminSettings()
