@@ -143,11 +143,12 @@ class Users(models.Model):
             
             if is_new:
                 # Обработка реферала (только для новых пользователей)
-                referrer = await cls.get_or_none(id=referred_by)
-                if referrer and referrer.id != user.id:
-                    user.referred_by = referred_by
-                    needs_save = True
-                    logger.info(f"Пользователю {user.id} назначен реферер {referred_by}")
+                if referred_by and referred_by != user.id:  # Проверяем что пользователь не пытается стать своим рефералом
+                    referrer = await cls.get_or_none(id=referred_by)
+                    if referrer:
+                        user.referred_by = referred_by
+                        needs_save = True
+                        logger.info(f"Пользователю {user.id} назначен реферер {referred_by}")
 
                 # Отправляем уведомление о новом пользователе
                 try:
