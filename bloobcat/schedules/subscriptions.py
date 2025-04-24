@@ -16,23 +16,11 @@ async def check_subscriptions():
     - Создает автоплатеж в день истечения подписки
     """
     try:
-        logger.info("Начало проверки подписок пользователей")
+        logger.debug("Начало проверки подписок пользователей")
         
         # Получаем всех пользователей для отладки
         all_users = await Users.all()
-        logger.info(f"Всего пользователей в базе: {len(all_users)}")
-        
-        # Логируем информацию о пользователе с ID 367192315
-        user_367192315 = await Users.get_or_none(id=367192315)
-        if user_367192315:
-            logger.info(
-                f"Информация о пользователе 367192315: "
-                f"is_registered={user_367192315.is_registered}, "
-                f"is_subscribed={user_367192315.is_subscribed}, "
-                f"renew_id={user_367192315.renew_id}, "
-                f"expired_at={user_367192315.expired_at}, "
-                f"days_remaining={(user_367192315.expired_at - datetime.now().date()).days if user_367192315.expired_at else 'None'}"
-            )
+        logger.debug(f"Всего пользователей в базе: {len(all_users)}")
         
         # Получаем пользователей с автопродлением для проверки подписок
         users_with_auto_renewal = await Users.filter(
@@ -41,40 +29,24 @@ async def check_subscriptions():
             expired_at__not_isnull=True
         )
         
-        logger.info(f"Найдено {len(users_with_auto_renewal)} пользователей с автопродлением")
-        
-        # Проверяем, есть ли пользователь 367192315 в списке для проверки
-        if user_367192315 and user_367192315 not in users_with_auto_renewal and user_367192315.is_subscribed:
-            logger.info(
-                f"Пользователь 367192315 не входит в список для проверки автопродления. "
-                f"Причины: is_subscribed={user_367192315.is_subscribed}, "
-                f"renew_id is null={user_367192315.renew_id is None}, "
-                f"expired_at is null={user_367192315.expired_at is None}"
-            )
+        logger.debug(f"Найдено {len(users_with_auto_renewal)} пользователей с автопродлением")
         
         # Обрабатываем пользователей с автопродлением
         for user in users_with_auto_renewal:
             try:
                 days_remaining = (user.expired_at - datetime.now().date()).days
-                # Логируем информацию о подписке пользователя
-                logger.info(f"Проверка подписки для пользователя {user.id} с автопродлением: истекает через {days_remaining} дней")
                 
-                # Проверяем, что подписка еще не истекла (для уведомлений)
                 if days_remaining < 0:
-                    logger.info(f"Подписка пользователя {user.id} уже истекла, уведомление не отправляется")
+                    logger.debug(f"Подписка пользователя {user.id} уже истекла")
                     continue
                 
                 if 0 < days_remaining < 3:
-                    # Только уведомляем пользователя о предстоящем списании
-                    logger.info(f"Отправка уведомления о предстоящем списании пользователю {user.id}")
+                    logger.debug(f"Отправка уведомления о предстоящем списании пользователю {user.id}")
                     # await notify_auto_payment(user) # Закомментировано по запросу
                 elif days_remaining == 0:
-                    # Создаем автоплатеж в день истечения
-                    logger.info(f"Создание автоплатежа для пользователя {user.id}")
+                    logger.debug(f"Создание автоплатежа для пользователя {user.id}")
                     result = await create_auto_payment(user)
-                    if result:
-                        logger.info(f"Автоплатеж для пользователя {user.id} успешно создан")
-                    else:
+                    if not result:
                         logger.error(f"Не удалось создать автоплатеж для пользователя {user.id}")
             except Exception as e:
                 logger.error(f"Ошибка при обработке пользователя {user.id} с автопродлением: {str(e)}")
@@ -88,12 +60,12 @@ async def check_subscriptions():
             is_subscribed=False
         ).all()
         
-        logger.info(f"Найдено {len(users_without_auto_renewal)} пользователей без автопродления")
+        logger.debug(f"Найдено {len(users_without_auto_renewal)} пользователей без автопродления")
         
         # Проверяем, есть ли пользователи с is_subscribed=False, но с renew_id
         for user in users_without_auto_renewal:
             if user.renew_id:
-                logger.warning(f"Пользователь {user.id} имеет renew_id={user.renew_id}, но is_subscribed=False. Возможно, нужно исправить данные.")
+                logger.warning(f"Пользователь {user.id} имеет renew_id={user.renew_id}, но is_subscribed=False")
         
         # Обрабатываем пользователей без автопродления
         for user in users_without_auto_renewal:

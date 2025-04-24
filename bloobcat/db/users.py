@@ -1,4 +1,3 @@
-import zlib
 from datetime import date, timedelta
 from typing import Optional, Any
 
@@ -20,23 +19,12 @@ from bloobcat.logger import get_logger
 logger = get_logger("users_db")
 
 
-def crc32(a: str):
-    return format(zlib.crc32(str(a).encode("utf-8")), "08x")
-
-
-def get_connect_url(user_id) -> str:
-    return (
-        crc32(f"{user_id}connect") + crc32(f"connect {user_id}") + "bloobcat"
-    )
-
-
 class Users(models.Model):
     id = fields.BigIntField(primary_key=True)
     username = fields.CharField(max_length=100, null=True)
     full_name = fields.CharField(max_length=1000)
     expired_at = fields.DateField(null=True)
     is_registered = fields.BooleanField(default=False)
-    connect_url = fields.CharField(max_length=100, null=True)
     balance = fields.IntField(default=0)
     referred_by = fields.IntField(default=0)
     is_admin = fields.BooleanField(default=False)
@@ -44,11 +32,8 @@ class Users(models.Model):
     registration_date = fields.DatetimeField(auto_now_add=True)
     referrals = fields.IntField(default=0)
     is_subscribed = fields.BooleanField(default=False)
-    is_sended_notification_connect = fields.BooleanField(default=False)
     utm = fields.CharField(max_length=100, null=True)
     renew_id = fields.CharField(max_length=100, null=True)
-    last_action = fields.CharField(max_length=100, null=True)
-    tv_connect = fields.CharField(max_length=5, null=True)
     connected_at = fields.DatetimeField(null=True)
     email = fields.CharField(max_length=255, null=True)
     created_at = fields.DatetimeField(auto_now_add=True)
@@ -134,8 +119,6 @@ class Users(models.Model):
                         if telegram_user.last_name
                         else ""
                     ),
-                    connect_url=get_connect_url(telegram_user.id),
-                    tv_connect=crc32(get_connect_url(telegram_user.id))[::-1][:5],
                 ),
             )
             
@@ -276,7 +259,6 @@ class UsersModelAdmin(TortoiseModelAdmin):
     )
     readonly_fields = (
         "id",
-        "connect_url",
         "registration_date",
         "activation_date",
         "referrals",

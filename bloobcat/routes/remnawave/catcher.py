@@ -10,7 +10,7 @@ from bloobcat.db.payments import ProcessedPayments
 from bloobcat.logger import get_logger
 from .client import RemnaWaveClient
 from bloobcat.settings import remnawave_settings
-from bloobcat.processing.user_processor import process_user_safe, process_user
+from bloobcat.processing.remnawave_processor import process_user_safe, process_user
 
 router = APIRouter(prefix="/remnawave", tags=["remnawave"])
 logger = get_logger("remnawave_catcher")

@@ -19,7 +19,7 @@ def get_remnawave_client_proc() -> RemnaWaveClient:
     global remnawave_client_instance
     if remnawave_client_instance is None:
         remnawave_client_instance = RemnaWaveClient(remnawave_settings.url, remnawave_settings.token.get_secret_value())
-        logger.info("Экземпляр RemnaWaveClient создан для user_processor")
+        logger.debug("Создан экземпляр RemnaWaveClient")
     return remnawave_client_instance
 
 async def process_user_safe(user: Users, remnawave_users_dict: Dict = None) -> bool:
@@ -28,7 +28,7 @@ async def process_user_safe(user: Users, remnawave_users_dict: Dict = None) -> b
         await process_user(user, remnawave_users_dict)
         return True
     except Exception as e:
-        logger.error(f"Ошибка при безопасной обработке пользователя {user.id}: {str(e)}", exc_info=True)
+        logger.error(f"Ошибка при обработке пользователя {user.id}: {str(e)}", exc_info=True)
         return False
 
 async def process_user(user: Users, remnawave_users_dict: Optional[Dict] = None):
@@ -37,7 +37,7 @@ async def process_user(user: Users, remnawave_users_dict: Optional[Dict] = None)
         logger.warning("Попытка обработки пустого пользователя (None)")
         return
 
-    logger.info(f"Обработка пользователя {user.id} ({user.name()}): connected_at={user.connected_at}, is_registered={user.is_registered}, last_action={user.last_action}, expires()={user.expires()}")
+    logger.debug(f"Обработка пользователя {user.id} ({user.name()}): зарегистрирован={user.is_registered}, срок={user.expires()}")
     
     user_updated = False
 
@@ -55,11 +55,12 @@ async def process_user(user: Users, remnawave_users_dict: Optional[Dict] = None)
     else:
         logger.debug(f"Пользователь {user.id} еще не зарегистрирован, синхронизация статуса RemnaWave пропущена.")
 
-    logger.info(f"Обработка пользователя {user.id} ({user.name()}) завершена.")
+    if user_updated:
+        logger.info(f"Обновлено состояние пользователя {user.id}")
 
 async def _handle_new_user_registration(user: Users) -> bool:
     """Обрабатывает регистрацию нового пользователя, назначает триал и создает в RemnaWave."""
-    logger.info(f"Активация ключа для нового пользователя {user.id}")
+    logger.debug(f"Активация ключа для нового пользователя {user.id}")
     
     # Проверяем платежи
     has_payments = await ProcessedPayments.filter(
@@ -109,9 +110,9 @@ async def _handle_new_user_registration(user: Users) -> bool:
                 hwid_device_limit=hwid_limit
             )
             user.remnawave_uuid = response["response"]["uuid"]
-            logger.info(f"Создан пользователь в RemnaWave с UUID: {user.remnawave_uuid} и лимитом устройств: {hwid_limit}")
+            logger.info(f"Создан пользователь в RemnaWave {user.id} с UUID: {user.remnawave_uuid}")
         except Exception as e:
-            logger.error(f"Ошибка при создании пользователя в RemnaWave: {str(e)}")
+            logger.error(f"Ошибка при создании пользователя {user.id} в RemnaWave: {str(e)}")
             raise
 
     # Регистрируем пользователя
@@ -137,7 +138,7 @@ async def _handle_new_user_registration(user: Users) -> bool:
 async def _synchronize_remnawave_status(user: Users, remnawave_users_dict: Optional[Dict] = None) -> bool:
     """Проверяет статус пользователя в RemnaWave и применяет ограничения при необходимости."""
     if not user.remnawave_uuid:
-        logger.warning(f"У пользователя {user.id} нет UUID RemnaWave, синхронизация невозможна")
+        logger.warning(f"У пользователя {user.id} нет UUID RemnaWave")
         return False
 
     remnawave = get_remnawave_client_proc()
@@ -165,11 +166,11 @@ async def _synchronize_remnawave_status(user: Users, remnawave_users_dict: Optio
                         logger.debug(f"Пользователь {user.id} не найден в RemnaWave (ответ API)")
                         current_status = "not_found"
                     else:
-                        logger.error(f"Ошибка при получении пользователя {user.id} из RemnaWave: {str(e)}")
+                        logger.error(f"Ошибка при получении статуса пользователя {user.id} из RemnaWave: {str(e)}")
                         current_status = "unknown"
 
     except Exception as e:
-        logger.warning(f"Ошибка при определении статуса пользователя {user.id} в RemnaWave: {str(e)}")
+        logger.error(f"Ошибка при проверке статуса пользователя {user.id} в RemnaWave: {str(e)}")
         current_status = "unknown"
 
     # Логика применения ограничений
@@ -206,7 +207,7 @@ async def _synchronize_remnawave_status(user: Users, remnawave_users_dict: Optio
                 user.last_action = "limit"
                 await user.save()
                 user_updated = True
-                logger.info(f"Установлено ограничение для пользователя {user.id} в RemnaWave")
+                logger.info(f"Установлено ограничение для пользователя {user.id}")
             except Exception as e:
                 logger.error(f"Ошибка при установке ограничения для {user.id}: {str(e)}")
 
@@ -219,64 +220,8 @@ async def _synchronize_remnawave_status(user: Users, remnawave_users_dict: Optio
                 user.last_action = "unlimit"
                 await user.save()
                 user_updated = True
-                logger.info(f"Снято ограничение для пользователя {user.id} в RemnaWave")
+                logger.info(f"Снято ограничение для пользователя {user.id}")
             except Exception as e:
                 logger.error(f"Ошибка при снятии ограничения для {user.id}: {str(e)}")
 
-    return user_updated
-
-async def reset_expired_users():
-    """Сброс подписок и VPN для пользователей с истекшей подпиской."""
-    logger.info("Запуск сброса подписок для истекших пользователей")
-    try:
-        users_to_check = await Users.filter(is_registered=True).all()
-        logger.info(f"Найдено {len(users_to_check)} зарегистрированных пользователей для проверки на истечение")
-        
-        reset_tasks = []
-        for user_db in users_to_check:
-            if user_db.expires() == 0:
-                reset_tasks.append(reset_expired_user(user_db))
-        
-        if reset_tasks:
-            sem = asyncio.Semaphore(10)
-            async def reset_with_sem(user):
-                async with sem:
-                    await reset_expired_user(user)
-            
-            await asyncio.gather(*[reset_with_sem(user) for user in reset_tasks])
-            logger.info(f"Завершена параллельная обработка {len(reset_tasks)} истекших пользователей")
-        else:
-            logger.info("Нет истекших пользователей для сброса")
-                
-        logger.info("Сброс подписок для истекших пользователей завершен")
-    except Exception as e:
-        logger.error(f"Критическая ошибка в reset_expired_users: {str(e)}", exc_info=True)
-
-async def reset_expired_user(user_db: Users):
-    """Сбрасывает подписку и статус в RemnaWave для конкретного пользователя."""
-    try:
-        logger.info(f"Сброс VPN и подписки для пользователя {user_db.id} (истекла)")
-        
-        if user_db.remnawave_uuid:
-            remnawave = get_remnawave_client_proc()
-            try:
-                await remnawave.users.update_user(
-                    uuid=str(user_db.remnawave_uuid),
-                    status="DISABLED"
-                )
-                logger.info(f"Статус пользователя {user_db.id} в RemnaWave установлен как DISABLED")
-            except Exception as e:
-                logger.error(f"Ошибка при отключении пользователя {user_db.id} в RemnaWave: {str(e)}")
-
-        user_db.is_subscribed = False
-        user_db.renew_id = None
-        user_db.last_action = "limit"
-        
-        if user_db.is_trial:
-            user_db.is_trial = False
-            logger.info(f"Сброс флага пробного периода для пользователя {user_db.id}")
-        
-        await user_db.save()
-        logger.info(f"Статус пользователя {user_db.id} в БД обновлен (подписка истекла)")
-    except Exception as e:
-        logger.error(f"Ошибка при обработке сброса для пользователя {user_db.id}: {str(e)}", exc_info=True) 
+    return user_updated 

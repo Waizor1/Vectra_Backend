@@ -24,12 +24,9 @@ logger = get_logger("bloobcat")
 
 @asynccontextmanager
 async def lifespan(fastapi_app: FastAPI):
-    logger.info("Запуск приложения...")
-    start_scheduler()
-
     command = Command(tortoise_config=TORTOISE_ORM, location="migrations")
-    logger.info("Ожидание готовности базы данных...")
-    await asyncio.sleep(5)  # Даем базе данных время на инициализацию
+    # Небольшая задержка перед инициализацией миграций
+    await asyncio.sleep(5)
     
     try:
         logger.info("Инициализация базы данных...")
@@ -54,15 +51,15 @@ async def lifespan(fastapi_app: FastAPI):
         + telegram_settings.webhook_secret
     )
     
-    # Запускаем только RemnaWave мониторинг
-    online_tasks = await online_worker_tasks()
-    logger.info("Фоновые задачи RemnaWave запущены")
-    
+    # Запуск фоновых задач после инициализации БД и бота
     async with RegisterTortoise(
         fastapi_app,
         config=TORTOISE_ORM,
         add_exception_handlers=True,
     ):
+        start_scheduler()
+        online_tasks = await online_worker_tasks()
+        logger.info("Фоновые задачи запущены")
         yield
     
     for task in online_tasks:

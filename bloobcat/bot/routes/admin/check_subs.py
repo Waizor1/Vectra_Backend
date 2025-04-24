@@ -6,8 +6,8 @@ from tortoise.functions import Count
 
 from bloobcat.bot.routes.admin.functions import IsAdmin, search_user
 from bloobcat.schedules import check_subscriptions, check_trial_users
-from bloobcat.routes.marzban.catcher import marzban_updater
-from bloobcat.processing.user_processor import reset_expired_users, process_user
+from bloobcat.routes.remnawave.catcher import remnawave_updater
+from bloobcat.processing.remnawave_processor import process_user
 from bloobcat.bot.alerts import alerts_worker
 from bloobcat.db.users import Users
 from bloobcat.db.payments import ProcessedPayments
@@ -39,29 +39,7 @@ async def admin_check_subs(message: Message):
         logger.error(error_message)
 
 
-@router.message(Command("reset_expired"), IsAdmin())
-async def admin_reset_expired(message: Message):
-    """
-    Хендлер для ручного запуска сброса истекших пользователей.
-    Команда: /reset_expired
-    """
-    try:
-        await message.answer(
-            "⚠️ <b>Внимание!</b> Функция сброса истекших подписок не запускается автоматически "
-            "и должна запускаться вручную по необходимости.\n\n"
-            "Начинаю сброс подписок истекших пользователей...",
-            parse_mode="HTML"
-        )
-        
-        # Запускаем сброс истекших пользователей
-        await reset_expired_users()
-        
-        await message.answer("Сброс истекших подписок успешно завершен! Подробности в логах.")
-        logger.info(f"Администратор {message.from_user.id} вручную запустил сброс истекших подписок")
-    except Exception as e:
-        error_message = f"Ошибка при сбросе истекших подписок: {str(e)}"
-        await message.answer(error_message)
-        logger.error(error_message)
+
 
 
 @router.message(Command("expiring"), IsAdmin())
@@ -135,18 +113,10 @@ async def admin_check_all(message: Message):
         # Запускаем все задачи последовательно
         start_time = datetime.now()
         
-        # 1. Обновление Marzban
-        await message.answer("1/5. Запуск обновления Marzban...")
-        await marzban_updater()
-        
-        # 2. Сброс истекших пользователей
-        await message.answer(
-            "2/5. Запуск сброса истекших пользователей...\n"
-            "⚠️ <b>Примечание</b>: Эта функция не запускается автоматически и выполняется только при ручном запуске.",
-            parse_mode="HTML"
-        )
-        await reset_expired_users()
-        
+        # 1. Обновление RemnaWave
+        await message.answer("1/5. Запуск обновления RemnaWave...")
+        await remnawave_updater()
+
         # 3. Отправка уведомлений
         await message.answer("3/5. Запуск отправки уведомлений...")
         await alerts_worker()
@@ -370,7 +340,7 @@ async def admin_set_registered(message: Message):
         if is_registered and not previous_state:
             await message.answer(f"Статус регистрации пользователя {user_id} изменен на 'Зарегистрирован'. Запускаю process_user...")
             try:
-                # Запускаем process_user для обновления пользователя в Marzban
+                # Запускаем process_user для обновления пользователя в RemnaWave
                 await process_user(user)
                 await message.answer(f"Пользователь {user_id} успешно обработан функцией process_user.")
             except Exception as e:
@@ -624,7 +594,7 @@ async def admin_set_trial(message: Message):
         
         await user.save()
         
-        # Запускаем process_user для обновления пользователя в Marzban
+        # Запускаем process_user для обновления пользователя в RemnaWave
         try:
             await process_user(user)
             await message.answer(f"Пользователь {user_id} успешно обработан функцией process_user.")

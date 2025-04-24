@@ -1,13 +1,10 @@
 from fastapi import APIRouter
 
-from .remnawave.connect import router as remnawave_connect_router
 from .payment import router as payment_router
-from .tv_connect import router as tv_router
 from .user import router as user_router
 
 main_router = APIRouter()
 
-main_router.include_router(remnawave_connect_router)
 main_router.include_router(payment_router)
 main_router.include_router(user_router)
 
@@ -35,4 +32,3 @@ def include_bot_router():
     # Устанавливаем флаг, что маршрутизатор бота включен
     _bot_router_included = True
 
-main_router.include_router(tv_router)
