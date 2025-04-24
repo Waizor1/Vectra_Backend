@@ -97,9 +97,11 @@ app = FastAPI(lifespan=lifespan, openapi_url=None)
 
 origins = [
     "https://ttestapp.guarddogvpn.com",
-    "https://app.guarddogvpn.com",
-    "https://*.trycloudflare.com",       # для тестовых туннелей
-    "https://*.cloudflare.com"           # для постоянных туннелей
+    "https://app.guarddogvpn.com", 
+    "https://app.starmy.store",
+    "https://api.starmy.store",
+    "https://*.trycloudflare.com",
+    "https://*.cloudflare.com"
 ]
 
 app.add_middleware(
