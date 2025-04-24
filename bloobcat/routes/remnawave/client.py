@@ -118,9 +118,9 @@ class UsersAPI:
 
     async def get_user_by_uuid(self, uuid: str) -> Dict[str, Any]:
         """Получение пользователя по UUID"""
-        logger.info(f"Получение пользователя по UUID: {uuid}")
+        logger.debug(f"Получение пользователя по UUID: {uuid}")
         response = await self.client._request("GET", f"/api/users/uuid/{uuid}")
-        logger.info(f"Ответ при получении пользователя по UUID: {response}")
+        logger.debug(f"Ответ при получении пользователя по UUID: {response}")
         return response
 
     async def update_user(self, uuid: str, **kwargs) -> Dict[str, Any]:

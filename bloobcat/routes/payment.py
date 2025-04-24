@@ -1,6 +1,8 @@
 from random import randint
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 import json
+import asyncio
+import random
 
 from fastapi import APIRouter, Depends, HTTPException, Header, Request # type: ignore
 from yookassa import Configuration, Payment, Webhook
@@ -17,9 +19,11 @@ from bloobcat.bot.notifications.user import (
 from bloobcat.db.tariff import Tariffs
 from bloobcat.db.users import Users
 from bloobcat.funcs.validate import validate
-from bloobcat.settings import yookassa_settings
+from bloobcat.settings import yookassa_settings, remnawave_settings
 from bloobcat.db.payments import ProcessedPayments
 from bloobcat.logger import get_payment_logger
+from bloobcat.db.active_tariff import ActiveTariffs
+from bloobcat.routes.remnawave.client import RemnaWaveClient
 
 # Инициализируем клиент ЮKассы
 Configuration.account_id = yookassa_settings.shop_id
@@ -184,6 +188,84 @@ async def yookassa_webhook(request: Request, secret: str):
             )
             return {"status": "error", "message": "Invalid month value"}
         
+        # Новый тариф из webhook
+        tariff_id = data.get("tariff_id")
+        if tariff_id is not None:
+            # Получаем новый тариф
+            new_tariff = await Tariffs.get_or_none(id=tariff_id)
+            if not new_tariff:
+                logger.error(f"Не найден тариф {tariff_id} при обработке платежа")
+                return {"status": "error", "message": "Tariff not found"}
+                
+            # Проверяем, есть ли у пользователя активная подписка и активный тариф
+            current_date = date.today()
+            additional_days = 0
+            
+            if user.expired_at and user.expired_at > current_date and user.active_tariff_id:
+                # У пользователя есть действующая подписка
+                try:
+                    # Получаем активный тариф
+                    active_tariff = await ActiveTariffs.get(id=user.active_tariff_id)
+                    
+                    # Вычисляем оставшиеся дни подписки
+                    days_remaining = (user.expired_at - current_date).days
+                    logger.info(f"У пользователя {user.id} осталось {days_remaining} дней подписки")
+                    
+                    # Рассчитываем количество дней, которое давал старый тариф
+                    old_months = active_tariff.months
+                    old_target_date = current_date.replace(
+                        year=current_date.year + ((current_date.month + old_months - 1) // 12),
+                        month=((current_date.month + old_months - 1) % 12) + 1
+                    )
+                    old_total_days = (old_target_date - current_date).days
+                    
+                    # Рассчитываем процент неиспользованной подписки
+                    unused_percent = days_remaining / old_total_days if old_total_days > 0 else 0
+                    unused_value = unused_percent * active_tariff.price
+                    
+                    logger.info(
+                        f"Неиспользованная часть подписки пользователя {user.id}: " 
+                        f"{days_remaining}/{old_total_days} дней ({unused_percent:.2%}), " 
+                        f"стоимость: {unused_value:.2f} руб."
+                    )
+                    
+                    # Рассчитываем, сколько дней даст неиспользованная сумма в новом тарифе
+                    if new_tariff.price > 0:
+                        # Рассчитываем новый период подписки
+                        new_target_date = current_date.replace(
+                            year=current_date.year + ((current_date.month + new_tariff.months - 1) // 12),
+                            month=((current_date.month + new_tariff.months - 1) % 12) + 1
+                        )
+                        new_total_days = (new_target_date - current_date).days
+                        
+                        # Сколько дней даст неиспользованная сумма в новом тарифе
+                        additional_days = int(unused_value / new_tariff.price * new_total_days)
+                        logger.info(
+                            f"Перенос времени для пользователя {user.id}: "
+                            f"{unused_value:.2f} руб. = {additional_days} дней в новом тарифе"
+                        )
+                except Exception as e:
+                    logger.error(f"Ошибка при расчете переноса подписки для {user.id}: {str(e)}")
+                    additional_days = 0  # При ошибке не добавляем дополнительные дни
+            
+            # Рассчитываем точное количество дней для указанного количества месяцев + дополнительные дни
+            current_date = date.today()
+            target_date = current_date.replace(
+                year=current_date.year + ((current_date.month + months - 1) // 12),
+                month=((current_date.month + months - 1) % 12) + 1
+            )
+            days = (target_date - current_date).days + additional_days
+            logger.info(f"Итоговое количество дней подписки: {days} ({(target_date - current_date).days} + {additional_days})")
+        else:
+            # Если нет tariff_id, значит это автоплатеж или другой тип платежа, просто рассчитываем дни как обычно
+            current_date = date.today()
+            target_date = current_date.replace(
+                year=current_date.year + ((current_date.month + months - 1) // 12),
+                month=((current_date.month + months - 1) % 12) + 1
+            )
+            days = (target_date - current_date).days
+            logger.info(f"Стандартное количество дней подписки: {days}")
+        
         # Рассчитываем точное количество дней для указанного количества месяцев
         try:
             amount_from_balance = float(data.get("amount_from_balance", 0))
@@ -200,16 +282,150 @@ async def yookassa_webhook(request: Request, secret: str):
                     }
                 )
             
-            current_date = date.today()
-            target_date = current_date.replace(year=current_date.year + ((current_date.month + months - 1) // 12),
-                                         month=((current_date.month + months - 1) % 12) + 1)
-            days = (target_date - current_date).days
-            
-            await user.extend_subscription(days)
-            
-            # Проверяем, является ли это автоплатежом
+            # Устанавливаем новую дату окончания подписки
+            # В случае автопродления переходим на новый тариф, сбрасывая старую подписку
             is_auto = data.get("is_auto", False)
+            if is_auto:
+                # Для автопродления используем extend_subscription вместо прямой установки даты
+                await user.extend_subscription(days)
+                logger.info(
+                    f"Автопродление: подписка пользователя {user.id} продлена на {days} дней, новая дата истечения: {user.expired_at}"
+                )
+            else:
+                # Если это новый тариф (tariff_id присутствует), устанавливаем новую дату
+                # иначе расширяем существующую подписку
+                if tariff_id is not None:
+                    # Устанавливаем новую дату окончания
+                    user.expired_at = current_date + timedelta(days=days)
+                    logger.info(
+                        f"Установлена новая дата истечения для пользователя {user.id}: {user.expired_at} "
+                        f"(сброшена предыдущая дата и установлено {days} дней)"
+                    )
+                else:
+                    # Расширяем существующую подписку при обычном продлении
+                    await user.extend_subscription(days)
+                
+            # If a tariff_id is provided in metadata, ensure it's created in ActiveTariffs and assign to user
+            if tariff_id is not None:
+                original = await Tariffs.get_or_none(id=tariff_id)
+                if original:
+                    # Удаляем предыдущий активный тариф, если он есть
+                    if user.active_tariff_id:
+                        old_active_tariff = await ActiveTariffs.get_or_none(id=user.active_tariff_id)
+                        if old_active_tariff:
+                            logger.info(f"Удаляем предыдущий активный тариф {user.active_tariff_id} пользователя {user.id}")
+                            await old_active_tariff.delete()
+                        else:
+                            logger.warning(f"Не найден активный тариф {user.active_tariff_id} для удаления у пользователя {user.id}")
+                    
+                    # Create a new active tariff entry with random ID
+                    active_tariff = await ActiveTariffs.create(
+                        user=user,  # Link to this user
+                        name=original.name,
+                        months=original.months,
+                        price=original.price,
+                        hwid_limit=original.hwid_limit
+                    )
+                    # Link user to this active tariff
+                    user.active_tariff_id = active_tariff.id
+                    logger.info(f"Created ActiveTariff {active_tariff.id} for user {user.id} based on tariff {original.id}")
+                else:
+                    logger.error(f"Original tariff {tariff_id} not found; skipping ActiveTariffs")
             
+            # Синхронизируем данные с RemnaWave
+            if user.remnawave_uuid:
+                # Настройки бесконечных повторных попыток с ограничением по времени
+                max_total_time = 60  # Максимальное время в секундах для всех попыток (1 минута)
+                start_time = datetime.now()
+                retry_count = 0
+                remnawave_client = None
+                success = False
+                
+                try:
+                    # Подготавливаем параметры для обновления
+                    update_params = {}
+
+                    # Форматируем дату истечения для API (это обновляем всегда)
+                    expire_at_dt = datetime.combine(user.expired_at, datetime.max.time(), tzinfo=timezone.utc)
+                    expire_at_str = expire_at_dt.strftime('%Y-%m-%dT%H:%M:%S.%fZ')[:-4] + 'Z'
+                    update_params["expireAt"] = expire_at_str
+                    
+                    # Определяем hwid_limit ТОЛЬКО для новых подписок (когда есть tariff_id),
+                    # при автопродлении hwid_limit не меняем
+                    hwid_limit = None
+                    if tariff_id is not None and original:
+                        hwid_limit = original.hwid_limit
+                        logger.info(f"Новая подписка: устанавливаем hwid_limit={hwid_limit} из тарифа ID={original.id}")
+                        update_params["hwidDeviceLimit"] = hwid_limit
+                    else:
+                        logger.info(f"Автопродление: hwid_limit не меняем, обновляем только дату истечения")
+                    
+                    # Цикл повторных попыток обновления информации в RemnaWave
+                    while not success:
+                        # Проверяем, не превысили ли мы общее время попыток
+                        elapsed_time = (datetime.now() - start_time).total_seconds()
+                        if elapsed_time > max_total_time:
+                            logger.error(
+                                f"Превышено максимальное время ({max_total_time} сек) для обновления пользователя {user.id} в RemnaWave. "
+                                f"Выполнено {retry_count} попыток за {elapsed_time:.1f} сек."
+                            )
+                            break
+                            
+                        try:
+                            retry_count += 1
+                            
+                            # Создаем клиент RemnaWave для каждой попытки
+                            if remnawave_client:
+                                await remnawave_client.close()
+                            remnawave_client = RemnaWaveClient(
+                                remnawave_settings.url, 
+                                remnawave_settings.token.get_secret_value()
+                            )
+                            
+                            # Обновляем пользователя в RemnaWave
+                            logger.info(
+                                f"Попытка #{retry_count} [{elapsed_time:.1f} сек]: Обновляем пользователя {user.id} в RemnaWave (UUID: {user.remnawave_uuid}). "
+                                f"Новая дата: {user.expired_at}" + 
+                                (f", hwid_limit: {hwid_limit}" if hwid_limit is not None else ", hwid_limit без изменений")
+                            )
+                            
+                            await remnawave_client.users.update_user(
+                                uuid=user.remnawave_uuid,
+                                **update_params
+                            )
+                            
+                            logger.info(f"УСПЕХ! Пользователь {user.id} обновлен в RemnaWave с попытки #{retry_count} за {elapsed_time:.1f} сек")
+                            success = True
+                            break  # Успешное обновление, выходим из цикла
+                            
+                        except Exception as retry_exc:
+                            # Ограничиваем экспоненциальный рост задержки
+                            backoff_time = min(10, 0.5 * (2 ** min(retry_count, 5)) + random.uniform(0, 0.5))
+                            logger.warning(
+                                f"Ошибка при обновлении пользователя {user.id} в RemnaWave (попытка {retry_count}, прошло {elapsed_time:.1f} сек): {str(retry_exc)}. "
+                                f"Повторная попытка через {backoff_time:.2f} сек."
+                            )
+                            await asyncio.sleep(backoff_time)
+                    
+                    # Если не удалось обновить после всех попыток
+                    if not success:
+                        logger.error(
+                            f"НЕ УДАЛОСЬ обновить пользователя {user.id} в RemnaWave даже после {retry_count} попыток. "
+                            f"Общее время: {(datetime.now() - start_time).total_seconds():.1f} сек."
+                        )
+                    
+                except Exception as e:
+                    logger.error(f"Ошибка при обновлении пользователя {user.id} в RemnaWave: {str(e)}")
+                    # Продолжаем обработку платежа, несмотря на ошибку синхронизации с RemnaWave
+                finally:
+                    # Закрываем клиент в любом случае
+                    if remnawave_client:
+                        try:
+                            await remnawave_client.close()
+                        except Exception as close_exc:
+                            logger.warning(f"Ошибка при закрытии клиента RemnaWave: {str(close_exc)}")
+
+            # Если это автоплатеж и он успешен, обновляем статус подписки
             if payment.payment_method.saved and not is_auto:
                 user.renew_id = payment.payment_method.id
                 user.is_subscribed = True
@@ -344,9 +560,6 @@ async def pay(tariff_id: int, email: str, user: Users = Depends(validate)):
 
         user.balance -= full_price
         await user.extend_subscription(days)
-        if user.is_trial:
-            user.is_trial = False
-            logger.info(f"Сброшен флаг пробного периода для {user.id} при оплате с баланса")
         await user.save()
 
         payment_id = f"balance_{user.id}_{int(datetime.now().timestamp())}_{randint(100, 999)}"
@@ -390,7 +603,8 @@ async def pay(tariff_id: int, email: str, user: Users = Depends(validate)):
         metadata = {
             "user_id": user.id,
             "month": months,
-            "amount_from_balance": amount_from_balance # Добавляем сумму списания с баланса
+            "amount_from_balance": amount_from_balance, # Добавляем сумму списания с баланса
+            "tariff_id": tariff.id
         }
 
         payment = Payment.create({
@@ -404,12 +618,12 @@ async def pay(tariff_id: int, email: str, user: Users = Depends(validate)):
             },
             "metadata": metadata,
             "capture": True,
-            "description": f"Оплата заказа Bloobcat (Тариф: {tariff.name})",
+            "description": f"Оплата подписки пользователя {user.id} (Тариф: {tariff.name})",
             "save_payment_method": True,
             "receipt": {
                 "customer": {"email": email},
                 "items": [{
-                    "description": f"WEB-Сервис Bloobcat ({tariff.name})",
+                    "description": f"Подписка пользователя {user.id} ({tariff.name})",
                     "quantity": "1",
                     "amount": {
                         "value": str(amount_to_pay),
@@ -431,40 +645,36 @@ async def create_auto_payment(user: Users) -> bool:
         bool: True если платеж успешно создан, False в случае ошибки
     """
     try:
-        # Получаем последний платеж пользователя из истории платежей
-        last_payment = await ProcessedPayments.filter(
-            user_id=user.id,
-            status="succeeded"
-        ).order_by("-processed_at").first()
-
-        if not last_payment:
-            logger.error(
-                f"Не найден последний УСПЕШНЫЙ платеж для пользователя {user.id} для автопродления",
-                extra={'user_id': user.id}
-            )
-            # Уведомляем пользователя о неудаче
-            await notify_auto_renewal_failure(user, reason="Не найден последний УСПЕШНЫЙ платеж для автопродления")
-            return False
-
-        # Получаем тариф на основе суммы последнего успешного платежа
-        tariff = await Tariffs.get_or_none(price=last_payment.amount)
-        if not tariff:
-            logger.error(
-                f"Не найден тариф для суммы {last_payment.amount} при создании автоплатежа для {user.id}",
-                extra={'user_id': user.id, 'last_payment_amount': last_payment.amount}
-            )
-            # Отключаем автопродление, если тариф не найден (цена изменилась?)
+        # --- Modify auto-payment logic to use active_tariff_id ---
+        if not user.active_tariff_id:
+            logger.error(f"У пользователя {user.id} не установлен active_tariff_id. Автопродление невозможно.")
+            await notify_auto_renewal_failure(user, reason="Отсутствует информация о последнем активном тарифе")
+            # Отключаем подписку, если нет активного тарифа
             user.is_subscribed = False
             user.renew_id = None
             await user.save()
-            logger.warning(f"Автопродление отключено для {user.id} из-за отсутствия тарифа на сумму {last_payment.amount}")
-            # Уведомляем пользователя о неудаче
-            await notify_auto_renewal_failure(user, reason=f"Не найден актуальный тариф для автопродления (сумма {last_payment.amount} руб.)")
             return False
 
-        full_price = float(tariff.price)
+        # Получаем детали тарифа из ActiveTariffs
+        active_tariff = await ActiveTariffs.get_or_none(id=user.active_tariff_id)
+        if not active_tariff:
+            logger.error(
+                f"Не найден активный тариф с ID {user.active_tariff_id} для пользователя {user.id}",
+                extra={'user_id': user.id, 'active_tariff_id': user.active_tariff_id}
+            )
+            # Отключаем автопродление, если активный тариф не найден
+            user.is_subscribed = False
+            user.renew_id = None
+            await user.save()
+            logger.warning(f"Автопродление отключено для {user.id} из-за отсутствия активного тарифа ID={user.active_tariff_id} в базе.")
+            await notify_auto_renewal_failure(user, reason=f"Не найден активный тариф (ID: {user.active_tariff_id}) для автопродления")
+            return False
+
+        logger.info(f"Автопродление для пользователя {user.id}. Используется активный тариф ID={active_tariff.id} (Name: {active_tariff.name}, Price: {active_tariff.price})")
+
+        full_price = float(active_tariff.price)
         user_balance = float(user.balance)
-        months = int(tariff.months)
+        months = int(active_tariff.months)
 
         try:
             current_date = date.today()
@@ -473,8 +683,8 @@ async def create_auto_payment(user: Users) -> bool:
             days = (target_date - current_date).days
         except Exception as e:
             logger.error(
-                f"Ошибка при расчете дней подписки для автоплатежа {user.id}, тариф {tariff.id}: {e}",
-                extra={'user_id': user.id, 'tariff_id': tariff.id, 'months': months}
+                f"Ошибка при расчете дней подписки для автоплатежа {user.id}, тариф {active_tariff.id}: {e}",
+                extra={'user_id': user.id, 'tariff_id': active_tariff.id, 'months': months}
             )
             # Уведомляем пользователя о неудаче (здесь маловероятно, но все же)
             await notify_auto_renewal_failure(user, reason="Ошибка при расчете срока продления")
@@ -483,7 +693,7 @@ async def create_auto_payment(user: Users) -> bool:
         # Проверка полной оплаты с баланса
         if user_balance >= full_price:
             logger.info(
-                f"Автопродление тарифа {tariff.id} для пользователя {user.id} полностью с баланса. "
+                f"Автопродление тарифа {active_tariff.id} для пользователя {user.id} полностью с баланса. "
                 f"Цена: {full_price}, Баланс: {user_balance}"
             )
 
@@ -539,7 +749,7 @@ async def create_auto_payment(user: Users) -> bool:
 
             logger.info(
                 f"Создание автоплатежа Yookassa для пользователя {user.id}. "
-                f"Тариф: {tariff.id}, Полная цена: {full_price}, Баланс: {user_balance}, "
+                f"Тариф: {active_tariff.id}, Полная цена: {full_price}, Баланс: {user_balance}, "
                 f"К оплате: {amount_to_pay}, С баланса: {amount_from_balance}"
             )
 
@@ -547,7 +757,7 @@ async def create_auto_payment(user: Users) -> bool:
                 "user_id": user.id,
                 "month": months,
                 "is_auto": True,
-                "amount_from_balance": amount_from_balance
+                "amount_from_balance": amount_from_balance,
             }
 
             # Создаем автоплатеж Yookassa
@@ -559,11 +769,11 @@ async def create_auto_payment(user: Users) -> bool:
                 "payment_method_id": user.renew_id,
                 "metadata": metadata,
                 "capture": True,
-                "description": f"Автопродление подписки Bloobcat ({tariff.name})",
+                "description": f"Автопродление подписки пользователя {user.id} ({active_tariff.name})",
                 "receipt": {
                     "customer": {"email": user.email if user.email else "auto@bloobcat.ru"},
                     "items": [{
-                        "description": f"Автопродление WEB-Сервиса Bloobcat ({tariff.name})",
+                        "description": f"Автопродление подписки пользователя {user.id} ({active_tariff.name})",
                         "quantity": "1",
                         "amount": {
                             "value": str(amount_to_pay),

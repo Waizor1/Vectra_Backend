@@ -60,6 +60,35 @@ async def lifespan(fastapi_app: FastAPI):
         logger.info("Фоновые задачи запущены")
         yield
     
+    # Закрытие всех клиентов RemnaWave при завершении работы
+    try:
+        # Закрываем основной клиент из routes/user.py
+        from bloobcat.routes.user import close_remnawave_client
+        await close_remnawave_client()
+        
+        # Закрываем синглтон-клиент из процессора, если он был создан
+        try:
+            from bloobcat.routes.remnawave.catcher import remnawave
+            if remnawave and remnawave.session:
+                logger.info("Закрытие клиента RemnaWave из catcher.py")
+                await remnawave.close()
+        except (ImportError, AttributeError) as e:
+            logger.warning(f"Не удалось закрыть remnawave клиент из catcher.py: {e}")
+        
+        # Попытка закрыть клиент из remnawave_processor, если он существует
+        try:
+            import sys
+            if 'bloobcat.processing.remnawave_processor' in sys.modules:
+                remnawave_module = sys.modules.get('bloobcat.processing.remnawave_processor')
+                if hasattr(remnawave_module, 'remnawave_client_instance') and remnawave_module.remnawave_client_instance:
+                    logger.info("Закрытие клиента RemnaWave из remnawave_processor.py")
+                    await remnawave_module.remnawave_client_instance.close()
+        except Exception as e:
+            logger.warning(f"Не удалось закрыть remnawave_client_instance: {e}")
+
+        logger.info("Все клиенты RemnaWave успешно закрыты")
+    except Exception as e:
+        logger.error(f"Ошибка при закрытии клиентов RemnaWave: {e}")
 
     logger.info("Приложение остановлено")
 

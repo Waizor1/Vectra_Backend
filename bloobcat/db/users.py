@@ -16,6 +16,8 @@ import logging
 from bloobcat.settings import remnawave_settings
 from bloobcat.logger import get_logger
 
+from bloobcat.db.active_tariff import ActiveTariffs
+
 import zlib
 
 logger = get_logger("users_db")
@@ -55,6 +57,9 @@ class Users(models.Model):
     notification_24h_sent = fields.BooleanField(default=False)
     remnawave_uuid = fields.UUIDField(null=True)  # UUID пользователя в RemnaWave
     familyurl = fields.CharField(max_length=100, null=True)
+    active_tariff: fields.ForeignKeyNullableRelation["ActiveTariffs"] = fields.ForeignKeyField(
+        "models.ActiveTariffs", related_name="users", null=True, on_delete=fields.SET_NULL, description="ID активного тарифа пользователя"
+    )
 
     async def _ensure_remnawave_user(self) -> bool:
         """
@@ -73,41 +78,46 @@ class Users(models.Model):
             
             remnawave = RemnaWaveClient(remnawave_settings.url, remnawave_settings.token.get_secret_value())
             
-            # Определяем дату истечения
-            expire_at_date = self.expired_at
-            if expire_at_date is None:
-                # Если даты нет и триал не использован, назначаем триал 
-                if not self.used_trial:
-                    expire_at_date = date.today() + timedelta(days=3)  # 3 дня триал
-                    self.is_trial = True
-                    self.used_trial = True
-                    self.expired_at = expire_at_date
-                    logger.info(f"Назначен триал для {self.id} до {expire_at_date}")
-                else:
-                    # Если триал использован, устанавливаем дату на сегодня
-                    expire_at_date = date.today()
-                    logger.warning(f"Пользователь {self.id} уже использовал триал, дата истечения: {expire_at_date}")
-            
-            # Базовый лимит устройств
-            hwid_limit = 1
-            
-            # Создаем пользователя в RemnaWave
-            response = await remnawave.users.create_user(
-                username=str(self.id),
-                expire_at=expire_at_date,
-                telegram_id=self.id,
-                email=self.email,
-                description=f"Telegram: {self.name()}",
-                hwid_device_limit=hwid_limit
-            )
-            
-            # Сохраняем UUID
-            self.remnawave_uuid = response["response"]["uuid"]
-            self.is_registered = True
-            await self.save()
-            
-            logger.info(f"Пользователь {self.id} успешно создан в RemnaWave с UUID: {self.remnawave_uuid}")
-            return True
+            try:
+                # Определяем дату истечения
+                expire_at_date = self.expired_at
+                if expire_at_date is None:
+                    # Если даты нет и триал не использован, назначаем триал 
+                    if not self.used_trial:
+                        expire_at_date = date.today() + timedelta(days=3)  # 3 дня триал
+                        self.is_trial = True
+                        self.used_trial = True
+                        self.expired_at = expire_at_date
+                        logger.info(f"Назначен триал для {self.id} до {expire_at_date}")
+                    else:
+                        # Если триал использован, устанавливаем дату на сегодня
+                        expire_at_date = date.today()
+                        logger.warning(f"Пользователь {self.id} уже использовал триал, дата истечения: {expire_at_date}")
+                
+                # Базовый лимит устройств
+                hwid_limit = 1
+                
+                # Создаем пользователя в RemnaWave
+                response = await remnawave.users.create_user(
+                    username=str(self.id),
+                    expire_at=expire_at_date,
+                    telegram_id=self.id,
+                    email=self.email,
+                    description=f"Telegram: {self.name()}",
+                    hwid_device_limit=hwid_limit
+                )
+                
+                # Сохраняем UUID
+                self.remnawave_uuid = response["response"]["uuid"]
+                self.is_registered = True
+                await self.save()
+                
+                logger.info(f"Пользователь {self.id} успешно создан в RemnaWave с UUID: {self.remnawave_uuid}")
+                return True
+            finally:
+                # Гарантированно закрываем сессию клиента, даже при возникновении исключения
+                await remnawave.close()
+                logger.debug(f"Закрыта сессия клиента RemnaWave в _ensure_remnawave_user для пользователя {self.id}")
             
         except Exception as e:
             logger.error(f"Ошибка при создании пользователя {self.id} в RemnaWave: {str(e)}")
@@ -157,6 +167,7 @@ class Users(models.Model):
             
             if is_new:
                 # Обработка реферала (только для новых пользователей)
+                referrer = None
                 if referred_by and referred_by != user.id:  # Проверяем что пользователь не пытается стать своим рефералом
                     referrer = await cls.get_or_none(id=referred_by)
                     if referrer:
@@ -271,6 +282,7 @@ class UsersModelAdmin(TortoiseModelAdmin):
         "expired_at",
         "balance",
         "utm",
+        "active_tariff_id",
     )
     readonly_fields = (
         "id",
@@ -280,10 +292,98 @@ class UsersModelAdmin(TortoiseModelAdmin):
         "username",
         "full_name",
     )
-
+    fields = (
+        "id",
+        "username",
+        "full_name",
+        "expired_at",
+        "is_registered",
+        "balance",
+        "referred_by",
+        "is_admin",
+        "custom_referral_percent",
+        "registration_date",
+        "referrals",
+        "is_subscribed",
+        "utm",
+        "renew_id",
+        "connected_at",
+        "email",
+        "created_at",
+        "is_trial",
+        "used_trial",
+        "notification_2h_sent",
+        "notification_24h_sent",
+        "remnawave_uuid",
+        "familyurl",
+        "active_tariff",
+    )
     search_help_text = "Юзернейм, имя, айди"
     verbose_name = "Пользователи"
     verbose_name_plural = "Пользователи"
+
+    async def save_model(self, pk, form_data=None):
+        """
+        Переопределенный метод сохранения пользователя.
+        
+        После сохранения в БД обновляет дату истечения подписки в RemnaWave.
+        
+        :param pk: Первичный ключ пользователя (ID)
+        :param form_data: Данные формы с изменениями
+        """
+        # Получаем исходного пользователя по ID
+        original_obj = None
+        original_expired_at = None
+        
+        if pk:
+            original_obj = await Users.get_or_none(id=pk)
+            if original_obj:
+                original_expired_at = original_obj.expired_at
+        
+        # Вызываем стандартный метод сохранения (он может возвращать dict)
+        result = await super().save_model(pk, form_data)
+        
+        # Получаем обновленный объект пользователя из БД
+        obj = await Users.get(id=pk)
+        
+        logger.info(f"Пользователь {obj.id} сохранен. Проверяем необходимость обновления в RemnaWave")
+        
+        # Проверяем, изменилась ли дата истечения и есть ли UUID RemnaWave
+        if obj.remnawave_uuid and obj.expired_at and obj.expired_at != original_expired_at:
+            # Проверка, не является ли дата в прошлом
+            from datetime import date
+            today = date.today()
+            
+            if obj.expired_at < today:
+                logger.warning(f"Дата истечения {obj.expired_at} находится в прошлом. RemnaWave не принимает такие даты. Пропускаем обновление.")
+            else:
+                logger.info(f"Дата истечения изменилась: {original_expired_at} -> {obj.expired_at}. Обновляем в RemnaWave")
+                
+                try:
+                    # Импортируем здесь, чтобы избежать циклического импорта
+                    from bloobcat.routes.remnawave.client import RemnaWaveClient
+                    from datetime import datetime, time, timezone
+                    
+                    # Подготавливаем дату в формате API RemnaWave
+                    expire_at_dt = datetime.combine(obj.expired_at, time.max, tzinfo=timezone.utc)
+                    expire_at_dt_str = expire_at_dt.strftime('%Y-%m-%dT%H:%M:%S.%fZ')[:-4] + 'Z'
+                    
+                    # Создаем клиент и обновляем пользователя
+                    client = RemnaWaveClient(remnawave_settings.url, remnawave_settings.token.get_secret_value())
+                    try:
+                        await client.users.update_user(obj.remnawave_uuid, expireAt=expire_at_dt_str)
+                        logger.info(f"Дата истечения для пользователя {obj.id} успешно обновлена в RemnaWave")
+                    finally:
+                        # Гарантированно закрываем сессию клиента
+                        await client.close()
+                        logger.debug(f"Закрыта сессия клиента RemnaWave после обновления даты истечения")
+                except Exception as e:
+                    logger.error(f"Ошибка при обновлении даты истечения в RemnaWave для пользователя {obj.id}: {str(e)}", 
+                                exc_info=True)
+                    # Не перевыбрасываем исключение, чтобы не прерывать работу админ-панели
+        
+        # Возвращаем результат от super().save_model(), который FastAPI может сериализовать
+        return result
 
     async def delete_model(self, pk: int):
         """Переопределенный метод удаления пользователя.
@@ -306,6 +406,7 @@ class UsersModelAdmin(TortoiseModelAdmin):
 
         # Пытаемся удалить из RemnaWave
         if user_obj.remnawave_uuid:
+            remnawave = None  # Объявляем переменную в более широкой области
             try:
                 # Импортируем RemnaWaveClient здесь, чтобы избежать циклического импорта
                 from bloobcat.routes.remnawave.client import RemnaWaveClient
@@ -314,7 +415,6 @@ class UsersModelAdmin(TortoiseModelAdmin):
                 logger.info(f"Попытка удаления пользователя {user_obj.id} (UUID: {user_obj.remnawave_uuid}) из RemnaWave...")
                 await remnawave.users.delete_user(user_obj.remnawave_uuid)
                 logger.info(f"Пользователь {user_obj.id} успешно удален/отсутствовал в RemnaWave.")
-                await remnawave.close() # Закрываем сессию клиента
             except Exception as e:
                 # Логируем ошибку, но продолжаем удаление из локальной БД
                 logger.error(
@@ -322,9 +422,11 @@ class UsersModelAdmin(TortoiseModelAdmin):
                     f"Пользователь все равно будет удален из локальной БД.",
                     exc_info=True # Добавляем трейсбек для детальной диагностики
                 )
-                # Убедимся, что сессия закрыта даже в случае ошибки
-                if 'remnawave' in locals() and remnawave.session:
+            finally:
+                # Гарантированно закрываем сессию клиента в любом случае
+                if remnawave:
                     await remnawave.close()
+                    logger.debug(f"Закрыта сессия клиента RemnaWave после удаления пользователя {user_obj.id}")
         else:
             logger.warning(f"У пользователя {user_obj.id} отсутствует remnawave_uuid. Пропускаем удаление из RemnaWave.")
         

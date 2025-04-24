@@ -7,6 +7,8 @@ from bloobcat.funcs.validate import validate
 from bloobcat.routes.remnawave.client import RemnaWaveClient
 from bloobcat.settings import remnawave_settings
 from bloobcat.logger import get_logger
+from fastapi import FastAPI
+from starlette.background import BackgroundTask
 
 logger = get_logger("routes.user")
 
@@ -22,6 +24,18 @@ class UserUpdate(BaseModel):
 
 # --- Инициализируем клиент RemnaWave один раз ---
 remnawave_client = RemnaWaveClient(remnawave_settings.url, remnawave_settings.token.get_secret_value())
+
+# Функция для закрытия клиента RemnaWave при завершении работы приложения
+async def close_remnawave_client():
+    logger.info("Закрытие клиента RemnaWave при завершении работы приложения")
+    await remnawave_client.close()
+
+def register_shutdown_event(app: FastAPI):
+    """Регистрирует обработчик события завершения работы приложения"""
+    @app.on_event("shutdown")
+    async def shutdown_event():
+        logger.info("Приложение завершает работу, закрываем RemnaWave клиент")
+        await close_remnawave_client()
 
 @router.get("")
 async def check(user: Users = Depends(validate)) -> Dict[str, Any]:
