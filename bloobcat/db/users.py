@@ -16,7 +16,19 @@ import logging
 from bloobcat.settings import remnawave_settings
 from bloobcat.logger import get_logger
 
+import zlib
+
 logger = get_logger("users_db")
+
+
+def crc32(a: str):
+    return format(zlib.crc32(str(a).encode("utf-8")), "08x")
+
+
+def get_family_url(user_id) -> str:
+    return (
+        crc32(f"{user_id}family") + crc32(f"family {user_id}") + "blubcat"
+    )
 
 
 class Users(models.Model):
@@ -42,6 +54,7 @@ class Users(models.Model):
     notification_2h_sent = fields.BooleanField(default=False)
     notification_24h_sent = fields.BooleanField(default=False)
     remnawave_uuid = fields.UUIDField(null=True)  # UUID пользователя в RemnaWave
+    familyurl = fields.CharField(max_length=100, null=True)
 
     async def _ensure_remnawave_user(self) -> bool:
         """
@@ -119,6 +132,7 @@ class Users(models.Model):
                         if telegram_user.last_name
                         else ""
                     ),
+                    familyurl=get_family_url(telegram_user.id),
                 ),
             )
             
