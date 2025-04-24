@@ -24,36 +24,16 @@ logger = get_logger("bloobcat")
 @asynccontextmanager
 async def lifespan(fastapi_app: FastAPI):
     command = Command(tortoise_config=TORTOISE_ORM, location="migrations")
+    # Небольшая задержка перед инициализацией миграций
     await asyncio.sleep(5)
     
     try:
         logger.info("Инициализация базы данных...")
-        # Инициализируем Tortoise ORM
-        await RegisterTortoise(
-            fastapi_app,
-            config=TORTOISE_ORM,
-            generate_schemas=True,
-            add_exception_handlers=True,
-        )
+        await command.init()
         
-        try:
-            # Инициализируем aerich
-            await command.init_db(safe=True)
-        except Exception as e:
-            if "already exists" not in str(e):
-                logger.error(f"Ошибка при инициализации aerich: {str(e)}", exc_info=True)
-                raise
-            logger.info("База aerich уже инициализирована")
-        
-        try:
-            logger.info("Применение миграций...")
-            await command.upgrade(run_in_transaction=True)
-            logger.info("Применение миграций завершено")
-        except FileNotFoundError:
-            logger.info("Директория с миграциями не найдена. Пропускаем применение миграций.")
-        except Exception as e:
-            logger.error(f"Ошибка при применении миграций: {str(e)}", exc_info=True)
-            raise
+        logger.info("Применение миграций...")
+        await command.upgrade(run_in_transaction=True)
+        logger.info("Применение миграций завершено")
     except Exception as e:
         logger.error(f"Ошибка при инициализации базы данных: {str(e)}", exc_info=True)
         raise
