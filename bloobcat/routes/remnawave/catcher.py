@@ -196,6 +196,17 @@ async def remnawave_updater():
                         new_connected_at = datetime.fromisoformat(online_at.replace('Z', '+00:00'))
                         old_connected_at = user.connected_at
                         
+                        # Если раньше не было подключений, а теперь есть - вызываем on_activated_key
+                        if not old_connected_at:
+                            referrer = await user.referrer()
+                            await on_activated_key(
+                                user.id,
+                                user.full_name,
+                                referrer_id=referrer.id if referrer else None,
+                                referrer_name=referrer.full_name if referrer else None
+                            )
+                            logger.info(f"Первое подключение пользователя {user.id}, отправлено уведомление")
+                        
                         # Обновляем только если время онлайна новее или connected_at отсутствует
                         if not old_connected_at or new_connected_at > old_connected_at:
                             user.connected_at = new_connected_at
