@@ -51,7 +51,7 @@ async def day_after_disabled(user: Users):
     )
 
 
-async def hour_after_disabled(user: Users):
+async def notify_hour_before_expiration(user: Users):
     logger.info(f"Отправка уведомления о часе до истечения подписки пользователю {user.id}")
     await bot.send_message(
         user.id,

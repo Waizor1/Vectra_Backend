@@ -213,6 +213,27 @@ async def remnawave_updater():
                     remnawave_expire_at = datetime.fromisoformat(remnawave_user['expireAt'].replace('Z', '+00:00'))
                     db_expire_at = user.expired_at
                     
+                    # Подробное логирование данных пользователя из RemnaWave
+                    logger.debug(f"Данные пользователя {user.id} из RemnaWave: {remnawave_user}")
+                    
+                    # Проверяем подключения пользователя
+                    online_at = remnawave_user.get('onlineAt')
+                    logger.debug(f"Пользователь {user.id}: onlineAt={online_at}, текущий connected_at={user.connected_at}")
+                    
+                    if online_at:
+                        new_connected_at = datetime.fromisoformat(online_at.replace('Z', '+00:00'))
+                        old_connected_at = user.connected_at
+                        
+                        # Обновляем только если время онлайна новее или connected_at отсутствует
+                        if not old_connected_at or new_connected_at > old_connected_at:
+                            user.connected_at = new_connected_at
+                            await user.save()
+                            logger.debug(f"Обновлен статус подключения для пользователя {user.id}: {new_connected_at}")
+                        else:
+                            logger.debug(f"Пропуск обновления для пользователя {user.id}: текущее время подключения новее ({old_connected_at} > {new_connected_at})")
+                    else:
+                        logger.debug(f"Пользователь {user.id} не имеет активных подключений")
+                    
                     # Нормализуем даты для корректного сравнения
                     if hasattr(remnawave_expire_at, 'date'):
                         remnawave_expire_date = remnawave_expire_at.date()
@@ -225,7 +246,7 @@ async def remnawave_updater():
                         db_expire_date = db_expire_at
                     
                     if db_expire_date != remnawave_expire_date:
-                        logger.info(f"Обновление даты истечения в RemnaWave для пользователя {user.id}: {remnawave_expire_at} -> {db_expire_at}")
+                        logger.debug(f"Обновление даты истечения в RemnaWave для пользователя {user.id}: {remnawave_expire_at} -> {db_expire_at}")
                         expire_at_str = db_expire_at.strftime('%Y-%m-%dT%H:%M:%S.%fZ')[:-4] + 'Z'
                         
                         # Повторные попытки обновления пользователя
@@ -249,7 +270,7 @@ async def remnawave_updater():
                                 logger.warning(f"Ошибка при обновлении пользователя {user.id} (попытка {update_retry_attempt}): {str(e)}. Повторная попытка через {retry_interval} сек.")
                                 await asyncio.sleep(retry_interval)
                     else:
-                        logger.info(f"Даты истечения совпадают для пользователя {user.id}. Обновление не требуется.")
+                        logger.debug(f"Даты истечения совпадают для пользователя {user.id}. Обновление не требуется.")
                 except Exception as e:
                     logger.error(f"Ошибка при обработке пользователя {user.id}: {str(e)}")
                     errors += 1
