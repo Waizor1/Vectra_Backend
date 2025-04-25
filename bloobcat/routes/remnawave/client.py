@@ -213,6 +213,13 @@ class UsersAPI:
         """Обновление лимита HWID устройств пользователя"""
         return await self.update_user(uuid, hwidDeviceLimit=hwid_limit)
 
+    async def revoke_user(self, uuid: str) -> Dict[str, Any]:
+        """Отзывает подписку пользователя в RemnaWave по UUID"""
+        logger.info(f"Revoking subscription for user {uuid}")
+        if hasattr(uuid, 'hex'):
+            uuid = str(uuid)
+        return await self.client._request("PATCH", f"/api/users/revoke/{uuid}")
+
 class NodesAPI:
     def __init__(self, client: RemnaWaveClient):
         self.client = client

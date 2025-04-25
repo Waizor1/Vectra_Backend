@@ -28,7 +28,10 @@ async def validate(init_data: str = Depends(oauth2_scheme)) -> Users:
         utm = None
         logger.info(f"Проверка start_param для пользователя {user.user.id}: {user.start_param!r}") 
         if user.start_param:
-            if user.start_param.isdigit():
+            # Ignore family links to not count as UTM or referral
+            if user.start_param.startswith("family_"):
+                logger.info(f"Пропускаем family link: {user.start_param} для пользователя {user.user.id}")
+            elif user.start_param.isdigit():
                 referred_by = int(user.start_param)
                 logger.info(f"Найден реферал: {referred_by} для пользователя {user.user.id}")
             else:

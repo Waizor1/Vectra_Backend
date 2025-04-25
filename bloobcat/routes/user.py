@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, EmailStr
 from typing import Dict, Any
 from datetime import datetime, timedelta, timezone
+import uuid  # For generating new familyurl
 
 from bloobcat.db.users import User_Pydantic, Users
 from bloobcat.funcs.validate import validate
@@ -144,3 +145,85 @@ async def reset_devices(user: Users = Depends(validate)):
     user.last_hwid_reset = now
     await user.save()
     return {"status": "ok"}
+
+@router.get("/family/{familyurl}")
+async def get_family_subscription(familyurl: str):
+    """
+    Возвращает данные подписки и информацию об устройствах пользователя, приглашённого по семейному URL.
+    """
+    user = await Users.get_or_none(familyurl=familyurl)
+    if not user:
+        raise HTTPException(status_code=404, detail="Family link not found")
+
+    # Подготовка URL подписки
+    subscription_url = None
+    error_getting_url = None
+    if not user.remnawave_uuid:
+        error_getting_url = "Failed to initialize user account."
+    else:
+        try:
+            subscription_url = await remnawave_client.users.get_subscription_url(user)
+        except Exception as e:
+            error_getting_url = f"Failed to get subscription URL: {str(e)}"
+
+    # Сериализация данных пользователя
+    user_data = await User_Pydantic.from_tortoise_orm(user)
+    user_dict = user_data.model_dump()
+    user_dict["subscription_url"] = subscription_url
+    user_dict["subscription_url_error"] = error_getting_url
+
+    # Подсчёт устройств
+    devices_count = 0
+    if user.remnawave_uuid:
+        try:
+            raw_resp = await remnawave_client.users.get_user_hwid_devices(str(user.remnawave_uuid))
+            devices_list = []
+            if isinstance(raw_resp, list):
+                devices_list = raw_resp
+            elif isinstance(raw_resp, dict):
+                resp = raw_resp.get("response")
+                if isinstance(resp, list):
+                    devices_list = resp
+                elif isinstance(resp, dict) and isinstance(resp.get("devices"), list):
+                    devices_list = resp.get("devices")
+            devices_count = len(devices_list)
+        except Exception:
+            pass
+    user_dict["devices_count"] = devices_count
+
+    # Лимит устройств
+    devices_limit = 1
+    if user.active_tariff_id:
+        tariff = await ActiveTariffs.get_or_none(id=user.active_tariff_id)
+        if tariff:
+            devices_limit = tariff.hwid_limit
+    user_dict["devices_limit"] = devices_limit
+
+    return user_dict
+
+@router.post("/family/revoke")
+async def revoke_family(user: Users = Depends(validate)) -> Dict[str, Any]:
+    """
+    Отзываем семейную подписку: делаем revoke в RemnaWave и регенерируем familyurl
+    """
+    if not user.remnawave_uuid:
+        raise HTTPException(status_code=400, detail="No RemnaWave UUID for user")
+    # Отзываем подписку в RemnaWave
+    try:
+        await remnawave_client.users.revoke_user(str(user.remnawave_uuid))
+    except Exception as e:
+        logger.error(f"Error revoking subscription in RemnaWave for user {user.id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to revoke subscription in RemnaWave")
+
+    # Очищаем зарегистрированные устройства в RemnaWave
+    try:
+        await cleanup_user_hwid_devices(user.id, user.remnawave_uuid)
+    except Exception as e:
+        logger.error(f"Error cleaning up HWID devices for user {user.id}: {e}")
+        # Не прерываем основной поток, продолжаем регенерацию ссылки
+
+    # Регенерируем семейную ссылку случайным UUID
+    new_url = uuid.uuid4().hex
+    user.familyurl = new_url
+    await user.save()
+    return {"new_familyurl": new_url}
