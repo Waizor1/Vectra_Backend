@@ -7,12 +7,11 @@ from tortoise.functions import Count
 from bloobcat.bot.routes.admin.functions import IsAdmin, search_user
 from bloobcat.schedules import check_subscriptions, check_trial_users
 from bloobcat.routes.remnawave.catcher import remnawave_updater
-from bloobcat.bot.alerts import alerts_worker
 from bloobcat.db.users import Users
 from bloobcat.db.payments import ProcessedPayments
 from bloobcat.logger import get_logger
 from bloobcat.routes.payment import create_auto_payment
-from bloobcat.bot.notifications.user import notify_auto_payment
+from bloobcat.bot.notifications.subscription.expiration import notify_auto_payment
 
 logger = get_logger("admin_check_subs")
 router = Router()
@@ -116,10 +115,6 @@ async def admin_check_all(message: Message):
         await message.answer("1/5. Запуск обновления RemnaWave...")
         await remnawave_updater()
 
-        # 3. Отправка уведомлений
-        await message.answer("3/5. Запуск отправки уведомлений...")
-        await alerts_worker()
-        
         # 4. Проверка подписок
         await message.answer("4/5. Запуск проверки подписок...")
         await check_subscriptions()

@@ -3,7 +3,7 @@ from bloobcat.logger import get_logger
 
 from bloobcat.db.users import Users
 from bloobcat.routes.payment import create_auto_payment
-from bloobcat.bot.notifications.user import notify_auto_payment, notify_expiring_subscription
+from bloobcat.bot.notifications.subscription.expiration import notify_auto_payment, notify_expiring_subscription
 # Импорты уведомлений перенесены внутрь функции для избежания циклического импорта
 
 logger = get_logger("schedules.subscriptions")

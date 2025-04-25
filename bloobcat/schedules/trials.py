@@ -20,7 +20,10 @@ async def check_trial_users():
         logger.info("Начало проверки пользователей с пробным периодом")
         
         # Импортируем функции уведомлений здесь, чтобы избежать циклического импорта
-        from bloobcat.bot.notifications.user import notify_trial_ended, notify_no_trial_taken, on_disabled, notify_trial_extended
+        from bloobcat.bot.notifications.trial.end import notify_trial_ended
+        from bloobcat.bot.notifications.trial.no_trial import notify_no_trial_taken
+        from bloobcat.bot.notifications.subscription.key import on_disabled
+        from bloobcat.bot.notifications.trial.extended import notify_trial_extended
         
         # Текущее время
         now = datetime.now()

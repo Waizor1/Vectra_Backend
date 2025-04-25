@@ -10,9 +10,9 @@ from yookassa.domain.notification import WebhookNotification, WebhookNotificatio
 
 from bloobcat.bot.bot import get_bot_username
 from bloobcat.bot.notifications.admin import on_payment
-from bloobcat.bot.notifications.user import (
-    on_referral_payment, 
-    notify_auto_renewal_success_balance, 
+from bloobcat.bot.notifications.general.referral import on_referral_payment
+from bloobcat.bot.notifications.subscription.renewal import (
+    notify_auto_renewal_success_balance,
     notify_auto_renewal_failure,
     notify_renewal_success_yookassa
 )
