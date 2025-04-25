@@ -1,6 +1,7 @@
 from dotenv import load_dotenv
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
+import os
 
 load_dotenv()
 
@@ -55,3 +56,4 @@ yookassa_settings = YookassaSettings()
 remnawave_settings = RemnaWaveSettings()
 script_settings = ScriptSettings()
 admin_settings = AdminSettings()
+test_mode = os.getenv("TESTMODE", "false").strip().lower() in ("true", "1", "yes")

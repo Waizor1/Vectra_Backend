@@ -13,7 +13,7 @@ from bloobcat.config import referral_percent
 
 import logging
 
-from bloobcat.settings import remnawave_settings
+from bloobcat.settings import remnawave_settings, test_mode
 from bloobcat.logger import get_logger
 
 from bloobcat.db.active_tariff import ActiveTariffs
@@ -100,7 +100,7 @@ class Users(models.Model):
                 
                 # Создаем пользователя в RemnaWave
                 response = await remnawave.users.create_user(
-                    username=str(self.id),
+                    username=f"{self.id}_TEST" if test_mode else str(self.id),
                     expire_at=expire_at_date,
                     telegram_id=self.id,
                     email=self.email,
