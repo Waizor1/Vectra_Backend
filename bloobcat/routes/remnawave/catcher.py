@@ -213,6 +213,8 @@ async def remnawave_updater():
                         if not old_connected_at or new_connected_at > old_connected_at:
                             user.connected_at = new_connected_at
                             await user.save()
+                            # Записываем подключение в таблицу connections
+                            await Connections.process(user.id, new_connected_at.date())
                             logger.debug(f"Обновлен статус подключения для пользователя {user.id}: {new_connected_at}")
                         else:
                             logger.debug(f"Пропуск обновления для пользователя {user.id}: текущее время подключения новее ({old_connected_at} > {new_connected_at})")

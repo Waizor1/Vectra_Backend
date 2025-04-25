@@ -4,6 +4,7 @@ from bloobcat.logger import get_logger
 from bloobcat.db.users import Users
 from bloobcat.routes.payment import create_auto_payment
 from bloobcat.bot.notifications.subscription.expiration import notify_auto_payment, notify_expiring_subscription
+from bloobcat.bot.notifications.subscription.key import on_disabled
 # Импорты уведомлений перенесены внутрь функции для избежания циклического импорта
 
 logger = get_logger("schedules.subscriptions")
@@ -75,7 +76,8 @@ async def check_subscriptions():
                 logger.info(f"Проверка подписки для пользователя {user.id} без автопродления: истекает через {days_remaining} дней")
                 
                 if days_remaining <= 0:
-                    logger.info(f"Подписка пользователя {user.id} уже истекла или истекает сегодня, уведомление не отправляется")
+                    logger.info(f"Подписка пользователя {user.id} истекла, отправляю уведомление об окончании подписки")
+                    await on_disabled(user)
                     continue
                 
                 if days_remaining in [1, 2, 3]:

@@ -50,6 +50,7 @@ class Users(models.Model):
     renew_id = fields.CharField(max_length=100, null=True)
     connected_at = fields.DatetimeField(null=True)
     email = fields.CharField(max_length=255, null=True)
+    language_code = fields.CharField(max_length=5, default="ru", description="Код языка пользователя для локализации уведомлений")
     created_at = fields.DatetimeField(auto_now_add=True)
     is_trial = fields.BooleanField(default=False)
     used_trial = fields.BooleanField(default=False)
