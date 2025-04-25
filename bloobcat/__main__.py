@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 
 import uvicorn # type: ignore
 from aerich import Command # type: ignore
-from aiogram.types import BotCommand
+from aiogram.types import BotCommand, MenuButtonWebApp, WebAppInfo
 from fastadmin import fastapi_app as admin_app # type: ignore
 from fastapi import FastAPI # type: ignore
 from fastapi.middleware.cors import CORSMiddleware # type: ignore
@@ -38,8 +38,11 @@ async def lifespan(fastapi_app: FastAPI):
         logger.error(f"Ошибка при инициализации базы данных: {str(e)}", exc_info=True)
         raise
 
-    await bot.set_my_commands(
-        [BotCommand(command="/start", description="Перезапуск бота")]
+    await bot.set_chat_menu_button(
+        menu_button=MenuButtonWebApp(
+            text="Личный кабинет",
+            web_app=WebAppInfo(url=telegram_settings.miniapp_url)
+        )
     )
     await Admin.init()
     logger.info("Инициализация бота завершена")
