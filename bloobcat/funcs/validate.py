@@ -43,8 +43,14 @@ async def validate(init_data: str = Depends(oauth2_scheme)) -> Users:
         raise HTTPException(status_code=403, detail=str(e))
     
     # Явно передаем параметры по имени для большей ясности
-    return await Users.get_user(
+    db_user = await Users.get_user(
         telegram_user=user.user, 
         referred_by=referred_by, 
         utm=utm
     )
+    
+    if not db_user:
+        logger.error("Не удалось получить пользователя из базы данных")
+        raise HTTPException(status_code=500, detail="User not found in database")
+    
+    return db_user

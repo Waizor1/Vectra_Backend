@@ -130,7 +130,8 @@ class Users(models.Model):
         cls, telegram_user: WebAppUser | User | None, referred_by: int = 0, utm: Optional[str] = None
     ):
         if not telegram_user:
-            return
+            logger.error("get_user: telegram_user is None")
+            return None
 
         try:
             user, is_new = await Users.update_or_create(
