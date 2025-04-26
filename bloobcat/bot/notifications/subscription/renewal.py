@@ -24,24 +24,24 @@ async def notify_auto_renewal_success_balance(user, days: int, amount: float):
         logger.error(f"Ошибка отправки уведомления об успешном автопродлении с баланса для {user.id}: {str(e)}")
 
 
-async def notify_auto_renewal_failure(user, reason: str = "Неизвестная ошибка"):
+async def notify_auto_renewal_failure(user, reason: str = "Неизвестная ошибка", will_retry: bool = True):
     """
     Уведомляет пользователя о неудаче автоматического продления подписки.
     """
-    # Локализация уведомления о неудаче автопродления
     lang = get_user_locale(user)
     logger.warning(f"Отправка уведомления о НЕУДАЧНОМ автопродлении пользователю {user.id}. Причина: {reason}")
+    retry_text = "\n\nМы попробуем повторить попытку завтра автоматически." if will_retry and lang == 'ru' else "\n\nWe will try again automatically tomorrow." if will_retry and lang != 'ru' else ""
     if lang == 'ru':
         text = (
             f"⚠️ Не удалось автоматически продлить вашу подписку.\n\n"
-            f"Причина: {reason}\n\n"
+            f"Причина: {reason}{retry_text}\n\n"
             f"Пожалуйста, продлите подписку вручную в личном кабинете или обратитесь в поддержку."
         )
         button = await webapp_inline_button("💳 Продлить вручную")
     else:
         text = (
             f"⚠️ Auto-renewal failed.\n\n"
-            f"Reason: {reason}\n\n"
+            f"Reason: {reason}{retry_text}\n\n"
             f"Please renew your subscription manually in your dashboard or contact support."
         )
         button = await webapp_inline_button("💳 Renew manually")

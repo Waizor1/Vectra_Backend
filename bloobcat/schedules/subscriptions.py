@@ -37,16 +37,13 @@ async def check_subscriptions():
         for user in users_with_auto_renewal:
             try:
                 days_remaining = (user.expired_at - datetime.now().date()).days
-                
+                # Если подписка уже истекла — не пробуем
                 if days_remaining < 0:
                     logger.debug(f"Подписка пользователя {user.id} уже истекла")
                     continue
-                
-                if 0 < days_remaining < 3:
-                    logger.debug(f"Отправка уведомления о предстоящем списании пользователю {user.id}")
-                    # await notify_auto_payment(user) # Закомментировано по запросу
-                elif days_remaining == 0:
-                    logger.debug(f"Создание автоплатежа для пользователя {user.id}")
+                # Начинаем попытки за 3 дня до окончания, пробуем раз в день (по запуску функции)
+                if 0 <= days_remaining <= 3:
+                    logger.debug(f"Пробую автоплатеж для пользователя {user.id} (осталось {days_remaining} дней)")
                     result = await create_auto_payment(user)
                     if not result:
                         logger.error(f"Не удалось создать автоплатеж для пользователя {user.id}")
