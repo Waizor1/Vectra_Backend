@@ -10,8 +10,8 @@ from tortoise import Tortoise
 
 
 @register_widget
-class TotalUsersDashboardWidgetAdmin(DashboardWidgetAdmin):
-    title = "Всего пользователей"
+class RegisteredUsersDashboardWidgetAdmin(DashboardWidgetAdmin):
+    title = "Зарегистрировалось"
     dashboard_widget_type = DashboardWidgetType.ChartLine
 
     x_field = "date"
@@ -41,26 +41,18 @@ class TotalUsersDashboardWidgetAdmin(DashboardWidgetAdmin):
         else:
             max_x_field_date = datetime.datetime.fromisoformat(max_x_field)
 
-        if not period_x_field or period_x_field not in (
-            self.x_field_periods or []
-        ):
+        if not period_x_field or period_x_field not in self.x_field_periods:
             period_x_field = "day"
 
         results = await conn.execute_query_dict(
             """
-                WITH daily AS (
-                    SELECT
-                        date_trunc($1, registration_date)::date AS day,
-                        COUNT(*) AS daily_count
-                    FROM users
-                    WHERE registration_date >= $2 AND registration_date <= $3
-                    GROUP BY date_trunc($1, registration_date)::date
-                )
                 SELECT
-                    to_char(day, 'DD/MM/YYYY') AS date,
-                    SUM(daily_count) OVER (ORDER BY day) AS count
-                FROM daily
-                ORDER BY day
+                    to_char(date_trunc($1, registration_date)::date, 'DD/MM/YYYY') AS date,
+                    COUNT(*) AS count
+                FROM users
+                WHERE registration_date >= $2 AND registration_date <= $3
+                GROUP BY date_trunc($1, registration_date)
+                ORDER BY date_trunc($1, registration_date)
             """,
             [period_x_field, min_x_field_date, max_x_field_date],
         )

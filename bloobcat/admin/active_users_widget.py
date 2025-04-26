@@ -58,6 +58,12 @@ class ActiveUsersDashboardWidgetAdmin(DashboardWidgetAdmin):
             """,
             [period_x_field, min_x_field_date, max_x_field_date],
         )
+        # Добавляю кумулятивный подсчет активных пользователей
+        running_total = 0
+        for item in results:
+            running_total += item["count"]
+            item["count"] = running_total
+
         return {
             "results": results,
             "min_x_field": min_x_field_date.isoformat(),
