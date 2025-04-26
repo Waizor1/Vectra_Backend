@@ -9,7 +9,7 @@ class Tariffs(models.Model):
     months = fields.IntField()
     price = fields.IntField()
     hwid_limit = fields.IntField(default=1, description="Лимит количества устройств")
-    order = fields.IntField(default=0, description="Порядок отображения тарифа")
+    order = fields.IntField(default=3, description="Порядок отображения тарифа")
 
 
 Tariffs_Pydantic = pydantic_model_creator(Tariffs, name="Tariffs")
