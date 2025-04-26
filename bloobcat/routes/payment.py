@@ -35,7 +35,7 @@ logger = get_payment_logger()
 
 @router.get("/tariffs")
 async def get_tariffs():
-    return await Tariffs().all()
+    return await Tariffs.all().order_by("order")
 
 @router.post("/webhook/yookassa/{secret}")
 async def yookassa_webhook(request: Request, secret: str):

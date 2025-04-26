@@ -9,6 +9,7 @@ class Tariffs(models.Model):
     months = fields.IntField()
     price = fields.IntField()
     hwid_limit = fields.IntField(default=1, description="Лимит количества устройств")
+    order = fields.IntField(default=0, description="Порядок отображения тарифа")
 
 
 Tariffs_Pydantic = pydantic_model_creator(Tariffs, name="Tariffs")
@@ -16,6 +17,8 @@ Tariffs_Pydantic = pydantic_model_creator(Tariffs, name="Tariffs")
 
 @register(Tariffs)
 class UsersModelAdmin(TortoiseModelAdmin):
-    list_display = ("name", "months", "price", "hwid_limit")
+    list_display = ("order", "name", "months", "price", "hwid_limit")
+    list_editable = ("order",)
+    ordering = ("order",)
     verbose_name = "Тарифы"
     verbose_name_plural = "Тарифы"
