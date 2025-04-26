@@ -188,9 +188,43 @@ async def on_payment(
     except Exception as e:
         logger.error(f"Ошибка отправки уведомления о платеже: {str(e)}")
 
+async def cancel_subscription(user):
+    """
+    Отправляет уведомление в админ чат о том, что пользователь отключил автопродление подписки.
+    """
+    try:
+        # Формируем информацию о пользователе
+        user_name = user.full_name
+        username = f"@{user.username}" if user.username else "Нет юзернейма"
+        
+        # Определяем дату окончания подписки
+        from datetime import date
+        days_remaining = (user.expired_at - date.today()).days if user.expired_at else 0
+        expiration_info = f"{user.expired_at.strftime('%d.%m.%Y')} (осталось {days_remaining} дн.)" if user.expired_at else "Нет активной подписки"
+        
+        text = f"""❌ Отключение автопродления подписки!
 
-# async def cancel_subscription(user: Users):
-#     text = f"💔 {user.name()} #ОтменилПодписку по рекуррентным платежам"
-#     await bot.send_message(
-#         admin_id, text, reply_markup=await write_to(user.id)
-#     )
+👤 Пользователь: {user_name} ({username})
+🆔 ID пользователя: {user.id}
+📅 Дата окончания подписки: {expiration_info}
+
+После окончания текущего периода подписка не будет продлена автоматически.
+
+#отмена #автопродление"""
+        
+        try:
+            await bot.send_message(
+                chat_id=admin_settings.telegram_id,
+                text=text,
+                reply_markup=await write_to(user.id)
+            )
+        except Exception as btn_error:
+            logger.warning(f"Не удалось отправить уведомление об отключении автопродления с кнопками: {str(btn_error)}. Отправляем без кнопок.")
+            await bot.send_message(
+                chat_id=admin_settings.telegram_id,
+                text=text
+            )
+            
+        logger.info(f"Отправлено уведомление об отключении автопродления для пользователя {user.id}")
+    except Exception as e:
+        logger.error(f"Ошибка отправки уведомления об отключении автопродления: {str(e)}")

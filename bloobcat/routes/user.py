@@ -13,6 +13,7 @@ from fastapi import FastAPI
 from starlette.background import BackgroundTask
 from bloobcat.routes.remnawave.hwid_utils import cleanup_user_hwid_devices
 from bloobcat.db.active_tariff import ActiveTariffs
+from bloobcat.bot.notifications.admin import cancel_subscription
 
 logger = get_logger("routes.user")
 
@@ -137,6 +138,8 @@ async def unsubscribe(user: Users = Depends(validate)):
     """
     user.is_subscribed = False
     await user.save()
+    # Уведомляем админа об отключении автопродления
+    await cancel_subscription(user)
     return {"status": "ok"}
 
 @router.post("/reset_devices")
