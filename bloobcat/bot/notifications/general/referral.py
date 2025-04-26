@@ -12,16 +12,18 @@ async def on_referral_payment(user: Users, referral: Users, amount: int):
     await user.save()
     lang = get_user_locale(user)
     if lang == 'ru':
-        logger.info(f"Начисление реферального бонуса пользователю {user.id} в размере {to_add} руб. за оплату реферала {referral.id} на сумму {amount} руб.")
-        text = f"""💰Ваш реферал {referral.name()} совершил оплату на сумму {amount} руб.
-Ваш реф процент {user.referral_percent()}%
-Вам зачислено {to_add} руб"""
-        button = await webapp_inline_button()
+        logger.info(f"Реферальный бонус: пользователь {user.id} получил {to_add}₽ за оплату реферала {referral.id} на {amount}₽")
+        text = (
+            f"🎉 Привет, {user.full_name}! Ваш реферал {referral.name()} оплатил подписку на {amount}₽.\n"
+            f"Вы получили {to_add}₽ на баланс. Спасибо за рекомендацию! 🎊"
+        )
+        button = await webapp_inline_button("Личный кабинет")
     else:
         logger.info(f"Crediting referral bonus to user {user.id}: {to_add} RUB for referral {referral.id}'s payment of {amount} RUB.")
-        text = f"""💰Your referral {referral.name()} has paid {amount} RUB.
-Your referral rate is {user.referral_percent()}%.
-You have been credited {to_add} RUB."""
+        text = (
+            f"🎉 Hi {user.full_name}! Your referral {referral.name()} just paid {amount} RUB.\n"
+            f"You've been credited {to_add} RUB. Thanks for spreading the word! 🎊"
+        )
         button = await webapp_inline_button("Dashboard")
     await bot.send_message(
         user.id,
@@ -32,15 +34,19 @@ You have been credited {to_add} RUB."""
 async def on_referral_registration(user: Users, referral: Users):
     lang = get_user_locale(user)
     if lang == 'ru':
-        logger.info(f"Отправка уведомления о регистрации реферала {referral.id} пользователю {user.id}")
-        text = f"""🎉Ваш реферал {referral.name()} зарегистрировался в сервисе.
-Вы получили 7 дней подписки бесплатно!"""
-        button = await webapp_inline_button()
+        logger.info(f"Реферальная регистрация: пользователь {user.id} получил 7 дней подписки за регистрацию реферала {referral.id}")
+        text = (
+            f"🎉 Привет, {user.full_name}! Ваш реферал {referral.name()} только что зарегистрировался.\n"
+            "Вы получили 7-дневный бесплатный доступ. Наслаждайтесь тестированием VPN!"
+        )
+        button = await webapp_inline_button("Активировать пробную")
     else:
         logger.info(f"Sending referral registration notification to user {user.id} for referral {referral.id}")
-        text = f"""🎉Your referral {referral.name()} has registered in our service.
-You have been awarded a 7-day free subscription!"""
-        button = await webapp_inline_button("Dashboard")
+        text = (
+            f"🎉 Hi {user.full_name}! Your referral {referral.name()} just signed up.\n"
+            "You've been awarded a 7-day free trial. Enjoy testing our VPN!"
+        )
+        button = await webapp_inline_button("Activate Trial")
     await bot.send_message(
         user.id,
         text,

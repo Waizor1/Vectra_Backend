@@ -11,10 +11,10 @@ async def on_disabled(user: Users):
     lang = get_user_locale(user)
     # Выбор текста и кнопки в зависимости от языка
     if lang == 'ru':
-        text = "😢Ваш ключ истек. Пожалуйста, продлите подписку в личном кабинете"
-        button = await webapp_inline_button("Продлить подписку", "pay")
+        text = f"😢 Привет, {user.full_name}! Ваша подписка истекла. Продлите её прямо сейчас, чтобы не прерывать доступ к VPN 🌐🔒"
+        button = await webapp_inline_button("Продлить сейчас", "pay")
     else:
-        text = "😢Your key has expired. Please renew your subscription in your dashboard"
-        button = await webapp_inline_button("Renew subscription", "pay")
+        text = f"😢 Hi {user.full_name}, your subscription has expired. Renew now to keep your VPN active 🌐🔒"
+        button = await webapp_inline_button("Renew Now", "pay")
     logger.info(f"Отправка уведомления об истечении ключа пользователю {user.id}")
     await bot.send_message(user.id, text, reply_markup=button) 

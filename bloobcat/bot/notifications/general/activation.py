@@ -11,18 +11,18 @@ async def on_activated_key(user: Users):
     lang = get_user_locale(user)
     # Выбор текстов в зависимости от языка
     if lang == 'ru':
-        text1 = "Включайте, отключайте, меняйте страну VPN в приложении которое Вы установили"
+        text1 = f"🎉 Привет, {user.full_name}! Ваш ключ VPN активирован! 🔑\n" \
+                "Теперь вы можете включать и отключать VPN одним нажатием."
         text2 = (
-            "Не забудьте вернуться в бот чтобы проверить свой личный кабинет 🎁\n"
-            "Управление ключами VPN происходит в боте. Рекомендуем закрепить бот, чтобы не потерять.\n"
-            "Мы на связи, BlubCat VPN 🤙"
+            "Вернитесь в бот, чтобы управлять ключами и подписками.\n"
+            "Мы всегда на связи, BlubCat VPN 🤙"
         )
         button = await webapp_inline_button()
     else:
-        text1 = "Turn the VPN on and off and change the server location in the app you installed"
+        text1 = f"🎉 Hi {user.full_name}, your VPN key is now active! 🔑\n" \
+                "You can turn your VPN on and off with ease."
         text2 = (
-            "Don't forget to go back to the bot to check your dashboard 🎁\n"
-            "Manage your VPN keys in the bot. We recommend pinning it for easy access.\n"
+            "Return to the bot to manage your keys and subscriptions.\n"
             "We're here for you, BlubCat VPN 🤙"
         )
         button = await webapp_inline_button("Dashboard")

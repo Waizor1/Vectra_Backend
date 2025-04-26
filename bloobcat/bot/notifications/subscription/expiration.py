@@ -26,18 +26,18 @@ async def notify_auto_payment(user: Users):
     logger.info(f"Отправка уведомления об автоплатеже пользователю {user.id}, дней до списания: {days_remaining}, сумма: {last_payment.amount}")
     if lang == 'ru':
         text = (
-            f"🔄 Автоматическое продление подписки\n\n"
-            f"Через {days_remaining} {'день' if days_remaining == 1 else 'дня'} закончится ваша текущая подписка.\n"
-            f"В день окончания подписки будет произведено автоматическое списание в размере {last_payment.amount} руб. для её продления.\n\n"
-            f"Если вы хотите отключить автопродление, нажмите кнопку ниже и перейдите в раздел настроек."
+            f"🔄 Привет, {user.full_name}! Через {days_remaining} "
+            f"{'день' if days_remaining == 1 else 'дня' if days_remaining < 5 else 'дней'} "
+            f"ваша подписка автоматически продлится. С вас спишется {last_payment.amount}₽. "
+            "Чтобы изменить автопродление, перейдите в личный кабинет."
         )
         button = await webapp_inline_button("Личный кабинет")
     else:
         text = (
-            f"🔄 Automatic subscription renewal\n\n"
-            f"In {days_remaining} {'day' if days_remaining == 1 else 'days'} your current subscription will end.\n"
-            f"On the day of expiration, an automatic charge of {last_payment.amount} RUB will be made to renew it.\n\n"
-            f"If you wish to disable auto-renewal, press the button below and go to settings."
+            f"🔄 Hi {user.full_name}! In {days_remaining} "
+            f"{'day' if days_remaining == 1 else 'days'} your subscription will auto-renew. "
+            f"{last_payment.amount} RUB will be charged. "
+            "To manage auto-renewal, go to Dashboard."
         )
         button = await webapp_inline_button("Dashboard")
     try:
@@ -61,31 +61,19 @@ async def notify_expiring_subscription(user: Users):
     days_remaining = (user.expired_at - datetime.now().date()).days
     logger.info(f"Отправка уведомления об истечении подписки пользователю {user.id}, дней до истечения: {days_remaining}")
     if lang == 'ru':
-        if days_remaining == 1:
-            text = "❗ Ваш ключ истекает через 1 день. Пожалуйста, продлите подписку в личном кабинете."
-        elif days_remaining == 2:
-            text = "❗ Ваш ключ истекает через 2 дня. Пожалуйста, продлите подписку в личном кабинете."
-        elif days_remaining == 3:
-            text = "❗ Ваш ключ истекает через 3 дня. Пожалуйста, продлите подписку в личном кабинете."
-        else:
-            text = (f"⚠️ Истечение подписки\n\nЧерез {days_remaining} "
-                    f"{'день' if days_remaining == 1 else 'дня' if 1 < days_remaining < 5 else 'дней'} "
-                    f"закончится ваша текущая подписка.\nАвтопродление не включено.\n\n" 
-                    f"Чтобы VPN продолжил работать, пожалуйста, продлите подписку в личном кабинете.")
-        button = await webapp_inline_button("Продлить подписку", "pay")
+        text = (
+            f"⚠️ Привет, {user.full_name}! Ваша подписка истекает через {days_remaining} "
+            f"{'день' if days_remaining == 1 else 'дня' if days_remaining < 5 else 'дней'}. "
+            "Продлите сейчас, чтобы не прерывать доступ к VPN! 🔒"
+        )
+        button = await webapp_inline_button("Продлить сейчас", "pay")
     else:
-        if days_remaining == 1:
-            text = "❗ Your key will expire in 1 day. Please renew your subscription in your dashboard."
-        elif days_remaining == 2:
-            text = "❗ Your key will expire in 2 days. Please renew your subscription in your dashboard."
-        elif days_remaining == 3:
-            text = "❗ Your key will expire in 3 days. Please renew your subscription in your dashboard."
-        else:
-            text = (f"⚠️ Subscription Expiry\n\nIn {days_remaining} "
-                    f"{'day' if days_remaining == 1 else 'days'} your current subscription will expire.\n" 
-                    f"Auto-renewal is not enabled.\n\n" 
-                    f"Please renew your subscription in your dashboard to continue using VPN.")
-        button = await webapp_inline_button("Renew subscription", "pay")
+        text = (
+            f"⚠️ Hi {user.full_name}! Your subscription will expire in {days_remaining} "
+            f"{'day' if days_remaining == 1 else 'days'}. "
+            "Renew now to keep your VPN active! 🔒"
+        )
+        button = await webapp_inline_button("Renew Now", "pay")
     try:
         await bot.send_message(
             user.id,
