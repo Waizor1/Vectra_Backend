@@ -33,12 +33,20 @@ async def send_admin_message(text: str, reply_markup=None):
             )
         else:
             # Для личных сообщений используем reply_markup
-            await bot.send_message(
-                chat_id=chat_id,
-                text=text,
-                reply_markup=reply_markup,
-                parse_mode="HTML"
-            )
+            try:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=text,
+                    reply_markup=reply_markup,
+                    parse_mode="HTML"
+                )
+            except Exception as btn_error:
+                logger.warning(f"Не удалось отправить сообщение с кнопками: {str(btn_error)}. Отправляем без кнопок.")
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=text,
+                    parse_mode="HTML"
+                )
             
     except TelegramBadRequest as e:
         if "chat not found" in str(e):
@@ -52,17 +60,32 @@ async def on_activated_bot(
     user_id: int, name: str, referrer_id: int | None, referrer_name: str | None
 ):
     try:
-        text = f"🔌 {name} #АктивировалБота"
+        text = f"""👤 Новая регистрация в боте!
+
+👤 Пользователь: {name}
+🆔 ID пользователя: {user_id}"""
+
         if referrer_id:
-            text += f"\nРеферер: {referrer_name}"
+            text += f"\n👨‍👩‍👧‍👦 Реферер: {referrer_name} (ID: {referrer_id})"
+        else:
+            text += "\n👨‍👩‍👧‍👦 Реферер: Отсутствует"
+            
+        text += "\n\n#новый_пользователь"
         
-        await bot.send_message(
-            chat_id=admin_settings.telegram_id,
-            text=text,
-            reply_markup=await write_to(
-                user_id, referrer_id if referrer_id else 0
-            ),
-        )
+        try:
+            await bot.send_message(
+                chat_id=admin_settings.telegram_id,
+                text=text,
+                reply_markup=await write_to(
+                    user_id, referrer_id if referrer_id else 0
+                ),
+            )
+        except Exception as btn_error:
+            logger.warning(f"Не удалось отправить сообщение с кнопками: {str(btn_error)}. Отправляем без кнопок.")
+            await bot.send_message(
+                chat_id=admin_settings.telegram_id,
+                text=text
+            )
     except Exception as e:
         logger.error(f"Ошибка отправки уведомления о активации бота: {str(e)}")
 
@@ -70,17 +93,32 @@ async def on_activated_key(
     user_id: int, name: str, referrer_id: int | None, referrer_name: str | None
 ):
     try:
-        text = f"🔑 {name} #АктивировалКлюч"
+        text = f"""✅ Активация ключа пользователем!
+
+👤 Пользователь: {name}
+🆔 ID пользователя: {user_id}"""
+
         if referrer_name:
-            text += f"\nРеферер: {referrer_name}"
+            text += f"\n👨‍👩‍👧‍👦 Реферер: {referrer_name} (ID: {referrer_id})"
+        else:
+            text += "\n👨‍👩‍👧‍👦 Реферер: Отсутствует"
             
-        await bot.send_message(
-            chat_id=admin_settings.telegram_id,
-            text=text,
-            reply_markup=await write_to(
-                user_id, referrer_id if referrer_id else 0
-            ),
-        )
+        text += "\n\n#активация #ключ"
+            
+        try:
+            await bot.send_message(
+                chat_id=admin_settings.telegram_id,
+                text=text,
+                reply_markup=await write_to(
+                    user_id, referrer_id if referrer_id else 0
+                ),
+            )
+        except Exception as btn_error:
+            logger.warning(f"Не удалось отправить сообщение с кнопками: {str(btn_error)}. Отправляем без кнопок.")
+            await bot.send_message(
+                chat_id=admin_settings.telegram_id,
+                text=text
+            )
     except Exception as e:
         logger.error(f"Ошибка отправки уведомления о активации ключа: {str(e)}")
 
@@ -93,19 +131,60 @@ async def on_payment(
     method: str,
 ):
     try:
-        text = f"""#ПоступилаОплата💰
-Пользователь {user_id}
-оплатил подписку на {months} месяцев, на сумму {amount} рублей.
-Метод оплаты: {method}
-Рекуррентный платеж: {"да" if is_sub else "нет"}"""
+        # Получаем информацию о пользователе
+        from bloobcat.db.users import Users
+        user = await Users.get_or_none(id=user_id)
+        
+        # Формируем имя пользователя
+        user_name = user.full_name if user else f"ID: {user_id}"
+        username = f"@{user.username}" if user and user.username else "Нет юзернейма"
+        
+        # ID платежа (используем случайный идентификатор, так как реального ID нет)
+        from datetime import datetime
+        from random import randint
+        payment_id = f"blub{int(datetime.now().timestamp())}-{randint(1000, 9999)}"
+        
+        # Проверяем статус автопродления
+        # is_sub передается из payment.py и содержит значение user.is_subscribed
+        # Дополнительно проверяем наличие renew_id у пользователя (для подстраховки)
+        recurrent_status = "✅ Да" if is_sub and (user and user.renew_id) else "❌ Нет"
+        
+        # Определяем, является ли текущий платеж автосписанием
+        is_auto_payment = "auto" in method.lower()
+        auto_payment_status = "✅ Да" if is_auto_payment else "❌ Нет"
+        
+        text = f"""💰 Успешная оплата пользователя!
+
+👤 Пользователь: {user_name} ({username})
+🆔 ID пользователя: {user_id}
+💸 Сумма платежа: {amount}₽
+📅 Период подписки: {months} месяц(ев)
+🔄 Автоматическое списание: {auto_payment_status}
+♻️ Автопродление: {recurrent_status}
+💳 Метод оплаты: {method}
+🧾 ID платежа: {payment_id}"""
+
         if referrer:
-            text += f"\nРеферер: {referrer}"
+            text += f"\n👨‍👩‍👧‍👦 Реферер: {referrer}"
             
-        await bot.send_message(
-            chat_id=admin_settings.telegram_id,
-            text=text,
-            reply_markup=await write_to(user_id)
-        )
+        # Добавляем соответствующий хештег
+        if is_auto_payment:
+            text += "\n\n#оплата #подписка #автосписание"
+        else:
+            text += "\n\n#оплата #подписка"
+            
+        try:
+            await bot.send_message(
+                chat_id=admin_settings.telegram_id,
+                text=text,
+                reply_markup=await write_to(user_id)
+            )
+        except Exception as btn_error:
+            logger.warning(f"Не удалось отправить сообщение с кнопками: {str(btn_error)}. Отправляем без кнопок.")
+            await bot.send_message(
+                chat_id=admin_settings.telegram_id,
+                text=text
+            )
     except Exception as e:
         logger.error(f"Ошибка отправки уведомления о платеже: {str(e)}")
 
