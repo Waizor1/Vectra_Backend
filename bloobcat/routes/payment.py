@@ -515,10 +515,11 @@ async def yookassa_webhook(request: Request, secret: str):
             await on_payment(
                 user_id=user.id,
                 is_sub=user.is_subscribed,
+                referrer=referrer.name() if referrer else None,
                 amount=amount,
                 months=months,
                 method="yookassa",
-                referrer=referrer.name() if referrer else None,
+                payment_id=payment.id,
             )
         except Exception as e:
             logger.error(
@@ -581,10 +582,11 @@ async def pay(tariff_id: int, email: str, user: Users = Depends(validate)):
             await on_payment(
                 user_id=user.id,
                 is_sub=user.is_subscribed, # Передаем текущий статус автопродления
+                referrer=referrer.name() if referrer else None,
                 amount=full_price, # Сумма уведомления - полная цена тарифа
                 months=months,
                 method="balance", # Указываем метод оплаты
-                referrer=referrer.name() if referrer else None,
+                payment_id=payment_id,
             )
         except Exception as e:
             logger.error(
@@ -731,10 +733,11 @@ async def create_auto_payment(user: Users) -> bool:
                 await on_payment(
                     user_id=user.id,
                     is_sub=user.is_subscribed,
+                    referrer=referrer.name() if referrer else None,
                     amount=full_price,
                     months=months,
                     method="balance_auto", # Указываем метод
-                    referrer=referrer.name() if referrer else None,
+                    payment_id=payment_id,
                 )
             except Exception as e:
                 logger.error(

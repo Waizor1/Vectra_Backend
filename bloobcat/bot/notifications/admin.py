@@ -129,6 +129,7 @@ async def on_payment(
     amount: int,
     months: int,
     method: str,
+    payment_id: str,
 ):
     try:
         # Получаем информацию о пользователе
@@ -138,11 +139,6 @@ async def on_payment(
         # Формируем имя пользователя
         user_name = user.full_name if user else f"ID: {user_id}"
         username = f"@{user.username}" if user and user.username else "Нет юзернейма"
-        
-        # ID платежа (используем случайный идентификатор, так как реального ID нет)
-        from datetime import datetime
-        from random import randint
-        payment_id = f"blub{int(datetime.now().timestamp())}-{randint(1000, 9999)}"
         
         # Проверяем статус автопродления
         # is_sub передается из payment.py и содержит значение user.is_subscribed
