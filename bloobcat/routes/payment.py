@@ -620,7 +620,7 @@ async def pay(tariff_id: int, email: str, user: Users = Depends(validate)):
             },
             "confirmation": {
                 "type": "redirect",
-                "return_url": f"https://t.me/{await get_bot_username()}/cybertest" # Используем /cybertest
+                "return_url": f"https://t.me/{await get_bot_username()}/"
             },
             "metadata": metadata,
             "capture": True,
