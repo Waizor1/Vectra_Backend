@@ -2,7 +2,7 @@ from aiogram import Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 import asyncio
 import traceback
 from datetime import date
@@ -10,6 +10,7 @@ from datetime import date
 from bloobcat.bot.routes.admin.functions import IsAdmin
 from bloobcat.db.users import Users
 from bloobcat.logger import get_logger
+from aiogram import Bot
 
 logger = get_logger("bot_admin_send")
 
@@ -19,22 +20,18 @@ router = Router()
 class SendFSM(StatesGroup):
     waiting_for_audience = State()
     waiting_for_message = State()
+    waiting_for_confirmation = State()
 
 
 @router.message(Command("send"), IsAdmin())
 async def send(message: Message, state: FSMContext):
     """Начало процесса рассылки сообщений"""
-    markup = ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="Всем пользователям")],
-            [KeyboardButton(text="Только активным")],
-            [KeyboardButton(text="Неактивным пользователям")],
-            [KeyboardButton(text="/cancel")]
-        ],
-        resize_keyboard=True,
-        one_time_keyboard=True
-    )
-    
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Всем пользователям", callback_data="send_audience:all")],
+        [InlineKeyboardButton(text="Только активным", callback_data="send_audience:active")],
+        [InlineKeyboardButton(text="Неактивным пользователям", callback_data="send_audience:inactive")],
+        [InlineKeyboardButton(text="Отменить", callback_data="send_cancel")]
+    ])
     await message.answer(
         "Выберите аудиторию для рассылки:",
         reply_markup=markup
@@ -49,27 +46,22 @@ async def cancel(message: Message, state: FSMContext):
     await state.clear()
 
 
-@router.message(SendFSM.waiting_for_audience)
-async def process_audience(message: Message, state: FSMContext):
-    """Обработка выбора аудитории для рассылки"""
-    audience = message.text.strip()
-    
-    if audience == "/cancel":
-        await cancel(message, state)
+@router.callback_query(SendFSM.waiting_for_audience, lambda c: c.data.startswith("send_audience:") or c.data == "send_cancel", IsAdmin())
+async def process_audience_callback(callback_query: CallbackQuery, state: FSMContext):
+    if callback_query.data == "send_cancel":
+        await callback_query.message.edit_reply_markup()
+        await callback_query.message.answer("Отменено")
+        await state.clear()
         return
-    
-    if audience not in ["Всем пользователям", "Только активным", "Неактивным пользователям"]:
-        await message.answer(
-            "Пожалуйста, выберите одну из предложенных опций или отмените командой /cancel"
-        )
-        return
-    
-    await state.update_data(audience=audience)
-    
-    await message.answer(
+    key = callback_query.data.split(":", 1)[1]
+    audience_map = {"all": "Всем пользователям", "active": "Только активным", "inactive": "Неактивным пользователям"}
+    audience_type = audience_map.get(key, "Всем пользователям")
+    await state.update_data(audience=audience_type)
+    await callback_query.answer()
+    await callback_query.message.edit_reply_markup()
+    await callback_query.message.answer(
         "Введите текст для рассылки. Поддерживается текст и одно вложение (фото, видео, документ).\n"
-        "Для отмены используйте /cancel",
-        reply_markup=None
+        "Для отмены используйте /cancel"
     )
     await state.set_state(SendFSM.waiting_for_message)
 
@@ -77,109 +69,89 @@ async def process_audience(message: Message, state: FSMContext):
 @router.message(SendFSM.waiting_for_message)
 async def send_message_(message: Message, state: FSMContext):
     """Отправка сообщения выбранной аудитории"""
+    if message.text and message.text.strip() == "/cancel":
+        await cancel(message, state)
+        return
     if not message.text and not message.photo and not message.video and not message.document:
         await message.answer("Сообщение должно содержать текст или вложение. Попробуйте еще раз.")
         return
-    
-    state_data = await state.get_data()
-    audience_type = state_data.get("audience", "Всем пользователям")
-    
-    progress_message = await message.answer(f"Начинаю рассылку ({audience_type})...")
-    await state.clear()
+    await state.update_data(orig_chat_id=message.chat.id, orig_message_id=message.message_id)
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Подтвердить", callback_data="send_confirm")],
+        [InlineKeyboardButton(text="Отменить", callback_data="send_cancel")]
+    ])
+    await message.copy_to(message.chat.id, reply_markup=markup)
+    await state.set_state(SendFSM.waiting_for_confirmation)
 
+
+@router.callback_query(SendFSM.waiting_for_confirmation, lambda c: c.data == "send_confirm", IsAdmin())
+async def confirm_broadcast(callback_query: CallbackQuery, state: FSMContext, bot: Bot):
+    await callback_query.answer()
+    data = await state.get_data()
+    audience_type = data.get("audience", "Всем пользователям")
+    orig_chat_id = data.get("orig_chat_id")
+    orig_message_id = data.get("orig_message_id")
+    await callback_query.message.edit_reply_markup()
+    progress_message = await callback_query.message.answer(f"Начинаю рассылку ({audience_type})...")
+    await state.clear()
     try:
         today = date.today()
-        
         if audience_type == "Всем пользователям":
             all_users = await Users.all()
         elif audience_type == "Только активным":
-            # Пользователи с активной подпиской - у которых установлен expired_at, он в будущем,
-            # и которые хотя бы раз подключались
             all_users = await Users.filter(
-                is_registered=True, 
-                expired_at__not_isnull=True, 
+                is_registered=True,
+                expired_at__not_isnull=True,
                 expired_at__gt=today,
                 connected_at__not_isnull=True
             )
-        else:  # "Неактивным пользователям" - две категории: не подключались + истекшая подписка
-            # 1. Пользователи, которые никогда не подключались
-            never_connected_users = await Users.filter(
-                connected_at__isnull=True
-            )
-            
-            # 2. Пользователи с истекшей подпиской
-            expired_users = await Users.filter(
+        else:
+            never_connected = await Users.filter(connected_at__isnull=True)
+            expired = await Users.filter(
                 is_registered=True,
-                expired_at__not_isnull=True,  # Добавляем проверку, что expired_at существует
+                expired_at__not_isnull=True,
                 expired_at__lte=today
             )
-            
-            # Объединяем категории
-            all_users = []
-            all_users.extend(never_connected_users)
-            all_users.extend(expired_users)
-            
-            # Логируем информацию о составе неактивных пользователей
+            all_users = never_connected + expired
             logger.info(
-                f"Состав неактивных пользователей для рассылки: "
-                f"никогда не подключались: {len(never_connected_users)}, "
-                f"с истекшей подпиской: {len(expired_users)}, "
-                f"всего: {len(all_users)}"
+                f"Состав неактивных пользователей для рассылки: никогда не подключались: {len(never_connected)}, с истекшей подпиской: {len(expired)}, всего: {len(all_users)}"
             )
-            
-        total_users = len(all_users)
-        success, failure = 0, 0
-        
-        # Обновляем сообщение о прогрессе раз в 10 пользователей
-        update_interval = max(1, min(10, total_users // 10))
-        last_update = 0
-
-        logger.info(f"Начало рассылки. Всего пользователей: {total_users}, тип аудитории: {audience_type}")
-        
+        total = len(all_users)
+        success = failure = 0
+        update_interval = max(1, min(10, total // 10))
         for i, user in enumerate(all_users):
             try:
-                await message.copy_to(user.id)
+                await bot.copy_message(chat_id=user.id, from_chat_id=orig_chat_id, message_id=orig_message_id)
                 success += 1
-                # Для отладки
-                logger.debug(f"Сообщение успешно отправлено пользователю {user.id}")
             except Exception as e:
                 failure += 1
-                error_message = str(e)
-                logger.error(f"Ошибка при отправке сообщения пользователю {user.id}: {error_message}")
-                if "Forbidden" in error_message:
+                if "Forbidden" in str(e):
                     logger.debug("Пользователь, вероятно, заблокировал бота")
-            
-            # Обновляем сообщение с прогрессом
-            if (i + 1) % update_interval == 0 or i + 1 == total_users:
-                progress_percent = round((i + 1) / total_users * 100)
+                logger.error(f"Ошибка при отправке сообщению {user.id}: {e}")
+            if (i+1) % update_interval == 0 or i+1 == total:
+                percent = round((i+1)/total*100)
                 try:
                     await progress_message.edit_text(
-                        f"Рассылка в процессе... {i+1}/{total_users} ({progress_percent}%)\n"
-                        f"✅ Успешно: {success}\n"
-                        f"❌ Ошибок: {failure}"
+                        f"Рассылка в процессе... {i+1}/{total} ({percent}%)\n✅ Успешно: {success}\n❌ Ошибок: {failure}"
                     )
-                    last_update = i + 1
-                except Exception as e:
-                    logger.error(f"Не удалось обновить сообщение о прогрессе: {e}")
-            
-            # Добавляем задержку, чтобы избежать ограничений API Telegram
-            await asyncio.sleep(0.05)  # 50 мс
-
-        final_message = (
-            f"✅ Рассылка завершена!\n\n"
-            f"📊 Статистика:\n"
-            f"👥 Всего пользователей: {total_users}\n"
-            f"✅ Успешно отправлено: {success}\n"
-            f"❌ Ошибок отправки: {failure}"
+                except Exception as err:
+                    logger.error(f"Не удалось обновить прогресс: {err}")
+            await asyncio.sleep(0.05)
+        final_text = (
+            f"✅ Рассылка завершена!\n\n📊 Статистика:\n👥 Всего пользователей: {total}\n✅ Успешно: {success}\n❌ Ошибок: {failure}"
         )
-        
-        await progress_message.edit_text(final_message)
-        logger.info(f"Рассылка завершена. Успешно: {success}, ошибок: {failure}")
-        
+        await progress_message.edit_text(final_text)
     except Exception as e:
-        error_traceback = traceback.format_exc()
-        logger.error(f"Критическая ошибка при рассылке: {e}\n{error_traceback}")
+        tb = traceback.format_exc()
+        logger.error(f"Критическая ошибка при рассылке: {e}\n{tb}")
         await progress_message.edit_text(
-            f"❌ Произошла ошибка при рассылке: {e}\n\n"
-            f"Если ошибка повторяется, обратитесь к разработчику."
+            f"❌ Произошла ошибка при рассылке: {e}\n\nЕсли ошибка повторяется, обратитесь к разработчику."
         )
+
+
+@router.callback_query(SendFSM.waiting_for_confirmation, lambda c: c.data == "send_cancel", IsAdmin())
+async def cancel_broadcast(callback_query: CallbackQuery, state: FSMContext):
+    await callback_query.answer()
+    await callback_query.message.edit_reply_markup()
+    await callback_query.message.answer("Рассылка отменена")
+    await state.clear()

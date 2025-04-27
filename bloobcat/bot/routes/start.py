@@ -50,10 +50,3 @@ async def command_start_handler(message: Message, command: CommandObject):
     )
 
 
-@router.callback_query()
-async def call_all(call: CallbackQuery):
-    await call.answer(
-        "Мы обновились! Напишите /start чтобы продолжить работу",
-        show_alert=True,
-        cache_time=3600,
-    )
