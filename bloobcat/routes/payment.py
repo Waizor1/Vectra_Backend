@@ -1,5 +1,5 @@
 from random import randint
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 import json
 import asyncio
 import random
@@ -350,10 +350,8 @@ async def yookassa_webhook(request: Request, secret: str):
                     # Подготавливаем параметры для обновления
                     update_params = {}
 
-                    # Форматируем дату истечения для API (это обновляем всегда)
-                    expire_at_dt = datetime.combine(user.expired_at, datetime.max.time(), tzinfo=timezone.utc)
-                    expire_at_str = expire_at_dt.strftime('%Y-%m-%dT%H:%M:%S.%fZ')[:-4] + 'Z'
-                    update_params["expireAt"] = expire_at_str
+                    # Передаём дату в формате date; клиент внутри сам форматирует expireAt
+                    update_params["expireAt"] = user.expired_at
                     
                     # Определяем hwid_limit ТОЛЬКО для новых подписок (когда есть tariff_id),
                     # при автопродлении hwid_limit не меняем

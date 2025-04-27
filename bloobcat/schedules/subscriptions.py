@@ -1,4 +1,5 @@
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from bloobcat.logger import get_logger
 
 from bloobcat.db.users import Users
@@ -19,6 +20,9 @@ async def check_subscriptions():
     try:
         logger.debug("Начало проверки подписок пользователей")
         
+        # Текущее время в зоне MSK и дата
+        moscow_tz = ZoneInfo("Europe/Moscow")
+        current_date = datetime.now(moscow_tz).date()
         # Получаем всех пользователей для отладки
         all_users = await Users.all()
         logger.debug(f"Всего пользователей в базе: {len(all_users)}")
@@ -36,7 +40,7 @@ async def check_subscriptions():
         # Обрабатываем пользователей с автопродлением
         for user in users_with_auto_renewal:
             try:
-                days_remaining = (user.expired_at - datetime.now().date()).days
+                days_remaining = (user.expired_at - current_date).days
                 # Если подписка уже истекла — не пробуем
                 if days_remaining < 0:
                     logger.debug(f"Подписка пользователя {user.id} уже истекла")
@@ -69,7 +73,7 @@ async def check_subscriptions():
         # Обрабатываем пользователей без автопродления
         for user in users_without_auto_renewal:
             try:
-                days_remaining = (user.expired_at - datetime.now().date()).days
+                days_remaining = (user.expired_at - current_date).days
                 logger.info(f"Проверка подписки для пользователя {user.id} без автопродления: истекает через {days_remaining} дней")
                 
                 if days_remaining <= 0:

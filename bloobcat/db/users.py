@@ -362,18 +362,11 @@ class UsersModelAdmin(TortoiseModelAdmin):
                 logger.info(f"Дата истечения изменилась: {original_expired_at} -> {obj.expired_at}. Обновляем в RemnaWave")
                 
                 try:
-                    # Импортируем здесь, чтобы избежать циклического импорта
+                    # Передаём дату из БД, клиент внутри сам форматирует expireAt
                     from bloobcat.routes.remnawave.client import RemnaWaveClient
-                    from datetime import datetime, time, timezone
-                    
-                    # Подготавливаем дату в формате API RemnaWave
-                    expire_at_dt = datetime.combine(obj.expired_at, time.max, tzinfo=timezone.utc)
-                    expire_at_dt_str = expire_at_dt.strftime('%Y-%m-%dT%H:%M:%S.%fZ')[:-4] + 'Z'
-                    
-                    # Создаем клиент и обновляем пользователя
                     client = RemnaWaveClient(remnawave_settings.url, remnawave_settings.token.get_secret_value())
                     try:
-                        await client.users.update_user(obj.remnawave_uuid, expireAt=expire_at_dt_str)
+                        await client.users.update_user(obj.remnawave_uuid, expireAt=obj.expired_at)
                         logger.info(f"Дата истечения для пользователя {obj.id} успешно обновлена в RemnaWave")
                     finally:
                         # Гарантированно закрываем сессию клиента

@@ -4,6 +4,7 @@ from typing import Dict, Any, Optional, List
 from datetime import datetime, date, time, timezone, timedelta
 from bloobcat.logger import get_logger
 from bloobcat.db.users import Users  # Добавляем импорт Users
+from zoneinfo import ZoneInfo
 
 logger = get_logger("remnawave_client")
 
@@ -85,6 +86,15 @@ class UsersAPI:
     def __init__(self, client: RemnaWaveClient):
         self.client = client
 
+    def _format_expire_at(self, expire_at: date) -> str:
+        """Форматируем expireAt как 00:00 в зоне Europe/Moscow и конвертим в UTC для API"""
+        local_tz = ZoneInfo("Europe/Moscow")
+        # начало дня по МСК
+        local_midnight = datetime.combine(expire_at, time.min, tzinfo=local_tz)
+        # переводим в UTC
+        expire_at_dt = local_midnight.astimezone(timezone.utc)
+        return expire_at_dt.strftime('%Y-%m-%dT%H:%M:%S.%fZ')[:-4] + 'Z'
+
     async def create_user(self, username: str, expire_at: date, traffic_limit_strategy: str = "NO_RESET",
                          status: str = "ACTIVE", traffic_limit_bytes: int = 0,
                          description: str = None, telegram_id: int = None, 
@@ -92,9 +102,9 @@ class UsersAPI:
                          activate_all_inbounds: bool = True) -> Dict[str, Any]:
         """Создание пользователя с указанием лимита устройств"""
 
-        expire_at_dt = datetime.combine(expire_at, time.max, tzinfo=timezone.utc)
-        expire_at_dt_str = expire_at_dt.strftime('%Y-%m-%dT%H:%M:%S.%fZ')[:-4] + 'Z'
-        logger.debug(f"Formatted expireAt date for API: {expire_at_dt_str}")
+        # Формируем expireAt через централизованный метод
+        expire_at_dt_str = self._format_expire_at(expire_at)
+        logger.debug(f"Formatted expireAt date for API (adjusted to UTC): {expire_at_dt_str}")
 
         data = {
             "username": username,
@@ -147,9 +157,12 @@ class UsersAPI:
             
         data = {"uuid": uuid}
         
-        # Добавляем переданные параметры
+        # Добавляем и форматируем expireAt, если он передан как date
         for key, value in kwargs.items():
-            data[key] = value
+            if key == 'expireAt' and isinstance(value, date):
+                data['expireAt'] = self._format_expire_at(value)
+            else:
+                data[key] = value
             
         logger.info(f"Данные для API: {data}")
         return await self.client._request("POST", "/api/users/update", json=data)

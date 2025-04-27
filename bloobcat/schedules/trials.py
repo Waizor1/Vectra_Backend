@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from bloobcat.logger import get_logger
 from bloobcat.db.users import Users
 from bloobcat.db.payments import ProcessedPayments
@@ -24,8 +25,9 @@ async def check_trial_users():
         from bloobcat.bot.notifications.trial.no_trial import notify_no_trial_taken
         from bloobcat.bot.notifications.trial.extended import notify_trial_extended
         
-        # Текущее время
-        now = datetime.now()
+        # Текущее время в часовой зоне MSK
+        moscow_tz = ZoneInfo("Europe/Moscow")
+        now = datetime.now(moscow_tz)
         today = now.date()
         
         # Добавляем механизм повторных попыток для всех запросов к базе данных
