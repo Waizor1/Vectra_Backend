@@ -1,5 +1,6 @@
 import aiohttp
 import json
+import asyncio
 from typing import Dict, Any, Optional, List
 from datetime import datetime, date, time, timezone, timedelta
 from bloobcat.logger import get_logger
@@ -95,6 +96,24 @@ class UsersAPI:
         expire_at_dt = local_midnight.astimezone(timezone.utc)
         return expire_at_dt.strftime('%Y-%m-%dT%H:%M:%S.%fZ')[:-4] + 'Z'
 
+    async def _execute_with_retry(self, func, *args, **kwargs) -> Dict[str, Any]:
+        """Выполняет функцию с повторными попытками в течение 60 сек, пропускает валидационные ошибки"""
+        start_time = datetime.now()
+        retry_interval = 3
+        max_total_time = 60
+        while True:
+            try:
+                return await func(*args, **kwargs)
+            except Exception as e:
+                # Не повторяем в случае валидационной ошибки
+                if 'validation' in str(e).lower():
+                    raise
+                elapsed = (datetime.now() - start_time).total_seconds()
+                if elapsed > max_total_time:
+                    raise
+                logger.warning(f"Ошибка RemnaWave API: {e}. Повторная попытка через {retry_interval} сек.")
+                await asyncio.sleep(retry_interval)
+
     async def create_user(self, username: str, expire_at: date, traffic_limit_strategy: str = "NO_RESET",
                          status: str = "ACTIVE", traffic_limit_bytes: int = 0,
                          description: str = None, telegram_id: int = None, 
@@ -120,56 +139,61 @@ class UsersAPI:
         }
         filtered_data = {k: v for k, v in data.items() if v is not None}
 
-        return await self.client._request("POST", "/api/users", json=filtered_data)
+        # Выполняем с повторными попытками
+        return await self._execute_with_retry(
+            self.client._request, "POST", "/api/users", json=filtered_data
+        )
 
     async def get_users(self, size: int = 100, start: int = 0) -> Dict[str, Any]:
         """Получение списка пользователей"""
-        return await self.client._request("GET", f"/api/users/v2?size={size}&start={start}")
+        return await self._execute_with_retry(self.client._request, "GET", f"/api/users/v2?size={size}&start={start}")
 
     async def get_user_by_uuid(self, uuid: str) -> Dict[str, Any]:
         """Получение пользователя по UUID"""
         logger.debug(f"Получение пользователя по UUID: {uuid}")
-        response = await self.client._request("GET", f"/api/users/uuid/{uuid}")
+        response = await self._execute_with_retry(self.client._request, "GET", f"/api/users/uuid/{uuid}")
         logger.debug(f"Ответ при получении пользователя по UUID: {response}")
         return response
 
     async def update_user(self, uuid: str, **kwargs) -> Dict[str, Any]:
         """Обновление пользователя"""
-        # Пример из документации: https://sub.starmy.store/scalar#tag/users-controller/POST/api/users/update
-        #
-        # {
-        #   "uuid": "",
-        #   "status": "ACTIVE",
-        #   "trafficLimitBytes": 1,
-        #   "trafficLimitStrategy": "NO_RESET",
-        #   "activeUserInbounds": [""],
-        #   "expireAt": "",
-        #   "description": null,
-        #   "telegramId": null,
-        #   "email": null,
-        #   "hwidDeviceLimit": null
-        # }
         logger.info(f"Обновление пользователя {uuid} с параметрами: {kwargs}")
-        
-        # Конвертируем UUID в строку, если это объект UUID
+        # Если дата истечения в прошлом или сегодня — ставим expireAt на текущее время +1 минуту по МСК
+        if 'expireAt' in kwargs and isinstance(kwargs['expireAt'], date):
+            moscow_tz = ZoneInfo("Europe/Moscow")
+            today = datetime.now(moscow_tz).date()
+            if kwargs['expireAt'] <= today:
+                # Формируем новое время: текущее +1 минута по МСК и конвертим в UTC
+                async def _bump_expire():
+                    now_msk = datetime.now(moscow_tz)
+                    future_msk = now_msk + timedelta(minutes=1)
+                    future_utc = future_msk.astimezone(timezone.utc)
+                    expire_str = future_utc.strftime('%Y-%m-%dT%H:%M:%S.%fZ')[:-4] + 'Z'
+                    # Преобразуем uuid в строку для сериализации
+                    u = str(uuid) if hasattr(uuid, 'hex') else uuid
+                    return await self.client._request(
+                        "POST", "/api/users/update", json={"uuid": u, "expireAt": expire_str}
+                    )
+                return await self._execute_with_retry(_bump_expire)
+        # Преобразуем UUID
         if hasattr(uuid, 'hex'):
             uuid = str(uuid)
-            
+        # Собираем данные
         data = {"uuid": uuid}
-        
-        # Добавляем и форматируем expireAt, если он передан как date
         for key, value in kwargs.items():
             if key == 'expireAt' and isinstance(value, date):
                 data['expireAt'] = self._format_expire_at(value)
             else:
                 data[key] = value
-            
         logger.info(f"Данные для API: {data}")
-        return await self.client._request("POST", "/api/users/update", json=data)
+        # Выполняем обновление с повторными попытками
+        return await self._execute_with_retry(
+            self.client._request, "POST", "/api/users/update", json=data
+        )
 
     async def delete_user(self, uuid: str) -> Dict[str, Any]:
         """Удаление пользователя"""
-        return await self.client._request("DELETE", f"/api/users/delete/{uuid}")
+        return await self._execute_with_retry(self.client._request, "DELETE", f"/api/users/delete/{uuid}")
 
     async def get_subscription_url(self, user_db: Users) -> str:
         """Получает URL подписки пользователя (только если он уже существует в RemnaWave)."""
@@ -198,7 +222,7 @@ class UsersAPI:
 
     async def get_user_hwid_devices(self, user_uuid: str) -> Dict[str, Any]:
         """Получение списка HWID устройств пользователя"""
-        return await self.client._request("GET", f"/api/hwid/devices/get/{user_uuid}")
+        return await self._execute_with_retry(self.client._request, "GET", f"/api/hwid/devices/get/{user_uuid}")
 
     async def add_user_hwid_device(self, user_uuid: str, hwid: str, 
                                  platform: str = None, os_version: str = None,
@@ -212,7 +236,7 @@ class UsersAPI:
             "deviceModel": device_model,
             "userAgent": user_agent
         }
-        return await self.client._request("POST", "/api/hwid/devices/create", json=data)
+        return await self._execute_with_retry(self.client._request, "POST", "/api/hwid/devices/create", json=data)
 
     async def delete_user_hwid_device(self, user_uuid: str, hwid: str) -> Dict[str, Any]:
         """Удаление HWID устройства пользователя"""
@@ -220,7 +244,7 @@ class UsersAPI:
             "userUuid": user_uuid,
             "hwid": hwid
         }
-        return await self.client._request("POST", "/api/hwid/devices/delete", json=data)
+        return await self._execute_with_retry(self.client._request, "POST", "/api/hwid/devices/delete", json=data)
 
     async def update_user_hwid_limit(self, uuid: str, hwid_limit: int) -> Dict[str, Any]:
         """Обновление лимита HWID устройств пользователя"""
@@ -231,7 +255,7 @@ class UsersAPI:
         logger.info(f"Revoking subscription for user {uuid}")
         if hasattr(uuid, 'hex'):
             uuid = str(uuid)
-        return await self.client._request("PATCH", f"/api/users/revoke/{uuid}")
+        return await self._execute_with_retry(self.client._request, "PATCH", f"/api/users/revoke/{uuid}")
 
 class NodesAPI:
     def __init__(self, client: RemnaWaveClient):

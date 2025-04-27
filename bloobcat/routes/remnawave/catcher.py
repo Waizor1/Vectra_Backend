@@ -224,7 +224,8 @@ async def remnawave_updater():
                     
                     # Текущая дата по MSK для проверки прошлых дат
                     today = datetime.now(ZoneInfo("Europe/Moscow")).date()
-                    remnawave_expire_date = remnawave_expire_at.date()
+                    # Конвертим полученное expireAt в MSK и берём дату для сравнения
+                    remnawave_expire_date = remnawave_expire_at.astimezone(ZoneInfo("Europe/Moscow")).date()
                     db_expire_date = db_expire_at
                     
                     # Пропускаем обновление, если дата истечения в прошлом
