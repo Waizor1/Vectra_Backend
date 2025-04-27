@@ -5,6 +5,7 @@ from bloobcat.logger import get_logger
 from .subscriptions import check_subscriptions
 from .trials import check_trial_users
 from .helpers import periodic_task, daily_task
+from .referral import check_referral_notifications
 
 # Импортируем внешние задачи (полные пути)
 from bloobcat.routes.remnawave.catcher import remnawave_updater
@@ -40,9 +41,12 @@ def start_scheduler():
     trial_users_task = asyncio.create_task(
         periodic_task(check_trial_users, 3600, "check_trial_users")  # Каждый час
     )
+    referral_task = asyncio.create_task(
+        daily_task(check_referral_notifications, hour=12, minute=30, task_name="check_referral_notifications")
+    )
     
     # Сохраняем задачи для возможности их отмены
-    active_tasks = [remnawave_task, subscriptions_task, trial_users_task]
+    active_tasks = [remnawave_task, subscriptions_task, trial_users_task, referral_task]
     
     logger.info("Фоновые задачи запущены")
     

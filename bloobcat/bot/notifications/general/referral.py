@@ -51,4 +51,26 @@ async def on_referral_registration(user: Users, referral: Users):
         user.id,
         text,
         reply_markup=button,
+    )
+
+async def on_referral_prompt(user: Users, days: int):
+    """Уведомление для пользователей, чтобы пригласить друга и получить бонусы"""
+    lang = get_user_locale(user)
+    if lang == 'ru':
+        text = (
+            f"🎉 Привет, {user.full_name}! Вы уже с нами {days} дней. "
+            "Пригласите друга и получите бонусы в реферальной программе!"
+        )
+        button = await webapp_inline_button("Реферальная программа", "ref")
+    else:
+        text = (
+            f"🎉 Hi {user.full_name}! You've been with us for {days} days. "
+            "Invite a friend and earn rewards in our referral program!"
+        )
+        button = await webapp_inline_button("Referral Program", "ref")
+    logger.info(f"Отправка реферального напоминания пользователю {user.id} ({days} дней)")
+    await bot.send_message(
+        user.id,
+        text,
+        reply_markup=button,
     ) 

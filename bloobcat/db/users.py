@@ -62,6 +62,7 @@ class Users(models.Model):
     active_tariff: fields.ForeignKeyNullableRelation["ActiveTariffs"] = fields.ForeignKeyField(
         "models.ActiveTariffs", related_name="users", null=True, on_delete=fields.SET_NULL, description="ID активного тарифа пользователя"
     )
+    referral_notification_sent_count = fields.IntField(default=0, description="Счетчик отправленных уведомлений о реферальной программе")
 
     async def _ensure_remnawave_user(self) -> bool:
         """
@@ -319,6 +320,7 @@ class UsersModelAdmin(TortoiseModelAdmin):
         "remnawave_uuid",
         "familyurl",
         "active_tariff",
+        "referral_notification_sent_count",
     )
     search_help_text = "Юзернейм, имя, айди"
     verbose_name = "Пользователи"
