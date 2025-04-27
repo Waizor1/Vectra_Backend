@@ -520,6 +520,7 @@ async def yookassa_webhook(request: Request, secret: str):
                 months=months,
                 method="yookassa",
                 payment_id=payment.id,
+                is_auto=is_auto,
             )
         except Exception as e:
             logger.error(
@@ -738,6 +739,7 @@ async def create_auto_payment(user: Users) -> bool:
                     months=months,
                     method="balance_auto", # Указываем метод
                     payment_id=payment_id,
+                    is_auto=True,
                 )
             except Exception as e:
                 logger.error(

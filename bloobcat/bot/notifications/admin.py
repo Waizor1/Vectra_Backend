@@ -130,6 +130,7 @@ async def on_payment(
     months: int,
     method: str,
     payment_id: str,
+    is_auto: bool = False,
 ):
     try:
         # Получаем информацию о пользователе
@@ -146,7 +147,7 @@ async def on_payment(
         recurrent_status = "✅ Да" if is_sub and (user and user.renew_id) else "❌ Нет"
         
         # Определяем, является ли текущий платеж автосписанием
-        is_auto_payment = "auto" in method.lower()
+        is_auto_payment = is_auto or ("auto" in method.lower())
         auto_payment_status = "✅ Да" if is_auto_payment else "❌ Нет"
         
         text = f"""💰 Успешная оплата пользователя!

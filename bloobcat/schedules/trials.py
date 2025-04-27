@@ -22,7 +22,6 @@ async def check_trial_users():
         # Импортируем функции уведомлений здесь, чтобы избежать циклического импорта
         from bloobcat.bot.notifications.trial.end import notify_trial_ended
         from bloobcat.bot.notifications.trial.no_trial import notify_no_trial_taken
-        from bloobcat.bot.notifications.subscription.key import on_disabled
         from bloobcat.bot.notifications.trial.extended import notify_trial_extended
         
         # Текущее время
@@ -111,9 +110,6 @@ async def check_trial_users():
             try:
                 logger.info(f"Отправка уведомления о завершении пробного периода пользователю {user.id}")
                 await notify_trial_ended(user)
-                
-                # Также отправляем стандартное уведомление об истечении ключа
-                await on_disabled(user)
                 
                 # Обновляем статус пользователя
                 user.is_trial = False
