@@ -1,4 +1,5 @@
-from datetime import datetime
+from datetime import datetime, time
+from zoneinfo import ZoneInfo
 from bloobcat.bot.bot import bot
 from bloobcat.bot.keyboard import webapp_inline_button
 from bloobcat.db.users import Users
@@ -58,19 +59,30 @@ async def notify_expiring_subscription(user: Users):
     # Локализация
     lang = get_user_locale(user)
     logger.info(f"Подготовка уведомления об истечении подписки для пользователя {user.id}")
-    days_remaining = (user.expired_at - datetime.now().date()).days
-    logger.info(f"Отправка уведомления об истечении подписки пользователю {user.id}, дней до истечения: {days_remaining}")
+    # Вычисляем точное время до окончания подписки с учетом московского часового пояса
+    moscow_tz = ZoneInfo("Europe/Moscow")
+    now = datetime.now(moscow_tz)
+    expire_dt = datetime.combine(user.expired_at, time(0, 0), tzinfo=moscow_tz)
+    seconds_left = (expire_dt - now).total_seconds()
+    # Определяем дни до окончания: 0 если меньше суток, иначе целые дни
+    days = 0 if seconds_left < 24 * 3600 else int(seconds_left // (24 * 3600))
+    logger.info(f"Отправка уведомления об истечении подписки пользователю {user.id}, дней до истечения: {days}")
+    # Формируем строку даты окончания
+    if days == 0:
+        date_str_ru = "сегодня"
+        date_str_en = "today"
+    else:
+        date_str_ru = f"через {days} {{'день' if days == 1 else 'дня' if days < 5 else 'дней'}}"
+        date_str_en = f"in {days} {{'day' if days == 1 else 'days'}}"
     if lang == 'ru':
         text = (
-            f"⚠️ Привет, {user.full_name}! Ваша подписка истекает через {days_remaining} "
-            f"{'день' if days_remaining == 1 else 'дня' if days_remaining < 5 else 'дней'}. "
+            f"⚠️ Привет, {user.full_name}! Ваша подписка истекает {date_str_ru}. "
             "Продлите сейчас, чтобы не прерывать доступ к VPN! 🔒"
         )
         button = await webapp_inline_button("Продлить сейчас", "pay")
     else:
         text = (
-            f"⚠️ Hi {user.full_name}! Your subscription will expire in {days_remaining} "
-            f"{'day' if days_remaining == 1 else 'days'}. "
+            f"⚠️ Hi {user.full_name}! Your subscription will expire {date_str_en}. "
             "Renew now to keep your VPN active! 🔒"
         )
         button = await webapp_inline_button("Renew Now", "pay")

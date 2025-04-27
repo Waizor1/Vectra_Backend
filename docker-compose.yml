@@ -20,6 +20,7 @@ services:
     environment:
       - SCRIPT_DB=postgres://postgres:postgres@bloobcat_db:5432/postgres
       - PYTHONUNBUFFERED=1
+      - TZ=Europe/Moscow
     ports:
       - "33083:33083"
     container_name: bloobcat
