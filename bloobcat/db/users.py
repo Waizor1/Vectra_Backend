@@ -40,7 +40,7 @@ class Users(models.Model):
     expired_at = fields.DateField(null=True)
     is_registered = fields.BooleanField(default=False)
     balance = fields.IntField(default=0)
-    referred_by = fields.IntField(default=0)
+    referred_by = fields.BigIntField(default=0)
     is_admin = fields.BooleanField(default=False)
     custom_referral_percent = fields.IntField(default=0)
     registration_date = fields.DatetimeField(auto_now_add=True)
