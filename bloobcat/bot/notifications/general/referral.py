@@ -12,24 +12,24 @@ async def on_referral_payment(user: Users, referral: Users, amount: int):
     await user.save()
     lang = get_user_locale(user)
     if lang == 'ru':
-        logger.info(f"Реферальный бонус: пользователь {user.id} получил {to_add}₽ за оплату реферала {referral.id} на {amount}₽")
+        logger.info(f"Реферальный бонус зачислен пользователю {user.id}: {to_add}₽ за оплату реферала {referral.id} на {amount}₽")
         text = (
             f"🎉 Привет, {user.full_name}! Ваш реферал {referral.name()} оплатил подписку на {amount}₽.\n"
             f"Вы получили {to_add}₽ на баланс. Спасибо за рекомендацию! 🎊"
         )
         button = await webapp_inline_button("Личный кабинет")
     else:
-        logger.info(f"Crediting referral bonus to user {user.id}: {to_add} RUB for referral {referral.id}'s payment of {amount} RUB.")
+        logger.info(f"Реферальный бонус зачислен пользователю {user.id}: {to_add}₽ за оплату реферала {referral.id} на {amount}₽")
         text = (
             f"🎉 Hi {user.full_name}! Your referral {referral.name()} just paid {amount} RUB.\n"
             f"You've been credited {to_add} RUB. Thanks for spreading the word! 🎊"
         )
         button = await webapp_inline_button("Dashboard")
-    await bot.send_message(
-        user.id,
-        text,
-        reply_markup=button,
-    )
+    try:
+        await bot.send_message(user.id, text, reply_markup=button)
+        logger.info(f"Уведомление о реферальном бонусе успешно отправлено пользователю {user.id}")
+    except Exception as e:
+        logger.error(f"Ошибка при отправке уведомления о реферальном бонусе пользователю {user.id}: {e}")
 
 async def on_referral_registration(user: Users, referral: Users):
     lang = get_user_locale(user)
@@ -41,17 +41,17 @@ async def on_referral_registration(user: Users, referral: Users):
         )
         button = await webapp_inline_button("Активировать пробную")
     else:
-        logger.info(f"Sending referral registration notification to user {user.id} for referral {referral.id}")
+        logger.info(f"Реферальная регистрация: пользователь {user.id} получил 7 дней подписки за регистрацию реферала {referral.id}")
         text = (
             f"🎉 Hi {user.full_name}! Your referral {referral.name()} just signed up.\n"
             "You've been awarded a 7-day free trial. Enjoy testing our VPN!"
         )
         button = await webapp_inline_button("Activate Trial")
-    await bot.send_message(
-        user.id,
-        text,
-        reply_markup=button,
-    )
+    try:
+        await bot.send_message(user.id, text, reply_markup=button)
+        logger.info(f"Уведомление о реферальной регистрации успешно отправлено пользователю {user.id}")
+    except Exception as e:
+        logger.error(f"Ошибка при отправке уведомления о реферальной регистрации пользователю {user.id}: {e}")
 
 async def on_referral_prompt(user: Users, days: int):
     """Уведомление для пользователей, чтобы пригласить друга и получить бонусы"""
@@ -69,8 +69,8 @@ async def on_referral_prompt(user: Users, days: int):
         )
         button = await webapp_inline_button("Referral Program", "ref")
     logger.info(f"Отправка реферального напоминания пользователю {user.id} ({days} дней)")
-    await bot.send_message(
-        user.id,
-        text,
-        reply_markup=button,
-    ) 
+    try:
+        await bot.send_message(user.id, text, reply_markup=button)
+        logger.info(f"Реферальное напоминание успешно отправлено пользователю {user.id}")
+    except Exception as e:
+        logger.error(f"Ошибка при отправке реферального напоминания пользователю {user.id}: {e}") 

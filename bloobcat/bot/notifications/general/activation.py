@@ -28,7 +28,15 @@ async def on_activated_key(user: Users):
         button = await webapp_inline_button("Dashboard")
     # Отправка уведомлений
     logger.info(f"Отправка уведомления об активации ключа пользователю {user.id}")
-    await bot.send_message(user.id, text1)
+    try:
+        await bot.send_message(user.id, text1)
+        logger.info(f"Первое уведомление об активации ключа успешно отправлено пользователю {user.id}")
+    except Exception as e:
+        logger.error(f"Ошибка при отправке первого уведомления об активации ключа пользователю {user.id}: {e}")
     await sleep(5)
     logger.info(f"Отправка второго уведомления об активации ключа пользователю {user.id}")
-    await bot.send_message(user.id, text2, reply_markup=button) 
+    try:
+        await bot.send_message(user.id, text2, reply_markup=button)
+        logger.info(f"Второе уведомление об активации ключа успешно отправлено пользователю {user.id}")
+    except Exception as e:
+        logger.error(f"Ошибка при отправке второго уведомления об активации ключа пользователю {user.id}: {e}") 

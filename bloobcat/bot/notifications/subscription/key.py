@@ -17,4 +17,8 @@ async def on_disabled(user: Users):
         text = f"😢 Hi {user.full_name}, your subscription has expired. Renew now to keep your VPN active 🌐🔒"
         button = await webapp_inline_button("Renew Now", "pay")
     logger.info(f"Отправка уведомления об истечении ключа пользователю {user.id}")
-    await bot.send_message(user.id, text, reply_markup=button) 
+    try:
+        await bot.send_message(user.id, text, reply_markup=button)
+        logger.info(f"Уведомление об истечении подписки успешно отправлено пользователю {user.id}")
+    except Exception as e:
+        logger.error(f"Ошибка при отправке уведомления об истечении подписки пользователю {user.id}: {e}") 
