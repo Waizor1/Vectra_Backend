@@ -42,9 +42,9 @@ async def process_utm_source(message: Message, state: FSMContext, bot: Bot):
     try:
         # Используем URL из настроек
         base_url = telegram_settings.webapp_url
-        # Убеждаемся, что нет лишнего слеша, если он уже есть в base_url
-        # Используем startapp для передачи параметра в WebApp
-        link = f"{base_url.rstrip('/')}?startapp={utm_source}"
+        # Добавляем id пользователя, генерирующего UTM ссылку
+        user_id = message.from_user.id
+        link = f"{base_url.rstrip('/')}?startapp={utm_source}-{user_id}"
         # Отправляем ссылку как код для легкого копирования, используя HTML parse_mode
         await message.answer(f"Готово! Ваша ссылка:\n<code>{link}</code>", parse_mode="HTML")
     except Exception as e:

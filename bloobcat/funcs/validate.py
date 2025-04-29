@@ -28,14 +28,26 @@ async def validate(init_data: str = Depends(oauth2_scheme)) -> Users:
         utm = None
         logger.info(f"Проверка start_param для пользователя {user.user.id}: {user.start_param!r}") 
         if user.start_param:
-            # Ignore family links to not count as UTM or referral
-            if user.start_param.startswith("family_"):
-                logger.info(f"Пропускаем family link: {user.start_param} для пользователя {user.user.id}")
-            elif user.start_param.isdigit():
-                referred_by = int(user.start_param)
+            param = user.start_param
+            # Combined UTM and numeric referral (format: <utm>-<referrer_id>)
+            if "-" in param:
+                # Разделяем по последнему дефису
+                utm_part, ref_part = param.rsplit("-", 1)
+                if ref_part.isdigit():
+                    referred_by = int(ref_part)
+                    utm = utm_part
+                    logger.info(f"Найдена UTM: '{utm}' и реферал: {referred_by} для пользователя {user.user.id}")
+                else:
+                    # Если часть после '-' не число, считаем всю строку UTM
+                    utm = param
+                    logger.info(f"Найдена UTM (без реферала): '{utm}' для пользователя {user.user.id}")
+            elif param.startswith("family_"):
+                logger.info(f"Пропускаем family link: {param} для пользователя {user.user.id}")
+            elif param.isdigit():
+                referred_by = int(param)
                 logger.info(f"Найден реферал: {referred_by} для пользователя {user.user.id}")
             else:
-                utm = user.start_param
+                utm = param
                 logger.info(f"Найдена UTM: '{utm}' для пользователя {user.user.id}")
 
     except Exception as e:

@@ -197,7 +197,7 @@ async def schedule_user_tasks(user):
     # Log summary of scheduled tasks for this user
     logger.debug(f"User {user.id}: total {len(scheduled_tasks[user.id])} tasks scheduled")
 
-async def remnawave_scheduler(interval_seconds: int = 60):
+async def remnawave_scheduler(interval_seconds: int = 600):
     """Periodically run RemnaWave updater."""
     while True:
         try:
