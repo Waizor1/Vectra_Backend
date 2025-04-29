@@ -135,11 +135,6 @@ async def yookassa_webhook(request: Request, secret: str):
             return {"status": "ok"}
         
         if event == WebhookNotificationEventType.PAYMENT_CANCELED:
-            # При отмене платежа также отключаем автопродление
-            user.is_subscribed = False
-            user.renew_id = None
-            await user.save()
-            
             # Сохраняем информацию об отмене
             await ProcessedPayments.create(
                 payment_id=payment.id,
@@ -157,27 +152,27 @@ async def yookassa_webhook(request: Request, secret: str):
                     'status': "canceled"
                 }
             )
-            # --- Добавляем уведомление пользователю, если это был автоплатеж ---
             if data.get("is_auto", False):
+                disable = data.get("disable_on_fail", False)
+                if disable:
+                    user.is_subscribed = False
+                    user.renew_id = None
+                    await user.save()
                 await notify_auto_renewal_failure(user, reason="Платеж был отменен", will_retry=(user.expired_at and (user.expired_at - date.today()).days >= 0))
-            # --- Конец добавления ---
             return {"status": "ok"}
         
         if event != WebhookNotificationEventType.PAYMENT_SUCCEEDED:
             return {"status": "ok"}
         
         if payment.status != "succeeded":
-            # --- Добавляем обработку неуспешного статуса автоплатежа ---
             logger.warning(f"Автоплатеж {payment.id} для пользователя {user.id} завершился со статусом {payment.status}")
             if data.get("is_auto", False):
-                # Отключаем автопродление
-                user.is_subscribed = False
-                user.renew_id = None
-                await user.save()
-                logger.info(f"Автопродление отключено для {user.id} из-за неуспешного статуса автоплатежа ({payment.status})")
-                # Уведомляем пользователя
+                disable = data.get("disable_on_fail", False)
+                if disable:
+                    user.is_subscribed = False
+                    user.renew_id = None
+                    await user.save()
                 await notify_auto_renewal_failure(user, reason=f"Платеж не прошел (статус: {payment.status})", will_retry=(user.expired_at and (user.expired_at - date.today()).days >= 0))
-            # --- Конец добавления ---
             return {"status": "ok"}
         
         try:
@@ -448,7 +443,7 @@ async def yookassa_webhook(request: Request, secret: str):
                     }
                 )
             
-            await user.save() # Сохраняем пользователя (включая обновленный баланс)
+            await user.save()  # Сохраняем пользователя (включая обновленный баланс)
             
             amount_paid_via_yookassa = float(payment.amount.value)
             full_tariff_price_for_history = amount_paid_via_yookassa + amount_from_balance
@@ -644,7 +639,7 @@ async def pay(tariff_id: int, email: str, user: Users = Depends(validate)):
 
         return {"redirect_to": payment.confirmation.confirmation_url}
 
-async def create_auto_payment(user: Users) -> bool:
+async def create_auto_payment(user: Users, disable_on_fail: bool = True) -> bool:
     """
     Создает автоматический платеж для продления подписки
     Returns:
@@ -766,6 +761,7 @@ async def create_auto_payment(user: Users) -> bool:
                 "month": months,
                 "is_auto": True,
                 "amount_from_balance": amount_from_balance,
+                "disable_on_fail": disable_on_fail,
             }
 
             # Создаем автоплатеж Yookassa
@@ -822,11 +818,11 @@ async def create_auto_payment(user: Users) -> bool:
             f"Ошибка при создании автоплатежа для пользователя {user.id}: {e}",
             extra={'user_id': user.id}
         )
-        # Отключаем автопродление при любой ошибке в этой функции
-        user.is_subscribed = False
-        user.renew_id = None
-        await user.save()
+        # Отключаем автопродление только если это последняя попытка
+        if disable_on_fail:
+            user.is_subscribed = False
+            user.renew_id = None
+            await user.save()
         logger.warning(f"Автопродление отключено для {user.id} из-за ошибки при создании автоплатежа: {e}")
-        # Уведомляем пользователя о неудаче
         await notify_auto_renewal_failure(user, reason=f"Внутренняя ошибка сервера при попытке автопродления", will_retry=(user.expired_at and (user.expired_at - date.today()).days >= 0))
         return False

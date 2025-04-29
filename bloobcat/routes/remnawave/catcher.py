@@ -83,7 +83,7 @@ async def remnawave_updater():
                 users = await Users.all()
                 if users is None:
                     raise Exception("Результат запроса users is None")
-                logger.info(f"Получено {len(users)} пользователей из БД")
+                logger.debug(f"Получено {len(users)} пользователей из БД")
             except Exception as e:
                 elapsed_retry_time = (datetime.now() - start_retry_time).total_seconds()
                 
@@ -100,7 +100,7 @@ async def remnawave_updater():
             logger.warning("Не найдено пользователей с UUID и датой истечения")
             return
             
-        logger.info(f"Найдено {len(users_with_uuid)} пользователей с UUID и датой истечения")
+        logger.debug(f"Найдено {len(users_with_uuid)} пользователей с UUID и датой истечения")
         
         # Получаем данные из RemnaWave с повторными попытками
         remnawave_users = []
@@ -115,7 +115,7 @@ async def remnawave_updater():
         while total_users is None or start_index < total_users:
             try:
                 retry_attempt += 1
-                logger.info(f"Получение списка пользователей из RemnaWave (страница {start_index//page_size + 1})")
+                logger.debug(f"Получение списка пользователей из RemnaWave (страница {start_index//page_size + 1})")
                 
                 remnawave_users_response = await remnawave.users.get_users(size=page_size, start=start_index)
                 
@@ -131,7 +131,7 @@ async def remnawave_updater():
                 # Обновляем общее количество пользователей если не было известно
                 if total_users is None and "total" in remnawave_users_response["response"]:
                     total_users = remnawave_users_response["response"]["total"]
-                    logger.info(f"Всего пользователей в RemnaWave: {total_users}")
+                    logger.debug(f"Всего пользователей в RemnaWave: {total_users}")
                     
                 page_users = remnawave_users_response["response"]["users"]
                 if page_users is None:
@@ -139,7 +139,7 @@ async def remnawave_updater():
                 
                 # Добавляем пользователей текущей страницы в общий список
                 remnawave_users.extend(page_users)
-                logger.info(f"Получено {len(page_users)} пользователей на странице {start_index//page_size + 1}")
+                logger.debug(f"Получено {len(page_users)} пользователей на странице {start_index//page_size + 1}")
                 
                 # Если страница пустая или мы получили меньше, чем размер страницы - прерываем
                 if not page_users or len(page_users) < page_size:
@@ -164,7 +164,7 @@ async def remnawave_updater():
                 logger.warning(f"Ошибка при получении списка пользователей из RemnaWave (попытка {retry_attempt}): {str(e)}. Повторная попытка через {retry_interval} сек.")
                 await asyncio.sleep(retry_interval)
         
-        logger.info(f"Всего получено {len(remnawave_users)} пользователей из RemnaWave")
+        logger.debug(f"Всего получено {len(remnawave_users)} пользователей из RemnaWave")
         
         # Создаем словарь с UUID в качестве ключей
         remnawave_users_dict = {}

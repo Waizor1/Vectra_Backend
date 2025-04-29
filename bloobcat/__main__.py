@@ -14,7 +14,6 @@ from bloobcat.clients import TORTOISE_ORM
 from bloobcat.db.admins import Admin
 from bloobcat.routes import main_router, include_bot_router
 from bloobcat.routes import app_info # Добавляем импорт нового роутера
-from bloobcat.schedules import start_scheduler
 from bloobcat.settings import script_settings, telegram_settings
 from bloobcat.logger import get_logger
 
@@ -59,8 +58,9 @@ async def lifespan(fastapi_app: FastAPI):
         config=TORTOISE_ORM,
         add_exception_handlers=True,
     ):
-        start_scheduler()
         logger.info("Фоновые задачи запущены")
+        from bloobcat.scheduler import schedule_all_tasks
+        await schedule_all_tasks()
         yield
     
     # Закрытие всех клиентов RemnaWave при завершении работы

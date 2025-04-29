@@ -7,9 +7,6 @@ logger = get_logger("notifications.trial.no_trial")
 
 async def notify_no_trial_taken(user, hours_passed: int):
     logger.info(f"Подготовка уведомления пользователю {user.id}, не взявшему пробную подписку (прошло {hours_passed} ч.)")
-    if user.expired_at is not None:
-        logger.info(f"Пользователь {user.id} имеет или имел подписку (expired_at={user.expired_at}), уведомление не отправляется")
-        return
     has_payments = await ProcessedPayments.filter(
         user_id=user.id,
         status="succeeded"

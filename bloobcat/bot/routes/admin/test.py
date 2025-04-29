@@ -4,7 +4,7 @@ from aiogram.types import Message
 
 from bloobcat.bot.routes.admin.functions import IsAdmin
 from bloobcat.db.users import Users
-from bloobcat import schedules
+# from bloobcat import schedules
 from datetime import datetime
 
 router = Router()
@@ -41,12 +41,10 @@ async def test_check_subscriptions(message: Message):
         # Отправляем сообщение со списком пользователей
         await message.answer(user_list)
         
-        # Запускаем проверку подписок
-        await message.answer("Запускаю проверку подписок...")
-        await schedules.check_subscriptions()
-        
-        # Отправляем сообщение об успешном завершении
-        await message.answer("Проверка подписок успешно завершена")
+        # Запрос ручной проверки подписок временно отключен
+        # await message.answer("Запускаю проверку подписок...")
+        # await schedules.check_subscriptions()
+        # await message.answer("Проверка подписок успешно завершена")
         
     except Exception as e:
         # В случае ошибки отправляем сообщение с текстом ошибки

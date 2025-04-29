@@ -5,7 +5,6 @@ from datetime import datetime, timedelta
 from tortoise.functions import Count
 
 from bloobcat.bot.routes.admin.functions import IsAdmin, search_user
-from bloobcat.schedules import check_subscriptions, check_trial_users
 from bloobcat.routes.remnawave.catcher import remnawave_updater
 from bloobcat.db.users import Users
 from bloobcat.db.payments import ProcessedPayments
@@ -26,8 +25,8 @@ async def admin_check_subs(message: Message):
     try:
         await message.answer("Начинаю проверку подписок пользователей...")
         
-        # Запускаем проверку подписок
-        await check_subscriptions()
+        # Запрос ручной проверки подписок отключен (legacy schedules removed)
+        # await check_subscriptions()
         
         await message.answer("Проверка подписок успешно завершена! Подробности в логах.")
         logger.info(f"Администратор {message.from_user.id} вручную запустил проверку подписок")
@@ -115,13 +114,13 @@ async def admin_check_all(message: Message):
         await message.answer("1/5. Запуск обновления RemnaWave...")
         await remnawave_updater()
 
-        # 4. Проверка подписок
-        await message.answer("4/5. Запуск проверки подписок...")
-        await check_subscriptions()
+        # 4. Проверка подписок отключена (legacy schedules removed)
+        # await message.answer("4/5. Запуск проверки подписок...")
+        # await check_subscriptions()
         
-        # 5. Проверка пользователей с пробным периодом
-        await message.answer("5/5. Запуск проверки пользователей с пробным периодом...")
-        await check_trial_users()
+        # 5. Проверка пользователей с пробным периодом отключена
+        # await message.answer("5/5. Запуск проверки пользователей с пробным периодом...")
+        # await check_trial_users()
         
         elapsed = (datetime.now() - start_time).total_seconds()
         await message.answer(f"Все задачи успешно выполнены за {elapsed:.2f} секунд! Подробности в логах.")
@@ -455,7 +454,7 @@ async def admin_check_trial(message: Message):
         await message.answer("Начинаю проверку пользователей с пробным периодом...")
         
         # Запускаем проверку пользователей с пробным периодом
-        await check_trial_users()
+        # await check_trial_users()
         
         await message.answer("Проверка пользователей с пробным периодом успешно завершена! Подробности в логах.")
         logger.info(f"Администратор {message.from_user.id} вручную запустил проверку пользователей с пробным периодом")

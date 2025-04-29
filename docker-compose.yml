@@ -18,7 +18,6 @@ services:
     env_file:
       - .env
     environment:
-      - SCRIPT_DB=postgres://postgres:postgres@bloobcat_db:5432/postgres
       - PYTHONUNBUFFERED=1
       - TZ=Europe/Moscow
     ports:
@@ -40,6 +39,7 @@ services:
     environment:
       PGADMIN_DEFAULT_EMAIL: admin@admin.com
       PGADMIN_DEFAULT_PASSWORD: admin
+      TZ: Europe/Moscow
     networks:
       - bloobcat_network
     depends_on:

@@ -62,7 +62,6 @@ class Users(models.Model):
     active_tariff: fields.ForeignKeyNullableRelation["ActiveTariffs"] = fields.ForeignKeyField(
         "models.ActiveTariffs", related_name="users", null=True, on_delete=fields.SET_NULL, description="ID активного тарифа пользователя"
     )
-    referral_notification_sent_count = fields.IntField(default=0, description="Счетчик отправленных уведомлений о реферальной программе")
 
     async def _ensure_remnawave_user(self) -> bool:
         """
@@ -92,10 +91,11 @@ class Users(models.Model):
                         self.used_trial = True
                         self.expired_at = expire_at_date
                         logger.info(f"Назначен триал для {self.id} до {expire_at_date}")
-                    else:
-                        # Если триал использован, устанавливаем дату на сегодня
-                        expire_at_date = date.today()
-                        logger.warning(f"Пользователь {self.id} уже использовал триал, дата истечения: {expire_at_date}")
+                    
+                else:
+                    # Если триал использован, устанавливаем дату на сегодня
+                    expire_at_date = date.today()
+                    logger.warning(f"Пользователь {self.id} уже использовал триал, дата истечения: {expire_at_date}")
                 
                 # Базовый лимит устройств
                 hwid_limit = 1
@@ -199,10 +199,13 @@ class Users(models.Model):
             await user.count_referrals()
 
             # Создаем пользователя в RemnaWave, если он еще не создан
-            # Это будет происходить при первом обращении к /user эндпоинту
             if is_new or not user.remnawave_uuid:
                 await user._ensure_remnawave_user()
-            
+            # Schedule referral notifications for new users
+            if is_new:
+                from bloobcat.scheduler import schedule_user_tasks
+                await schedule_user_tasks(user)
+
             return user
             
         except Exception as e:
@@ -237,6 +240,9 @@ class Users(models.Model):
             # Если подписка неактивна, считаем от текущей даты
             self.expired_at = current_date + timedelta(days=days)
         await self.save()
+        # Schedule subscription tasks whenever expired_at is updated
+        from bloobcat.scheduler import schedule_user_tasks
+        await schedule_user_tasks(self)
 
     async def referrer(self):
         if self.referred_by:
@@ -250,23 +256,39 @@ class Users(models.Model):
         self.referrals = referrals
         await self.save()
 
-    async def delete_model(self):
-        """Удаляет пользователя из RemnaWave и локальной базы данных"""
-        try:
-            if self.remnawave_uuid:
-                from bloobcat.routes.remnawave.client import RemnaWaveClient
-                from bloobcat.settings import remnawave_settings
-
-                client = RemnaWaveClient(remnawave_settings.url, remnawave_settings.token.get_secret_value())
+    async def delete(self, *args, **kwargs):
+        """Удаляет пользователя: отзывает задачи Celery, удаляет в RemnaWave и из локальной БД"""
+        # Cancel all scheduled asyncio tasks for this user
+        from bloobcat.scheduler import cancel_user_tasks
+        cancel_user_tasks(self.id)
+        # Удаляем пользователя в RemnaWave
+        if self.remnawave_uuid:
+            from bloobcat.routes.remnawave.client import RemnaWaveClient
+            from bloobcat.settings import remnawave_settings
+            client = RemnaWaveClient(remnawave_settings.url, remnawave_settings.token.get_secret_value())
+            try:
                 await client.users.delete_user(self.remnawave_uuid)
                 logger.info(f"Пользователь {self.id} удален из RemnaWave")
+            except Exception as e:
+                logger.error(f"Ошибка при удалении пользователя {self.id} из RemnaWave: {e}")
+            finally:
+                await client.close()
+        # Выполняем удаление из БД через оригинальный delete
+        result = await super().delete(*args, **kwargs)
+        logger.info(f"Пользователь {self.id} удален из локальной базе данных")
+        return result
 
-            # Вызываем стандартный метод delete модели Tortoise
-            await self.delete()
-            logger.info(f"Пользователь {self.id} удален из локальной базы данных")
-        except Exception as e:
-            logger.error(f"Ошибка при удалении пользователя {self.id}: {e}")
-            raise
+    async def save(self, *args, **kwargs):
+        # Check previous expiration date
+        old_expired_at = None
+        if self.id is not None:
+            orig = await Users.get_or_none(id=self.id)
+            old_expired_at = orig.expired_at if orig else None
+        # Save the user as usual
+        await super().save(*args, **kwargs)
+        if self.expired_at and self.expired_at != old_expired_at:
+            from bloobcat.scheduler import schedule_user_tasks
+            await schedule_user_tasks(self)
 
     class PydanticMeta:
         computed = ["expires", "name", "referral_percent"]
@@ -320,7 +342,6 @@ class UsersModelAdmin(TortoiseModelAdmin):
         "remnawave_uuid",
         "familyurl",
         "active_tariff",
-        "referral_notification_sent_count",
     )
     search_help_text = "Юзернейм, имя, айди"
     verbose_name = "Пользователи"
@@ -383,50 +404,14 @@ class UsersModelAdmin(TortoiseModelAdmin):
         return result
 
     async def delete_model(self, pk: int):
-        """Переопределенный метод удаления пользователя.
-
-        Сначала получает объект пользователя по pk, затем пытается удалить
-        пользователя из RemnaWave и после этого удаляет из БД.
-        """
-        logger.info(f"Запрос на удаление пользователя с ID {pk} из админ-панели")
-        
-        # Получаем объект пользователя из БД
+        """Удаление пользователя через админку: используем переопределённый delete() модели"""
+        # Получаем пользователя
         user_obj = await Users.get_or_none(id=pk)
-        
-        if not user_obj:
-            logger.warning(f"Пользователь с ID {pk} не найден в БД. Удаление невозможно.")
-            # Вызываем super, чтобы fastadmin получил ожидаемый результат.
-            await super().delete_model(pk)
-            return
-            
-        logger.info(f"Найден пользователь {user_obj.id} ({user_obj.name()}) для удаления")
-
-        # Пытаемся удалить из RemnaWave
-        if user_obj.remnawave_uuid:
-            remnawave = None  # Объявляем переменную в более широкой области
-            try:
-                # Импортируем RemnaWaveClient здесь, чтобы избежать циклического импорта
-                from bloobcat.routes.remnawave.client import RemnaWaveClient
-                # Создаем экземпляр клиента RemnaWave
-                remnawave = RemnaWaveClient(remnawave_settings.url, remnawave_settings.token.get_secret_value())
-                logger.info(f"Попытка удаления пользователя {user_obj.id} (UUID: {user_obj.remnawave_uuid}) из RemnaWave...")
-                await remnawave.users.delete_user(user_obj.remnawave_uuid)
-                logger.info(f"Пользователь {user_obj.id} успешно удален/отсутствовал в RemnaWave.")
-            except Exception as e:
-                # Логируем ошибку, но продолжаем удаление из локальной БД
-                logger.error(
-                    f"Исключение при попытке удаления пользователя {user_obj.id} (UUID: {user_obj.remnawave_uuid}) из RemnaWave: {str(e)}. "
-                    f"Пользователь все равно будет удален из локальной БД.",
-                    exc_info=True # Добавляем трейсбек для детальной диагностики
-                )
-            finally:
-                # Гарантированно закрываем сессию клиента в любом случае
-                if remnawave:
-                    await remnawave.close()
-                    logger.debug(f"Закрыта сессия клиента RemnaWave после удаления пользователя {user_obj.id}")
+        if user_obj:
+            # Удаляем через метод delete(), где отзываются задачи Celery и удаляется из RemnaWave
+            await user_obj.delete()
+            logger.info(f"Пользователь {pk} удалён через админку с revocation Celery и RemnaWave")
         else:
-            logger.warning(f"У пользователя {user_obj.id} отсутствует remnawave_uuid. Пропускаем удаление из RemnaWave.")
-        
-        # Выполняем стандартное удаление из базы данных, передавая pk
+            logger.warning(f"Пользователь с ID {pk} не найден при удалении через админку")
+        # Возвращаем стандартный ответ админки
         await super().delete_model(pk)
-        logger.info(f"Пользователь {user_obj.id} ({user_obj.name()}) успешно удален из локальной БД.")
