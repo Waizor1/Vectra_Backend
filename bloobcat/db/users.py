@@ -154,19 +154,15 @@ class Users(models.Model):
             
             needs_save = False
             
-            # Обработка UTM - устанавливаем только если пользователь новый ИЛИ у него еще нет UTM
+            # Обработка UTM - устанавливаем только для новых пользователей
             if utm:
                 logger.info(f"Получен параметр UTM: {utm} для пользователя {user.id}")
                 if is_new:
                     user.utm = utm
                     needs_save = True
                     logger.info(f"Пользователь новый, устанавливаем UTM: {utm}")
-                elif user.utm is None:
-                    user.utm = utm
-                    needs_save = True
-                    logger.info(f"У пользователя нет UTM, устанавливаем: {utm}")
                 else:
-                    logger.info(f"У пользователя уже есть UTM: {user.utm}, сохраняем её (не перезаписываем)")
+                    logger.info(f"Пользователь {user.id} уже существует, пропускаем UTM")
             
             if is_new:
                 # Обработка реферала (только для новых пользователей)

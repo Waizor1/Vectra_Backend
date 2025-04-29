@@ -36,11 +36,11 @@ async def validate(init_data: str = Depends(oauth2_scheme)) -> Users:
                 if ref_part.isdigit():
                     referred_by = int(ref_part)
                     utm = utm_part
-                    logger.info(f"Найдена UTM: '{utm}' и реферал: {referred_by} для пользователя {user.user.id}")
+                    logger.info(f"Найдена UTM: '{utm}' и рефер: {referred_by} для пользователя {user.user.id}")
                 else:
                     # Если часть после '-' не число, считаем всю строку UTM
                     utm = param
-                    logger.info(f"Найдена UTM (без реферала): '{utm}' для пользователя {user.user.id}")
+                    logger.info(f"Найдена UTM (без реферера): '{utm}' для пользователя {user.user.id}")
             elif param.startswith("family_"):
                 logger.info(f"Пропускаем family link: {param} для пользователя {user.user.id}")
             elif param.isdigit():
