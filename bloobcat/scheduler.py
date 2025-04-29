@@ -155,7 +155,7 @@ async def schedule_user_tasks(user):
 
     # Trial tasks
     # Only for users with trial assigned and not subscribed
-    if user.used_trial and not user.is_subscribed and user.expired_at:
+    if user.is_trial and not user.is_subscribed and user.expired_at:
         exp_dt = datetime.combine(user.expired_at, time.min).replace(tzinfo=MOSCOW)
         # Calculate time for notifications from registration_date
         reg_dt = user.registration_date.replace(tzinfo=MOSCOW)
