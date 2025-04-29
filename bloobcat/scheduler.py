@@ -77,7 +77,7 @@ async def _exec_notify_expired(user_id: int, planned_expired: date):
 async def _exec_notify_no_trial(user_id: int, hours_passed: int):
     user = await Users.get_or_none(id=user_id)
     # Only for users who were assigned a trial and haven't subscribed yet
-    if not user or not user.used_trial:
+    if not user or not user.is_trial or user.connected_at:
         logger.debug(f"Skipping notify no trial for user {user_id} (no trial assigned)")
         return
     if user.is_subscribed:
@@ -209,8 +209,8 @@ async def remnawave_scheduler(interval_seconds: int = 600):
 async def retry_send_missed_trial_notifications():
     """Retry sending trial notifications to users who haven't received them yet"""
     logger.debug(f"Starting missed trial notifications check")
-    # Only check users with trial assigned and not subscribed
-    users = await Users.filter(used_trial=True, is_subscribed=False)
+    # Только для пользователей с активным триалом, без коннектов и без платной подписки
+    users = await Users.filter(is_trial=True, connected_at=None, is_subscribed=False)
     
     processed_count = 0
     sent_count = 0
