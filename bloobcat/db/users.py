@@ -181,6 +181,7 @@ class Users(models.Model):
                         user.full_name,
                         referrer_id=referrer.id if referrer else None,
                         referrer_name=referrer.full_name if referrer else None,
+                        utm=user.utm
                     )
                 except Exception as e:
                     logger.error(f"Ошибка отправки уведомления админу о новом пользователе: {str(e)}")

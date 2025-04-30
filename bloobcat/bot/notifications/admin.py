@@ -57,7 +57,7 @@ async def send_admin_message(text: str, reply_markup=None):
         logger.error(f"Неожиданная ошибка при отправке сообщения: {str(e)}")
 
 async def on_activated_bot(
-    user_id: int, name: str, referrer_id: int | None, referrer_name: str | None
+    user_id: int, name: str, referrer_id: int | None, referrer_name: str | None, utm: str | None = None
 ):
     try:
         text = f"""👤 Новая регистрация в боте!
@@ -69,6 +69,9 @@ async def on_activated_bot(
             text += f"\n👨‍👩‍👧‍👦 Реферер: {referrer_name} (ID: {referrer_id})"
         else:
             text += "\n👨‍👩‍👧‍👦 Реферер: Отсутствует"
+            
+        if utm:
+            text += f"\n🎯 UTM: {utm}"
             
         text += "\n\n#новый_пользователь"
         
@@ -90,7 +93,7 @@ async def on_activated_bot(
         logger.error(f"Ошибка отправки уведомления о активации бота: {str(e)}")
 
 async def on_activated_key(
-    user_id: int, name: str, referrer_id: int | None, referrer_name: str | None
+    user_id: int, name: str, referrer_id: int | None, referrer_name: str | None, utm: str | None = None
 ):
     try:
         text = f"""✅ Активация ключа пользователем!
@@ -102,6 +105,9 @@ async def on_activated_key(
             text += f"\n👨‍👩‍👧‍👦 Реферер: {referrer_name} (ID: {referrer_id})"
         else:
             text += "\n👨‍👩‍👧‍👦 Реферер: Отсутствует"
+            
+        if utm:
+            text += f"\n🎯 UTM: {utm}"
             
         text += "\n\n#активация #ключ"
             

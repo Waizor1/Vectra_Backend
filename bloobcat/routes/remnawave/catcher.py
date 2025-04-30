@@ -204,7 +204,8 @@ async def remnawave_updater():
                                 user.id,
                                 user.full_name,
                                 referrer_id=referrer.id if referrer else None,
-                                referrer_name=referrer.full_name if referrer else None
+                                referrer_name=referrer.full_name if referrer else None,
+                                utm=user.utm
                             )
                             user.is_registered = True
                             await user.save()
