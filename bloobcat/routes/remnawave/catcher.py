@@ -231,7 +231,7 @@ async def remnawave_updater():
                     
                     # Пропускаем обновление, если дата истечения в прошлом
                     if db_expire_date < today:
-                        logger.warning(f"Дата истечения {db_expire_date} находится в прошлом. RemnaWave не принимает такие даты. Пропускаем обновление для пользователя {user.id}")
+                        logger.debug(f"Дата истечения {db_expire_date} находится в прошлом. RemnaWave не принимает такие даты. Пропускаем обновление для пользователя {user.id}")
                         continue
                     
                     if db_expire_date != remnawave_expire_date:
