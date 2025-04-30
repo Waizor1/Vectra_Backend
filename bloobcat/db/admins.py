@@ -1,7 +1,7 @@
 from uuid import UUID
 
 import bcrypt
-from fastadmin import TortoiseModelAdmin, register
+from fastadmin import TortoiseModelAdmin, register, WidgetType
 from tortoise import fields
 from tortoise.models import Model
 
@@ -34,11 +34,17 @@ class Admin(Model):
 
 @register(Admin)
 class UserAdmin(TortoiseModelAdmin):
-    exclude = ("hash_password",)
     list_display = ("id", "username", "is_superuser", "is_active")
     list_display_links = ("id", "username")
     list_filter = ("id", "username", "is_superuser", "is_active")
     search_fields = ("username",)
+    fieldsets = (
+        (None, {"fields": ("username", "hash_password")} ),
+        ("Permissions", {"fields": ("is_superuser", "is_active")} ),
+    )
+    formfield_overrides = {
+        "hash_password": (WidgetType.PasswordInput, {"passwordModalForm": True}),
+    }
 
     async def authenticate(
         self, username: str, password: str
@@ -49,3 +55,10 @@ class UserAdmin(TortoiseModelAdmin):
         if not bcrypt.checkpw(password.encode(), user.hash_password.encode()):
             return None
         return user.id
+
+    async def change_password(self, id: UUID | int, password: str) -> None:
+        user = await Admin.filter(id=id).first()
+        if not user:
+            return
+        user.hash_password = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+        await user.save(update_fields=("hash_password",))
