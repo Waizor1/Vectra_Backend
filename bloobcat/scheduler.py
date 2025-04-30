@@ -246,10 +246,50 @@ async def retry_send_missed_trial_notifications():
     
     logger.debug(f"Finished missed trial notifications: processed {processed_count}, sent {sent_count}")
 
+async def retry_missed_trial_extensions():
+    """Retry trial extensions for users if the extension time has already passed."""
+    logger.debug("Starting missed trial extensions check")
+    users = await Users.filter(is_trial=True, connected_at=None, is_subscribed=False)
+    processed = 0
+    extended_count = 0
+    now_dt = datetime.now(MOSCOW)
+    for user in users:
+        processed += 1
+        exp_dt = datetime.combine(user.expired_at, time.min).replace(tzinfo=MOSCOW)
+        ext_eta = exp_dt - timedelta(hours=12)
+        # Если момент продления уже прошёл (включая истекший trial)
+        if ext_eta <= now_dt:
+            logger.debug(f"Extending (missed) trial for user {user.id}")
+            await _exec_extend_trial(user.id, user.expired_at)
+            extended_count += 1
+    logger.debug(f"Finished missed trial extensions: processed {processed}, extended {extended_count}")
+
+async def retry_missed_trial_endings():
+    """Retry trial end notifications and flag cleanup if trial expired during downtime."""
+    logger.debug("Starting missed trial end check")
+    # Только для тех, кто действительно подключался (connected_at != None)
+    users = await Users.filter(is_trial=True, is_subscribed=False).exclude(connected_at=None)
+    processed = 0
+    finalized = 0
+    now_dt = datetime.now(MOSCOW)
+    for user in users:
+        processed += 1
+        exp_dt = datetime.combine(user.expired_at, time.min).replace(tzinfo=MOSCOW)
+        # Если до окончания триала время уже прошло
+        if exp_dt <= now_dt:
+            logger.debug(f"Finalizing missed trial end for user {user.id}")
+            await _exec_notify_trial_end(user.id, user.expired_at)
+            finalized += 1
+    logger.debug(f"Finished missed trial end check: processed {processed}, finalized {finalized}")
+
 async def schedule_all_tasks():
     """Schedule tasks for all users on application startup."""
     # First try to send any missed notifications
     await retry_send_missed_trial_notifications()
+    # Then retry missed trial extensions
+    await retry_missed_trial_extensions()
+    # Then finalize missed trial ends
+    await retry_missed_trial_endings()
     
     users = await Users.all()
     for user in users:

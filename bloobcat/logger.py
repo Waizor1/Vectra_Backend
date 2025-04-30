@@ -3,6 +3,7 @@ import sys
 import logging
 import datetime
 from loguru import logger
+from .settings import test_mode
 
 # Функция для настройки логирования
 def setup_logging():
@@ -25,6 +26,9 @@ def setup_logging():
     
     # Удаляем стандартный обработчик логов Loguru
     logger.remove()
+    
+    # Устанавливаем уровень логирования (DEBUG если test_mode, иначе INFO)
+    log_level = "DEBUG" if test_mode else "INFO"
     
     # Список фраз для фильтрации
     filtered_phrases = [
@@ -53,7 +57,7 @@ def setup_logging():
     logger.add(
         sys.stdout,
         format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
-        level="INFO",
+        level=log_level,
         colorize=True,
         filter=message_filter
     )
@@ -65,36 +69,12 @@ def setup_logging():
     logger.add(
         os.path.join(log_dir, f"bloobcat_{current_time}.log"),
         format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}",
-        level="INFO",
+        level=log_level,
         rotation="10 MB",
         compression="zip",
         retention=30,
         encoding="utf-8",
-        filter=lambda record: message_filter(record) and record["name"] not in ["payment", "tunnel"]
-    )
-    
-    # Добавляем обработчик для логов платежей
-    payment_logger_id = logger.add(
-        os.path.join(log_dir, f"payments_{current_time}.log"),
-        format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - [PaymentID:{extra[payment_id]}] [UserID:{extra[user_id]}] [Amount:{extra[amount]}] [Status:{extra[status]}] {message}",
-        level="INFO",
-        rotation="10 MB",
-        compression="zip",
-        retention=30,
-        encoding="utf-8",
-        filter=lambda record: record["name"] == "payment"
-    )
-    
-    # Добавляем обработчик для логов туннеля
-    tunnel_logger_id = logger.add(
-        os.path.join(log_dir, f"tunnel_{current_time}.log"),
-        format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}",
-        level="INFO",
-        rotation="10 MB", 
-        compression="zip",
-        retention=30,
-        encoding="utf-8", 
-        filter=lambda record: record["name"] == "tunnel"
+        filter=message_filter
     )
     
     # Класс для перехвата стандартных логов Python
