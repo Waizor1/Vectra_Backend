@@ -12,7 +12,7 @@ class Admin(Model):
     username = fields.CharField(max_length=255, unique=True)
     hash_password = fields.CharField(max_length=255)
     is_superuser = fields.BooleanField(default=False)
-    is_active = fields.BooleanField(default=False)
+    is_active = fields.BooleanField(default=True)
 
     @classmethod
     async def init(cls):
@@ -49,7 +49,7 @@ class UserAdmin(TortoiseModelAdmin):
     async def authenticate(
         self, username: str, password: str
     ) -> UUID | int | None:
-        user = await Admin.filter(username=username, is_superuser=True).first()
+        user = await Admin.filter(username=username, is_active=True).first()
         if not user:
             return None
         if not bcrypt.checkpw(password.encode(), user.hash_password.encode()):
@@ -62,3 +62,21 @@ class UserAdmin(TortoiseModelAdmin):
             return
         user.hash_password = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
         await user.save(update_fields=("hash_password",))
+
+    async def has_add_permission(self, user_id: UUID | int | None = None) -> bool:
+        if not user_id:
+            return False
+        user = await Admin.filter(id=user_id, is_superuser=True).first()
+        return bool(user)
+
+    async def has_change_permission(self, user_id: UUID | int | None = None) -> bool:
+        if not user_id:
+            return False
+        user = await Admin.filter(id=user_id, is_superuser=True).first()
+        return bool(user)
+
+    async def has_delete_permission(self, user_id: UUID | int | None = None) -> bool:
+        if not user_id:
+            return False
+        user = await Admin.filter(id=user_id, is_superuser=True).first()
+        return bool(user)

@@ -119,6 +119,21 @@ app.add_middleware(
 )
 
 app.mount("/admin", admin_app)
+
+# Ограничиваем права на создание/изменение/удаление: только суперюзеры имеют эти права
+from fastadmin import TortoiseModelAdmin
+
+async def only_superuser(self, user_id=None) -> bool:
+    if not user_id:
+        return False
+    user = await Admin.filter(id=user_id, is_superuser=True).first()
+    return bool(user)
+
+# Патчим базовые методы прав доступа для всех моделей
+TortoiseModelAdmin.has_add_permission = only_superuser
+TortoiseModelAdmin.has_change_permission = only_superuser
+TortoiseModelAdmin.has_delete_permission = only_superuser
+
 setup_router()
 include_bot_router()
 app.include_router(router)
