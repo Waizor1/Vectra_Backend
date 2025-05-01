@@ -7,6 +7,7 @@ from pytz import UTC
 
 from bloobcat.bot.routes.admin.functions import IsAdmin
 from bloobcat.db.users import Users
+from bloobcat.db.payments import ProcessedPayments
 
 router = Router()
 
@@ -17,10 +18,15 @@ async def admin_stat(message: Message, command: CommandObject):
     amount = await Users.filter(utm=utm).count()
     registered = await Users.filter(utm=utm, is_registered=True).count()
     payed = 0
-    for user in await Users.filter(utm=utm):
-        expires_days = user.expires()
-        if expires_days is not None and expires_days > 3:
-            payed += 1
+    # Count how many registered users have at least one successful payment
+    registered_ids = await Users.filter(utm=utm, is_registered=True).values_list("id", flat=True)
+    if registered_ids:
+        paid_user_ids = await ProcessedPayments.filter(
+            user_id__in=registered_ids, status="succeeded"
+        ).values_list("user_id", flat=True)
+        payed = len(set(paid_user_ids))
+    else:
+        payed = 0
 
     now = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
     percent_registered = amount and registered / amount * 100 or 0
