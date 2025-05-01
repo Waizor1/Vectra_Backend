@@ -104,7 +104,7 @@ async def show_utm_list(message, page=0, edit_message=False):
     ]
     
     # Определяем пагинацию
-    items_per_page = 1  # Для теста показываем 1 UTM на странице
+    items_per_page = 5  # Показываем 5 UTM на странице
     total_pages = (len(utms) + items_per_page - 1) // items_per_page
     
     # Ограничиваем номер страницы
@@ -134,7 +134,8 @@ async def show_utm_list(message, page=0, edit_message=False):
         
         utm_str = str(utm)
         button_text = f"{utm_str} ({amount}|{registered}|{payed})"
-        builder.button(text=button_text, callback_data=f"utm_{utm_str}_{page}")
+        # Добавляем каждую кнопку в отдельную строку
+        builder.row(InlineKeyboardButton(text=button_text, callback_data=f"utm_{utm_str}_{page}"))
     
     # Кнопки навигации (предыдущая, номер страницы, следующая)
     if total_pages > 1:
