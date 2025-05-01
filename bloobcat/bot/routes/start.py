@@ -11,9 +11,6 @@ router = Router()
 
 @router.message(CommandStart())
 async def command_start_handler(message: Message, command: CommandObject):
-    user = message.from_user
-    # Получаем или создаем пользователя
-   # await Users.get_user(user)
 
     # Определяем язык пользователя
     lang_code = message.from_user.language_code
