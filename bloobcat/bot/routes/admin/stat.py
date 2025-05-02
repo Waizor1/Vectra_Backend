@@ -135,7 +135,7 @@ async def show_utm_list(message, page=0, edit_message=False):
         utm_str = str(utm)
         button_text = f"{utm_str} ({amount}|{registered}|{payed})"
         # Добавляем каждую кнопку в отдельную строку
-        builder.row(InlineKeyboardButton(text=button_text, callback_data=f"utm_{utm_str}_{page}"))
+        builder.row(InlineKeyboardButton(text=button_text, callback_data=f"utm:{utm_str}:{page}"))
     
     # Кнопки навигации (предыдущая, номер страницы, следующая)
     if total_pages > 1:
@@ -237,7 +237,7 @@ async def show_utm_detail(message, utm, page=0):
         )
 
 
-@router.callback_query(lambda c: c.data and c.data.startswith(("utm_", "page_", "back_to_list_", "noop")), IsAdmin())
+@router.callback_query(lambda c: c.data and c.data.startswith(("utm:", "page_", "back_to_list_", "noop")), IsAdmin())
 async def callback_handler(callback: CallbackQuery):
     # Acknowledge callback to remove loading spinner
     await callback.answer()
@@ -265,8 +265,8 @@ async def callback_handler(callback: CallbackQuery):
             logger.error(f"Неверный формат страницы для возврата: {callback.data}")
     
     # Обработка нажатия на UTM
-    if callback.data.startswith("utm_"):
-        parts = callback.data.split("_", 2)
+    if callback.data.startswith("utm:"):
+        parts = callback.data.split(":", 2)
         if len(parts) == 3:
             utm = parts[1]
             page = int(parts[2])
