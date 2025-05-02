@@ -51,7 +51,7 @@ async def online_(message: Message):
     m = await message.answer("⏳ <i>Подождите...</i>", parse_mode="HTML")
 
     active_users = await Users.filter(
-        connected_at__gte=datetime.now(UTC) - timedelta(minutes=3)
+        connected_at__gte=datetime.now(UTC) - timedelta(minutes=15)
     )
     i = len(active_users)
 
@@ -84,7 +84,7 @@ async def show_utm_list(message, page=0, edit_message=False):
     
     # Получаем количество пользователей онлайн
     active_users = await Users.filter(
-        connected_at__gte=datetime.now(UTC) - timedelta(minutes=3)
+        connected_at__gte=datetime.now(UTC) - timedelta(minutes=15)
     ).count()
     
     # Получаем все ID зарегистрированных пользователей
