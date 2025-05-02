@@ -9,6 +9,7 @@ from bloobcat.bot.notifications.subscription.key import on_disabled
 from bloobcat.bot.notifications.trial.no_trial import notify_no_trial_taken
 from bloobcat.bot.notifications.trial.extended import notify_trial_extended
 from bloobcat.bot.notifications.trial.end import notify_trial_ended
+from bloobcat.bot.notifications.trial.expiring import notify_expiring_trial
 from bloobcat.bot.notifications.general.referral import on_referral_prompt
 from bloobcat.routes.remnawave.catcher import remnawave_updater
 from bloobcat.logger import get_logger
@@ -117,6 +118,13 @@ async def _exec_referral_prompt(user_id: int, scheduled_days: int):
         return
     await on_referral_prompt(user, scheduled_days)
 
+async def _exec_notify_expiring_trial(user_id: int, planned_expired: date):
+    user = await Users.get_or_none(id=user_id)
+    if not user or not user.is_trial or user.expired_at != planned_expired:
+        logger.debug(f"Skipping notify expiring trial for user {user_id}")
+        return
+    await notify_expiring_trial(user)
+
 async def schedule_user_tasks(user):
     """Schedule subscription, trial, and referral tasks for a user."""
     # Cancel existing tasks for this user before scheduling new ones
@@ -176,6 +184,14 @@ async def schedule_user_tasks(user):
                     logger.debug(f"Sending immediate 'no trial taken' ({hours}h) to user {user.id}, registration was at {reg_dt}")
                     task = schedule_coro(now, _exec_notify_no_trial, user.id, hours)
                     scheduled_tasks[user.id].append(task)
+        
+        # Notification about expiring trial - at 12:00 the day before
+        day_before = exp_dt - timedelta(days=1)
+        exp_notification_eta = datetime.combine(day_before.date(), time(hour=12, minute=0)).replace(tzinfo=MOSCOW)
+        if exp_notification_eta > now:
+            task = schedule_coro(exp_notification_eta, _exec_notify_expiring_trial, user.id, user.expired_at)
+            scheduled_tasks[user.id].append(task)
+        
         # Trial extension check
         ext_eta = exp_dt - timedelta(hours=12)
         if ext_eta > now:
