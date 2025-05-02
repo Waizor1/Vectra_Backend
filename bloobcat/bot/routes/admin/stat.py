@@ -82,6 +82,11 @@ async def show_utm_list(message, page=0, edit_message=False):
     total_users = await Users.all().count()
     total_registered = await Users.filter(is_registered=True).count()
     
+    # Получаем количество пользователей онлайн
+    active_users = await Users.filter(
+        connected_at__gte=datetime.now(UTC) - timedelta(minutes=3)
+    ).count()
+    
     # Получаем все ID зарегистрированных пользователей
     registered_ids_all = await Users.filter(is_registered=True).values_list("id", flat=True)
     total_paid = 0
@@ -100,7 +105,8 @@ async def show_utm_list(message, page=0, edit_message=False):
         f"📊 <b>Общая статистика:</b> <i>отчет на {now}</i>\n",
         f"👥 Всего пользователей: <b>{total_users}</b>",
         f"✅ Активировано: <b>{total_registered}</b> (<i>{percent_registered_total:.1f}%</i>)",
-        f"💰 Оплачено: <b>{total_paid}</b> (<i>{percent_paid_total:.1f}%</i>)"
+        f"💰 Оплачено: <b>{total_paid}</b> (<i>{percent_paid_total:.1f}%</i>)",
+        f"🟢 Сейчас онлайн: <b>{active_users}</b>"
     ]
     
     # Определяем пагинацию
