@@ -136,9 +136,10 @@ async def unsubscribe(user: Users = Depends(validate)):
     """
     Отписывает пользователя от рассылки (но не влияет на подписку VPN).
     """
+    if not user.is_subscribed:
+        return {"status": "ok", "message": "already unsubscribed"}
     user.is_subscribed = False
     await user.save()
-    # Уведомляем админа об отключении автопродления
     await cancel_subscription(user)
     return {"status": "ok"}
 
