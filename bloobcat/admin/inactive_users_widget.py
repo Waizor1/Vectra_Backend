@@ -65,7 +65,7 @@ class InactiveUsersDashboardWidgetAdmin(DashboardWidgetAdmin):
         ):
             period_x_field = "day"
 
-        logging.warning(f"Executing widget {self.__class__.__name__}: period='{period_x_field}', start='{actual_start_date.isoformat()}', end='{max_x_field_date.isoformat()}'")
+        logging.debug(f"Executing widget {self.__class__.__name__}: period='{period_x_field}', start='{actual_start_date.isoformat()}', end='{max_x_field_date.isoformat()}'")
 
         # Ensure generate_series includes the last day
         query_end_date = max_x_field_date + datetime.timedelta(seconds=1)
@@ -93,7 +93,7 @@ class InactiveUsersDashboardWidgetAdmin(DashboardWidgetAdmin):
             """,
             [period_x_field, actual_start_date, query_end_date],
         )
-        logging.warning(f"Widget {self.__class__.__name__} results for end='{max_x_field_date.isoformat()}': {results}")
+        logging.debug(f"Widget {self.__class__.__name__} results for end='{max_x_field_date.isoformat()}': {results}")
         return {
             "results": results,
             "min_x_field": actual_start_date.isoformat(),

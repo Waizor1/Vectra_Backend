@@ -83,8 +83,9 @@ async def show_utm_list(message, page=0, edit_message=False):
     total_registered = await Users.filter(is_registered=True).count()
     
     # Получаем количество пользователей онлайн
-    active_users = await Users.filter(
-        connected_at__gte=datetime.now(UTC) - timedelta(minutes=15)
+    now_utc = datetime.now(UTC) # Get current UTC time
+    active_users_online = await Users.filter(
+        connected_at__gte=now_utc - timedelta(minutes=15)
     ).count()
     
     # Получаем все ID зарегистрированных пользователей
@@ -96,17 +97,22 @@ async def show_utm_list(message, page=0, edit_message=False):
         ).values_list("user_id", flat=True)
         total_paid = len(set(paid_user_ids_all))
     
-    now = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+    # Считаем активных пользователей (подписка не истекла)
+    total_active_now = await Users.filter(is_registered=True, expired_at__gt=now_utc).count()
+    
+    now_str = now_utc.strftime("%d.%m.%Y %H:%M:%S") # Use formatted UTC time for report time
     percent_registered_total = total_users and total_registered / total_users * 100 or 0
     percent_paid_total = total_registered and total_paid / total_registered * 100 or 0
+    percent_active_now = total_registered and total_active_now / total_registered * 100 or 0 # Calculate percentage of active users
     
     # Создаем сообщение с общей статистикой
     lines = [
-        f"📊 <b>Общая статистика:</b> <i>отчет на {now}</i>\n",
+        f"📊 <b>Общая статистика:</b> <i>отчет на {now_str}</i>\n",
         f"👥 Всего пользователей: <b>{total_users}</b>",
         f"✅ Активировано: <b>{total_registered}</b> (<i>{percent_registered_total:.1f}%</i>)",
+        f"⚡ Активны сейчас: <b>{total_active_now}</b> (<i>{percent_active_now:.1f}%)</i>", # Add new line for active users
         f"💰 Оплачено: <b>{total_paid}</b> (<i>{percent_paid_total:.1f}%</i>)",
-        f"🟢 Сейчас онлайн: <b>{active_users}</b>"
+        f"🟢 Сейчас онлайн: <b>{active_users_online}</b>" # Use correct variable name
     ]
     
     # Определяем пагинацию
@@ -130,6 +136,7 @@ async def show_utm_list(message, page=0, edit_message=False):
         amount = await Users.filter(utm=utm).count()
         registered = await Users.filter(utm=utm, is_registered=True).count()
         
+        # Считаем оплативших для UTM
         payed = 0
         registered_ids = await Users.filter(utm=utm, is_registered=True).values_list("id", flat=True)
         if registered_ids:
@@ -137,9 +144,13 @@ async def show_utm_list(message, page=0, edit_message=False):
                 user_id__in=registered_ids, status="succeeded"
             ).values_list("user_id", flat=True)
             payed = len(set(paid_user_ids))
+
+        # Считаем активных сейчас для UTM
+        active_now_utm = await Users.filter(utm=utm, is_registered=True, expired_at__gt=now_utc).count()
         
         utm_str = str(utm)
-        button_text = f"{utm_str} ({amount}|{registered}|{payed})"
+        # Обновляем текст кнопки, добавляя активных
+        button_text = f"{utm_str} ({amount}|{registered}|{active_now_utm}|{payed})" # Add active_now_utm
         # Добавляем каждую кнопку в отдельную строку
         builder.row(InlineKeyboardButton(text=button_text, callback_data=f"utm:{utm_str}:{page}"))
     
@@ -208,16 +219,22 @@ async def show_utm_detail(message, utm, page=0):
             user_id__in=registered_ids, status="succeeded"
         ).values_list("user_id", flat=True)
         payed = len(set(paid_user_ids))
+
+    # Count currently active users for this UTM
+    now_utc = datetime.now(UTC)
+    active_now = await Users.filter(utm=utm, is_registered=True, expired_at__gt=now_utc).count()
     
-    now = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+    now_str = now_utc.strftime("%d.%m.%Y %H:%M:%S") # Use formatted UTC time for report time
     percent_registered = amount and registered / amount * 100 or 0
     percent_payed = registered and payed / registered * 100 or 0
+    percent_active_now = registered and active_now / registered * 100 or 0 # Calculate percentage of active users
     
     stats_message = (
         f"📊 <b>Статистика по UTM:</b> <code>{utm}</code>\n"
-        f"<i>отчет на {now}</i>\n\n"
+        f"<i>отчет на {now_str}</i>\n\n"
         f"👥 Всего зашли: <b>{amount}</b>\n"
         f"✅ Активировали: <b>{registered}</b> (<i>{percent_registered:.1f}%</i>)\n"
+        f"⚡ Активны сейчас: <b>{active_now}</b> (<i>{percent_active_now:.1f}%)</i>\n"  # Add new line
         f"💰 Оплатили: <b>{payed}</b> (<i>{percent_payed:.1f}%</i>)"
     )
     
