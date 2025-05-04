@@ -52,7 +52,7 @@ class InactiveUsersDashboardWidgetAdmin(DashboardWidgetAdmin):
                     SELECT
                         date_trunc($1, registration_date)::date AS day,
                         COUNT(*) AS daily_total,
-                        COUNT(*) FILTER (WHERE expired_at > CURRENT_DATE AND is_registered = TRUE) AS daily_active
+                        COUNT(*) FILTER (WHERE expired_at > date_trunc($1, registration_date)::date AND is_registered = TRUE) AS daily_active
                     FROM users
                     WHERE registration_date >= $2 AND registration_date <= $3
                     GROUP BY date_trunc($1, registration_date)::date

@@ -50,7 +50,7 @@ class ActiveUsersDashboardWidgetAdmin(DashboardWidgetAdmin):
             """
                 SELECT
                     to_char(date_trunc($1, registration_date)::date, 'DD/MM/YYYY') AS date,
-                    COUNT(*) FILTER (WHERE expired_at > CURRENT_DATE AND is_registered = TRUE) AS count
+                    COUNT(*) FILTER (WHERE expired_at > date_trunc($1, registration_date)::date AND is_registered = TRUE) AS count
                 FROM users
                 WHERE registration_date >= $2 AND registration_date <= $3
                 GROUP BY date_trunc($1, registration_date)
