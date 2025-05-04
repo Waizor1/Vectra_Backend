@@ -98,6 +98,7 @@ class ConnectionDashboardWidgetAdmin(DashboardWidgetAdmin):
             """,
             [period_x_field, actual_start_date, max_x_field_date],
         )
+        logging.warning(f"Widget {self.__class__.__name__} results for end='{max_x_field_date.isoformat()}': {results}")
         # Убираем код, который пытался определить дату из результатов, т.к. generate_series теперь начинается с нужной даты
         # actual_min_date = min_x_field_date
         # if results: 

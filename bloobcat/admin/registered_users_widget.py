@@ -86,6 +86,7 @@ class RegisteredUsersDashboardWidgetAdmin(DashboardWidgetAdmin):
             """,
             [period_x_field, actual_start_date, max_x_field_date],
         )
+        logging.warning(f"Widget {self.__class__.__name__} results for end='{max_x_field_date.isoformat()}': {results}")
         return {
             "results": results,
             "min_x_field": actual_start_date.isoformat(), # Используем ту же дату, что и для запроса
