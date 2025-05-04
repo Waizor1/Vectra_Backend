@@ -13,7 +13,7 @@ oauth2_scheme = APIKeyHeader(name="Authorization", auto_error=False)
 
 async def validate(init_data: str = Depends(oauth2_scheme)) -> Users:
     try:
-        logger.info(f"Получены данные для валидации: {init_data[:50]}...")  # логируем только начало для безопасности
+        logger.debug(f"Получены данные для валидации: {init_data[:50]}...")  # логируем только начало для безопасности
         
         if not init_data:
             logger.error("Отсутствует заголовок Authorization")
@@ -22,11 +22,11 @@ async def validate(init_data: str = Depends(oauth2_scheme)) -> Users:
         user = safe_parse_webapp_init_data(
             telegram_settings.token.get_secret_value(), init_data
         )
-        logger.info(f"Успешная валидация для пользователя {user.user.id}")
+        logger.debug(f"Успешная валидация для пользователя {user.user.id}")
         
         referred_by = 0
         utm = None
-        logger.info(f"Проверка start_param для пользователя {user.user.id}: {user.start_param!r}") 
+        logger.debug(f"Проверка start_param для пользователя {user.user.id}: {user.start_param!r}") 
         if user.start_param:
             param = user.start_param
             # Combined UTM and numeric referral (format: <utm>-<referrer_id>)
@@ -36,19 +36,19 @@ async def validate(init_data: str = Depends(oauth2_scheme)) -> Users:
                 if ref_part.isdigit():
                     referred_by = int(ref_part)
                     utm = utm_part
-                    logger.info(f"Найдена UTM: '{utm}' и рефер: {referred_by} для пользователя {user.user.id}")
+                    logger.debug(f"Найдена UTM: '{utm}' и рефер: {referred_by} для пользователя {user.user.id}")
                 else:
                     # Если часть после '-' не число, считаем всю строку UTM
                     utm = param
-                    logger.info(f"Найдена UTM (без реферера): '{utm}' для пользователя {user.user.id}")
+                    logger.debug(f"Найдена UTM (без реферера): '{utm}' для пользователя {user.user.id}")
             elif param.startswith("family_"):
-                logger.info(f"Пропускаем family link: {param} для пользователя {user.user.id}")
+                logger.debug(f"Пропускаем family link: {param} для пользователя {user.user.id}")
             elif param.isdigit():
                 referred_by = int(param)
-                logger.info(f"Найден реферал: {referred_by} для пользователя {user.user.id}")
+                logger.debug(f"Найден реферал: {referred_by} для пользователя {user.user.id}")
             else:
                 utm = param
-                logger.info(f"Найдена UTM: '{utm}' для пользователя {user.user.id}")
+                logger.debug(f"Найдена UTM: '{utm}' для пользователя {user.user.id}")
 
     except Exception as e:
         logger.error(f"Ошибка валидации: {str(e)}")

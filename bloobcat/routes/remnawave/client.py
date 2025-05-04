@@ -197,14 +197,14 @@ class UsersAPI:
 
     async def get_subscription_url(self, user_db: Users) -> str:
         """Получает URL подписки пользователя (только если он уже существует в RemnaWave)."""
-        logger.info(f"Получаем URL подписки для пользователя {user_db.id}")
+        logger.debug(f"Получаем URL подписки для пользователя {user_db.id}")
         
         if not user_db.remnawave_uuid:
             logger.error(f"У пользователя {user_db.id} отсутствует UUID RemnaWave. Невозможно получить URL.")
             raise ValueError(f"User {user_db.id} has no RemnaWave UUID")
         
         try:
-            logger.info(f"Запрос данных пользователя по UUID: {user_db.remnawave_uuid}")
+            logger.debug(f"Запрос данных пользователя по UUID: {user_db.remnawave_uuid}")
             user_data = await self.get_user_by_uuid(user_db.remnawave_uuid)
             subscription_url = user_data["response"].get("happ", {}).get("cryptoLink", "")
             

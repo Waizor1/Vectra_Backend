@@ -189,9 +189,9 @@ class Users(models.Model):
             # Сохраняем пользователя, если были изменения (UTM или реферал)
             if needs_save:
                 await user.save()
-                logger.info(f"Пользователь {user.id} сохранен после изменений. Текущий UTM: {user.utm}")
+                logger.debug(f"Пользователь {user.id} сохранен после изменений. Текущий UTM: {user.utm}")
             else:
-                logger.info(f"Пользователь {user.id} не сохранялся, изменений не было. Текущий UTM: {user.utm}")
+                logger.debug(f"Пользователь {user.id} не сохранялся, изменений не было. Текущий UTM: {user.utm}")
                 
             await user.count_referrals()
 

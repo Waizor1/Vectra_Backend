@@ -59,9 +59,9 @@ async def check(user: Users = Depends(validate)) -> Dict[str, Any]:
     else:
         try:
             # Получаем URL подписки
-            logger.info(f"Получаем URL подписки для {user.id} внутри эндпоинта /user")
+            logger.debug(f"Получаем URL подписки для {user.id} внутри эндпоинта /user")
             subscription_url = await remnawave_client.users.get_subscription_url(user)
-            logger.info(f"Пользователь {user.id} получил URL подписки RemnaWave: {subscription_url[:20]}...")
+            logger.debug(f"Пользователь {user.id} получил URL подписки RemnaWave: {subscription_url[:20]}...")
         except Exception as e:
             error_getting_url = f"Failed to get subscription URL: {str(e)}"
             logger.error(f"Ошибка при получении URL подписки для пользователя {user.id} в эндпоинте /user: {error_getting_url}")
