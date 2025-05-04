@@ -79,8 +79,8 @@ class ActiveUsersDashboardWidgetAdmin(DashboardWidgetAdmin):
                     -- и чья подписка была активна на эту дату (сравниваем date)
                     COUNT(u.id) AS count
                 FROM date_series ds
-                LEFT JOIN users u ON u.registration_date <= ds.report_timestamp
-                                 AND u.expired_at > ds.report_timestamp::date -- Сравниваем DATE с DATE
+                LEFT JOIN users u ON u.registration_date::date <= ds.report_timestamp::date -- Сравниваем DATE с DATE
+                                 AND u.expired_at >= ds.report_timestamp::date + interval '1 day' -- Активен, если истекает на следующий день или позже
                                  AND u.is_registered = TRUE
                 GROUP BY ds.report_timestamp -- Группируем по полному timestamp
                 ORDER BY ds.report_timestamp;
