@@ -48,20 +48,18 @@ class InactiveUsersDashboardWidgetAdmin(DashboardWidgetAdmin):
 
         results = await conn.execute_query_dict(
             """
-                WITH daily AS (
-                    SELECT
-                        date_trunc($1, registration_date)::date AS day,
-                        COUNT(*) AS daily_total,
-                        COUNT(*) FILTER (WHERE expired_at > date_trunc($1, registration_date)::date AND is_registered = TRUE) AS daily_active
-                    FROM users
-                    WHERE registration_date >= $2 AND registration_date <= $3
-                    GROUP BY date_trunc($1, registration_date)::date
-                )
                 SELECT
-                    to_char(day, 'DD/MM/YYYY') AS date,
-                    SUM(daily_total - daily_active) OVER (ORDER BY day) AS count
-                FROM daily
-                ORDER BY day
+                    to_char(gs.day::date, 'DD/MM/YYYY') AS date,
+                    COUNT(u.id) AS count
+                FROM generate_series(
+                    $2, $3, '1 ' || $1
+                ) AS gs(day)
+                LEFT JOIN users u
+                    ON u.registration_date <= gs.day
+                    AND u.expired_at <= gs.day
+                    AND u.is_registered = TRUE
+                GROUP BY gs.day
+                ORDER BY gs.day
             """,
             [period_x_field, min_x_field_date, max_x_field_date],
         )

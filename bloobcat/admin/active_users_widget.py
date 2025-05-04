@@ -49,20 +49,20 @@ class ActiveUsersDashboardWidgetAdmin(DashboardWidgetAdmin):
         results = await conn.execute_query_dict(
             """
                 SELECT
-                    to_char(date_trunc($1, registration_date)::date, 'DD/MM/YYYY') AS date,
-                    COUNT(*) FILTER (WHERE expired_at > date_trunc($1, registration_date)::date AND is_registered = TRUE) AS count
-                FROM users
-                WHERE registration_date >= $2 AND registration_date <= $3
-                GROUP BY date_trunc($1, registration_date)
-                ORDER BY date_trunc($1, registration_date)
+                    to_char(gs.day::date, 'DD/MM/YYYY') AS date,
+                    COUNT(u.id) AS count
+                FROM generate_series(
+                    $2, $3, '1 ' || $1
+                ) AS gs(day)
+                LEFT JOIN users u
+                    ON u.registration_date <= gs.day
+                    AND u.expired_at > gs.day
+                    AND u.is_registered = TRUE
+                GROUP BY gs.day
+                ORDER BY gs.day
             """,
             [period_x_field, min_x_field_date, max_x_field_date],
         )
-        # Добавляю кумулятивный подсчет активных пользователей
-        running_total = 0
-        for item in results:
-            running_total += item["count"]
-            item["count"] = running_total
 
         return {
             "results": results,
