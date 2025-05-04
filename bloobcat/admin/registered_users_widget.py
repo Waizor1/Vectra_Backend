@@ -1,4 +1,5 @@
 import datetime
+import logging
 
 from fastadmin import (
     DashboardWidgetAdmin,
@@ -62,6 +63,8 @@ class RegisteredUsersDashboardWidgetAdmin(DashboardWidgetAdmin):
         # else:
         #     actual_start_date = min_x_field_date # Оставляем выбранную, если в БД нет дат
         # ----------------------------------------------------------------------
+
+        logging.warning(f"Executing widget {self.__class__.__name__}: period='{period_x_field}', start='{actual_start_date.isoformat()}', end='{max_x_field_date.isoformat()}'")
 
         results = await conn.execute_query_dict(
             """
