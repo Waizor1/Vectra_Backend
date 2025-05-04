@@ -65,6 +65,9 @@ class TotalUsersDashboardWidgetAdmin(DashboardWidgetAdmin):
 
         logging.warning(f"Executing widget {self.__class__.__name__}: period='{period_x_field}', start='{actual_start_date.isoformat()}', end='{max_x_field_date.isoformat()}'")
 
+        # Ensure generate_series includes the last day
+        query_end_date = max_x_field_date + datetime.timedelta(seconds=1) 
+
         results = await conn.execute_query_dict(
             """
                 WITH date_series AS (
@@ -86,8 +89,8 @@ class TotalUsersDashboardWidgetAdmin(DashboardWidgetAdmin):
                 FROM date_series ds
                 ORDER BY ds.report_timestamp;
             """,
-            # Передаем period_x_field ($1), actual_start_date ($2), max_x_field_date ($3)
-            [period_x_field, actual_start_date, max_x_field_date],
+            # Передаем period_x_field ($1), actual_start_date ($2), query_end_date ($3)
+            [period_x_field, actual_start_date, query_end_date], # Use query_end_date
         )
         logging.warning(f"Widget {self.__class__.__name__} results for end='{max_x_field_date.isoformat()}': {results}")
         return {

@@ -67,6 +67,9 @@ class ActiveUsersDashboardWidgetAdmin(DashboardWidgetAdmin):
 
         logging.warning(f"Executing widget {self.__class__.__name__}: period='{period_x_field}', start='{actual_start_date.isoformat()}', end='{max_x_field_date.isoformat()}'")
 
+        # Ensure generate_series includes the last day
+        query_end_date = max_x_field_date + datetime.timedelta(seconds=1)
+
         results = await conn.execute_query_dict(
             """
                 WITH date_series AS (
@@ -88,8 +91,9 @@ class ActiveUsersDashboardWidgetAdmin(DashboardWidgetAdmin):
                 GROUP BY ds.report_timestamp -- Группируем по полному timestamp
                 ORDER BY ds.report_timestamp;
             """,
-            [period_x_field, actual_start_date, max_x_field_date],
+            [period_x_field, actual_start_date, query_end_date],
         )
+        logging.warning(f"Widget {self.__class__.__name__} results for end='{max_x_field_date.isoformat()}': {results}")
         # Убираем кумулятивный подсчет
         # running_total = 0
         # for item in results:
