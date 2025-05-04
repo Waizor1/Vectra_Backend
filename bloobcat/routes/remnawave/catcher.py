@@ -11,6 +11,7 @@ from bloobcat.db.payments import ProcessedPayments
 from bloobcat.logger import get_logger
 from .client import RemnaWaveClient
 from bloobcat.settings import remnawave_settings
+from bloobcat.bot.notifications.general.referral import on_referral_registration
 
 router = APIRouter(prefix="/remnawave", tags=["remnawave"])
 logger = get_logger("remnawave_catcher")
@@ -210,6 +211,13 @@ async def remnawave_updater():
                             user.is_registered = True
                             await user.save()
                             logger.info(f"Первое подключение пользователя {user.id}, отправлено уведомление")
+
+                            # --- Реферальный бонус: 50₽ на баланс пригласившему ---
+                            if referrer:
+                                referrer.balance += 50
+                                await referrer.save()
+                                await on_referral_registration(referrer, user)
+                                logger.info(f"Начислено 50₽ рефереру {referrer.id} за регистрацию пользователя {user.id}")
                         
                         # Обновляем только если время онлайна новее или connected_at отсутствует
                         if not old_connected_at or new_connected_at > old_connected_at:

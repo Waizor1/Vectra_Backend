@@ -34,19 +34,19 @@ async def on_referral_payment(user: Users, referral: Users, amount: int):
 async def on_referral_registration(user: Users, referral: Users):
     lang = get_user_locale(user)
     if lang == 'ru':
-        logger.info(f"Реферальная регистрация: пользователь {user.id} получил 7 дней подписки за регистрацию реферала {referral.id}")
+        logger.info(f"Реферальная регистрация: пользователь {user.id} получил 50₽ за регистрацию реферала {referral.id}")
         text = (
             f"🎉 Привет, {user.full_name}! Ваш реферал {referral.name()} только что зарегистрировался.\n"
-            "Вы получили 7-дневный бесплатный доступ. Наслаждайтесь тестированием VPN!"
+            "Вы получили 50₽ на баланс. Спасибо, что рекомендуете нас! 💸"
         )
-        button = await webapp_inline_button("Активировать пробную")
+        button = await webapp_inline_button("Реферальная программа", "ref")
     else:
-        logger.info(f"Реферальная регистрация: пользователь {user.id} получил 7 дней подписки за регистрацию реферала {referral.id}")
+        logger.info(f"Реферальная регистрация: пользователь {user.id} получил 50₽ за регистрацию реферала {referral.id}")
         text = (
             f"🎉 Hi {user.full_name}! Your referral {referral.name()} just signed up.\n"
-            "You've been awarded a 7-day free trial. Enjoy testing our VPN!"
+            "You've been credited 50 RUB to your balance. Thanks for spreading the word! 💸"
         )
-        button = await webapp_inline_button("Activate Trial")
+        button = await webapp_inline_button("Реферальная программа", "ref")
     try:
         await bot.send_message(user.id, text, reply_markup=button)
         logger.info(f"Уведомление о реферальной регистрации успешно отправлено пользователю {user.id}")
