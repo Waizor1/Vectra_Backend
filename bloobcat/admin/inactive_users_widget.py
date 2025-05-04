@@ -54,7 +54,10 @@ class InactiveUsersDashboardWidgetAdmin(DashboardWidgetAdmin):
                 min_registration_date_db = min_registration_date_db.replace(tzinfo=datetime.timezone.utc)
             else:
                 min_registration_date_db = min_registration_date_db.astimezone(datetime.timezone.utc)
-            actual_start_date = max(min_x_field_date, min_registration_date_db)
+            # Вычисляем "сырую" стартовую дату
+            actual_start_date_raw = max(min_x_field_date, min_registration_date_db)
+            # Округляем до начала UTC дня
+            actual_start_date = datetime.datetime.combine(actual_start_date_raw.date(), datetime.time.min).replace(tzinfo=datetime.timezone.utc)
         # ---------------------------------------------
 
         if not period_x_field or period_x_field not in (

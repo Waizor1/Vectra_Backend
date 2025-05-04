@@ -58,8 +58,10 @@ class RegisteredUsersDashboardWidgetAdmin(DashboardWidgetAdmin):
                 min_registration_date_db = min_registration_date_db.replace(tzinfo=datetime.timezone.utc)
             else:
                 min_registration_date_db = min_registration_date_db.astimezone(datetime.timezone.utc)
-            # Используем самую позднюю из двух: начало окна или первая регистрация
-            actual_start_date = max(min_x_field_date, min_registration_date_db)
+            # Вычисляем "сырую" стартовую дату
+            actual_start_date_raw = max(min_x_field_date, min_registration_date_db)
+            # Округляем до начала UTC дня
+            actual_start_date = datetime.datetime.combine(actual_start_date_raw.date(), datetime.time.min).replace(tzinfo=datetime.timezone.utc)
         # else:
         #     actual_start_date = min_x_field_date # Оставляем выбранную, если в БД нет дат
         # ----------------------------------------------------------------------
