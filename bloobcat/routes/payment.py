@@ -562,9 +562,102 @@ async def pay(tariff_id: int, email: str, user: Users = Depends(validate)):
             f"Цена: {full_price}, Баланс: {user_balance}"
         )
 
+        current_date = date.today()
+        additional_days = 0
+        # --- NEW: перерасчёт остатка по старому тарифу ---
+        if user.expired_at and user.expired_at > current_date and user.active_tariff_id:
+            try:
+                active_tariff = await ActiveTariffs.get(id=user.active_tariff_id)
+                days_remaining = (user.expired_at - current_date).days
+                logger.info(f"У пользователя {user.id} осталось {days_remaining} дней подписки")
+                old_months = active_tariff.months
+                old_target_date = current_date.replace(
+                    year=current_date.year + ((current_date.month + old_months - 1) // 12),
+                    month=((current_date.month + old_months - 1) % 12) + 1
+                )
+                old_total_days = (old_target_date - current_date).days
+                unused_percent = days_remaining / old_total_days if old_total_days > 0 else 0
+                unused_value = unused_percent * active_tariff.price
+                logger.info(
+                    f"Неиспользованная часть подписки пользователя {user.id}: "
+                    f"{days_remaining}/{old_total_days} дней (стоимость: {unused_value:.2f} руб.)"
+                )
+                if tariff.price > 0:
+                    new_target_date = current_date.replace(
+                        year=current_date.year + ((current_date.month + tariff.months - 1) // 12),
+                        month=((current_date.month + tariff.months - 1) % 12) + 1
+                    )
+                    new_total_days = (new_target_date - current_date).days
+                    additional_days = int(unused_value / tariff.price * new_total_days)
+                    logger.info(
+                        f"Перенос времени для пользователя {user.id}: "
+                        f"{unused_value:.2f} руб. = {additional_days} дней в новом тарифе"
+                    )
+            except Exception as e:
+                logger.error(f"Ошибка при расчете переноса подписки для {user.id}: {str(e)}")
+                additional_days = 0
+        # ... существующий код ...
+        # days уже определён выше, пересчитаем с учётом additional_days
+        current_date = date.today()
+        target_date = current_date.replace(
+            year=current_date.year + ((current_date.month + months - 1) // 12),
+            month=((current_date.month + months - 1) % 12) + 1
+        )
+        days = (target_date - current_date).days + additional_days
+        logger.info(f"Итоговое количество дней подписки: {days} ({(target_date - current_date).days} + {additional_days})")
+
         user.balance -= full_price
         await user.extend_subscription(days)
+
+        # --- NEW: Создаём/обновляем ActiveTariffs и лимит устройств ---
+        # Удаляем предыдущий активный тариф, если есть
+        if user.active_tariff_id:
+            old_active_tariff = await ActiveTariffs.get_or_none(id=user.active_tariff_id)
+            if old_active_tariff:
+                logger.info(f"Удаляем предыдущий активный тариф {user.active_tariff_id} пользователя {user.id}")
+                await old_active_tariff.delete()
+            else:
+                logger.warning(f"Не найден активный тариф {user.active_tariff_id} для удаления у пользователя {user.id}")
+
+        # При смене тарифа удаляем все HWID устройства пользователя в RemnaWave
+        if user.remnawave_uuid:
+            await cleanup_user_hwid_devices(user.id, user.remnawave_uuid)
+
+        # Создаём новый активный тариф
+        active_tariff = await ActiveTariffs.create(
+            user=user,
+            name=tariff.name,
+            months=tariff.months,
+            price=tariff.price,
+            hwid_limit=tariff.hwid_limit
+        )
+        user.active_tariff_id = active_tariff.id
+
+        # Сохраняем пользователя (до синхронизации RemnaWave)
         await user.save()
+
+        # Синхронизируем лимит устройств и дату окончания с RemnaWave
+        if user.remnawave_uuid:
+            remnawave_client = None
+            try:
+                remnawave_client = RemnaWaveClient(
+                    remnawave_settings.url,
+                    remnawave_settings.token.get_secret_value()
+                )
+                await remnawave_client.users.update_user(
+                    uuid=user.remnawave_uuid,
+                    expireAt=user.expired_at,
+                    hwidDeviceLimit=tariff.hwid_limit
+                )
+                logger.info(f"Синхронизирован hwid_limit={tariff.hwid_limit} и expireAt={user.expired_at} для пользователя {user.id} в RemnaWave")
+            except Exception as e:
+                logger.error(f"Ошибка при синхронизации hwid_limit/expireAt с RemnaWave для пользователя {user.id}: {e}")
+            finally:
+                if remnawave_client:
+                    try:
+                        await remnawave_client.close()
+                    except Exception as close_exc:
+                        logger.warning(f"Ошибка при закрытии клиента RemnaWave: {close_exc}")
 
         payment_id = f"balance_{user.id}_{int(datetime.now().timestamp())}_{randint(100, 999)}"
 
