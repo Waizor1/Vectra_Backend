@@ -318,9 +318,9 @@ async def yookassa_webhook(request: Request, secret: str):
                         else:
                             logger.warning(f"Не найден активный тариф {user.active_tariff_id} для удаления у пользователя {user.id}")
                     
-                    # При смене тарифа удаляем все HWID устройства пользователя в RemnaWave
-                    if user.remnawave_uuid:
-                        await cleanup_user_hwid_devices(user.id, user.remnawave_uuid)
+                    # код по сбросу HWID временно отключен
+                    # if user.remnawave_uuid:
+                        # await cleanup_user_hwid_devices(user.id, user.remnawave_uuid)
                     
                     # Create a new active tariff entry with random ID
                     active_tariff = await ActiveTariffs.create(
@@ -619,9 +619,9 @@ async def pay(tariff_id: int, email: str, user: Users = Depends(validate)):
             else:
                 logger.warning(f"Не найден активный тариф {user.active_tariff_id} для удаления у пользователя {user.id}")
 
-        # При смене тарифа удаляем все HWID устройства пользователя в RemnaWave
-        if user.remnawave_uuid:
-            await cleanup_user_hwid_devices(user.id, user.remnawave_uuid)
+        # код по сбросу HWID временно отключен
+        # if user.remnawave_uuid:
+            # await cleanup_user_hwid_devices(user.id, user.remnawave_uuid)
 
         # Создаём новый активный тариф
         active_tariff = await ActiveTariffs.create(
