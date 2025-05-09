@@ -20,6 +20,9 @@ from bloobcat.db.active_tariff import ActiveTariffs
 
 import zlib
 
+# Import for new trial granted notification
+from bloobcat.bot.notifications.trial.granted import notify_trial_granted
+
 logger = get_logger("users_db")
 
 
@@ -87,11 +90,16 @@ class Users(models.Model):
                 if expire_at_date is None:
                     # Если даты нет и триал не использован, назначаем триал 
                     if not self.used_trial:
-                        expire_at_date = date.today() + timedelta(days=3)  # 3 дня триал
+                        expire_at_date = date.today() + timedelta(days=10)  # 10 дней триал
                         self.is_trial = True
                         self.used_trial = True
                         self.expired_at = expire_at_date
                         logger.info(f"Назначен триал для {self.id} до {expire_at_date}")
+                        # Send immediate notification about granted trial
+                        try:
+                            await notify_trial_granted(self)
+                        except Exception as e_notify:
+                            logger.error(f"Ошибка при отправке уведомления о предоставлении триала пользователю {self.id} в _ensure_remnawave_user: {e_notify}")
                     
                 else:
                     # Если триал использован, устанавливаем дату на сегодня

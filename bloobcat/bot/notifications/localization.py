@@ -1,6 +1,11 @@
-from bloobcat.db.users import Users
+from typing import TYPE_CHECKING
 
-def get_user_locale(user: Users) -> str:
+# from bloobcat.db.users import Users # Moved to TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from bloobcat.db.users import Users
+
+def get_user_locale(user: 'Users') -> str:
     """
     Определяет язык пользователя по полю language_code, возвращает 'ru' или 'en'.
     """
