@@ -57,3 +57,11 @@ remnawave_settings = RemnaWaveSettings()
 script_settings = ScriptSettings()
 admin_settings = AdminSettings()
 test_mode = os.getenv("TESTMODE", "false").strip().lower() in ("true", "1", "yes")
+
+# New settings class for application-specific configurations
+class AppSettings(BaseSettings):
+    trial_days: int = 10 # Default to 10 days, will be overridden by TRIAL_DAYS from .env
+    # model_config = SettingsConfigDict(env_prefix="APP_") # If we want APP_TRIAL_DAYS
+    # No env_prefix means it will look for TRIAL_DAYS directly.
+
+app_settings = AppSettings()

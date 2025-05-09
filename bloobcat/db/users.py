@@ -13,7 +13,7 @@ from bloobcat.config import referral_percent
 
 import logging
 
-from bloobcat.settings import remnawave_settings, test_mode
+from bloobcat.settings import remnawave_settings, test_mode, app_settings
 from bloobcat.logger import get_logger
 
 from bloobcat.db.active_tariff import ActiveTariffs
@@ -90,7 +90,7 @@ class Users(models.Model):
                 if expire_at_date is None:
                     # Если даты нет и триал не использован, назначаем триал 
                     if not self.used_trial:
-                        expire_at_date = date.today() + timedelta(days=10)  # 10 дней триал
+                        expire_at_date = date.today() + timedelta(days=app_settings.trial_days)  # Используем значение из настроек
                         self.is_trial = True
                         self.used_trial = True
                         self.expired_at = expire_at_date

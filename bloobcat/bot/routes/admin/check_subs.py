@@ -11,6 +11,7 @@ from bloobcat.db.payments import ProcessedPayments
 from bloobcat.logger import get_logger
 from bloobcat.routes.payment import create_auto_payment
 from bloobcat.bot.notifications.subscription.expiration import notify_auto_payment
+from bloobcat.settings import app_settings
 
 logger = get_logger("admin_check_subs")
 router = Router()
@@ -375,7 +376,7 @@ async def admin_help(message: Message):
             "⚙️ <b>Управление пользователями</b>\n"
             "/set_registered [user_id] [0|1] - Изменить статус регистрации пользователя\n"
             "/set_auto_renewal [user_id] [0|1] [renew_id] - Изменить статус автопродления подписки\n"
-            "/set_trial [user_id] [days=3] [force] - Установить пробный период для пользователя\n"
+            f"/set_trial [user_id] [days={app_settings.trial_days}] [force] - Установить пробный период для пользователя (по умолч. из .env)\n"
             "/reset_trial [user_id] - Сбросить флаг пробного периода для пользователя\n"
             "/send_renewal_notice [user_id] - Отправить уведомление о предстоящем списании\n\n"
             
