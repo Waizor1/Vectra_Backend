@@ -7,7 +7,17 @@ from bloobcat.db.users import Users
 class IsAdmin(BaseFilter):
     async def __call__(self, message: Message):
         user = await Users.get_user(message.from_user)
+        if not user:
+            return False
         return user.is_admin
+
+
+class IsPartnerOrAdmin(BaseFilter):
+    async def __call__(self, message: Message):
+        user = await Users.get_user(message.from_user)
+        if not user:
+            return False
+        return user.is_admin or user.is_partner
 
 
 async def search_user(user_id: str):

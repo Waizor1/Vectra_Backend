@@ -6,7 +6,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message
 
-from .functions import IsAdmin
+from .functions import IsPartnerOrAdmin
 from bloobcat.settings import telegram_settings
 
 router = Router()
@@ -16,14 +16,14 @@ class UtmForm(StatesGroup):
     waiting_for_source = State()
 
 
-@router.message(Command("utm"), IsAdmin())
+@router.message(Command("utm"), IsPartnerOrAdmin())
 async def cmd_utm(message: Message, state: FSMContext):
     """Handles the /utm command from an admin."""
     await message.answer("Введите название UTM-метки (например, 'vk_ads', 'channel_promo'). Используйте только латиницу, цифры и символ подчеркивания `_`.")
     await state.set_state(UtmForm.waiting_for_source)
 
 
-@router.message(UtmForm.waiting_for_source, F.text, IsAdmin())
+@router.message(UtmForm.waiting_for_source, F.text, IsPartnerOrAdmin())
 async def process_utm_source(message: Message, state: FSMContext, bot: Bot):
     """Processes the UTM source entered by the admin."""
     utm_source = message.text.strip()

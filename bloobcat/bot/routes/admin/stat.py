@@ -8,7 +8,7 @@ from pytz import UTC
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from bloobcat.bot.routes.admin.functions import IsAdmin
+from bloobcat.bot.routes.admin.functions import IsPartnerOrAdmin
 from bloobcat.db.users import Users
 from bloobcat.db.payments import ProcessedPayments
 
@@ -16,7 +16,7 @@ router = Router()
 logger = logging.getLogger(__name__)
 
 
-@router.message(Command("stat"), IsAdmin())
+@router.message(Command("stat"), IsPartnerOrAdmin())
 async def admin_stat(message: Message, command: CommandObject):
     utm = command.args
     amount = await Users.filter(utm=utm).count()
@@ -46,7 +46,7 @@ async def admin_stat(message: Message, command: CommandObject):
     await message.answer(stats_message, parse_mode="HTML")
 
 
-@router.message(Command("online"), IsAdmin())
+@router.message(Command("online"), IsPartnerOrAdmin())
 async def online_(message: Message):
     m = await message.answer("⏳ <i>Подождите...</i>", parse_mode="HTML")
 
@@ -58,7 +58,7 @@ async def online_(message: Message):
     await m.edit_text(f"👥 <b>Сейчас онлайн:</b> <code>{i}</code>", parse_mode="HTML")
 
 
-@router.message(Command("stats"), IsAdmin())
+@router.message(Command("stats"), IsPartnerOrAdmin())
 async def stats_all(message: Message):
     await show_utm_list(message, page=0)
 
@@ -260,7 +260,7 @@ async def show_utm_detail(message, utm, page=0):
         )
 
 
-@router.callback_query(lambda c: c.data and c.data.startswith(("utm:", "page_", "back_to_list_", "noop")), IsAdmin())
+@router.callback_query(lambda c: c.data and c.data.startswith(("utm:", "page_", "back_to_list_", "noop")), IsPartnerOrAdmin())
 async def callback_handler(callback: CallbackQuery):
     # Acknowledge callback to remove loading spinner
     await callback.answer()

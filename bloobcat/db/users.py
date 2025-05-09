@@ -42,6 +42,7 @@ class Users(models.Model):
     balance = fields.IntField(default=0)
     referred_by = fields.BigIntField(default=0)
     is_admin = fields.BooleanField(default=False)
+    is_partner = fields.BooleanField(default=False)
     custom_referral_percent = fields.IntField(default=0)
     registration_date = fields.DatetimeField(auto_now_add=True)
     referrals = fields.IntField(default=0)
@@ -305,6 +306,8 @@ class UsersModelAdmin(TortoiseModelAdmin):
         "balance",
         "utm",
         "active_tariff_id",
+        "is_admin",
+        "is_partner",
     )
     readonly_fields = (
         "id",
@@ -323,6 +326,7 @@ class UsersModelAdmin(TortoiseModelAdmin):
         "balance",
         "referred_by",
         "is_admin",
+        "is_partner",
         "custom_referral_percent",
         "registration_date",
         "referrals",

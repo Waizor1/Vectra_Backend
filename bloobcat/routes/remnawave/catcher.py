@@ -213,11 +213,13 @@ async def remnawave_updater():
                             logger.info(f"Первое подключение пользователя {user.id}, отправлено уведомление")
 
                             # --- Реферальный бонус: 50₽ на баланс пригласившему ---
-                            if referrer:
+                            if referrer and not referrer.is_partner: # Проверяем, что реферер не является партнером
                                 referrer.balance += 50
                                 await referrer.save()
                                 await on_referral_registration(referrer, user)
-                                logger.info(f"Начислено 50₽ рефереру {referrer.id} за регистрацию пользователя {user.id}")
+                                logger.info(f"Начислено 50₽ рефереру {referrer.id} (не партнер) за регистрацию пользователя {user.id}")
+                            elif referrer and referrer.is_partner:
+                                logger.info(f"Реферер {referrer.id} является партнером. Фиксированный бонус 50₽ не начисляется за регистрацию пользователя {user.id}")
                         
                         # Обновляем только если время онлайна новее или connected_at отсутствует
                         if not old_connected_at or new_connected_at > old_connected_at:
