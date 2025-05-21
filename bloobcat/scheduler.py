@@ -166,7 +166,7 @@ async def schedule_user_tasks(user):
     if user.is_trial and not user.is_subscribed and user.expired_at:
         exp_dt = datetime.combine(user.expired_at, time.min).replace(tzinfo=MOSCOW)
         # Calculate time for notifications from registration_date
-        reg_dt = user.registration_date.replace(tzinfo=MOSCOW)
+        reg_dt = user.registration_date.replace(tzinfo=ZoneInfo("UTC")).astimezone(MOSCOW)
         for hours in (2, 24):
             # Calculate target time as registration time + hours
             target_time = reg_dt + timedelta(hours=hours)
@@ -243,7 +243,8 @@ async def retry_send_missed_trial_notifications():
         if await ProcessedPayments.filter(user_id=user.id, status="succeeded").exists():
             continue
 
-        hours_since_reg = (now - user.registration_date.replace(tzinfo=MOSCOW)).total_seconds() / 3600
+        reg_dt = user.registration_date.replace(tzinfo=ZoneInfo("UTC")).astimezone(MOSCOW)
+        hours_since_reg = (now - reg_dt).total_seconds() / 3600
         
         if hours_since_reg >= 2 and not user.notification_2h_sent:
             logger.debug(f"Sending missed 2h notification to user {user.id}, registration {hours_since_reg:.1f}h ago")
