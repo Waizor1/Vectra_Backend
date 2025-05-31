@@ -96,11 +96,28 @@ async def _exec_notify_no_trial(user_id: int, hours_passed: int):
 async def _exec_extend_trial(user_id: int, planned_expired: date):
     user = await Users.get_or_none(id=user_id)
     if not user or not user.is_trial or user.expired_at != planned_expired or user.connected_at:
-        logger.debug(f"Skipping extend trial for user {user_id}")
+        logger.debug(f"Skipping extend trial for user {user_id} because conditions not met (user: {bool(user)}, is_trial: {user.is_trial if user else 'N/A'}, expired_at: {user.expired_at if user else 'N/A'} vs {planned_expired}, connected_at: {user.connected_at if user else 'N/A'})")
         return
-    await user.extend_subscription(5)
-    await notify_trial_extended(user, 5)
+    
+    logger.info(f"[{user_id}] Attempting to extend trial. Current expired_at: {user.expired_at}, planned_expired: {planned_expired}")
+    try:
+        await user.extend_subscription(5)
+        logger.info(f"[{user_id}] DB trial extended. New expired_at: {user.expired_at}. Attempting to send notification.")
+    except Exception as e:
+        logger.error(f"[{user_id}] CRITICAL: Error during user.extend_subscription: {e}", exc_info=True)
+        return # Если продление не удалось, нет смысла отправлять уведомление или перепланировать
+
+    try:
+        logger.debug(f"[{user_id}] Calling notify_trial_extended...")
+        await notify_trial_extended(user, 5)
+        logger.info(f"[{user_id}] Call to notify_trial_extended completed (this log is from _exec_extend_trial).")
+    except Exception as e:
+        logger.error(f"[{user_id}] CRITICAL: Error occurred during or after notify_trial_extended call: {e}", exc_info=True)
+        # Продолжаем, чтобы хотя бы перепланировать задачи с новой датой, если подписка продлилась
+
+    logger.debug(f"[{user_id}] Attempting to reschedule tasks...")
     await schedule_user_tasks(user)
+    logger.info(f"[{user_id}] Tasks rescheduled after trial extension process.")
 
 async def _exec_notify_trial_end(user_id: int, planned_expired: date):
     user = await Users.get_or_none(id=user_id)
@@ -193,7 +210,7 @@ async def schedule_user_tasks(user):
             scheduled_tasks[user.id].append(task)
         
         # Trial extension check
-        ext_eta = exp_dt - timedelta(hours=12)
+        ext_eta = exp_dt - timedelta(days=2)
         if ext_eta > now:
             task = schedule_coro(ext_eta, _exec_extend_trial, user.id, user.expired_at)
             scheduled_tasks[user.id].append(task)
@@ -273,7 +290,7 @@ async def retry_missed_trial_extensions():
     for user in users:
         processed += 1
         exp_dt = datetime.combine(user.expired_at, time.min).replace(tzinfo=MOSCOW)
-        ext_eta = exp_dt - timedelta(hours=12)
+        ext_eta = exp_dt - timedelta(days=2)
         # Если момент продления уже прошёл (включая истекший trial)
         if ext_eta <= now_dt:
             logger.debug(f"Extending (missed) trial for user {user.id}")

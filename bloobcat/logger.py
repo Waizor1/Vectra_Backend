@@ -27,8 +27,17 @@ def setup_logging():
     # Удаляем стандартный обработчик логов Loguru
     logger.remove()
     
-    # Устанавливаем уровень логирования (DEBUG если test_mode, иначе INFO)
-    log_level = "DEBUG" if test_mode else "INFO"
+    # Устанавливаем уровень логирования
+    default_log_level_based_on_test_mode = "DEBUG" if test_mode else "INFO"
+    log_level_from_env = os.environ.get("LOG_LEVEL")
+    
+    if log_level_from_env:
+        log_level = log_level_from_env.upper()
+        # Проверка на допустимые значения, если нужно, но loguru обычно сам справляется
+        # или можно добавить: if log_level not in ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]:
+        #                      log_level = default_log_level_based_on_test_mode 
+    else:
+        log_level = default_log_level_based_on_test_mode
     
     # Список фраз для фильтрации
     filtered_phrases = [
