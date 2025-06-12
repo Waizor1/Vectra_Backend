@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 from bloobcat.db.users import Users
 from bloobcat.routes.payment import create_auto_payment
 from bloobcat.bot.notifications.subscription.expiration import notify_expiring_subscription
+from bloobcat.bot.notifications.subscription.renewal import notify_subscription_cancelled_after_failures
 from bloobcat.bot.notifications.subscription.key import on_disabled
 from bloobcat.bot.notifications.trial.no_trial import notify_no_trial_taken
 from bloobcat.bot.notifications.trial.extended import notify_trial_extended
@@ -67,6 +68,23 @@ async def _exec_notify_expiring(user_id: int, planned_expired: date, days_before
         logger.debug(f"Skipping notify expiring for user {user_id}")
         return
     await notify_expiring_subscription(user)
+
+async def _exec_cancel_if_unpaid(user_id: int, planned_expired: date):
+    """Checks if a subscription was renewed, and if not, cancels it."""
+    user = await Users.get_or_none(id=user_id)
+    # If user does not exist, or subscription was renewed (expired_at changed), or auto-renewal was cancelled, do nothing.
+    if not user or user.expired_at != planned_expired or not user.renew_id:
+        logger.debug(f"Skipping cancel_if_unpaid for user {user_id}. Conditions not met.")
+        return
+
+    logger.warning(f"User {user_id} subscription renewal failed multiple times. Cancelling subscription.")
+    # Cancel subscription
+    user.is_subscribed = False
+    user.renew_id = None
+    await user.save()
+
+    # Notify user about cancellation
+    await notify_subscription_cancelled_after_failures(user)
 
 async def _exec_notify_expired(user_id: int, planned_expired: date):
     user = await Users.get_or_none(id=user_id)
@@ -153,28 +171,35 @@ async def schedule_user_tasks(user):
     if user.is_subscribed and user.expired_at:
         # Base time at midnight of expiration day
         base = datetime.combine(user.expired_at, time.min).replace(tzinfo=MOSCOW)
-        # 3 and 2 days before: autopay and expiration reminder at midnight
-        for days_before in (3, 2):
-            eta = base - timedelta(days=days_before)
-            if eta > now:
-                # Auto-payment attempt
+
+        if user.renew_id:
+            # Logic for users WITH auto-renewal
+            # 4, 3 and 2 days before: autopay attempt at midnight.
+            for days_before in (4, 3, 2):
+                eta = base - timedelta(days=days_before)
+                # Auto-payment attempt. schedule_coro will execute immediately if eta is in the past.
                 task = schedule_coro(eta, _exec_auto_payment, user.id, user.expired_at, days_before)
                 scheduled_tasks[user.id].append(task)
-                # Expiration reminder
+
+            # 1 day before: final check. If not paid, cancel subscription.
+            eta_cancel = base - timedelta(days=1)
+            task = schedule_coro(eta_cancel, _exec_cancel_if_unpaid, user.id, user.expired_at)
+            scheduled_tasks[user.id].append(task)
+        else:
+            # Logic for users WITHOUT auto-renewal: send expiration reminders
+            # 3 and 2 days before: expiration reminder at midnight
+            for days_before in (3, 2):
+                eta = base - timedelta(days=days_before)
                 task = schedule_coro(eta, _exec_notify_expiring, user.id, user.expired_at, days_before)
                 scheduled_tasks[user.id].append(task)
-        # 1 day before: autopay at midnight, expiration reminder at noon
-        eta = base - timedelta(days=1)
-        if eta > now:
-            # Auto-payment attempt
-            task = schedule_coro(eta, _exec_auto_payment, user.id, user.expired_at, 1)
-            scheduled_tasks[user.id].append(task)
-            # Reminder that subscription will end tonight at midnight
-            reminder_time = eta + timedelta(hours=12)
+            # 1 day before: expiration reminder at noon
+            eta_remind = base - timedelta(days=1)
+            reminder_time = eta_remind + timedelta(hours=12)
             task = schedule_coro(reminder_time, _exec_notify_expiring, user.id, user.expired_at, 1)
             scheduled_tasks[user.id].append(task)
-        # On expiration day: send notification that subscription has expired
-        if base > now:
+
+            # On expiration day: send notification that subscription has expired.
+            # This will be skipped for auto-renewal users by the check inside _exec_notify_expired.
             task = schedule_coro(base, _exec_notify_expired, user.id, user.expired_at)
             scheduled_tasks[user.id].append(task)
 
@@ -191,41 +216,30 @@ async def schedule_user_tasks(user):
             notification_sent = (hours == 2 and user.notification_2h_sent) or (hours == 24 and user.notification_24h_sent)
             
             if not notification_sent:
-                # Use target_time as basis for scheduling, not "now + hours"
-                eta = target_time
-                if eta > now:
-                    task = schedule_coro(eta, _exec_notify_no_trial, user.id, hours)
-                    scheduled_tasks[user.id].append(task)
-                else:
-                    # If the target time is already in the past, execute immediately
-                    logger.debug(f"Sending immediate 'no trial taken' ({hours}h) to user {user.id}, registration was at {reg_dt}")
-                    task = schedule_coro(now, _exec_notify_no_trial, user.id, hours)
-                    scheduled_tasks[user.id].append(task)
+                # Use target_time as basis for scheduling. schedule_coro handles past events.
+                task = schedule_coro(target_time, _exec_notify_no_trial, user.id, hours)
+                scheduled_tasks[user.id].append(task)
         
         # Notification about expiring trial - at 12:00 the day before
         day_before = exp_dt - timedelta(days=1)
         exp_notification_eta = datetime.combine(day_before.date(), time(hour=12, minute=0)).replace(tzinfo=MOSCOW)
-        if exp_notification_eta > now:
-            task = schedule_coro(exp_notification_eta, _exec_notify_expiring_trial, user.id, user.expired_at)
-            scheduled_tasks[user.id].append(task)
+        task = schedule_coro(exp_notification_eta, _exec_notify_expiring_trial, user.id, user.expired_at)
+        scheduled_tasks[user.id].append(task)
         
         # Trial extension check
         ext_eta = exp_dt - timedelta(days=2)
-        if ext_eta > now:
-            task = schedule_coro(ext_eta, _exec_extend_trial, user.id, user.expired_at)
-            scheduled_tasks[user.id].append(task)
+        task = schedule_coro(ext_eta, _exec_extend_trial, user.id, user.expired_at)
+        scheduled_tasks[user.id].append(task)
         # Trial end notification
-        if exp_dt > now:
-            task = schedule_coro(exp_dt, _exec_notify_trial_end, user.id, user.expired_at)
-            scheduled_tasks[user.id].append(task)
+        task = schedule_coro(exp_dt, _exec_notify_trial_end, user.id, user.expired_at)
+        scheduled_tasks[user.id].append(task)
 
     # Referral tasks at 18:00 local time
     start_dt = datetime.combine(user.registration_date.date(), time(hour=18)).replace(tzinfo=MOSCOW)
     for days in (7, 14, 30):
         eta = start_dt + timedelta(days=days)
-        if eta > now:
-            task = schedule_coro(eta, _exec_referral_prompt, user.id, days)
-            scheduled_tasks[user.id].append(task)
+        task = schedule_coro(eta, _exec_referral_prompt, user.id, days)
+        scheduled_tasks[user.id].append(task)
 
     # Log summary of scheduled tasks for this user
     logger.debug(f"User {user.id}: total {len(scheduled_tasks[user.id])} tasks scheduled")
@@ -299,32 +313,61 @@ async def retry_missed_trial_extensions():
     logger.debug(f"Finished missed trial extensions: processed {processed}, extended {extended_count}")
 
 async def retry_missed_trial_endings():
-    """Retry trial end notifications and flag cleanup if trial expired during downtime."""
-    logger.debug("Starting missed trial end check")
-    # Только для тех, кто действительно подключался (connected_at != None)
-    users = await Users.filter(is_trial=True, is_subscribed=False).exclude(connected_at=None)
-    processed = 0
-    finalized = 0
-    now_dt = datetime.now(MOSCOW)
+    """Retry ending trials for users whose trial expiration was missed"""
+    logger.debug(f"Starting missed trial endings check")
+    users = await Users.filter(is_trial=True, expired_at__lte=date.today())
+    
+    ended_count = 0
     for user in users:
-        processed += 1
-        exp_dt = datetime.combine(user.expired_at, time.min).replace(tzinfo=MOSCOW)
-        # Если до окончания триала время уже прошло
-        if exp_dt <= now_dt:
-            logger.debug(f"Finalizing missed trial end for user {user.id}")
-            await _exec_notify_trial_end(user.id, user.expired_at)
-            finalized += 1
-    logger.debug(f"Finished missed trial end check: processed {processed}, finalized {finalized}")
+        logger.info(f"Retrying trial end for user {user.id}")
+        await notify_trial_ended(user)
+        user.is_trial = False
+        await user.save()
+        ended_count += 1
+        
+    logger.debug(f"Finished missed trial endings check. Ended: {ended_count}")
+
+async def cleanup_missed_cancellations():
+    """
+    Finds and cancels subscriptions for users where auto-renewal failed
+    and the cancellation task was missed (e.g., due to bot downtime).
+    """
+    logger.info("Running cleanup for missed subscription cancellations...")
+    
+    # We are looking for users who are in an inconsistent state:
+    # 1. They are still marked as subscribed.
+    # 2. They have auto-renewal enabled.
+    # 3. Their expiration date has already passed.
+    # This is a clear sign that renewal and cancellation tasks failed.
+    
+    users_to_cancel = await Users.filter(
+        is_subscribed=True,
+        renew_id__not_isnull=True,
+        expired_at__lte=date.today()
+    )
+    
+    cancelled_count = 0
+    for user in users_to_cancel:
+        logger.warning(f"Found missed cancellation for user {user.id} (expired at {user.expired_at}). Cancelling now.")
+        
+        # This is the same logic as in _exec_cancel_if_unpaid
+        user.is_subscribed = False
+        user.renew_id = None
+        await user.save()
+
+        # Notify user about cancellation
+        await notify_subscription_cancelled_after_failures(user)
+        cancelled_count += 1
+        
+    logger.info(f"Finished cleanup for missed cancellations. Cancelled: {cancelled_count} users.")
 
 async def schedule_all_tasks():
-    """Schedule tasks for all users on application startup."""
-    # First try to send any missed notifications
+    """Reschedule all tasks for all users. Typically run on startup."""
+    logger.info("Scheduling all tasks for all users...")
     await retry_send_missed_trial_notifications()
-    # Then retry missed trial extensions
     await retry_missed_trial_extensions()
-    # Then finalize missed trial ends
     await retry_missed_trial_endings()
-    
+    await cleanup_missed_cancellations()
     users = await Users.all()
     for user in users:
         await schedule_user_tasks(user)

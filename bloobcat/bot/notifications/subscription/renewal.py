@@ -89,4 +89,31 @@ async def notify_renewal_success_yookassa(user, days: int, amount_paid_via_yooka
         await bot.send_message(user.id, text, reply_markup=button)
         logger.info(f"Уведомление об успешном продлении (Yookassa) успешно отправлено пользователю {user.id}")
     except Exception as e:
-        logger.error(f"Ошибка отправки уведомления об успешном продлении (Yookassa) для {user.id}: {e}") 
+        logger.error(f"Ошибка отправки уведомления об успешном продлении (Yookassa) для {user.id}: {e}")
+
+
+async def notify_subscription_cancelled_after_failures(user):
+    """
+    Уведомляет пользователя о том, что подписка отменена после нескольких неудачных попыток оплаты.
+    """
+    lang = get_user_locale(user)
+    logger.warning(f"Отправка уведомления об отмене подписки из-за сбоев оплаты пользователю {user.id}")
+    if lang == 'ru':
+        text = (
+            "❗️ Не удалось продлить вашу подписку.\n\n"
+            "Мы несколько раз пытались списать средства, но не получилось. Ваша подписка отменена.\n\n"
+            "Чтобы возобновить доступ, пожалуйста, выберите и оплатите тариф заново."
+        )
+        button = await webapp_inline_button("🛒 Выбрать тариф")
+    else:
+        text = (
+            "❗️ We couldn't renew your subscription.\n\n"
+            "We tried to charge your payment method several times without success. Your subscription has been cancelled.\n\n"
+            "To regain access, please choose and pay for a new plan."
+        )
+        button = await webapp_inline_button("🛒 Choose a plan")
+    try:
+        await bot.send_message(user.id, text, reply_markup=button)
+        logger.info(f"Уведомление об отмене подписки успешно отправлено пользователю {user.id}")
+    except Exception as e:
+        logger.error(f"Ошибка отправки уведомления об отмене подписки для {user.id}: {e}") 
