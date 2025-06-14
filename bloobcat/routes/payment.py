@@ -332,7 +332,10 @@ async def yookassa_webhook(request: Request, secret: str):
                     )
                     # Link user to this active tariff
                     user.active_tariff_id = active_tariff.id
-                    logger.info(f"Created ActiveTariff {active_tariff.id} for user {user.id} based on tariff {original.id}")
+                    
+                    # Устанавливаем hwid_limit пользователю из купленного тарифа
+                    user.hwid_limit = original.hwid_limit
+                    logger.info(f"Created ActiveTariff {active_tariff.id} for user {user.id} based on tariff {original.id}, установлен hwid_limit={original.hwid_limit}")
                 else:
                     logger.error(f"Original tariff {tariff_id} not found; skipping ActiveTariffs")
             
@@ -632,6 +635,10 @@ async def pay(tariff_id: int, email: str, user: Users = Depends(validate)):
             hwid_limit=tariff.hwid_limit
         )
         user.active_tariff_id = active_tariff.id
+        
+        # Устанавливаем hwid_limit пользователю из купленного тарифа
+        user.hwid_limit = tariff.hwid_limit
+        logger.info(f"При покупке с баланса установлен hwid_limit={tariff.hwid_limit} для пользователя {user.id}")
 
         # Сохраняем пользователя (до синхронизации RemnaWave)
         await user.save()
