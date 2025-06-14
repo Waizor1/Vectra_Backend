@@ -94,20 +94,23 @@ async def check(user: Users = Depends(validate)) -> Dict[str, Any]:
             logger.error(f"Ошибка получения списка устройств для пользователя {user.id}: {e}")
     user_dict["devices_count"] = devices_count
 
-    # Определяем лимит устройств: сначала из RemnaWave, затем из активного тарифа или дефолт
-    devices_limit = 1
+    # --- Определение лимита устройств (только из БД) ---
+    devices_limit = 1  # 1. Значение по умолчанию
+    source = "дефолту"
+
+    # 2. Пытаемся получить из тарифа
     if user.active_tariff_id:
         tariff = await ActiveTariffs.get_or_none(id=user.active_tariff_id)
         if tariff:
             devices_limit = tariff.hwid_limit
-    if user.remnawave_uuid:
-        try:
-            api_data = await remnawave_client.users.get_user_by_uuid(str(user.remnawave_uuid))
-            api_limit = api_data.get("response", {}).get("hwidDeviceLimit")
-            if isinstance(api_limit, int):
-                devices_limit = api_limit
-        except Exception as e:
-            logger.error(f"Ошибка получения лимита устройств из RemnaWave для пользователя {user.id}: {e}")
+            source = f"тарифу ({tariff.name})"
+    
+    # 3. Личное значение из БД имеет наивысший приоритет
+    if user.hwid_limit is not None:
+        devices_limit = user.hwid_limit
+        source = "личной настройке в БД"
+
+    logger.debug(f"Итоговый лимит устройств для пользователя {user.id} установлен по {source}: {devices_limit}")
     user_dict["devices_limit"] = devices_limit
 
     return user_dict
@@ -203,20 +206,23 @@ async def get_family_subscription(familyurl: str):
             pass
     user_dict["devices_count"] = devices_count
 
-    # Определяем лимит устройств: сначала из RemnaWave, затем из активного тарифа или дефолт
-    devices_limit = 1
+    # --- Определение лимита устройств (только из БД) ---
+    devices_limit = 1  # 1. Значение по умолчанию
+    source = "дефолту"
+
+    # 2. Пытаемся получить из тарифа
     if user.active_tariff_id:
         tariff = await ActiveTariffs.get_or_none(id=user.active_tariff_id)
         if tariff:
             devices_limit = tariff.hwid_limit
-    if user.remnawave_uuid:
-        try:
-            api_data = await remnawave_client.users.get_user_by_uuid(str(user.remnawave_uuid))
-            api_limit = api_data.get("response", {}).get("hwidDeviceLimit")
-            if isinstance(api_limit, int):
-                devices_limit = api_limit
-        except Exception as e:
-            logger.error(f"Ошибка получения лимита устройств из RemnaWave для пользователя {user.id}: {e}")
+            source = f"тарифу ({tariff.name})"
+    
+    # 3. Личное значение из БД имеет наивысший приоритет
+    if user.hwid_limit is not None:
+        devices_limit = user.hwid_limit
+        source = "личной настройке в БД"
+
+    logger.debug(f"Итоговый лимит устройств для пользователя {user.id} по семейной ссылке установлен по {source}: {devices_limit}")
     user_dict["devices_limit"] = devices_limit
 
     return user_dict

@@ -46,11 +46,27 @@ async def lifespan(fastapi_app: FastAPI):
     await Admin.init()
     logger.info("Инициализация бота завершена")
 
-    print(
+    webhook_url = (
         script_settings.api_url
         + "/webhook/"
         + telegram_settings.webhook_secret
     )
+    
+    # Устанавливаем webhook для Telegram бота
+    try:
+        await bot.set_webhook(webhook_url)
+        logger.info(f"Webhook успешно установлен: {webhook_url}")
+        
+        # Проверяем статус webhook
+        webhook_info = await bot.get_webhook_info()
+        logger.info(f"Статус webhook: URL={webhook_info.url}, pending_update_count={webhook_info.pending_update_count}")
+        if webhook_info.last_error_message:
+            logger.warning(f"Последняя ошибка webhook: {webhook_info.last_error_message}")
+    except Exception as e:
+        logger.error(f"Ошибка установки webhook: {e}")
+        raise
+
+    print(webhook_url)
     
     # Запуск фоновых задач после инициализации БД и бота
     async with RegisterTortoise(
@@ -65,6 +81,13 @@ async def lifespan(fastapi_app: FastAPI):
     
     # Закрытие всех клиентов RemnaWave при завершении работы
     try:
+        # Удаляем webhook при остановке приложения
+        try:
+            await bot.delete_webhook()
+            logger.info("Webhook удален при остановке приложения")
+        except Exception as e:
+            logger.warning(f"Ошибка при удалении webhook: {e}")
+        
         # Закрываем основной клиент из routes/user.py
         from bloobcat.routes.user import close_remnawave_client
         await close_remnawave_client()
@@ -102,7 +125,9 @@ origins = [
     "https://ttestapp.guarddogvpn.com",
     "https://app.guarddogvpn.com", 
     "https://app.starmy.store",
+    "https://testapp.starmy.store",
     "https://api.starmy.store",
+    "https://testapi.starmy.store",
     "https://*.trycloudflare.com",
     "https://*.cloudflare.com"
 ]

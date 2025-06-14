@@ -184,13 +184,10 @@ async def remnawave_updater():
                 remnawave_user = remnawave_users_dict[user_uuid_str]
                 
                 try:
-                    remnawave_expire_at = datetime.fromisoformat(remnawave_user['expireAt'].replace('Z', '+00:00'))
-                    db_expire_at = user.expired_at
-                    
-                    # Подробное логирование данных пользователя из RemnaWave
-                    logger.debug(f"Данные пользователя {user.id} из RemnaWave: {remnawave_user}")
-                    
-                    # Проверяем подключения пользователя
+                    # Словарь для сбора обновлений для RemnaWave
+                    remnawave_updates = {}
+
+                    # ----------------- Логика обработки подключений (onlineAt) -----------------
                     online_at = remnawave_user.get('onlineAt')
                     logger.debug(f"Пользователь {user.id}: onlineAt={online_at}, текущий connected_at={user.connected_at}")
                     
@@ -198,58 +195,58 @@ async def remnawave_updater():
                         new_connected_at = datetime.fromisoformat(online_at.replace('Z', '+00:00'))
                         old_connected_at = user.connected_at
                         
-                        # Если раньше не было подключений, а теперь есть - вызываем on_activated_key
                         if not old_connected_at:
                             referrer = await user.referrer()
-                            await on_activated_key(
-                                user.id,
-                                user.full_name,
-                                referrer_id=referrer.id if referrer else None,
-                                referrer_name=referrer.full_name if referrer else None,
-                                utm=user.utm
-                            )
+                            await on_activated_key(user.id, user.full_name, referrer_id=referrer.id if referrer else None, referrer_name=referrer.full_name if referrer else None, utm=user.utm)
                             user.is_registered = True
                             await user.save()
                             logger.info(f"Первое подключение пользователя {user.id}, отправлено уведомление")
 
-                            # --- Реферальный бонус: 50₽ на баланс пригласившему ---
-                            if referrer and not referrer.is_partner: # Проверяем, что реферер не является партнером
+                            if referrer and not referrer.is_partner:
                                 referrer.balance += 50
                                 await referrer.save()
                                 await on_referral_registration(referrer, user)
-                                logger.info(f"Начислено 50₽ рефереру {referrer.id} (не партнер) за регистрацию пользователя {user.id}")
+                                logger.info(f"Начислено 50₽ рефереру {referrer.id} за регистрацию {user.id}")
                             elif referrer and referrer.is_partner:
-                                logger.info(f"Реферер {referrer.id} является партнером. Фиксированный бонус 50₽ не начисляется за регистрацию пользователя {user.id}")
+                                logger.info(f"Реферер {referrer.id} партнер, бонус 50₽ не начисляется за регистрацию {user.id}")
                         
-                        # Обновляем только если время онлайна новее или connected_at отсутствует
                         if not old_connected_at or new_connected_at > old_connected_at:
                             user.connected_at = new_connected_at
                             await user.save()
-                            # Записываем подключение в таблицу connections
                             await Connections.process(user.id, new_connected_at.date())
-                            logger.debug(f"Обновлен статус подключения для пользователя {user.id}: {new_connected_at}")
-                        else:
-                            logger.debug(f"Пропуск обновления для пользователя {user.id}: текущее время подключения новее ({old_connected_at} > {new_connected_at})")
-                    else:
-                        logger.debug(f"Пользователь {user.id} не имеет активных подключений")
-                    
-                    # Текущая дата по MSK для проверки прошлых дат
+                            logger.debug(f"Обновлен статус подключения для {user.id}: {new_connected_at}")
+
+                    # ----------------- Логика синхронизации `expired_at` (БД -> RemnaWave) -----------------
+                    remnawave_expire_at = datetime.fromisoformat(remnawave_user['expireAt'].replace('Z', '+00:00'))
+                    db_expire_at_date = user.expired_at
                     today = datetime.now(ZoneInfo("Europe/Moscow")).date()
-                    # Конвертим полученное expireAt в MSK и берём дату для сравнения
                     remnawave_expire_date = remnawave_expire_at.astimezone(ZoneInfo("Europe/Moscow")).date()
-                    db_expire_date = db_expire_at
                     
-                    # Пропускаем обновление, если дата истечения в прошлом
-                    if db_expire_date < today:
-                        logger.debug(f"Дата истечения {db_expire_date} находится в прошлом. RemnaWave не принимает такие даты. Пропускаем обновление для пользователя {user.id}")
-                        continue
-                    
-                    if db_expire_date != remnawave_expire_date:
-                        logger.debug(f"Обновление даты истечения в RemnaWave для пользователя {user.id}: {remnawave_expire_at} -> {db_expire_at}")
-                        # Передаём дату из БД напрямую, клиент сам форматирует expireAt
-                        result = await remnawave.users.update_user(user_uuid_str, expireAt=db_expire_at)
-                        update_success = True
+                    if db_expire_at_date >= today and db_expire_at_date != remnawave_expire_date:
+                        logger.debug(f"Обновление даты истечения в RemnaWave для {user.id}: {remnawave_expire_date} -> {db_expire_at_date}")
+                        remnawave_updates['expireAt'] = db_expire_at_date
+
+                    # ----------------- Логика синхронизации `hwid_limit` (двусторонняя) -----------------
+                    remnawave_hwid_limit = remnawave_user.get('hwidDeviceLimit')
+                    db_hwid_limit = user.hwid_limit
+
+                    if remnawave_hwid_limit is not None and isinstance(remnawave_hwid_limit, int):
+                        # Сценарий 1: в БД пусто, берем из RemnaWave
+                        if db_hwid_limit is None:
+                            user.hwid_limit = remnawave_hwid_limit
+                            await user.save()
+                            logger.info(f"Синхронизация (RemnaWave -> БД): hwid_limit для {user.id} установлен в {remnawave_hwid_limit}")
+                        # Сценарий 2: в БД есть значение и оно отличается, отправляем в RemnaWave
+                        elif db_hwid_limit != remnawave_hwid_limit:
+                            logger.debug(f"Обновление лимита устройств в RemnaWave для {user.id}: {remnawave_hwid_limit} -> {db_hwid_limit}")
+                            remnawave_updates['hwidDeviceLimit'] = db_hwid_limit
+
+                    # ----------------- Отправка всех собранных обновлений в RemnaWave -----------------
+                    if remnawave_updates:
+                        logger.info(f"Отправка обновлений в RemnaWave для {user.id}: {remnawave_updates}")
+                        await remnawave.users.update_user(user_uuid_str, **remnawave_updates)
                         updated += 1
+
                 except Exception as e:
                     logger.error(f"Ошибка при обработке пользователя {user.id}: {str(e)}")
                     errors += 1

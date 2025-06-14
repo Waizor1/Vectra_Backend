@@ -157,7 +157,7 @@ class UsersAPI:
 
     async def update_user(self, uuid: str, **kwargs) -> Dict[str, Any]:
         """Обновление пользователя"""
-        logger.info(f"Обновление пользователя {uuid} с параметрами: {kwargs}")
+        logger.debug(f"Обновление пользователя {uuid} с параметрами: {kwargs}")
         # Если дата истечения в прошлом или сегодня — ставим expireAt на текущее время +1 минуту по МСК
         if 'expireAt' in kwargs and isinstance(kwargs['expireAt'], date):
             moscow_tz = ZoneInfo("Europe/Moscow")
@@ -185,7 +185,7 @@ class UsersAPI:
                 data['expireAt'] = self._format_expire_at(value)
             else:
                 data[key] = value
-        logger.info(f"Данные для API: {data}")
+        logger.debug(f"Данные для API: {data}")
         # Выполняем обновление с повторными попытками
         return await self._execute_with_retry(
             self.client._request, "PATCH", "/api/users", json=data

@@ -66,6 +66,7 @@ class Users(models.Model):
     active_tariff: fields.ForeignKeyNullableRelation["ActiveTariffs"] = fields.ForeignKeyField(
         "models.ActiveTariffs", related_name="users", null=True, on_delete=fields.SET_NULL, description="ID активного тарифа пользователя"
     )
+    hwid_limit = fields.IntField(null=True, description="Личный лимит устройств (переопределяет тариф и настройки панели)")
 
     async def _ensure_remnawave_user(self) -> bool:
         """
@@ -314,6 +315,7 @@ class UsersModelAdmin(TortoiseModelAdmin):
         "balance",
         "utm",
         "active_tariff_id",
+        "hwid_limit",
         "is_admin",
         "is_partner",
     )
@@ -351,6 +353,7 @@ class UsersModelAdmin(TortoiseModelAdmin):
         "remnawave_uuid",
         "familyurl",
         "active_tariff",
+        "hwid_limit",
     )
     search_help_text = "Юзернейм, имя, айди"
     verbose_name = "Пользователи"
@@ -360,56 +363,62 @@ class UsersModelAdmin(TortoiseModelAdmin):
         """
         Переопределенный метод сохранения пользователя.
         
-        После сохранения в БД обновляет дату истечения подписки в RemnaWave.
+        После сохранения в БД обновляет дату истечения и лимит устройств в RemnaWave.
         
         :param pk: Первичный ключ пользователя (ID)
         :param form_data: Данные формы с изменениями
         """
-        # Получаем исходного пользователя по ID
         original_obj = None
         original_expired_at = None
+        original_hwid_limit = None
         
         if pk:
             original_obj = await Users.get_or_none(id=pk)
             if original_obj:
                 original_expired_at = original_obj.expired_at
-        
-        # Вызываем стандартный метод сохранения (он может возвращать dict)
+                original_hwid_limit = original_obj.hwid_limit
+
         result = await super().save_model(pk, form_data)
         
-        # Получаем обновленный объект пользователя из БД
         obj = await Users.get(id=pk)
         
-        logger.info(f"Пользователь {obj.id} сохранен. Проверяем необходимость обновления в RemnaWave")
+        logger.debug(f"Пользователь {obj.id} сохранен. Проверяем необходимость обновления в RemnaWave")
         
-        # Проверяем, изменилась ли дата истечения и есть ли UUID RemnaWave
-        if obj.remnawave_uuid and obj.expired_at and obj.expired_at != original_expired_at:
-            # Проверка, не является ли дата в прошлом
-            from datetime import date
-            today = date.today()
+        if obj.remnawave_uuid:
+            updates_needed = {}
             
-            if obj.expired_at < today:
-                logger.warning(f"Дата истечения {obj.expired_at} находится в прошлом. RemnaWave не принимает такие даты. Пропускаем обновление.")
-            else:
-                logger.info(f"Дата истечения изменилась: {original_expired_at} -> {obj.expired_at}. Обновляем в RemnaWave")
+            # Проверяем изменение даты истечения
+            if obj.expired_at and obj.expired_at != original_expired_at:
+                from datetime import date
+                today = date.today()
                 
+                if obj.expired_at < today:
+                    logger.warning(f"Дата истечения {obj.expired_at} в прошлом. Пропускаем обновление даты.")
+                else:
+                    updates_needed["expireAt"] = obj.expired_at
+                    logger.debug(f"Дата истечения изменилась: {original_expired_at} -> {obj.expired_at}")
+            
+            # Проверяем изменение hwid_limit
+            if obj.hwid_limit is not None and obj.hwid_limit != original_hwid_limit:
+                updates_needed["hwidDeviceLimit"] = obj.hwid_limit
+                logger.debug(f"Лимит устройств изменился: {original_hwid_limit} -> {obj.hwid_limit}")
+            
+            # Обновляем RemnaWave, если есть изменения
+            if updates_needed:
                 try:
-                    # Передаём дату из БД, клиент внутри сам форматирует expireAt
                     from bloobcat.routes.remnawave.client import RemnaWaveClient
                     client = RemnaWaveClient(remnawave_settings.url, remnawave_settings.token.get_secret_value())
                     try:
-                        await client.users.update_user(obj.remnawave_uuid, expireAt=obj.expired_at)
-                        logger.info(f"Дата истечения для пользователя {obj.id} успешно обновлена в RemnaWave")
+                        await client.users.update_user(obj.remnawave_uuid, **updates_needed)
+                        logger.debug(f"Данные для пользователя {obj.id} обновлены в RemnaWave: {updates_needed}")
                     finally:
-                        # Гарантированно закрываем сессию клиента
                         await client.close()
-                        logger.debug(f"Закрыта сессия клиента RemnaWave после обновления даты истечения")
                 except Exception as e:
-                    logger.error(f"Ошибка при обновлении даты истечения в RemnaWave для пользователя {obj.id}: {str(e)}", 
+                    logger.error(f"Ошибка при обновлении данных в RemnaWave для пользователя {obj.id}: {e}", 
                                 exc_info=True)
-                    # Не перевыбрасываем исключение, чтобы не прерывать работу админ-панели
+        else:
+            logger.warning(f"Пользователь {obj.id} не имеет UUID в RemnaWave, обновления пропускаются")
         
-        # Возвращаем результат от super().save_model(), который FastAPI может сериализовать
         return result
 
     async def delete_model(self, pk: int):
