@@ -275,7 +275,7 @@ async def yookassa_webhook(request: Request, secret: str):
                 initial_balance = user.balance
                 user.balance = max(0, user.balance - amount_from_balance)
                 logger.info(
-                    f"Списание с реферального баланса пользователя {user.id}. "
+                    f"Списание с бонусного баланса пользователя {user.id}. "
                     f"Сумма: {amount_from_balance}. Баланс до: {initial_balance}, После: {user.balance}",
                     extra={
                         'payment_id': payment.id,
@@ -716,7 +716,7 @@ async def pay(tariff_id: int, email: str, device_count: int = 1, user: Users = D
                 extra={'payment_id': payment_id, 'user_id': user.id}
             )
             
-        return {"status": "success", "message": "Оплачено с реферального баланса"}
+        return {"status": "success", "message": "Оплачено с бонусного баланса"}
 
     else:
         # Логика частичной оплаты

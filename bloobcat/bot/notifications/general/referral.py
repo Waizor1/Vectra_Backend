@@ -15,14 +15,14 @@ async def on_referral_payment(user: Users, referral: Users, amount: int):
         logger.info(f"Реферальный бонус зачислен пользователю {user.id}: {to_add}₽ за оплату реферала {referral.id} на {amount}₽")
         text = (
             f"🎉 Привет, {user.full_name}! Ваш реферал {referral.name()} оплатил подписку на {amount}₽.\n"
-            f"Вы получили {to_add}₽ на баланс. Спасибо за рекомендацию! 🎊"
+            f"Вы получили {to_add}₽ на бонусный баланс. Спасибо за рекомендацию! 🎊"
         )
         button = await webapp_inline_button("Личный кабинет")
     else:
         logger.info(f"Реферальный бонус зачислен пользователю {user.id}: {to_add}₽ за оплату реферала {referral.id} на {amount}₽")
         text = (
             f"🎉 Hi {user.full_name}! Your referral {referral.name()} just paid {amount} RUB.\n"
-            f"You've been credited {to_add} RUB. Thanks for spreading the word! 🎊"
+            f"You've been credited {to_add} RUB to your bonus balance. Thanks for spreading the word! 🎊"
         )
         button = await webapp_inline_button("Dashboard")
     try:
@@ -37,14 +37,14 @@ async def on_referral_registration(user: Users, referral: Users):
         logger.info(f"Реферальная регистрация: пользователь {user.id} получил 50₽ за регистрацию реферала {referral.id}")
         text = (
             f"🎉 Привет, {user.full_name}! Ваш реферал {referral.name()} только что зарегистрировался.\n"
-            "Вы получили 50₽ на баланс. Спасибо, что рекомендуете нас! 💸"
+            "Вы получили 50₽ на бонусный баланс. Спасибо, что рекомендуете нас! 💸"
         )
         button = await webapp_inline_button("Реферальная программа", "ref")
     else:
         logger.info(f"Реферальная регистрация: пользователь {user.id} получил 50₽ за регистрацию реферала {referral.id}")
         text = (
             f"🎉 Hi {user.full_name}! Your referral {referral.name()} just signed up.\n"
-            "You've been credited 50 RUB to your balance. Thanks for spreading the word! 💸"
+            "You've been credited 50 RUB to your bonus balance. Thanks for spreading the word! 💸"
         )
         button = await webapp_inline_button("Реферальная программа", "ref")
     try:

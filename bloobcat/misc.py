@@ -20,7 +20,7 @@ async def generate_user_report(user: Users):
 Реферер: {referrer.name() if referrer else "нет"}
 Кол-во рефералов: {await user.referrals()}
 Реферальный процент: {user.referral_percent()}%
-Баланс: {user.balance} P
+Бонусный баланс: {user.balance} P
 
 Реферальная ссылка: https://t.me/{await get_bot_username()}/Connect?startapp={user.id}
 """
