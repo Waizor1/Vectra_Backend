@@ -21,16 +21,25 @@ MOSCOW = ZoneInfo("Europe/Moscow")
 # Global mapping of user_id to scheduled asyncio tasks for cancellation
 scheduled_tasks = {}
 
-def schedule_coro(at_time: datetime, coro, *args):
+def schedule_coro(at_time: datetime, coro, *args, skip_if_past=False):
     """Schedule coroutine execution at a specific datetime."""
     now = datetime.now(MOSCOW)
     delay = (at_time - now).total_seconds()
     
     if delay <= 0:
-        # If task was scheduled for the past or now, execute immediately
-        logger.debug(f"Executing task '{coro.__name__}' immediately (scheduled for {at_time.isoformat()}) args={args}")
-        task = asyncio.create_task(coro(*args))
-        return task
+        if skip_if_past:
+            # Don't execute if time has passed and skip_if_past is True
+            logger.debug(f"Skipping task '{coro.__name__}' (scheduled for {at_time.isoformat()}) because time has passed")
+            # Return a dummy completed task
+            async def dummy():
+                pass
+            task = asyncio.create_task(dummy())
+            return task
+        else:
+            # If task was scheduled for the past or now, execute immediately
+            logger.debug(f"Executing task '{coro.__name__}' immediately (scheduled for {at_time.isoformat()}) args={args}")
+            task = asyncio.create_task(coro(*args))
+            return task
     else:
         # Schedule normally
         logger.debug(f"Scheduling task '{coro.__name__}' args={args} at {at_time.isoformat()}")
@@ -175,10 +184,26 @@ async def schedule_user_tasks(user):
         if user.renew_id:
             # Logic for users WITH auto-renewal
             # 4, 3 and 2 days before: autopay attempt at midnight.
+            # Check which payment attempts are needed to avoid multiple simultaneous payments
+            current_time = datetime.now(MOSCOW)  # Get fresh current time for accurate comparison
+            payment_attempts_needed = []
             for days_before in (4, 3, 2):
                 eta = base - timedelta(days=days_before)
-                # Auto-payment attempt. schedule_coro will execute immediately if eta is in the past.
-                task = schedule_coro(eta, _exec_auto_payment, user.id, user.expired_at, days_before)
+                if eta <= current_time:
+                    # If this payment time has passed, we need to execute it
+                    payment_attempts_needed.append((eta, days_before))
+                else:
+                    # Future payment - schedule normally
+                    task = schedule_coro(eta, _exec_auto_payment, user.id, user.expired_at, days_before)
+                    scheduled_tasks[user.id].append(task)
+            
+            # If multiple payment attempts are needed (due to restart), execute only the most recent one
+            if payment_attempts_needed:
+                # Sort by eta (most recent time first) and execute only the first one
+                payment_attempts_needed.sort(key=lambda x: x[0], reverse=True)
+                most_recent_eta, most_recent_days = payment_attempts_needed[0]
+                logger.info(f"Multiple autopay attempts needed for user {user.id}. Executing only most recent: {most_recent_days} days before")
+                task = schedule_coro(most_recent_eta, _exec_auto_payment, user.id, user.expired_at, most_recent_days)
                 scheduled_tasks[user.id].append(task)
 
             # 1 day before: final check. If not paid, cancel subscription.
@@ -190,17 +215,20 @@ async def schedule_user_tasks(user):
             # 3 and 2 days before: expiration reminder at midnight
             for days_before in (3, 2):
                 eta = base - timedelta(days=days_before)
-                task = schedule_coro(eta, _exec_notify_expiring, user.id, user.expired_at, days_before)
+                # Skip expiration reminders if time has already passed
+                task = schedule_coro(eta, _exec_notify_expiring, user.id, user.expired_at, days_before, skip_if_past=True)
                 scheduled_tasks[user.id].append(task)
             # 1 day before: expiration reminder at noon
             eta_remind = base - timedelta(days=1)
             reminder_time = eta_remind + timedelta(hours=12)
-            task = schedule_coro(reminder_time, _exec_notify_expiring, user.id, user.expired_at, 1)
+            # Skip expiration reminders if time has already passed
+            task = schedule_coro(reminder_time, _exec_notify_expiring, user.id, user.expired_at, 1, skip_if_past=True)
             scheduled_tasks[user.id].append(task)
 
             # On expiration day: send notification that subscription has expired.
             # This will be skipped for auto-renewal users by the check inside _exec_notify_expired.
-            task = schedule_coro(base, _exec_notify_expired, user.id, user.expired_at)
+            # Skip expired notifications if time has already passed
+            task = schedule_coro(base, _exec_notify_expired, user.id, user.expired_at, skip_if_past=True)
             scheduled_tasks[user.id].append(task)
 
     # Trial tasks
@@ -216,14 +244,15 @@ async def schedule_user_tasks(user):
             notification_sent = (hours == 2 and user.notification_2h_sent) or (hours == 24 and user.notification_24h_sent)
             
             if not notification_sent:
-                # Use target_time as basis for scheduling. schedule_coro handles past events.
-                task = schedule_coro(target_time, _exec_notify_no_trial, user.id, hours)
+                # Skip trial notifications if time has already passed
+                task = schedule_coro(target_time, _exec_notify_no_trial, user.id, hours, skip_if_past=True)
                 scheduled_tasks[user.id].append(task)
         
         # Notification about expiring trial - at 12:00 the day before
         day_before = exp_dt - timedelta(days=1)
         exp_notification_eta = datetime.combine(day_before.date(), time(hour=12, minute=0)).replace(tzinfo=MOSCOW)
-        task = schedule_coro(exp_notification_eta, _exec_notify_expiring_trial, user.id, user.expired_at)
+        # Skip expiring trial notifications if time has already passed
+        task = schedule_coro(exp_notification_eta, _exec_notify_expiring_trial, user.id, user.expired_at, skip_if_past=True)
         scheduled_tasks[user.id].append(task)
         
         # Trial extension check
@@ -238,7 +267,8 @@ async def schedule_user_tasks(user):
     start_dt = datetime.combine(user.registration_date.date(), time(hour=18)).replace(tzinfo=MOSCOW)
     for days in (7, 14, 30):
         eta = start_dt + timedelta(days=days)
-        task = schedule_coro(eta, _exec_referral_prompt, user.id, days)
+        # Skip referral notifications if time has already passed
+        task = schedule_coro(eta, _exec_referral_prompt, user.id, days, skip_if_past=True)
         scheduled_tasks[user.id].append(task)
 
     # Log summary of scheduled tasks for this user
