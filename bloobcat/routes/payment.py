@@ -37,6 +37,8 @@ logger = get_payment_logger()
 async def get_tariffs():
     return await Tariffs.all().order_by("order")
 
+
+
 @router.post("/webhook/yookassa/{secret}")
 async def yookassa_webhook(request: Request, secret: str):
     if secret != yookassa_settings.webhook_secret:
@@ -309,6 +311,17 @@ async def yookassa_webhook(request: Request, secret: str):
             if tariff_id is not None:
                 original = await Tariffs.get_or_none(id=tariff_id)
                 if original:
+                    # Получаем device_count из метаданных платежа
+                    try:
+                        device_count = int(data.get("device_count", 1))
+                    except (ValueError, TypeError):
+                        device_count = 1
+                    if device_count < 1:
+                        device_count = 1
+                    
+                    # Рассчитываем итоговую цену для указанного количества устройств
+                    calculated_price = original.calculate_price(device_count)
+                    
                     # Удаляем предыдущий активный тариф, если он есть
                     if user.active_tariff_id:
                         old_active_tariff = await ActiveTariffs.get_or_none(id=user.active_tariff_id)
@@ -327,15 +340,15 @@ async def yookassa_webhook(request: Request, secret: str):
                         user=user,  # Link to this user
                         name=original.name,
                         months=original.months,
-                        price=original.price,
-                        hwid_limit=original.hwid_limit
+                        price=calculated_price,  # Используем рассчитанную цену
+                        hwid_limit=device_count  # Используем выбранное количество устройств
                     )
                     # Link user to this active tariff
                     user.active_tariff_id = active_tariff.id
                     
-                    # Устанавливаем hwid_limit пользователю из купленного тарифа
-                    user.hwid_limit = original.hwid_limit
-                    logger.info(f"Created ActiveTariff {active_tariff.id} for user {user.id} based on tariff {original.id}, установлен hwid_limit={original.hwid_limit}")
+                    # Устанавливаем hwid_limit пользователю из выбранного количества устройств
+                    user.hwid_limit = device_count
+                    logger.info(f"Created ActiveTariff {active_tariff.id} for user {user.id} based on tariff {original.id}, device_count={device_count}, установлен hwid_limit={device_count}")
                 else:
                     logger.error(f"Original tariff {tariff_id} not found; skipping ActiveTariffs")
             
@@ -359,8 +372,14 @@ async def yookassa_webhook(request: Request, secret: str):
                     # при автопродлении hwid_limit не меняем
                     hwid_limit = None
                     if tariff_id is not None and original:
-                        hwid_limit = original.hwid_limit
-                        logger.info(f"Новая подписка: устанавливаем hwid_limit={hwid_limit} из тарифа ID={original.id}")
+                        try:
+                            device_count = int(data.get("device_count", 1))
+                        except (ValueError, TypeError):
+                            device_count = 1
+                        if device_count < 1:
+                            device_count = 1
+                        hwid_limit = device_count
+                        logger.info(f"Новая подписка: устанавливаем hwid_limit={hwid_limit} из device_count для тарифа ID={original.id}")
                         update_params["hwidDeviceLimit"] = hwid_limit
                     else:
                         logger.info(f"Автопродление: hwid_limit не меняем, обновляем только дату истечения")
@@ -537,12 +556,17 @@ async def yookassa_webhook(request: Request, secret: str):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @router.get("/{tariff_id}")
-async def pay(tariff_id: int, email: str, user: Users = Depends(validate)):
+async def pay(tariff_id: int, email: str, device_count: int = 1, user: Users = Depends(validate)):
     tariff = await Tariffs.get_or_none(id=tariff_id)
     if tariff is None:
         raise HTTPException(status_code=404, detail="Tariff not found")
 
-    full_price = float(tariff.price)
+    # Проверяем количество устройств
+    if device_count < 1:
+        device_count = 1
+    
+    # Рассчитываем цену для указанного количества устройств
+    full_price = float(tariff.calculate_price(device_count))
     user_balance = float(user.balance)
     months = int(tariff.months)
 
@@ -631,14 +655,14 @@ async def pay(tariff_id: int, email: str, user: Users = Depends(validate)):
             user=user,
             name=tariff.name,
             months=tariff.months,
-            price=tariff.price,
-            hwid_limit=tariff.hwid_limit
+            price=full_price,  # Используем рассчитанную цену
+            hwid_limit=device_count  # Используем выбранное количество устройств
         )
         user.active_tariff_id = active_tariff.id
         
-        # Устанавливаем hwid_limit пользователю из купленного тарифа
-        user.hwid_limit = tariff.hwid_limit
-        logger.info(f"При покупке с баланса установлен hwid_limit={tariff.hwid_limit} для пользователя {user.id}")
+        # Устанавливаем hwid_limit пользователю из выбранного количества устройств
+        user.hwid_limit = device_count
+        logger.info(f"При покупке с баланса установлен hwid_limit={device_count} для пользователя {user.id}")
 
         # Сохраняем пользователя (до синхронизации RemnaWave)
         await user.save()
@@ -654,9 +678,9 @@ async def pay(tariff_id: int, email: str, user: Users = Depends(validate)):
                 await remnawave_client.users.update_user(
                     uuid=user.remnawave_uuid,
                     expireAt=user.expired_at,
-                    hwidDeviceLimit=tariff.hwid_limit
+                    hwidDeviceLimit=device_count
                 )
-                logger.info(f"Синхронизирован hwid_limit={tariff.hwid_limit} и expireAt={user.expired_at} для пользователя {user.id} в RemnaWave")
+                logger.info(f"Синхронизирован hwid_limit={device_count} и expireAt={user.expired_at} для пользователя {user.id} в RemnaWave")
             except Exception as e:
                 logger.error(f"Ошибка при синхронизации hwid_limit/expireAt с RemnaWave для пользователя {user.id}: {e}")
             finally:
@@ -709,7 +733,8 @@ async def pay(tariff_id: int, email: str, user: Users = Depends(validate)):
             "user_id": user.id,
             "month": months,
             "amount_from_balance": amount_from_balance, # Добавляем сумму списания с баланса
-            "tariff_id": tariff.id
+            "tariff_id": tariff.id,
+            "device_count": device_count  # Добавляем количество устройств
         }
 
         payment = Payment.create({
