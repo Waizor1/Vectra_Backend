@@ -195,7 +195,9 @@ async def remnawave_updater():
                         new_connected_at = datetime.fromisoformat(online_at.replace('Z', '+00:00'))
                         old_connected_at = user.connected_at
                         
-                        if not old_connected_at:
+                        # Проверяем, является ли это первым подключением
+                        # (не было connected_at И пользователь не зарегистрирован)
+                        if not old_connected_at and not user.is_registered:
                             referrer = await user.referrer()
                             await on_activated_key(user.id, user.full_name, referrer_id=referrer.id if referrer else None, referrer_name=referrer.full_name if referrer else None, utm=user.utm)
                             user.is_registered = True
