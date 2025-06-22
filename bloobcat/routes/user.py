@@ -97,6 +97,7 @@ async def check(user: Users = Depends(validate)) -> Dict[str, Any]:
     # --- Определение лимита устройств (только из БД) ---
     devices_limit = 1  # 1. Значение по умолчанию
     source = "дефолту"
+    active_tariff_data = None
 
     # 2. Пытаемся получить из тарифа
     if user.active_tariff_id:
@@ -104,6 +105,14 @@ async def check(user: Users = Depends(validate)) -> Dict[str, Any]:
         if tariff:
             devices_limit = tariff.hwid_limit
             source = f"тарифу ({tariff.name})"
+            # Добавляем информацию об активном тарифе в ответ
+            active_tariff_data = {
+                "id": tariff.id,
+                "name": tariff.name,
+                "months": tariff.months,
+                "price": tariff.price,
+                "hwid_limit": tariff.hwid_limit
+            }
     
     # 3. Личное значение из БД имеет наивысший приоритет
     if user.hwid_limit is not None:
@@ -112,6 +121,7 @@ async def check(user: Users = Depends(validate)) -> Dict[str, Any]:
 
     logger.debug(f"Итоговый лимит устройств для пользователя {user.id} установлен по {source}: {devices_limit}")
     user_dict["devices_limit"] = devices_limit
+    user_dict["active_tariff"] = active_tariff_data
 
     return user_dict
 
@@ -209,6 +219,7 @@ async def get_family_subscription(familyurl: str):
     # --- Определение лимита устройств (только из БД) ---
     devices_limit = 1  # 1. Значение по умолчанию
     source = "дефолту"
+    active_tariff_data = None
 
     # 2. Пытаемся получить из тарифа
     if user.active_tariff_id:
@@ -216,6 +227,14 @@ async def get_family_subscription(familyurl: str):
         if tariff:
             devices_limit = tariff.hwid_limit
             source = f"тарифу ({tariff.name})"
+            # Добавляем информацию об активном тарифе в ответ
+            active_tariff_data = {
+                "id": tariff.id,
+                "name": tariff.name,
+                "months": tariff.months,
+                "price": tariff.price,
+                "hwid_limit": tariff.hwid_limit
+            }
     
     # 3. Личное значение из БД имеет наивысший приоритет
     if user.hwid_limit is not None:
@@ -224,6 +243,7 @@ async def get_family_subscription(familyurl: str):
 
     logger.debug(f"Итоговый лимит устройств для пользователя {user.id} по семейной ссылке установлен по {source}: {devices_limit}")
     user_dict["devices_limit"] = devices_limit
+    user_dict["active_tariff"] = active_tariff_data
 
     return user_dict
 
