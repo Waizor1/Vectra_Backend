@@ -294,18 +294,22 @@ async def yookassa_webhook(request: Request, secret: str):
                     f"Автопродление: подписка пользователя {user.id} продлена на {days} дней, новая дата истечения: {user.expired_at}"
                 )
             else:
-                # Если это новый тариф (tariff_id присутствует), устанавливаем новую дату
-                # иначе расширяем существующую подписку
-                if tariff_id is not None:
-                    # Устанавливаем новую дату окончания
+                # При смене тарифа (когда tariff_id присутствует) компенсация уже учтена в additional_days
+                # Поэтому устанавливаем дату от текущего дня, чтобы избежать двойного учёта
+                if tariff_id is not None and additional_days > 0:
+                    # Смена тарифа с компенсацией - устанавливаем от текущей даты
                     user.expired_at = current_date + timedelta(days=days)
                     logger.info(
-                        f"Установлена новая дата истечения для пользователя {user.id}: {user.expired_at} "
-                        f"(сброшена предыдущая дата и установлено {days} дней)"
+                        f"Смена тарифа для пользователя {user.id}: установлена дата {user.expired_at} "
+                        f"({days} дней от текущей даты, включая {additional_days} дней компенсации)"
                     )
                 else:
-                    # Расширяем существующую подписку при обычном продлении
+                    # Обычное продление или новая подписка без смены тарифа
                     await user.extend_subscription(days)
+                    logger.info(
+                        f"Подписка пользователя {user.id} продлена на {days} дней, новая дата истечения: {user.expired_at} "
+                        f"(с учетом оставшихся дней предыдущей подписки/триала)"
+                    )
                 
             # If a tariff_id is provided in metadata, ensure it's created in ActiveTariffs and assign to user
             if tariff_id is not None:
@@ -634,7 +638,28 @@ async def pay(tariff_id: int, email: str, device_count: int = 1, user: Users = D
         logger.info(f"Итоговое количество дней подписки: {days} ({(target_date - current_date).days} + {additional_days})")
 
         user.balance -= full_price
-        await user.extend_subscription(days)
+        
+        # При смене тарифа компенсация уже учтена в additional_days
+        # Поэтому устанавливаем дату от текущего дня, чтобы избежать двойного учёта
+        if additional_days > 0:
+            # Смена тарифа с компенсацией - устанавливаем от текущей даты
+            user.expired_at = current_date + timedelta(days=days)
+            logger.info(
+                f"Смена тарифа (баланс) для пользователя {user.id}: установлена дата {user.expired_at} "
+                f"({days} дней от текущей даты, включая {additional_days} дней компенсации)"
+            )
+        else:
+            # Обычное продление без смены тарифа
+            await user.extend_subscription(days)
+            logger.info(
+                f"Продление (баланс) для пользователя {user.id}: дата {user.expired_at} "
+                f"(с учетом оставшихся дней предыдущей подписки/триала)"
+            )
+        
+        # Если у пользователя был пробный период, сбрасываем флаг
+        if user.is_trial:
+            user.is_trial = False
+            logger.info(f"Сброшен флаг пробного периода для пользователя {user.id} после оплаты с баланса")
 
         # --- NEW: Создаём/обновляем ActiveTariffs и лимит устройств ---
         # Удаляем предыдущий активный тариф, если есть

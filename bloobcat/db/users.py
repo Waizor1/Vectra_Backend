@@ -240,12 +240,14 @@ class Users(models.Model):
 
     async def extend_subscription(self, days: int):
         current_date = date.today()
-        if self.expired_at and self.expired_at > current_date:
-            # Если подписка активна, считаем от даты окончания текущей подписки
-            self.expired_at = self.expired_at + timedelta(days=days)
-        else:
-            # Если подписка неактивна, считаем от текущей даты
-            self.expired_at = current_date + timedelta(days=days)
+        
+        # Определяем базовую дату для продления.
+        # Если подписка/триал активны (дата окончания в будущем), используем ее.
+        # Иначе (подписка истекла или ее не было), используем текущую дату.
+        start_date = max(self.expired_at, current_date) if self.expired_at else current_date
+        
+        self.expired_at = start_date + timedelta(days=days)
+        
         await self.save()
         # Schedule subscription tasks whenever expired_at is updated
         from bloobcat.scheduler import schedule_user_tasks
