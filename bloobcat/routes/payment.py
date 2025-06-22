@@ -231,33 +231,66 @@ async def yookassa_webhook(request: Request, secret: str):
                         f"стоимость: {unused_value:.2f} руб."
                     )
                     
-                    # Рассчитываем, сколько дней даст неиспользованная сумма в новом тарифе
+                    # ИСПРАВЛЕННАЯ ЛОГИКА: рассчитываем через пропорцию от общей суммы
                     if new_tariff.price > 0:
-                        # Рассчитываем новый период подписки
+                        # Получаем сумму, которую заплатил пользователь
+                        amount_paid_by_user = float(payment.amount.value)
+                        amount_from_balance = float(data.get("amount_from_balance", 0))
+                        total_paid = amount_paid_by_user + amount_from_balance
+                        
+                        # Получаем device_count и рассчитываем правильную цену
+                        try:
+                            device_count = int(data.get("device_count", 1))
+                        except (ValueError, TypeError):
+                            device_count = 1
+                        if device_count < 1:
+                            device_count = 1
+                        
+                        # Рассчитываем итоговую цену для указанного количества устройств
+                        correct_new_tariff_price = new_tariff.calculate_price(device_count)
+                        
+                        # Общая сумма = заплачено пользователем + компенсация за старый тариф
+                        total_amount = total_paid + unused_value
+                        
+                        # Рассчитываем новый период подписки (стандартный для тарифа)
                         new_target_date = current_date.replace(
                             year=current_date.year + ((current_date.month + new_tariff.months - 1) // 12),
                             month=((current_date.month + new_tariff.months - 1) % 12) + 1
                         )
                         new_total_days = (new_target_date - current_date).days
                         
-                        # Сколько дней даст неиспользованная сумма в новом тарифе
-                        additional_days = int(unused_value / new_tariff.price * new_total_days)
+                        # Пропорция: x дней / общая_сумма = полный_период_тарифа / цена_тарифа
+                        # x = общая_сумма * полный_период_тарифа / цена_тарифа
+                        calculated_days = int(total_amount * new_total_days / correct_new_tariff_price)
+                        
                         logger.info(
-                            f"Перенос времени для пользователя {user.id}: "
-                            f"{unused_value:.2f} руб. = {additional_days} дней в новом тарифе"
+                            f"ИСПРАВЛЕННЫЙ расчёт для пользователя {user.id}: "
+                            f"Заплачено: {total_paid:.2f} руб + Компенсация: {unused_value:.2f} руб = "
+                            f"Общая сумма: {total_amount:.2f} руб. "
+                            f"Пропорция: {calculated_days} дней = {total_amount:.2f} * {new_total_days} / {correct_new_tariff_price:.2f}"
                         )
+                        
+                        # Устанавливаем рассчитанные дни как итоговые (без additional_days)
+                        additional_days = 0  # Сбрасываем, так как используем calculated_days
+                        days = calculated_days  # Переопределяем days
                 except Exception as e:
                     logger.error(f"Ошибка при расчете переноса подписки для {user.id}: {str(e)}")
                     additional_days = 0  # При ошибке не добавляем дополнительные дни
             
-            # Рассчитываем точное количество дней для указанного количества месяцев + дополнительные дни
-            current_date = date.today()
-            target_date = current_date.replace(
-                year=current_date.year + ((current_date.month + months - 1) // 12),
-                month=((current_date.month + months - 1) % 12) + 1
-            )
-            days = (target_date - current_date).days + additional_days
-            logger.info(f"Итоговое количество дней подписки: {days} ({(target_date - current_date).days} + {additional_days})")
+            # Рассчитываем точное количество дней для указанного количества месяцев
+            # При смене тарифа days уже рассчитано через пропорцию
+            if 'calculated_days' not in locals():
+                # Обычная покупка нового тарифа без смены
+                current_date = date.today()
+                target_date = current_date.replace(
+                    year=current_date.year + ((current_date.month + months - 1) // 12),
+                    month=((current_date.month + months - 1) % 12) + 1
+                )
+                days = (target_date - current_date).days
+                logger.info(f"Стандартное количество дней подписки: {days}")
+            else:
+                # days уже рассчитано через пропорцию при смене тарифа
+                logger.info(f"Итоговое количество дней подписки (через пропорцию): {days}")
         else:
             # Если нет tariff_id, значит это автоплатеж или другой тип платежа, просто рассчитываем дни как обычно
             current_date = date.today()
@@ -294,14 +327,14 @@ async def yookassa_webhook(request: Request, secret: str):
                     f"Автопродление: подписка пользователя {user.id} продлена на {days} дней, новая дата истечения: {user.expired_at}"
                 )
             else:
-                # При смене тарифа (когда tariff_id присутствует) компенсация уже учтена в additional_days
-                # Поэтому устанавливаем дату от текущего дня, чтобы избежать двойного учёта
-                if tariff_id is not None and additional_days > 0:
+                # При смене тарифа (когда calculated_days определено) устанавливаем от текущей даты
+                # чтобы избежать двойного учёта компенсации
+                if 'calculated_days' in locals():
                     # Смена тарифа с компенсацией - устанавливаем от текущей даты
                     user.expired_at = current_date + timedelta(days=days)
                     logger.info(
                         f"Смена тарифа для пользователя {user.id}: установлена дата {user.expired_at} "
-                        f"({days} дней от текущей даты, включая {additional_days} дней компенсации)"
+                        f"({days} дней от текущей даты, рассчитано через пропорцию)"
                     )
                 else:
                     # Обычное продление или новая подписка без смены тарифа
@@ -613,40 +646,53 @@ async def pay(tariff_id: int, email: str, device_count: int = 1, user: Users = D
                     f"Неиспользованная часть подписки пользователя {user.id}: "
                     f"{days_remaining}/{old_total_days} дней (стоимость: {unused_value:.2f} руб.)"
                 )
-                if tariff.price > 0:
+                if full_price > 0:
+                    # ИСПРАВЛЕННАЯ ЛОГИКА: рассчитываем через пропорцию от общей суммы
+                    # Общая сумма = заплачено пользователем (full_price) + компенсация за старый тариф
+                    total_amount = full_price + unused_value
+                    
+                    # Рассчитываем новый период подписки (стандартный для тарифа)
                     new_target_date = current_date.replace(
                         year=current_date.year + ((current_date.month + tariff.months - 1) // 12),
                         month=((current_date.month + tariff.months - 1) % 12) + 1
                     )
                     new_total_days = (new_target_date - current_date).days
-                    additional_days = int(unused_value / tariff.price * new_total_days)
+                    
+                    # Пропорция: x дней / общая_сумма = полный_период_тарифа / цена_тарифа
+                    # x = общая_сумма * полный_период_тарифа / цена_тарифа
+                    calculated_days = int(total_amount * new_total_days / full_price)
+                    
                     logger.info(
-                        f"Перенос времени для пользователя {user.id}: "
-                        f"{unused_value:.2f} руб. = {additional_days} дней в новом тарифе"
+                        f"ИСПРАВЛЕННЫЙ расчёт (баланс) для пользователя {user.id}: "
+                        f"Заплачено: {full_price:.2f} руб + Компенсация: {unused_value:.2f} руб = "
+                        f"Общая сумма: {total_amount:.2f} руб. "
+                        f"Пропорция: {calculated_days} дней = {total_amount:.2f} * {new_total_days} / {full_price:.2f}"
                     )
+                    
+                    # Устанавливаем рассчитанные дни как итоговые
+                    additional_days = 0  # Сбрасываем, так как используем calculated_days
+                    days = calculated_days  # Переопределяем days
             except Exception as e:
                 logger.error(f"Ошибка при расчете переноса подписки для {user.id}: {str(e)}")
                 additional_days = 0
-        # ... существующий код ...
-        # days уже определён выше, пересчитаем с учётом additional_days
-        current_date = date.today()
-        target_date = current_date.replace(
-            year=current_date.year + ((current_date.month + months - 1) // 12),
-            month=((current_date.month + months - 1) % 12) + 1
-        )
-        days = (target_date - current_date).days + additional_days
-        logger.info(f"Итоговое количество дней подписки: {days} ({(target_date - current_date).days} + {additional_days})")
+        # При смене тарифа days уже рассчитано через пропорцию
+        if 'calculated_days' not in locals():
+            # Обычная покупка без смены тарифа - days уже рассчитано выше
+            logger.info(f"Стандартное количество дней подписки: {days}")
+        else:
+            # days уже рассчитано через пропорцию при смене тарифа
+            logger.info(f"Итоговое количество дней подписки (через пропорцию): {days}")
 
         user.balance -= full_price
         
-        # При смене тарифа компенсация уже учтена в additional_days
+        # При смене тарифа компенсация уже учтена в calculated_days
         # Поэтому устанавливаем дату от текущего дня, чтобы избежать двойного учёта
-        if additional_days > 0:
+        if 'calculated_days' in locals():
             # Смена тарифа с компенсацией - устанавливаем от текущей даты
             user.expired_at = current_date + timedelta(days=days)
             logger.info(
                 f"Смена тарифа (баланс) для пользователя {user.id}: установлена дата {user.expired_at} "
-                f"({days} дней от текущей даты, включая {additional_days} дней компенсации)"
+                f"({days} дней от текущей даты, рассчитано через пропорцию)"
             )
         else:
             # Обычное продление без смены тарифа
@@ -655,7 +701,7 @@ async def pay(tariff_id: int, email: str, device_count: int = 1, user: Users = D
                 f"Продление (баланс) для пользователя {user.id}: дата {user.expired_at} "
                 f"(с учетом оставшихся дней предыдущей подписки/триала)"
             )
-        
+
         # Если у пользователя был пробный период, сбрасываем флаг
         if user.is_trial:
             user.is_trial = False
