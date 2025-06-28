@@ -28,14 +28,14 @@ async def notify_expiring_trial(user):
             "Не хотите терять доступ к быстрому и безопасному VPN? Оформите подписку прямо сейчас! 🔒\n"
             "Возникли вопросы? Обратитесь в поддержку @BlubCatVPN_support"
         )
-        button = await webapp_inline_button("Оформить подписку", "pay")
+        button = await webapp_inline_button("Оформить подписку", "/pay")
     else:
         text = (
             f"⚠️ Hi {user.full_name}! Your BlubCat VPN trial period will expire tonight (at 00:00). \n"
             "Don't want to lose access to fast and secure VPN? Get a subscription now! 🔒\n"
             "Questions? Contact support @BlubCatVPN_support"
         )
-        button = await webapp_inline_button("Get Subscription", "pay")
+        button = await webapp_inline_button("Get Subscription", "/pay")
     
     try:
         await bot.send_message(user.id, text, reply_markup=button)

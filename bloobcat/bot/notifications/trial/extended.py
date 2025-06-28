@@ -14,14 +14,14 @@ async def notify_trial_extended(user, days: int):
             "Используйте это время, чтобы полностью оценить скорость и безопасность BlubCat VPN.\n"
             "Вопросы? Пишите в поддержку @BlubCatVPN_support"
         )
-        button = await webapp_inline_button("Подключить VPN", "second")
+        button = await webapp_inline_button("Подключить VPN", "/second")
     else:
         text = (
             f"🎉 Hi {user.full_name}! Your trial period has been extended by {days} days! 🔄\n"
             "Use this time to fully experience the speed and security of BlubCat VPN.\n"
             "Questions? Contact support @BlubCatVPN_support"
         )
-        button = await webapp_inline_button("Connect VPN", "second")
+        button = await webapp_inline_button("Connect VPN", "/second")
     try:
         await bot.send_message(user.id, text, reply_markup=button)
         logger.info(f"Уведомление о продлении пробного периода успешно отправлено пользователю {user.id}")

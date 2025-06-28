@@ -16,14 +16,14 @@ async def notify_trial_ended(user):
             "Не упустите возможность продления и получите эксклюзивные условия! 🔥\n"
             "Напишите в поддержку @BlubCatVPN_support или продлите прямо сейчас."
         )
-        button = await webapp_inline_button("Продлить сейчас", "pay")
+        button = await webapp_inline_button("Продлить сейчас", "/pay")
     else:
         text = (
             f"👋 Hi {user.full_name}! Your trial period has ended. 🎉\n"
             "Don't miss out on exclusive offers and renew now! 🔥\n"
             "Contact support @BlubCatVPN_support or renew now."
         )
-        button = await webapp_inline_button("Renew Now", "pay")
+        button = await webapp_inline_button("Renew Now", "/pay")
     try:
         await bot.send_message(user.id, text, reply_markup=button)
         logger.info(f"Уведомление о завершении пробного периода успешно отправлено пользователю {user.id}")

@@ -39,14 +39,14 @@ async def on_referral_registration(user: Users, referral: Users):
             f"🎉 Привет, {user.full_name}! Ваш реферал {referral.name()} только что зарегистрировался.\n"
             "Вы получили 50₽ на бонусный баланс. Спасибо, что рекомендуете нас! 💸"
         )
-        button = await webapp_inline_button("Реферальная программа", "ref")
+        button = await webapp_inline_button("Реферальная программа", "/ref")
     else:
         logger.info(f"Реферальная регистрация: пользователь {user.id} получил 50₽ за регистрацию реферала {referral.id}")
         text = (
             f"🎉 Hi {user.full_name}! Your referral {referral.name()} just signed up.\n"
             "You've been credited 50 RUB to your bonus balance. Thanks for spreading the word! 💸"
         )
-        button = await webapp_inline_button("Реферальная программа", "ref")
+        button = await webapp_inline_button("Реферальная программа", "/ref")
     try:
         await bot.send_message(user.id, text, reply_markup=button)
         logger.info(f"Уведомление о реферальной регистрации успешно отправлено пользователю {user.id}")
@@ -61,13 +61,13 @@ async def on_referral_prompt(user: Users, days: int):
             f"🎉 Привет, {user.full_name}! Вы уже с нами {days} дней. "
             "Пригласите друга и получите бонусы в реферальной программе!"
         )
-        button = await webapp_inline_button("Реферальная программа", "ref")
+        button = await webapp_inline_button("Реферальная программа", "/ref")
     else:
         text = (
             f"🎉 Hi {user.full_name}! You've been with us for {days} days. "
             "Invite a friend and earn rewards in our referral program!"
         )
-        button = await webapp_inline_button("Referral Program", "ref")
+        button = await webapp_inline_button("Referral Program", "/ref")
     logger.info(f"Отправка реферального напоминания пользователю {user.id} ({days} дней)")
     try:
         await bot.send_message(user.id, text, reply_markup=button)

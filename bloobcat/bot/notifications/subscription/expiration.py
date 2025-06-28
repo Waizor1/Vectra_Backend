@@ -75,17 +75,49 @@ async def notify_expiring_subscription(user: Users):
         date_str_ru = f"через {days} {{'день' if days == 1 else 'дня' if days < 5 else 'дней'}}"
         date_str_en = f"in {days} {{'day' if days == 1 else 'days'}}"
     if lang == 'ru':
-        text = (
-            f"⚠️ Привет, {user.full_name}! Ваша подписка истекает {date_str_ru}. "
-            "Продлите сейчас, чтобы не прерывать доступ к VPN! 🔒"
-        )
-        button = await webapp_inline_button("Продлить сейчас", "pay")
+        if days == 7:
+            text = (
+                f"⏰ Привет, {user.full_name}! Ваша подписка истекает через 7 дней.\n"
+                "Не забудьте продлить её, чтобы не прерывать доступ к VPN! 🔒"
+            )
+        elif days == 3:
+            text = (
+                f"🚨 Внимание, {user.full_name}! Ваша подписка истекает через 3 дня.\n"
+                "Продлите её прямо сейчас, чтобы не потерять доступ к VPN! 🌐"
+            )
+        elif days == 1:
+            text = (
+                f"🔥 Срочно, {user.full_name}! Ваша подписка истекает завтра.\n"
+                "Продлите её прямо сейчас, чтобы не прерывать доступ к VPN! ⚡"
+            )
+        else:
+            text = (
+                f"⏰ Привет, {user.full_name}! Ваша подписка истекает через {days} дней.\n"
+                "Не забудьте продлить её, чтобы не прерывать доступ к VPN! 🔒"
+            )
+        button = await webapp_inline_button("Продлить сейчас", "/pay")
     else:
-        text = (
-            f"⚠️ Hi {user.full_name}! Your subscription will expire {date_str_en}. "
-            "Renew now to keep your VPN active! 🔒"
-        )
-        button = await webapp_inline_button("Renew Now", "pay")
+        if days == 7:
+            text = (
+                f"⏰ Hi {user.full_name}! Your subscription expires in 7 days.\n"
+                "Don't forget to renew to keep your VPN access! 🔒"
+            )
+        elif days == 3:
+            text = (
+                f"🚨 Attention {user.full_name}! Your subscription expires in 3 days.\n"
+                "Renew now to avoid losing VPN access! 🌐"
+            )
+        elif days == 1:
+            text = (
+                f"🔥 Urgent, {user.full_name}! Your subscription expires tomorrow.\n"
+                "Renew now to keep your VPN active! ⚡"
+            )
+        else:
+            text = (
+                f"⏰ Hi {user.full_name}! Your subscription expires in {days} days.\n"
+                "Don't forget to renew to keep your VPN access! 🔒"
+            )
+        button = await webapp_inline_button("Renew Now", "/pay")
     try:
         await bot.send_message(
             user.id,
