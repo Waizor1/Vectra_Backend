@@ -6,6 +6,7 @@ from .stat import router as stat_router
 from .check_subs import router as check_subs_router
 from .utm_generator import router as utm_generator_router
 from .menu import router as menu_router
+from .test_notifications import router as test_notifications_router
 
 admin_router = Router()
 
@@ -14,6 +15,7 @@ admin_router.include_router(stat_router)
 admin_router.include_router(check_subs_router)
 admin_router.include_router(utm_generator_router)
 admin_router.include_router(menu_router)
+admin_router.include_router(test_notifications_router)
 
 
 # @admin_router.message()
