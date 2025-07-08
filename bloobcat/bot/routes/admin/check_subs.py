@@ -3,6 +3,7 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 from datetime import datetime, timedelta
 from tortoise.functions import Count
+from pytz import timezone
 
 from bloobcat.bot.routes.admin.functions import IsAdmin, search_user
 from bloobcat.routes.remnawave.catcher import remnawave_updater
@@ -15,6 +16,9 @@ from bloobcat.settings import app_settings
 
 logger = get_logger("admin_check_subs")
 router = Router()
+
+# Московский часовой пояс
+MOSCOW_TZ = timezone('Europe/Moscow')
 
 
 @router.message(Command("check_subs"), IsAdmin())
@@ -53,8 +57,9 @@ async def admin_expiring_subs(message: Message):
         if len(args) > 1 and args[1].isdigit():
             days = int(args[1])
         
-        # Получаем текущую дату и дату через указанное количество дней
-        today = datetime.now().date()
+        # Получаем текущую дату в московском часовом поясе и дату через указанное количество дней
+        moscow_now = datetime.now(MOSCOW_TZ)
+        today = moscow_now.date()
         future_date = today + timedelta(days=days)
         
         # Получаем пользователей с подписками, истекающими в указанный период
@@ -109,7 +114,7 @@ async def admin_check_all(message: Message):
         await message.answer("Начинаю выполнение всех задач планировщика...")
         
         # Запускаем все задачи последовательно
-        start_time = datetime.now()
+        start_time = datetime.now(MOSCOW_TZ)
         
         # 1. Обновление RemnaWave
         await message.answer("1/5. Запуск обновления RemnaWave...")
@@ -123,7 +128,7 @@ async def admin_check_all(message: Message):
         # await message.answer("5/5. Запуск проверки пользователей с пробным периодом...")
         # await check_trial_users()
         
-        elapsed = (datetime.now() - start_time).total_seconds()
+        elapsed = (datetime.now(MOSCOW_TZ) - start_time).total_seconds()
         await message.answer(f"Все задачи успешно выполнены за {elapsed:.2f} секунд! Подробности в логах.")
         logger.info(f"Администратор {message.from_user.id} вручную запустил все задачи планировщика")
     except Exception as e:
@@ -141,8 +146,9 @@ async def admin_user_stats(message: Message):
     try:
         await message.answer("Собираю статистику по пользователям...")
         
-        # Получаем текущую дату
-        today = datetime.now().date()
+        # Получаем текущую дату в московском часовом поясе
+        moscow_now = datetime.now(MOSCOW_TZ)
+        today = moscow_now.date()
         
         # Общее количество пользователей
         total_users = await Users.all().count()
@@ -189,7 +195,7 @@ async def admin_user_stats(message: Message):
         ).count()
         
         # Количество пользователей, подключившихся за последние 24 часа
-        last_day = datetime.now() - timedelta(days=1)
+        last_day = moscow_now - timedelta(days=1)
         connected_last_day = await Users.filter(
             connected_at__gte=last_day
         ).count()
@@ -238,8 +244,9 @@ async def admin_user_info(message: Message):
             await message.answer(f"Пользователь с ID {user_id} не найден.")
             return
         
-        # Получаем текущую дату для расчета оставшихся дней
-        today = datetime.now().date()
+        # Получаем текущую дату в московском часовом поясе для расчета оставшихся дней
+        moscow_now = datetime.now(MOSCOW_TZ)
+        today = moscow_now.date()
         
         # Формируем статус подписки
         if not user.is_registered:

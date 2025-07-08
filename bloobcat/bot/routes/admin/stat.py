@@ -4,7 +4,7 @@ import logging
 from aiogram.dispatcher.router import Router
 from aiogram.filters.command import Command, CommandObject
 from aiogram.types.message import Message
-from pytz import UTC
+from pytz import UTC, timezone
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
@@ -14,6 +14,9 @@ from bloobcat.db.payments import ProcessedPayments
 
 router = Router()
 logger = logging.getLogger(__name__)
+
+# Московский часовой пояс
+MOSCOW_TZ = timezone('Europe/Moscow')
 
 
 @router.message(Command("stat"), IsPartnerOrAdmin())
@@ -32,13 +35,13 @@ async def admin_stat(message: Message, command: CommandObject):
     else:
         payed = 0
 
-    now = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+    now_moscow = datetime.now(MOSCOW_TZ).strftime("%d.%m.%Y %H:%M:%S")
     percent_registered = amount and registered / amount * 100 or 0
     percent_payed = registered and payed / registered * 100 or 0
 
     stats_message = (
         f"📊 <b>Статистика по UTM:</b> <code>{utm}</code>\n"
-        f"<i>отчет на {now}</i>\n\n"
+        f"<i>отчет на {now_moscow}</i>\n\n"
         f"👥 Всего зашли: <b>{amount}</b>\n"
         f"✅ Активировали: <b>{registered}</b> (<i>{percent_registered:.1f}%</i>)\n"
         f"💰 Оплатили: <b>{payed}</b> (<i>{percent_payed:.1f}%</i>)"
@@ -50,8 +53,10 @@ async def admin_stat(message: Message, command: CommandObject):
 async def online_(message: Message):
     m = await message.answer("⏳ <i>Подождите...</i>", parse_mode="HTML")
 
+    # Используем московское время для проверки онлайна
+    moscow_now = datetime.now(MOSCOW_TZ)
     active_users = await Users.filter(
-        connected_at__gte=datetime.now(UTC) - timedelta(minutes=15)
+        connected_at__gte=moscow_now - timedelta(minutes=15)
     )
     i = len(active_users)
 
@@ -83,9 +88,9 @@ async def show_utm_list(message, page=0, edit_message=False):
     total_registered = await Users.filter(is_registered=True).count()
     
     # Получаем количество пользователей онлайн
-    now_utc = datetime.now(UTC) # Get current UTC time
+    now_moscow = datetime.now(MOSCOW_TZ)
     active_users_online = await Users.filter(
-        connected_at__gte=now_utc - timedelta(minutes=15)
+        connected_at__gte=now_moscow - timedelta(minutes=15)
     ).count()
     
     # Получаем все ID зарегистрированных пользователей
@@ -98,9 +103,11 @@ async def show_utm_list(message, page=0, edit_message=False):
         total_paid = len(set(paid_user_ids_all))
     
     # Считаем активных пользователей (подписка не истекла)
-    total_active_now = await Users.filter(is_registered=True, expired_at__gt=now_utc).count()
+    # Для проверки истечения подписки используем дату в московском времени
+    moscow_today = now_moscow.date()
+    total_active_now = await Users.filter(is_registered=True, expired_at__gt=moscow_today).count()
     
-    now_str = now_utc.strftime("%d.%m.%Y %H:%M:%S") # Use formatted UTC time for report time
+    now_str = now_moscow.strftime("%d.%m.%Y %H:%M:%S")
     percent_registered_total = total_users and total_registered / total_users * 100 or 0
     percent_paid_total = total_registered and total_paid / total_registered * 100 or 0
     percent_active_now = total_registered and total_active_now / total_registered * 100 or 0 # Calculate percentage of active users
@@ -146,7 +153,7 @@ async def show_utm_list(message, page=0, edit_message=False):
             payed = len(set(paid_user_ids))
 
         # Считаем активных сейчас для UTM
-        active_now_utm = await Users.filter(utm=utm, is_registered=True, expired_at__gt=now_utc).count()
+        active_now_utm = await Users.filter(utm=utm, is_registered=True, expired_at__gt=moscow_today).count()
         
         utm_str = str(utm)
         # Обновляем текст кнопки, добавляя активных
@@ -221,10 +228,11 @@ async def show_utm_detail(message, utm, page=0):
         payed = len(set(paid_user_ids))
 
     # Count currently active users for this UTM
-    now_utc = datetime.now(UTC)
-    active_now = await Users.filter(utm=utm, is_registered=True, expired_at__gt=now_utc).count()
+    now_moscow = datetime.now(MOSCOW_TZ)
+    moscow_today = now_moscow.date()
+    active_now = await Users.filter(utm=utm, is_registered=True, expired_at__gt=moscow_today).count()
     
-    now_str = now_utc.strftime("%d.%m.%Y %H:%M:%S") # Use formatted UTC time for report time
+    now_str = now_moscow.strftime("%d.%m.%Y %H:%M:%S")
     percent_registered = amount and registered / amount * 100 or 0
     percent_payed = registered and payed / registered * 100 or 0
     percent_active_now = registered and active_now / registered * 100 or 0 # Calculate percentage of active users
