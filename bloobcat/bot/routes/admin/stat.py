@@ -307,3 +307,281 @@ async def callback_handler(callback: CallbackQuery):
     # Если ничего не сработало
     logger.error(f"Неизвестный формат callback_data: {callback.data}")
     await callback.answer("Неизвестная команда")
+
+
+@router.message(Command("trial_stats"), IsPartnerOrAdmin())
+async def trial_extension_stats(message: Message):
+    """ОПТИМИЗИРОВАНО: Показывает детальную статистику trial extension уведомлений"""
+    m = await message.answer("⏳ <i>Загружаю оптимизированную статистику...</i>", parse_mode="HTML")
+    
+    try:
+        # Импортируем функции статистики из scheduler
+        from bloobcat.scheduler import get_trial_extension_stats, reset_trial_extension_stats
+        
+        stats = get_trial_extension_stats()
+        
+        # Форматируем время работы
+        uptime_hours = stats.get("uptime_hours", 0)
+        if uptime_hours < 1:
+            uptime_str = f"{uptime_hours * 60:.0f} мин"
+        elif uptime_hours < 24:
+            uptime_str = f"{uptime_hours:.1f} ч"
+        else:
+            uptime_str = f"{uptime_hours / 24:.1f} дн"
+        
+        # Производительность в реальном времени
+        performance = stats.get("performance", {})
+        mps = performance.get("messages_per_second", 0.0)
+        processed = performance.get("processed_count", 0)
+        eta_formatted = stats.get("eta_formatted", "Неизвестно")
+        
+        # Telegram API здоровье
+        telegram_health = stats.get("telegram_health", {})
+        rate_limit_hits = telegram_health.get("rate_limit_hits", 0)
+        api_error_rate = telegram_health.get("api_error_rate", 0.0)
+        
+        # Статистика успешности
+        success_rate = stats.get("success_rate", 0.0)
+        
+        # Формируем текст статистики
+        text = f"""📊 <b>СТАТИСТИКА TRIAL EXTENSIONS</b>
+<i>ОПТИМИЗИРОВАНО для 10k+ пользователей</i>
+
+⚡ <b>ПРОИЗВОДИТЕЛЬНОСТЬ:</b>
+• Скорость: <code>{mps:.2f} сообщений/сек</code>
+• Обработано: <code>{processed}</code> из <code>{stats.get('total_attempts', 0)}</code>
+• ETA завершения: <code>{eta_formatted}</code>
+• Настройка: <code>28.5 сообщений/сек</code> (лимит: 30)
+
+📈 <b>СТАТИСТИКА ОТПРАВКИ:</b>
+• Успешно: <code>{stats.get('successful_notifications', 0)}</code>
+• Ошибки: <code>{stats.get('failed_notifications', 0)}</code>
+• Таймауты: <code>{stats.get('timeouts', 0)}</code>
+• Успешность: <code>{success_rate:.1f}%</code>
+
+🚦 <b>TELEGRAM API ЗДОРОВЬЕ:</b>
+• Rate limit 429: <code>{rate_limit_hits}</code> раз
+• Процент API ошибок: <code>{api_error_rate:.2f}%</code>
+• Время работы: <code>{uptime_str}</code>
+
+⚙️ <b>ОПТИМИЗАЦИИ:</b>
+• Delay: <code>0.035с</code> (было: 0.5с)
+• Timeout: <code>600с</code> (было: 120с)
+• Retry with proper retry_after handling
+• Exponential backoff + jitter
+
+<i>Обновлено: {stats.get('last_reset', 'Неизвестно')}</i>"""
+        
+        # Клавиатура с действиями
+        from aiogram.utils.keyboard import InlineKeyboardBuilder
+        builder = InlineKeyboardBuilder()
+        builder.button(text="🔄 Обновить", callback_data="refresh_trial_stats")
+        builder.button(text="🗑 Сбросить", callback_data="reset_trial_stats")
+        builder.button(text="🧪 Тестировать", callback_data="test_trial_notification")
+        builder.adjust(2, 1)
+        
+        await m.edit_text(text, parse_mode="HTML", reply_markup=builder.as_markup())
+        
+    except Exception as e:
+        await m.edit_text(f"❌ <b>Ошибка получения статистики:</b>\n<code>{e}</code>", parse_mode="HTML")
+
+
+@router.callback_query(lambda c: c.data and c.data in ["refresh_trial_stats", "reset_trial_stats"], IsPartnerOrAdmin())
+async def trial_stats_callback_handler(callback: CallbackQuery):
+    """Обрабатывает кнопки статистики trial extensions"""
+    await callback.answer()
+    
+    try:
+        from bloobcat.scheduler import get_trial_extension_stats, reset_trial_extension_stats
+        
+        if callback.data == "reset_trial_stats":
+            reset_trial_extension_stats()
+            await callback.message.answer("✅ Статистика сброшена", parse_mode="HTML")
+        
+        # В любом случае показываем обновленную статистику
+        stats = get_trial_extension_stats()
+        
+        uptime_hours = stats.get("uptime_hours", 0)
+        if uptime_hours < 1:
+            uptime_str = f"{uptime_hours * 60:.0f} мин"
+        elif uptime_hours < 24:
+            uptime_str = f"{uptime_hours:.1f} ч"
+        else:
+            days = uptime_hours // 24
+            hours = uptime_hours % 24
+            uptime_str = f"{days:.0f}д {hours:.1f}ч"
+        
+        stats_message = [
+            f"📊 <b>Статистика Trial Extensions</b>",
+            f"<i>с {stats['last_reset'].strftime('%d.%m %H:%M')}, работает: {uptime_str}</i>\n",
+            f"🔄 Всего попыток: <b>{stats['total_attempts']}</b>",
+            f"✅ Успешно: <b>{stats['successful_notifications']}</b>",
+            f"❌ Неудачно: <b>{stats['failed_notifications']}</b>",
+            f"⏰ Таймауты: <b>{stats['timeouts']}</b>",
+            f"🚦 Rate limited: <b>{stats['rate_limited']}</b>",
+            f"📈 Успешность: <b>{stats['success_rate']:.1f}%</b>"
+        ]
+        
+        builder = InlineKeyboardBuilder()
+        builder.row(
+            InlineKeyboardButton(text="🔄 Обновить", callback_data="refresh_trial_stats"),
+            InlineKeyboardButton(text="🗑 Сбросить", callback_data="reset_trial_stats")
+        )
+        
+        await callback.message.edit_text(
+            "\n".join(stats_message), 
+            parse_mode="HTML",
+            reply_markup=builder.as_markup()
+        )
+        
+    except Exception as e:
+        await callback.message.edit_text(f"❌ <b>Ошибка:</b> {e}", parse_mode="HTML")
+
+
+@router.message(Command("test_trial"), IsPartnerOrAdmin())
+async def test_trial_notification_command(message: Message, command: CommandObject):
+    """Тестирует отправку trial extension уведомления"""
+    args = command.args
+    if not args:
+        await message.answer("❌ Укажите ID пользователя: <code>/test_trial 123456</code>", parse_mode="HTML")
+        return
+    
+    try:
+        user_id = int(args.strip())
+    except ValueError:
+        await message.answer("❌ Некорректный ID пользователя", parse_mode="HTML")
+        return
+    
+    m = await message.answer("⏳ <i>Тестирую отправку уведомления...</i>", parse_mode="HTML")
+    
+    try:
+        from bloobcat.test_notifications import test_trial_extension_notification
+        
+        result = await test_trial_extension_notification(user_id)
+        
+        if result["success"]:
+            response = [
+                f"✅ <b>Тест успешен!</b>",
+                f"👤 Пользователь: {result['details'].get('user_full_name', 'N/A')}",
+                f"🌐 Язык: {result['details'].get('user_language', 'unknown')}",
+                f"⏱ Время отправки: {result['timing'].get('notification_duration', 0):.2f}с",
+                f"⏱ Общее время: {result['timing'].get('total_duration', 0):.2f}с"
+            ]
+        else:
+            response = [
+                f"❌ <b>Тест неудачен</b>",
+                f"🔍 Пользователь найден: {result['details'].get('user_exists', False)}",
+                f"❗ Ошибка: <code>{result.get('error', 'Unknown')}</code>",
+                f"💬 Детали: {result['details'].get('message', 'N/A')}"
+            ]
+            
+        await m.edit_text("\n".join(response), parse_mode="HTML")
+        
+    except Exception as e:
+        await m.edit_text(f"❌ <b>Критическая ошибка:</b> {e}", parse_mode="HTML")
+
+
+@router.callback_query(lambda c: c.data == "refresh_trial_stats")
+async def refresh_trial_stats_callback(callback: CallbackQuery):
+    """Обновляет статистику trial extensions"""
+    await callback.answer("🔄 Обновляю статистику...")
+    
+    try:
+        from bloobcat.scheduler import get_trial_extension_stats
+        stats = get_trial_extension_stats()
+        
+        # Используем тот же код форматирования что и в главной команде
+        uptime_hours = stats.get("uptime_hours", 0)
+        if uptime_hours < 1:
+            uptime_str = f"{uptime_hours * 60:.0f} мин"
+        elif uptime_hours < 24:
+            uptime_str = f"{uptime_hours:.1f} ч"
+        else:
+            uptime_str = f"{uptime_hours / 24:.1f} дн"
+        
+        performance = stats.get("performance", {})
+        mps = performance.get("messages_per_second", 0.0)
+        processed = performance.get("processed_count", 0)
+        eta_formatted = stats.get("eta_formatted", "Неизвестно")
+        
+        telegram_health = stats.get("telegram_health", {})
+        rate_limit_hits = telegram_health.get("rate_limit_hits", 0)
+        api_error_rate = telegram_health.get("api_error_rate", 0.0)
+        
+        success_rate = stats.get("success_rate", 0.0)
+        
+        text = f"""📊 <b>СТАТИСТИКА TRIAL EXTENSIONS</b>
+<i>ОПТИМИЗИРОВАНО для 10k+ пользователей</i>
+
+⚡ <b>ПРОИЗВОДИТЕЛЬНОСТЬ:</b>
+• Скорость: <code>{mps:.2f} сообщений/сек</code>
+• Обработано: <code>{processed}</code> из <code>{stats.get('total_attempts', 0)}</code>
+• ETA завершения: <code>{eta_formatted}</code>
+• Настройка: <code>28.5 сообщений/сек</code> (лимит: 30)
+
+📈 <b>СТАТИСТИКА ОТПРАВКИ:</b>
+• Успешно: <code>{stats.get('successful_notifications', 0)}</code>
+• Ошибки: <code>{stats.get('failed_notifications', 0)}</code>
+• Таймауты: <code>{stats.get('timeouts', 0)}</code>
+• Успешность: <code>{success_rate:.1f}%</code>
+
+🚦 <b>TELEGRAM API ЗДОРОВЬЕ:</b>
+• Rate limit 429: <code>{rate_limit_hits}</code> раз
+• Процент API ошибок: <code>{api_error_rate:.2f}%</code>
+• Время работы: <code>{uptime_str}</code>
+
+⚙️ <b>ОПТИМИЗАЦИИ:</b>
+• Delay: <code>0.035с</code> (было: 0.5с)
+• Timeout: <code>600с</code> (было: 120с)
+• Retry with proper retry_after handling
+• Exponential backoff + jitter
+
+<i>Обновлено: {stats.get('last_reset', 'Неизвестно')}</i>"""
+        
+        from aiogram.utils.keyboard import InlineKeyboardBuilder
+        builder = InlineKeyboardBuilder()
+        builder.button(text="🔄 Обновить", callback_data="refresh_trial_stats")
+        builder.button(text="🗑 Сбросить", callback_data="reset_trial_stats")
+        builder.button(text="🧪 Тестировать", callback_data="test_trial_notification")
+        builder.adjust(2, 1)
+        
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=builder.as_markup())
+        
+    except Exception as e:
+        await callback.message.edit_text(f"❌ <b>Ошибка обновления:</b>\n<code>{e}</code>", parse_mode="HTML")
+
+
+@router.callback_query(lambda c: c.data == "reset_trial_stats")
+async def reset_trial_stats_callback(callback: CallbackQuery):
+    """Сбрасывает статистику trial extensions"""
+    await callback.answer("🗑 Сбрасываю статистику...")
+    
+    try:
+        from bloobcat.scheduler import reset_trial_extension_stats
+        reset_trial_extension_stats()
+        
+        await callback.message.edit_text(
+            "✅ <b>Статистика сброшена!</b>\n\n"
+            "Все счётчики обнулены, таймеры сброшены.\n"
+            "Новая статистика начнёт собираться с этого момента.",
+            parse_mode="HTML"
+        )
+        
+    except Exception as e:
+        await callback.message.edit_text(f"❌ <b>Ошибка сброса:</b>\n<code>{e}</code>", parse_mode="HTML")
+
+
+@router.callback_query(lambda c: c.data == "test_trial_notification")
+async def test_trial_notification_callback(callback: CallbackQuery):
+    """Показывает форму для тестирования trial notification"""
+    await callback.answer()
+    
+    await callback.message.edit_text(
+        "🧪 <b>Тестирование Trial Notification</b>\n\n"
+        "Отправьте команду в формате:\n"
+        "<code>/test_trial USER_ID</code>\n\n"
+        "Например: <code>/test_trial 123456789</code>\n\n"
+        "Это протестирует оптимизированную отправку уведомления "
+        "конкретному пользователю с новыми настройками.",
+        parse_mode="HTML"
+    )

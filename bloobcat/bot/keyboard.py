@@ -13,15 +13,18 @@ async def webapp_inline_button(
 ) -> InlineKeyboardMarkup:
     keyboard = InlineKeyboardBuilder()
     
-    # Нормализуем URL - убеждаемся что путь начинается с /
-    if url and not url.startswith('/'):
-        url = '/' + url
+    # Нормализуем URL правильно - избегаем двойных слешей
+    base_url = telegram_settings.miniapp_url.rstrip('/')  # Убираем слеш в конце базового URL
+    path = url.lstrip('/') if url else ''  # Убираем слеш в начале пути
     
     # Формируем итоговый URL
-    final_url = telegram_settings.miniapp_url + url
+    if path:
+        final_url = f"{base_url}/{path}"
+    else:
+        final_url = base_url
     
     # Логируем для отладки
-    logger.debug(f"Creating WebApp button: text='{text}', path='{url}', final_url='{final_url}'")
+    logger.debug(f"Creating WebApp button: text='{text}', original_path='{url}', normalized_path='{path}', final_url='{final_url}'")
     
     keyboard.button(
         text=text, web_app=WebAppInfo(url=final_url)

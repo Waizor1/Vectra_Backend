@@ -21,6 +21,86 @@ MOSCOW = ZoneInfo("Europe/Moscow")
 # Global mapping of user_id to scheduled asyncio tasks for cancellation
 scheduled_tasks = {}
 
+# Rate limiting для trial extension notifications
+_last_trial_notification_time = None
+# ОПТИМИЗИРОВАНО: Telegram Bot API позволяет 30 сообщений/сек
+# Используем 0.035с = ~28.5 сообщений/сек (с запасом безопасности)
+_trial_notification_delay = 0.035  # секунд между уведомлениями (было 0.5)
+
+# Статистика уведомлений для мониторинга
+_trial_extension_stats = {
+    "total_attempts": 0,
+    "successful_notifications": 0,
+    "failed_notifications": 0,
+    "timeouts": 0,
+    "rate_limited": 0,
+    "telegram_429_errors": 0,  # НОВОЕ: счётчик 429 ошибок
+    "performance": {
+        "start_time": None,
+        "messages_per_second": 0.0,
+        "eta_completion": None,
+        "processed_count": 0
+    },
+    "last_reset": datetime.now(MOSCOW)
+}
+
+def reset_trial_extension_stats():
+    """Сброс статистики trial extension уведомлений"""
+    global _trial_extension_stats
+    _trial_extension_stats = {
+        "total_attempts": 0,
+        "successful_notifications": 0,
+        "failed_notifications": 0,
+        "timeouts": 0,
+        "rate_limited": 0,
+        "telegram_429_errors": 0,  # НОВОЕ: счётчик 429 ошибок
+        "performance": {
+            "start_time": None,
+            "messages_per_second": 0.0,
+            "eta_completion": None,
+            "processed_count": 0
+        },
+        "last_reset": datetime.now(MOSCOW)
+    }
+    logger.debug("Trial extension statistics reset")
+
+def get_trial_extension_stats() -> dict:
+    """Возвращает статистику trial extension уведомлений"""
+    current_time = datetime.now(MOSCOW)
+    uptime = current_time - _trial_extension_stats["last_reset"]
+    uptime_hours = uptime.total_seconds() / 3600
+    
+    stats = _trial_extension_stats.copy()
+    stats["uptime_hours"] = uptime_hours
+    
+    # Дополнительные метрики
+    total_processed = stats.get("successful_notifications", 0) + stats.get("failed_notifications", 0)
+    if total_processed > 0:
+        stats["success_rate"] = (stats.get("successful_notifications", 0) / total_processed) * 100
+    else:
+        stats["success_rate"] = 0.0
+    
+    # НОВОЕ: Форматированная информация о производительности
+    performance = stats.get("performance", {})
+    if performance.get("eta_completion"):
+        eta_minutes = performance["eta_completion"] / 60
+        stats["eta_formatted"] = f"{eta_minutes:.1f} минут"
+    else:
+        stats["eta_formatted"] = "Неизвестно"
+    
+    # Telegram API ошибки
+    stats["telegram_health"] = {
+        "rate_limit_hits": stats.get("telegram_429_errors", 0),
+        "api_error_rate": (stats.get("telegram_429_errors", 0) / max(1, stats.get("total_attempts", 1))) * 100
+    }
+    
+    return stats
+
+async def log_trial_extension_summary():
+    """Логирует сводку по trial extension уведомлениям"""
+    stats = get_trial_extension_stats()
+    logger.info(f"Trial extension stats: {stats['total_attempts']} attempts, {stats['successful_notifications']} successful, {stats['failed_notifications']} failed, {stats['timeouts']} timeouts, {stats['success_rate']:.1f}% success rate")
+
 def schedule_coro(at_time: datetime, coro, *args, skip_if_past=False):
     """Schedule coroutine execution at a specific datetime."""
     now = datetime.now(MOSCOW)
@@ -121,30 +201,85 @@ async def _exec_notify_no_trial(user_id: int, hours_passed: int):
     await user.save()
 
 async def _exec_extend_trial(user_id: int, planned_expired: date):
+    """
+    Продляет trial подписку пользователя и отправляет уведомление.
+    ОПТИМИЗИРОВАНО для 10k+ пользователей с rate limiting 28.5 сообщений/сек.
+    """
+    global _last_trial_notification_time, _trial_extension_stats
+    
     user = await Users.get_or_none(id=user_id)
     if not user or not user.is_trial or user.expired_at != planned_expired or user.connected_at:
-        logger.debug(f"Skipping extend trial for user {user_id} because conditions not met (user: {bool(user)}, is_trial: {user.is_trial if user else 'N/A'}, expired_at: {user.expired_at if user else 'N/A'} vs {planned_expired}, connected_at: {user.connected_at if user else 'N/A'})")
+        logger.debug(f"[{user_id}] Skipping extend trial for user because conditions not met (user: {bool(user)}, is_trial: {user.is_trial if user else 'N/A'}, expired_at: {user.expired_at if user else 'N/A'} vs {planned_expired}, connected_at: {user.connected_at if user else 'N/A'})")
         return
     
-    logger.info(f"[{user_id}] Attempting to extend trial. Current expired_at: {user.expired_at}, planned_expired: {planned_expired}")
+    logger.debug(f"[{user_id}] Attempting to extend trial. Current expired_at: {user.expired_at}")
+    
+    # Инициализация статистики производительности
+    if _trial_extension_stats["performance"]["start_time"] is None:
+        _trial_extension_stats["performance"]["start_time"] = asyncio.get_event_loop().time()
+    
+    _trial_extension_stats["total_attempts"] += 1
+    
+    # Продляем trial
+    user.expired_at += timedelta(days=1)
+    await user.save()
+    logger.debug(f"[{user_id}] Trial extended. New expired_at: {user.expired_at}")
+    
+    # Rate limiting для уведомлений
+    current_time = asyncio.get_event_loop().time()
+    if _last_trial_notification_time is not None:
+        time_since_last = current_time - _last_trial_notification_time
+        if time_since_last < _trial_notification_delay:
+            wait_time = _trial_notification_delay - time_since_last
+            logger.debug(f"[{user_id}] Rate limiting: waiting {wait_time:.3f}s")
+            await asyncio.sleep(wait_time)
+    
+    # Отправляем уведомление с таймаутом (было 120с, стало 600с = 10 минут)
     try:
-        await user.extend_subscription(5)
-        logger.info(f"[{user_id}] DB trial extended. New expired_at: {user.expired_at}. Attempting to send notification.")
+        notification_result = await asyncio.wait_for(
+            notify_trial_extended(user, 1),
+            timeout=600.0  # ОПТИМИЗИРОВАНО: 10 минут для больших объёмов
+        )
+        
+        _trial_extension_stats["successful_notifications"] += 1
+        logger.info(f"[{user_id}] Trial extension notification sent successfully")
+        
+    except asyncio.TimeoutError:
+        _trial_extension_stats["timeouts"] += 1
+        logger.error(f"[{user_id}] Trial extension notification timed out after 600s")
+        
     except Exception as e:
-        logger.error(f"[{user_id}] CRITICAL: Error during user.extend_subscription: {e}", exc_info=True)
-        return # Если продление не удалось, нет смысла отправлять уведомление или перепланировать
-
-    try:
-        logger.debug(f"[{user_id}] Calling notify_trial_extended...")
-        await notify_trial_extended(user, 5)
-        logger.info(f"[{user_id}] Call to notify_trial_extended completed (this log is from _exec_extend_trial).")
-    except Exception as e:
-        logger.error(f"[{user_id}] CRITICAL: Error occurred during or after notify_trial_extended call: {e}", exc_info=True)
-        # Продолжаем, чтобы хотя бы перепланировать задачи с новой датой, если подписка продлилась
-
-    logger.debug(f"[{user_id}] Attempting to reschedule tasks...")
-    await schedule_user_tasks(user)
-    logger.info(f"[{user_id}] Tasks rescheduled after trial extension process.")
+        # Проверяем ошибки Telegram API
+        if "429" in str(e) or "Too Many Requests" in str(e):
+            _trial_extension_stats["telegram_429_errors"] += 1
+            logger.warning(f"[{user_id}] Telegram rate limit hit: {e}")
+        else:
+            _trial_extension_stats["failed_notifications"] += 1
+            logger.error(f"[{user_id}] Trial extension notification failed: {e}")
+    
+    # Обновляем статистику производительности
+    _trial_extension_stats["performance"]["processed_count"] += 1
+    _last_trial_notification_time = asyncio.get_event_loop().time()
+    
+    # Рассчитываем производительность
+    elapsed_time = _last_trial_notification_time - _trial_extension_stats["performance"]["start_time"]
+    if elapsed_time > 0:
+        _trial_extension_stats["performance"]["messages_per_second"] = (
+            _trial_extension_stats["performance"]["processed_count"] / elapsed_time
+        )
+        
+        # ETA для завершения (если есть информация о общем количестве)
+        if _trial_extension_stats["total_attempts"] > 0:
+            remaining = _trial_extension_stats["total_attempts"] - _trial_extension_stats["performance"]["processed_count"]
+            if remaining > 0 and _trial_extension_stats["performance"]["messages_per_second"] > 0:
+                eta_seconds = remaining / _trial_extension_stats["performance"]["messages_per_second"]
+                _trial_extension_stats["performance"]["eta_completion"] = eta_seconds
+    
+    # Логируем прогресс каждые 100 уведомлений (DEBUG уровень)
+    if _trial_extension_stats["performance"]["processed_count"] % 100 == 0:
+        mps = _trial_extension_stats["performance"]["messages_per_second"]
+        processed = _trial_extension_stats["performance"]["processed_count"]
+        logger.debug(f"Trial extension progress: {processed} processed, {mps:.2f} msg/sec")
 
 async def _exec_notify_trial_end(user_id: int, planned_expired: date):
     user = await Users.get_or_none(id=user_id)
@@ -401,5 +536,6 @@ async def schedule_all_tasks():
     users = await Users.all()
     for user in users:
         await schedule_user_tasks(user)
+    logger.info(f"Tasks scheduled for {len(users)} users")
     # Start periodic RemnaWave updater
     asyncio.create_task(remnawave_scheduler()) 
