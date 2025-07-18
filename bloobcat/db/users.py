@@ -296,6 +296,30 @@ class Users(models.Model):
         # Save the user as usual
         await super().save(*args, **kwargs)
         if self.expired_at and self.expired_at != old_expired_at:
+            # Немедленно обновляем RemnaWave при изменении expired_at
+            if self.remnawave_uuid:
+                try:
+                    from bloobcat.routes.remnawave.client import RemnaWaveClient
+                    from bloobcat.settings import remnawave_settings
+                    
+                    logger = get_logger("users.save")
+                    remnawave_client = RemnaWaveClient(
+                        remnawave_settings.url, 
+                        remnawave_settings.token.get_secret_value()
+                    )
+                    
+                    try:
+                        await remnawave_client.users.update_user(
+                            uuid=self.remnawave_uuid,
+                            expireAt=self.expired_at
+                        )
+                        logger.debug(f"User {self.id} RemnaWave updated immediately: {old_expired_at} -> {self.expired_at}")
+                    finally:
+                        await remnawave_client.close()
+                        
+                except Exception as e:
+                    logger.warning(f"User {self.id} failed to update RemnaWave immediately, will be synced by batch updater: {e}")
+            
             from bloobcat.scheduler import schedule_user_tasks
             await schedule_user_tasks(self)
 
