@@ -241,8 +241,12 @@ async def _exec_extend_trial(user_id: int, planned_expired: date):
             timeout=600.0  # ОПТИМИЗИРОВАНО: 10 минут для больших объёмов
         )
         
-        _trial_extension_stats["successful_notifications"] += 1
-        logger.info(f"[{user_id}] Trial extension notification sent successfully")
+        if notification_result:
+            _trial_extension_stats["successful_notifications"] += 1
+            logger.debug(f"[{user_id}] Trial extension notification sent successfully")
+        else:
+            _trial_extension_stats["failed_notifications"] += 1
+            logger.error(f"[{user_id}] Trial extension notification failed to send")
         
     except asyncio.TimeoutError:
         _trial_extension_stats["timeouts"] += 1

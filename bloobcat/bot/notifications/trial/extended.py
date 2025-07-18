@@ -21,7 +21,7 @@ async def notify_trial_extended(user, days: int):
             logger.debug(f"[{user.id}] Starting notify_trial_extended for {days} days (attempt {attempt + 1}/{max_retries})")
             
             # Получаем локаль пользователя
-            locale = await get_user_locale(user.language_code)
+            locale = get_user_locale(user)
             
             # Формируем сообщение
             if locale == "en":
