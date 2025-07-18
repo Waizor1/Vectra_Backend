@@ -28,7 +28,7 @@ async def notify_trial_extended(user, days: int):
                 message_text = f"🎉 Great news! Your free trial has been extended for {days} more day{'s' if days != 1 else ''}!\n\nEnjoy your extended access and feel free to explore all features."
                 button_text = "Open App"
             else:
-                message_text = f"🎉 Отличные новости! Ваш бесплатный период продлён ещё на {days} дн{'ей' if days != 1 else 'ь'}!\n\nНаслаждайтесь расширенным доступом и изучайте все возможности."
+                message_text = f"🎉 Отличные новости! Ваш бесплатный период продлён ещё на {days} {'день' if days == 1 else 'дней'}!\n\nНаслаждайтесь расширенным доступом и изучайте все возможности."
                 button_text = "Открыть приложение"
             
             # Создаём кнопку с таймаутом (оптимизировано до 5 секунд)

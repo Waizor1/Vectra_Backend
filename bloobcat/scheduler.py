@@ -14,6 +14,7 @@ from bloobcat.bot.notifications.trial.expiring import notify_expiring_trial
 from bloobcat.bot.notifications.general.referral import on_referral_prompt
 from bloobcat.routes.remnawave.catcher import remnawave_updater
 from bloobcat.logger import get_logger
+from bloobcat.settings import app_settings
 
 logger = get_logger("scheduler")
 
@@ -220,10 +221,13 @@ async def _exec_extend_trial(user_id: int, planned_expired: date):
     
     _trial_extension_stats["total_attempts"] += 1
     
+    # Рассчитываем количество дней для продления (половина от trial_days)
+    extension_days = app_settings.trial_days // 2
+    
     # Продляем trial
-    user.expired_at += timedelta(days=1)
+    user.expired_at += timedelta(days=extension_days)
     await user.save()
-    logger.debug(f"[{user_id}] Trial extended. New expired_at: {user.expired_at}")
+    logger.debug(f"[{user_id}] Trial extended by {extension_days} days. New expired_at: {user.expired_at}")
     
     # Rate limiting для уведомлений
     current_time = asyncio.get_event_loop().time()
@@ -237,7 +241,7 @@ async def _exec_extend_trial(user_id: int, planned_expired: date):
     # Отправляем уведомление с таймаутом (было 120с, стало 600с = 10 минут)
     try:
         notification_result = await asyncio.wait_for(
-            notify_trial_extended(user, 1),
+            notify_trial_extended(user, extension_days),
             timeout=600.0  # ОПТИМИЗИРОВАНО: 10 минут для больших объёмов
         )
         
