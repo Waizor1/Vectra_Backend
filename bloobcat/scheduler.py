@@ -314,6 +314,11 @@ async def _exec_notify_expiring_trial(user_id: int, planned_expired: date):
 
 async def schedule_user_tasks(user):
     """Schedule subscription, trial, and referral tasks for a user."""
+    # Skip blocked users
+    if user.is_blocked:
+        logger.debug(f"Skipping task scheduling for blocked user {user.id}")
+        return
+        
     # Cancel existing tasks for this user before scheduling new ones
     cancel_user_tasks(user.id)
     scheduled_tasks[user.id] = []
@@ -426,6 +431,22 @@ async def remnawave_scheduler(interval_seconds: int = 600):
             pass
         await asyncio.sleep(interval_seconds)
 
+async def blocked_users_cleanup_scheduler():
+    """Периодически запускает очистку заблокированных пользователей."""
+    if not app_settings.cleanup_blocked_users_enabled:
+        logger.info("Blocked users cleanup scheduler disabled")
+        return
+        
+    interval_seconds = app_settings.cleanup_blocked_users_interval_hours * 3600
+    logger.info(f"Starting blocked users cleanup scheduler (interval: {app_settings.cleanup_blocked_users_interval_hours}h)")
+    
+    while True:
+        try:
+            await asyncio.sleep(interval_seconds)
+            await cleanup_blocked_users()
+        except Exception as e:
+            logger.error(f"Error in blocked users cleanup scheduler: {e}")
+
 async def retry_send_missed_trial_notifications():
     """Retry sending trial notifications to users who haven't received them yet"""
     logger.debug(f"Starting missed trial notifications check")
@@ -534,6 +555,81 @@ async def cleanup_missed_cancellations():
         
     logger.info(f"Finished cleanup for missed cancellations. Cancelled: {cancelled_count} users.")
 
+async def cleanup_blocked_users():
+    """
+    Очищает пользователей, заблокировавших бота более X дней назад.
+    УСЛОВИЯ УДАЛЕНИЯ:
+    1. Триальные: заблокированы > 7 дней назад (ничего не платили)
+    2. Платные: заблокированы > 7 дней И подписка истекла > 7 дней назад
+    Использует существующий метод user.delete() для полной очистки.
+    """
+    if not app_settings.cleanup_blocked_users_enabled:
+        logger.debug("Cleanup of blocked users is disabled")
+        return
+        
+    logger.info("Starting cleanup of blocked users...")
+    
+    # Находим пользователей заблокированных более X дней назад
+    cutoff_date = datetime.now(MOSCOW) - timedelta(days=app_settings.blocked_user_cleanup_days)
+    today = date.today()
+    subscription_cutoff_date = today - timedelta(days=app_settings.blocked_user_cleanup_days)
+    
+    # СЛУЧАЙ 1: Триальные пользователи (заблокированы > 7 дней назад)
+    blocked_trial_users = await Users.filter(
+        is_blocked=True,
+        blocked_at__lte=cutoff_date,
+        is_trial=True  # Триальные пользователи (ничего не платили)
+    )
+    
+    # СЛУЧАЙ 2: Платные пользователи (заблокированы > 7 дней И подписка истекла > 7 дней назад)
+    blocked_expired_paid_users = await Users.filter(
+        is_blocked=True,
+        blocked_at__lte=cutoff_date,
+        is_trial=False,  # Платные пользователи
+        expired_at__lte=subscription_cutoff_date  # Подписка истекла > 7 дней назад
+    )
+    
+    # Объединяем списки для удаления
+    blocked_users = list(blocked_trial_users) + list(blocked_expired_paid_users)
+    
+    cleanup_count = 0
+    error_count = 0
+    trial_deleted = 0
+    paid_deleted = 0
+    
+    # Дополнительно считаем заблокированных платных с активной подпиской (которых НЕ удаляем)
+    blocked_paid_active = await Users.filter(
+        is_blocked=True,
+        blocked_at__lte=cutoff_date,
+        is_trial=False,  # Платные пользователи
+        expired_at__gt=subscription_cutoff_date  # С активной подпиской (истекла < 7 дней назад)
+    ).count()
+    
+    logger.info(f"Found {len(blocked_trial_users)} blocked trial users and {len(blocked_expired_paid_users)} blocked paid users with expired subscriptions for cleanup")
+    if blocked_paid_active > 0:
+        logger.info(f"Preserving {blocked_paid_active} blocked paid users with active subscriptions")
+    
+    for user in blocked_users:
+        try:
+            user_type = "trial" if user.is_trial else f"paid (expired {user.expired_at})"
+            logger.debug(f"Cleaning up blocked {user_type} user {user.id} (blocked at: {user.blocked_at})")
+            await user.delete()  # Полная очистка: scheduler + RemnaWave + БД
+            cleanup_count += 1
+            if user.is_trial:
+                trial_deleted += 1
+            else:
+                paid_deleted += 1
+        except Exception as e:
+            error_count += 1
+            logger.error(f"Failed to cleanup blocked user {user.id}: {e}")
+    
+    if cleanup_count > 0 or error_count > 0 or blocked_paid_active > 0:
+        logger.info(f"Blocked users cleanup completed: {trial_deleted} trial + {paid_deleted} expired paid users deleted, {error_count} errors, {blocked_paid_active} active paid users preserved")
+    else:
+        logger.debug("No blocked users found for cleanup")
+
+
+
 async def schedule_all_tasks():
     """Reschedule all tasks for all users. Typically run on startup."""
     logger.info("Scheduling all tasks for all users...")
@@ -541,9 +637,12 @@ async def schedule_all_tasks():
     await retry_missed_trial_extensions()
     await retry_missed_trial_endings()
     await cleanup_missed_cancellations()
+    await cleanup_blocked_users()  # Очистка заблокированных пользователей при старте
     users = await Users.all()
     for user in users:
         await schedule_user_tasks(user)
     logger.info(f"Tasks scheduled for {len(users)} users")
     # Start periodic RemnaWave updater
-    asyncio.create_task(remnawave_scheduler()) 
+    asyncio.create_task(remnawave_scheduler())
+    # Start periodic blocked users cleanup
+    asyncio.create_task(blocked_users_cleanup_scheduler()) 

@@ -67,6 +67,10 @@ class Users(models.Model):
         "models.ActiveTariffs", related_name="users", null=True, on_delete=fields.SET_NULL, description="ID активного тарифа пользователя"
     )
     hwid_limit = fields.IntField(null=True, description="Личный лимит устройств (переопределяет тариф и настройки панели)")
+    is_blocked = fields.BooleanField(default=False, description="Пользователь заблокировал бота")
+    blocked_at = fields.DatetimeField(null=True, description="Дата и время блокировки")
+    last_failed_message_at = fields.DatetimeField(null=True, description="Последняя неуспешная попытка отправки")
+    failed_message_count = fields.IntField(default=0, description="Количество неуспешных попыток подряд")
 
     async def _ensure_remnawave_user(self) -> bool:
         """
@@ -326,6 +330,74 @@ class Users(models.Model):
     class PydanticMeta:
         computed = ["expires", "name", "referral_percent"]
         exclude = ["country_code"]
+    
+    @staticmethod
+    async def get_blocked_users_stats() -> dict:
+        """
+        Возвращает статистику по заблокированным пользователям.
+        """
+        try:
+            from bloobcat.settings import app_settings
+            from datetime import datetime, timedelta
+            from zoneinfo import ZoneInfo
+            
+            MOSCOW = ZoneInfo("Europe/Moscow")
+            
+            total_blocked = await Users.filter(is_blocked=True).count()
+            
+            # Пользователи заблокированные в последние 24 часа
+            last_24h = datetime.now(MOSCOW) - timedelta(hours=24)
+            blocked_last_24h = await Users.filter(
+                is_blocked=True,
+                blocked_at__gte=last_24h
+            ).count()
+            
+            # Пользователи готовые к очистке
+            cutoff_date = datetime.now(MOSCOW) - timedelta(days=app_settings.blocked_user_cleanup_days)
+            today = datetime.now(MOSCOW).date()
+            subscription_cutoff_date = today - timedelta(days=app_settings.blocked_user_cleanup_days)
+            
+            # СЛУЧАЙ 1: Триальные пользователи (заблокированы > 7 дней назад)
+            blocked_trial_ready = await Users.filter(
+                is_blocked=True,
+                blocked_at__lte=cutoff_date,
+                is_trial=True
+            ).count()
+            
+            # СЛУЧАЙ 2: Платные пользователи с истекшей подпиской (заблокированы > 7 дней И подписка истекла > 7 дней назад)
+            blocked_paid_expired_ready = await Users.filter(
+                is_blocked=True,
+                blocked_at__lte=cutoff_date,
+                is_trial=False,
+                expired_at__lte=subscription_cutoff_date
+            ).count()
+            
+            ready_for_cleanup = blocked_trial_ready + blocked_paid_expired_ready
+            
+            # Платные пользователи с активной подпиской (которые НЕ удаляются)
+            blocked_paid_active = await Users.filter(
+                is_blocked=True,
+                blocked_at__lte=cutoff_date,
+                is_trial=False,
+                expired_at__gt=subscription_cutoff_date
+            ).count()
+            
+            return {
+                "total_blocked": total_blocked,
+                "blocked_last_24h": blocked_last_24h,
+                "ready_for_cleanup": ready_for_cleanup,
+                "blocked_trial_ready": blocked_trial_ready,
+                "blocked_paid_expired_ready": blocked_paid_expired_ready,
+                "blocked_paid_active": blocked_paid_active,
+                "cleanup_enabled": app_settings.cleanup_blocked_users_enabled,
+                "cleanup_days": app_settings.blocked_user_cleanup_days,
+                "max_failed_attempts": app_settings.blocked_user_max_failed_attempts
+            }
+        except Exception as e:
+            logger.error(f"Error getting blocked users stats: {e}")
+            return {
+                "error": str(e)
+            }
 
 
 User_Pydantic = pydantic_model_creator(Users, name="User")
@@ -344,6 +416,8 @@ class UsersModelAdmin(TortoiseModelAdmin):
         "hwid_limit",
         "is_admin",
         "is_partner",
+        "is_blocked",
+        "blocked_at",
     )
     readonly_fields = (
         "id",
@@ -380,6 +454,10 @@ class UsersModelAdmin(TortoiseModelAdmin):
         "familyurl",
         "active_tariff",
         "hwid_limit",
+        "is_blocked",
+        "blocked_at",
+        "last_failed_message_at",
+        "failed_message_count",
     )
     search_help_text = "Юзернейм, имя, айди"
     verbose_name = "Пользователи"

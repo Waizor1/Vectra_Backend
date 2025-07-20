@@ -5,6 +5,7 @@ from bloobcat.logger import get_logger
 from bloobcat.bot.notifications.localization import get_user_locale
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 import random
+from bloobcat.bot.error_handler import handle_telegram_forbidden_error, handle_telegram_bad_request, reset_user_failed_count
 
 logger = get_logger("notifications.trial.extend")
 
@@ -58,6 +59,8 @@ async def notify_trial_extended(user, days: int):
                 )
                 
                 logger.info(f"[{user.id}] Trial extension notification sent successfully")
+                # Сбрасываем счетчик неудач при успешной отправке
+                await reset_user_failed_count(user.id)
                 return True
                 
             except TelegramRetryAfter as e:
@@ -78,12 +81,12 @@ async def notify_trial_extended(user, days: int):
                     
             except TelegramBadRequest as e:
                 logger.error(f"[{user.id}] Bad request error: {e}")
-                if "chat not found" in str(e).lower():
-                    logger.debug(f"[{user.id}] User chat not found, likely deleted account")
+                await handle_telegram_bad_request(user.id, e)
                 return False
                 
             except TelegramForbiddenError as e:
                 logger.warning(f"[{user.id}] User blocked the bot: {e}")
+                await handle_telegram_forbidden_error(user.id, e)
                 return False
                 
             except asyncio.TimeoutError:

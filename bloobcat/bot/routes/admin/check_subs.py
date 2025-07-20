@@ -200,6 +200,9 @@ async def admin_user_stats(message: Message):
             connected_at__gte=last_day
         ).count()
         
+        # Количество заблокированных пользователей
+        blocked_users = await Users.filter(is_blocked=True).count()
+        
         # Формируем сообщение со статистикой
         stats_message = (
             "📊 <b>Статистика пользователей</b>\n\n"
@@ -212,6 +215,7 @@ async def admin_user_stats(message: Message):
             f"🟢 Использовали пробный период: <b>{used_trial_users}</b>\n"
             f"⏳ Истекает в ближайшие 7 дней: <b>{expiring_soon}</b>\n"
             f"📱 Подключались за последние 24ч: <b>{connected_last_day}</b>\n"
+            f"🚫 Заблокированных: <b>{blocked_users}</b>\n"
         )
         
         await message.answer(stats_message, parse_mode="HTML")
@@ -392,6 +396,13 @@ async def admin_help(message: Message):
             "/check_trial - Запустить проверку пользователей с пробным периодом\n"
             "/reset_expired - Сбросить истекшие подписки (⚠️ только вручную)\n"
             "/check_all - Запустить все задачи планировщика\n\n"
+            
+            "🚫 <b>Управление заблокированными пользователями</b>\n"
+            "/blocked_stats - Статистика заблокированных пользователей\n"
+            "/blocked_users [limit=10] - Список заблокированных пользователей\n"
+            "/cleanup_blocked - Ручная очистка заблокированных пользователей\n"
+            "/unblock_user [user_id] - Разблокировать пользователя\n"
+            "/block_user [user_id] [reason] - Заблокировать пользователя\n\n"
             
             "❓ <b>Помощь</b>\n"
             "/admin_help - Показать эту справку\n\n"
