@@ -8,6 +8,7 @@ from .utm_generator import router as utm_generator_router
 from .menu import router as menu_router
 from .test_notifications import router as test_notifications_router
 from .blocked_users import router as blocked_users_router
+from .statistics_commands import router as statistics_commands_router
 
 admin_router = Router()
 
@@ -18,6 +19,7 @@ admin_router.include_router(utm_generator_router)
 admin_router.include_router(menu_router)
 admin_router.include_router(test_notifications_router)
 admin_router.include_router(blocked_users_router)
+admin_router.include_router(statistics_commands_router)
 
 
 # @admin_router.message()

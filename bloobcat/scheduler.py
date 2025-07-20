@@ -645,4 +645,7 @@ async def schedule_all_tasks():
     # Start periodic RemnaWave updater
     asyncio.create_task(remnawave_scheduler())
     # Start periodic blocked users cleanup
-    asyncio.create_task(blocked_users_cleanup_scheduler()) 
+    asyncio.create_task(blocked_users_cleanup_scheduler())
+    # Start automatic statistics scheduler
+    from bloobcat.statistics.scheduler import statistics_scheduler
+    asyncio.create_task(statistics_scheduler()) 
