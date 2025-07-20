@@ -5,7 +5,9 @@ from aiogram.types import CallbackQuery, Message
 
 from bloobcat.bot.keyboard import webapp_inline_button
 from bloobcat.db.users import Users
+from bloobcat.logger import get_logger
 
+logger = get_logger("bot_start")
 router = Router()
 
 
@@ -45,5 +47,15 @@ async def command_start_handler(message: Message, command: CommandObject):
         response_text,
         reply_markup=await webapp_inline_button(button_text), # Используем локализованный текст кнопки
     )
+    
+    # Автоматическая установка админской клавиатуры для админов
+    try:
+        user = await Users.get_user(message.from_user)
+        if user and user.is_admin:
+            from bloobcat.bot.routes.admin.admin_menu import set_admin_keyboard
+            await set_admin_keyboard(message.bot, user.id)
+            logger.info(f"Автоматически установлена админская клавиатура для пользователя {user.id}")
+    except Exception as e:
+        logger.error(f"Ошибка при установке админской клавиатуры для {message.from_user.id}: {e}")
 
 

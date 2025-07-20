@@ -25,9 +25,13 @@ def setup_router():
     
     # Импортируем main_router внутри функции
     from bloobcat.bot.routes import main_router
+    from bloobcat.bot.error_handler import setup_error_handler
     
     # Включаем маршрутизатор в диспетчер
     dp.include_router(main_router)
+    
+    # Регистрируем error handler
+    setup_error_handler(dp)
     
     # Устанавливаем флаг, что маршрутизатор настроен
     _router_setup_done = True

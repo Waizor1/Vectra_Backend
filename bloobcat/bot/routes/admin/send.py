@@ -1,7 +1,6 @@
 from aiogram import Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 import asyncio
 import traceback
@@ -11,16 +10,12 @@ from bloobcat.bot.routes.admin.functions import IsAdmin
 from bloobcat.db.users import Users
 from bloobcat.logger import get_logger
 from aiogram import Bot
+from .keyboards import get_back_to_main_menu
+from .states import SendFSM
 
 logger = get_logger("bot_admin_send")
 
 router = Router()
-
-
-class SendFSM(StatesGroup):
-    waiting_for_audience = State()
-    waiting_for_message = State()
-    waiting_for_confirmation = State()
 
 
 @router.message(Command("send"), IsAdmin())
@@ -39,11 +34,7 @@ async def send(message: Message, state: FSMContext):
     await state.set_state(SendFSM.waiting_for_audience)
 
 
-@router.message(Command("cancel"), IsAdmin())
-async def cancel(message: Message, state: FSMContext):
-    """Отмена текущего действия"""
-    await message.answer("Отменено", reply_markup=None)
-    await state.clear()
+
 
 
 @router.callback_query(SendFSM.waiting_for_audience, lambda c: c.data.startswith("send_audience:") or c.data == "send_cancel", IsAdmin())
@@ -60,8 +51,7 @@ async def process_audience_callback(callback_query: CallbackQuery, state: FSMCon
     await callback_query.answer()
     await callback_query.message.edit_reply_markup()
     await callback_query.message.answer(
-        "Введите текст для рассылки. Поддерживается текст и одно вложение (фото, видео, документ).\n"
-        "Для отмены используйте /cancel"
+        "Введите текст для рассылки. Поддерживается текст и одно вложение (фото, видео, документ)."
     )
     await state.set_state(SendFSM.waiting_for_message)
 
@@ -69,17 +59,17 @@ async def process_audience_callback(callback_query: CallbackQuery, state: FSMCon
 @router.message(SendFSM.waiting_for_message)
 async def send_message_(message: Message, state: FSMContext):
     """Отправка сообщения выбранной аудитории"""
-    if message.text and message.text.strip() == "/cancel":
-        await cancel(message, state)
-        return
     if not message.text and not message.photo and not message.video and not message.document:
         await message.answer("Сообщение должно содержать текст или вложение. Попробуйте еще раз.")
         return
     await state.update_data(orig_chat_id=message.chat.id, orig_message_id=message.message_id)
+    
+    # Создаем клавиатуру с кнопкой возврата в главное меню
     markup = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Подтвердить", callback_data="send_confirm")],
-        [InlineKeyboardButton(text="Отменить", callback_data="send_cancel")]
+        [InlineKeyboardButton(text="✅ Подтвердить", callback_data="send_confirm")],
+        [InlineKeyboardButton(text="❌ Отменить", callback_data="send_cancel")]
     ])
+    
     await message.copy_to(message.chat.id, reply_markup=markup)
     await state.set_state(SendFSM.waiting_for_confirmation)
 
@@ -138,14 +128,22 @@ async def confirm_broadcast(callback_query: CallbackQuery, state: FSMContext, bo
                     logger.error(f"Не удалось обновить прогресс: {err}")
             await asyncio.sleep(0.05)
         final_text = (
-            f"✅ Рассылка завершена!\n\n📊 Статистика:\n👥 Всего пользователей: {total}\n✅ Успешно: {success}\n❌ Ошибок: {failure}"
+            f"✅ **РАССЫЛКА ЗАВЕРШЕНА!**\n\n📊 **Статистика:**\n👥 Всего пользователей: {total}\n✅ Успешно: {success}\n❌ Ошибок: {failure}"
         )
-        await progress_message.edit_text(final_text)
+        
+        # Добавляем кнопку возврата в главное меню
+        await progress_message.edit_text(
+            final_text,
+            reply_markup=get_back_to_main_menu(),
+            parse_mode="Markdown"
+        )
     except Exception as e:
         tb = traceback.format_exc()
         logger.error(f"Критическая ошибка при рассылке: {e}\n{tb}")
         await progress_message.edit_text(
-            f"❌ Произошла ошибка при рассылке: {e}\n\nЕсли ошибка повторяется, обратитесь к разработчику."
+            f"❌ **ОШИБКА РАССЫЛКИ**\n\nПроизошла ошибка: {e}\n\nЕсли ошибка повторяется, обратитесь к разработчику.",
+            reply_markup=get_back_to_main_menu(),
+            parse_mode="Markdown"
         )
 
 
@@ -153,5 +151,9 @@ async def confirm_broadcast(callback_query: CallbackQuery, state: FSMContext, bo
 async def cancel_broadcast(callback_query: CallbackQuery, state: FSMContext):
     await callback_query.answer()
     await callback_query.message.edit_reply_markup()
-    await callback_query.message.answer("Рассылка отменена")
+    await callback_query.message.answer(
+        "❌ **РАССЫЛКА ОТМЕНЕНА**",
+        reply_markup=get_back_to_main_menu(),
+        parse_mode="Markdown"
+    )
     await state.clear()

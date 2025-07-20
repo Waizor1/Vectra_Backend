@@ -379,36 +379,41 @@ async def admin_help(message: Message):
         help_text = (
             "📚 <b>Справка по административным командам</b>\n\n"
             
-            "🔍 <b>Информация о пользователях</b>\n"
-            "/user_stats - Общая статистика по пользователям\n"
+            "🆕 <b>ГЛАВНОЕ АДМИН МЕНЮ</b>\n"
+            "🔧 <b>/admin</b> - Главное админ меню с удобной навигацией\n"
+            "🧪 <b>Тесты</b> - Кнопка в reply клавиатуре для тестовых функций\n\n"
+            
+            "⚡ <b>БЫСТРЫЕ КОМАНДЫ (часто используемые)</b>\n"
             "/user_info [user_id] - Подробная информация о пользователе\n"
-            "/expiring [дней=7] - Список пользователей с истекающими подписками\n\n"
+            "/stat [utm] - Статистика по конкретному UTM\n"
+            "/utm [название] - Генератор UTM ссылок\n"
+            "/send - Массовая рассылка\n\n"
             
-            "⚙️ <b>Управление пользователями</b>\n"
-            "/set_registered [user_id] [0|1] - Изменить статус регистрации пользователя\n"
-            "/set_auto_renewal [user_id] [0|1] [renew_id] - Изменить статус автопродления подписки\n"
-            f"/set_trial [user_id] [days={app_settings.trial_days}] [force] - Установить пробный период для пользователя (по умолч. из .env)\n"
-            "/reset_trial [user_id] - Сбросить флаг пробного периода для пользователя\n"
-            "/send_renewal_notice [user_id] - Отправить уведомление о предстоящем списании\n\n"
+            "⚙️ <b>УПРАВЛЕНИЕ ПОЛЬЗОВАТЕЛЯМИ (команды)</b>\n"
+            "/set_registered [user_id] [0|1] - Изменить статус регистрации\n"
+            "/set_auto_renewal [user_id] [0|1] [renew_id] - Настроить автопродление\n"
+            f"/set_trial [user_id] [days={app_settings.trial_days}] [force] - Установить trial период\n"
+            "/balance [user_id] [amount] - Изменить баланс пользователя\n"
+            "/days [user_id] [amount] - Изменить дни подписки\n\n"
             
-            "🔄 <b>Управление задачами</b>\n"
-            "/check_subs - Запустить проверку подписок\n"
-            "/check_trial - Запустить проверку пользователей с пробным периодом\n"
-            "/reset_expired - Сбросить истекшие подписки (⚠️ только вручную)\n"
-            "/check_all - Запустить все задачи планировщика\n\n"
-            
-            "🚫 <b>Управление заблокированными пользователями</b>\n"
-            "/blocked_stats - Статистика заблокированных пользователей\n"
-            "/blocked_users [limit=10] - Список заблокированных пользователей\n"
-            "/cleanup_blocked - Ручная очистка заблокированных пользователей\n"
+            "🔧 <b>СИСТЕМНЫЕ КОМАНДЫ (редко используемые)</b>\n"
+            "/reset_trial [user_id] - Сбросить флаг trial периода\n"
+            "/send_renewal_notice [user_id] - Отправить уведомление о списании\n"
+            "/trigger_autopay [user_id] - Запустить автоплатеж (тест)\n"
             "/unblock_user [user_id] - Разблокировать пользователя\n"
-            "/block_user [user_id] [reason] - Заблокировать пользователя\n\n"
+            "/block_user [user_id] [reason] - Заблокировать пользователя\n"
+            "/reset_expired - Сбросить истекшие подписки (⚠️ только вручную)\n\n"
             
-            "❓ <b>Помощь</b>\n"
+            "⌨️ <b>УПРАВЛЕНИЕ КЛАВИАТУРАМИ</b>\n"
+            "/setup_admin_keyboard - Установить админскую клавиатуру себе\n"
+            "/setup_all_admin_keyboards - Установить клавиатуры всем админам\n"
+            "/remove_admin_keyboard - Убрать админскую клавиатуру\n\n"
+            
+            "❓ <b>СПРАВКА</b>\n"
             "/admin_help - Показать эту справку\n\n"
             
-            "ℹ️ <b>Примечание</b>: Функция сброса истекших подписок (/reset_expired) "
-            "не запускается автоматически и должна запускаться вручную по необходимости."
+            "💡 <b>РЕКОМЕНДАЦИЯ:</b> Большинство функций доступно через удобное меню <b>/admin</b>!\n"
+            "Команды выше нужны только для быстрого доступа или автоматизации."
         )
         
         await message.answer(help_text, parse_mode="HTML")
@@ -569,6 +574,136 @@ async def admin_delete_user(message: Message, command: CommandObject):
         f"Теперь при повторной регистрации пользователь сможет получить пробный период."
     )
     logger.info(f"Администратор удалил пользователя {user_id} вместе с {payments_count} платежами")
+
+
+@router.message(Command("set_registered"), IsAdmin())
+async def admin_set_registered(message: Message, command: CommandObject):
+    """
+    Хендлер для изменения статуса регистрации пользователя.
+    Команда: /set_registered [user_id] [0|1]
+    """
+    try:
+        if not command.args:
+            await message.answer(
+                "Ошибка: Неверный формат команды.\n"
+                "Пример: /set_registered 123456789 1 (активировать)\n"
+                "Пример: /set_registered 123456789 0 (деактивировать)"
+            )
+            return
+        
+        args = command.args.split()
+        if len(args) < 2 or not args[0].isdigit() or args[1] not in ['0', '1']:
+            await message.answer(
+                "Ошибка: Неверный формат команды.\n"
+                "Пример: /set_registered 123456789 1"
+            )
+            return
+        
+        user_id = int(args[0])
+        is_registered = args[1] == '1'
+        
+        # Получаем пользователя
+        user = await Users.get_or_none(id=user_id)
+        if not user:
+            await message.answer(f"Пользователь с ID {user_id} не найден.")
+            return
+        
+        # Сохраняем предыдущее состояние
+        previous_state = user.is_registered
+        
+        # Обновляем статус
+        user.is_registered = is_registered
+        await user.save()
+        
+        status_text = "активирован" if is_registered else "деактивирован"
+        await message.answer(
+            f"✅ Пользователь {user_id} ({user.full_name}) {status_text}.\n"
+            f"Предыдущий статус: {'активирован' if previous_state else 'деактивирован'}"
+        )
+        
+        logger.info(
+            f"Администратор {message.from_user.id} изменил статус регистрации пользователя {user_id} "
+            f"с '{previous_state}' на '{is_registered}'"
+        )
+        
+    except Exception as e:
+        error_message = f"Ошибка при изменении статуса регистрации: {str(e)}"
+        await message.answer(error_message)
+        logger.error(error_message)
+
+
+@router.message(Command("set_trial"), IsAdmin())
+async def admin_set_trial(message: Message, command: CommandObject):
+    """
+    Хендлер для предоставления trial периода пользователю.
+    Команда: /set_trial [user_id] [days] [force]
+    """
+    try:
+        if not command.args:
+            await message.answer(
+                f"Ошибка: Неверный формат команды.\n"
+                f"Пример: /set_trial 123456789 (дать {app_settings.trial_days} дней)\n"
+                f"Пример: /set_trial 123456789 14 (дать 14 дней)\n"
+                f"Пример: /set_trial 123456789 7 force (принудительно)"
+            )
+            return
+        
+        args = command.args.split()
+        if not args[0].isdigit():
+            await message.answer("Ошибка: ID пользователя должен быть числом.")
+            return
+        
+        user_id = int(args[0])
+        days = app_settings.trial_days  # По умолчанию из настроек
+        force = False
+        
+        # Парсим дополнительные аргументы
+        if len(args) > 1:
+            if args[1].isdigit():
+                days = int(args[1])
+            elif args[1] == "force":
+                force = True
+        
+        if len(args) > 2 and args[2] == "force":
+            force = True
+        
+        # Получаем пользователя
+        user = await Users.get_or_none(id=user_id)
+        if not user:
+            await message.answer(f"Пользователь с ID {user_id} не найден.")
+            return
+        
+        # Проверяем, можно ли дать trial
+        if user.used_trial and not force:
+            await message.answer(
+                f"❌ Пользователь {user_id} уже использовал trial период.\n"
+                f"Используйте 'force' для принудительного предоставления:\n"
+                f"/set_trial {user_id} {days} force"
+            )
+            return
+        
+        # Предоставляем trial
+        await user.extend_subscription(days)
+        user.is_trial = True
+        user.used_trial = True
+        await user.save()
+        
+        force_text = " (принудительно)" if force else ""
+        await message.answer(
+            f"✅ Пользователю {user_id} ({user.full_name}) предоставлен trial период на {days} дней{force_text}.\n"
+            f"Подписка истекает: {user.expired_at.strftime('%d.%m.%Y')}"
+        )
+        
+        logger.info(
+            f"Администратор {message.from_user.id} предоставил trial период {days} дней "
+            f"пользователю {user_id} (force={force})"
+        )
+        
+    except Exception as e:
+        error_message = f"Ошибка при предоставлении trial периода: {str(e)}"
+        await message.answer(error_message)
+        logger.error(error_message)
+
 
 
 @router.message(Command("trigger_autopay"), IsAdmin())

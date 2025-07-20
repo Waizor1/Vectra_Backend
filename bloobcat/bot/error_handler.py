@@ -164,4 +164,58 @@ async def reset_user_failed_count(user_id: int) -> bool:
         
     except Exception as e:
         logger.error(f"Error resetting failed count for user {user_id}: {e}")
-        return False 
+        return False
+
+
+# ============ ОСНОВНОЙ ERROR HANDLER ДЛЯ AIOGRAM ============
+
+from aiogram import BaseMiddleware
+from aiogram.types import TelegramObject, ErrorEvent
+from typing import Any, Awaitable, Callable, Dict
+
+
+async def global_error_handler(event: ErrorEvent) -> bool:
+    """
+    Основной обработчик всех ошибок aiogram диспетчера
+    """
+    exception = event.exception
+    update = event.update
+    
+    # Получаем user_id если возможно
+    user_id = None
+    try:
+        if update.message:
+            user_id = update.message.from_user.id
+        elif update.callback_query:
+            user_id = update.callback_query.from_user.id
+        elif update.inline_query:
+            user_id = update.inline_query.from_user.id
+    except:
+        pass
+    
+    # Логируем ошибку с деталями
+    logger.error(
+        f"Error handling update {update.update_id}: {exception.__class__.__name__}: {str(exception)}"
+        f"{f' (user_id: {user_id})' if user_id else ''}",
+        exc_info=True
+    )
+    
+    # Обрабатываем специфичные ошибки Telegram
+    if user_id:
+        if isinstance(exception, TelegramForbiddenError):
+            await handle_telegram_forbidden_error(user_id, exception)
+        elif isinstance(exception, TelegramBadRequest):
+            await handle_telegram_bad_request(user_id, exception)
+        else:
+            await handle_telegram_error_with_retry(user_id, exception)
+    
+    # Всегда возвращаем True чтобы ошибка считалась обработанной
+    return True
+
+
+def setup_error_handler(dp):
+    """
+    Регистрирует error handler в диспетчере
+    """
+    dp.errors.register(global_error_handler)
+    logger.info("Global error handler registered") 
