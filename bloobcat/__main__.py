@@ -20,6 +20,53 @@ from bloobcat.logger import get_logger
 # Получаем основной логгер приложения
 logger = get_logger("bloobcat")
 
+
+async def setup_webhook_with_retries(webhook_url: str) -> None:
+    """
+    Устанавливает webhook с бесконечными попытками и экспоненциальным backoff.
+    Не завершается до успешной установки webhook.
+    """
+    attempt = 1
+    base_delay = 5  # начальная задержка 5 секунд
+    max_delay = 300  # максимальная задержка 5 минут
+    
+    logger.info(f"🔄 Начинаю установку webhook: {webhook_url}")
+    
+    while True:
+        try:
+            # Попытка установки webhook
+            await bot.set_webhook(webhook_url)
+            logger.info(f"✅ Webhook успешно установлен (попытка {attempt})")
+            
+            # Проверяем статус webhook
+            webhook_info = await bot.get_webhook_info()
+            logger.info(f"📊 Статус webhook: URL={webhook_info.url}, pending_updates={webhook_info.pending_update_count}")
+            
+            if webhook_info.last_error_message:
+                logger.warning(f"⚠️ Последняя ошибка webhook: {webhook_info.last_error_message}")
+            
+            return  # Успешно установлен, выходим
+            
+        except Exception as e:
+            # Рассчитываем задержку с экспоненциальным backoff
+            delay = min(base_delay * (2 ** min(attempt - 1, 8)), max_delay)  # ограничиваем степень до 2^8
+            
+            logger.warning(f"❌ Попытка {attempt} установки webhook неудачна: {e}")
+            logger.info(f"⏳ Повторная попытка через {delay}с...")
+            
+            await asyncio.sleep(delay)
+            attempt += 1
+            
+            # Каждые 10 попыток логируем обзорную информацию
+            if attempt % 10 == 0:
+                logger.info(f"📈 Статистика: выполнено {attempt} попыток установки webhook, продолжаем...")
+                # Пытаемся получить текущую информацию о webhook для диагностики
+                try:
+                    current_webhook = await bot.get_webhook_info()
+                    logger.info(f"🔍 Текущий webhook: {current_webhook.url or 'не установлен'}")
+                except Exception as check_error:
+                    logger.debug(f"Не удалось проверить текущий webhook: {check_error}")
+
 @asynccontextmanager
 async def lifespan(fastapi_app: FastAPI):
     command = Command(tortoise_config=TORTOISE_ORM, location="migrations")
@@ -52,21 +99,8 @@ async def lifespan(fastapi_app: FastAPI):
         + telegram_settings.webhook_secret
     )
     
-    # Устанавливаем webhook для Telegram бота
-    try:
-        await bot.set_webhook(webhook_url)
-        logger.info(f"Webhook успешно установлен: {webhook_url}")
-        
-        # Проверяем статус webhook
-        webhook_info = await bot.get_webhook_info()
-        logger.info(f"Статус webhook: URL={webhook_info.url}, pending_update_count={webhook_info.pending_update_count}")
-        if webhook_info.last_error_message:
-            logger.warning(f"Последняя ошибка webhook: {webhook_info.last_error_message}")
-    except Exception as e:
-        logger.error(f"Ошибка установки webhook: {e}")
-        raise
-
-    print(webhook_url)
+    # Устанавливаем webhook для Telegram бота с бесконечными попытками
+    await setup_webhook_with_retries(webhook_url)
     
     # Запуск фоновых задач после инициализации БД и бота
     async with RegisterTortoise(
@@ -81,12 +115,23 @@ async def lifespan(fastapi_app: FastAPI):
     
     # Закрытие всех клиентов RemnaWave при завершении работы
     try:
-        # Удаляем webhook при остановке приложения
-        try:
-            await bot.delete_webhook()
-            logger.info("Webhook удален при остановке приложения")
-        except Exception as e:
-            logger.warning(f"Ошибка при удалении webhook: {e}")
+        # Удаляем webhook при остановке приложения с повторными попытками
+        webhook_deleted = False
+        for attempt in range(3):  # 3 попытки удаления
+            try:
+                await bot.delete_webhook()
+                logger.info("✅ Webhook удален при остановке приложения")
+                webhook_deleted = True
+                break
+            except Exception as e:
+                if attempt < 2:
+                    logger.warning(f"⚠️ Попытка {attempt + 1} удаления webhook неудачна: {e}, повторяю...")
+                    await asyncio.sleep(2)
+                else:
+                    logger.warning(f"❌ Не удалось удалить webhook после 3 попыток: {e}")
+        
+        if not webhook_deleted:
+            logger.warning("🔄 Webhook не был удален, но приложение продолжает завершение")
         
         # Закрываем основной клиент из routes/user.py
         from bloobcat.routes.user import close_remnawave_client
