@@ -10,4 +10,5 @@ class SendFSM(StatesGroup):
 
 class UserSearchState(StatesGroup):
     """Состояния для поиска пользователей"""
-    waiting_for_user_id = State() 
+    waiting_for_user_id = State()
+    choosing_user = State()  # Новое состояние для выбора из списка 

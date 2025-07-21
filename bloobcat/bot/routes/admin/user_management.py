@@ -2,15 +2,20 @@ from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
 
-from bloobcat.bot.routes.admin.functions import IsAdmin, search_user
+from bloobcat.bot.routes.admin.functions import IsAdmin, search_user, search_users
 from bloobcat.bot.routes.admin.navigation import UserSearchState, create_fake_message
 from bloobcat.logger import get_logger
 from .keyboards import get_user_management_menu, get_users_menu, get_main_admin_menu, get_confirmation_keyboard
 from bloobcat.db.users import Users
 from bloobcat.settings import app_settings
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.types import InlineKeyboardButton
 
 logger = get_logger("bot_admin_user_management")
 router = Router()
+
+# Настройки пагинации
+USERS_PER_PAGE = 5
 
 
 # ============ ПОИСК ПОЛЬЗОВАТЕЛЯ ============
@@ -28,26 +33,194 @@ async def process_user_search(message: Message, state: FSMContext):
         await state.clear()
         return
     
-    # Поиск пользователя
-    user = await search_user(user_input)
-    if not user:
-        await message.answer(
+    # Получаем исходное сообщение для редактирования
+    state_data = await state.get_data()
+    original_message_id = state_data.get("search_message_id")
+    
+    # Поиск пользователей
+    users = await search_users(user_input)
+    
+    if not users:
+        # Создаем клавиатуру с кнопкой "Главное меню"
+        kb = InlineKeyboardBuilder()
+        kb.button(text="🏠 Главное меню", callback_data="admin:main")
+        
+        text = (
             f"❌ **Пользователь не найден!**\n\n"
             f"Поиск по: `{user_input}`\n\n"
-            f"Попробуйте еще раз или отмените поиск командой /cancel",
-            parse_mode="Markdown"
+            f"Попробуйте другой запрос или вернитесь в главное меню"
         )
+        
+        # Пытаемся отредактировать исходное сообщение
+        if original_message_id:
+            try:
+                await message.bot.edit_message_text(
+                    text=text,
+                    chat_id=message.chat.id,
+                    message_id=original_message_id,
+                    reply_markup=kb.as_markup(),
+                    parse_mode="Markdown"
+                )
+            except Exception as e:
+                # Если не удалось отредактировать - отправляем новое
+                logger.warning(f"Не удалось отредактировать сообщение {original_message_id}: {e}")
+                await message.answer(text, reply_markup=kb.as_markup(), parse_mode="Markdown")
+        else:
+            await message.answer(text, reply_markup=kb.as_markup(), parse_mode="Markdown")
+        
+        # Удаляем сообщение пользователя
+        try:
+            await message.delete()
+        except:
+            pass
         return
     
-    # Показываем меню управления пользователем
-    await show_user_management_menu(message, user)
+    # Если найден только один пользователь - сразу показываем его
+    if len(users) == 1:
+        await show_user_management_menu(message, users[0])
+        await state.clear()
+        # Удаляем сообщение пользователя
+        try:
+            await message.delete()
+        except:
+            pass
+        return
+    
+    # Если найдено несколько - показываем список с пагинацией
+    await state.update_data(found_users=users, search_query=user_input)
+    await state.set_state(UserSearchState.choosing_user)
+    
+    # Отправляем новое сообщение со списком (редактирование не работает стабильно)
+    await show_search_results_page(message, state, page=1)
+    
+    # Удаляем сообщение пользователя
+    try:
+        await message.delete()
+    except:
+        pass
+
+
+async def show_search_results_page(message_or_callback, state: FSMContext, page: int):
+    """Показывает страницу с результатами поиска"""
+    state_data = await state.get_data()
+    found_users = state_data.get("found_users", [])
+    search_query = state_data.get("search_query", "")
+    
+    logger.info(f"show_search_results_page: найдено {len(found_users)} пользователей, запрос: {search_query}")
+    
+    total_users = len(found_users)
+    total_pages = (total_users + USERS_PER_PAGE - 1) // USERS_PER_PAGE
+    
+    # Корректируем номер страницы
+    page = max(1, min(page, total_pages))
+    
+    start_index = (page - 1) * USERS_PER_PAGE
+    end_index = start_index + USERS_PER_PAGE
+    users_on_page = found_users[start_index:end_index]
+    
+    kb = InlineKeyboardBuilder()
+    
+    # Добавляем кнопки пользователей
+    for user in users_on_page:
+        user_display = f"{user.full_name or 'Без имени'}"
+        if user.username:
+            user_display += f" (@{user.username})"
+        kb.button(
+            text=f"{user_display} - ID: {user.id}",
+            callback_data=f"select_user:{user.id}"
+        )
+    
+    # Кнопки навигации
+    nav_buttons = []
+    if total_pages > 1:
+        if page > 1:
+            nav_buttons.append(InlineKeyboardButton(text="<<", callback_data=f"search_page:1"))
+            nav_buttons.append(InlineKeyboardButton(text="<", callback_data=f"search_page:{page - 1}"))
+        else:
+            nav_buttons.extend([InlineKeyboardButton(text=" ", callback_data="ignore")] * 2)
+        
+        nav_buttons.append(InlineKeyboardButton(text=f"{page}/{total_pages}", callback_data="ignore"))
+        
+        if page < total_pages:
+            nav_buttons.append(InlineKeyboardButton(text=">", callback_data=f"search_page:{page + 1}"))
+            nav_buttons.append(InlineKeyboardButton(text=">>", callback_data=f"search_page:{total_pages}"))
+        else:
+            nav_buttons.extend([InlineKeyboardButton(text=" ", callback_data="ignore")] * 2)
+    
+    # Кнопка отмены
+    kb.button(text="🏠 Главное меню", callback_data="admin:main")
+    
+    # Компонуем клавиатуру
+    layout = []
+    layout.extend([1] * len(users_on_page))  # Каждый пользователь в отдельной строке
+    if nav_buttons:
+        kb.row(*nav_buttons)  # Навигация в одной строке
+    layout.append(1)  # Кнопка отмены в отдельной строке
+    
+    kb.adjust(*layout)
+    
+    text = (
+        f"🔍 **Найдено пользователей: {total_users}**\n"
+        f"Запрос: `{search_query}`\n\n"
+        f"Страница {page}/{total_pages}. Выберите пользователя:"
+    )
+    
+    # Всегда отправляем новое сообщение (для стабильности)
+    if isinstance(message_or_callback, CallbackQuery):
+        await message_or_callback.message.answer(
+            text, 
+            reply_markup=kb.as_markup(), 
+            parse_mode="Markdown"
+        )
+    else:
+        await message_or_callback.answer(
+            text, 
+            reply_markup=kb.as_markup(), 
+            parse_mode="Markdown"
+        )
+
+
+# Обработчик пагинации результатов поиска
+@router.callback_query(UserSearchState.choosing_user, F.data.startswith("search_page:"))
+async def search_page_callback(callback: CallbackQuery, state: FSMContext):
+    """Обработчик переключения страниц результатов поиска"""
+    page = int(callback.data.split(":")[1])
+    await show_search_results_page(callback, state, page)
+    await callback.answer()
+
+
+# Обработчик отмены поиска
+@router.callback_query(UserSearchState.choosing_user, F.data == "admin:main")
+async def search_main_menu_callback(callback: CallbackQuery, state: FSMContext):
+    """Обработчик возврата в главное меню из поиска"""
+    await callback.message.edit_text(
+        "🔧 **АДМИН ПАНЕЛЬ**\n\n"
+        "Выберите раздел для управления:",
+        reply_markup=get_main_admin_menu(),
+        parse_mode="Markdown"
+    )
     await state.clear()
+    await callback.answer()
+
+
+# Обработчик возврата в главное меню из состояния ожидания ввода
+@router.callback_query(UserSearchState.waiting_for_user_id, F.data == "admin:main")
+async def search_waiting_main_menu_callback(callback: CallbackQuery, state: FSMContext):
+    """Обработчик возврата в главное меню из состояния ожидания ввода"""
+    await callback.message.edit_text(
+        "🔧 **АДМИН ПАНЕЛЬ**\n\n"
+        "Выберите раздел для управления:",
+        reply_markup=get_main_admin_menu(),
+        parse_mode="Markdown"
+    )
+    await state.clear()
+    await callback.answer()
 
 
 async def show_user_management_menu(message_or_callback, user):
     """Показывает меню управления конкретным пользователем"""
-    # Получаем детальную информацию о пользователе
-    user_info = await get_user_detailed_info(user)
+    # Получаем краткую информацию о пользователе
+    user_info = await get_user_brief_info(user)
     
     text = (
         f"👤 **УПРАВЛЕНИЕ ПОЛЬЗОВАТЕЛЕМ**\n\n"
@@ -68,8 +241,8 @@ async def show_user_management_menu(message_or_callback, user):
         await message_or_callback.answer(text, reply_markup=keyboard, parse_mode="Markdown")
 
 
-async def get_user_detailed_info(user):
-    """Получает детальную информацию о пользователе"""
+async def get_user_brief_info(user):
+    """Получает краткую информацию о пользователе"""
     from datetime import datetime, date
     from pytz import timezone
     
@@ -90,35 +263,24 @@ async def get_user_detailed_info(user):
     else:
         sub_status = "🔴 Истекла"
     
-    # Автопродление
+    # Статус автопродления
     auto_renewal = "✅ Включено" if user.is_subscribed and user.renew_id else "❌ Отключено"
     
-    # Trial статус
-    trial_status = "✅ Использован" if user.used_trial else "❌ Не использован"
+    # Баланс
+    balance_info = f"💰 Баланс: {user.balance}₽"
     
-    # Статус блокировки бота
-    block_status = "🚫 Заблокировал бота" if user.is_blocked else "✅ Активен"
-    
-    # Даты
-    created_at = user.created_at.strftime("%d.%m.%Y %H:%M") if user.created_at else "Нет данных"
-    connected_at = user.connected_at.strftime("%d.%m.%Y %H:%M") if user.connected_at else "Никогда"
-    expired_at = user.expired_at.strftime("%d.%m.%Y") if user.expired_at else "Нет данных"
+    # Рефералы
+    referrals_info = f"👥 Рефералов: {user.referrals}"
     
     info = (
-        f"**Статусы:**\n"
+        f"📊 **Статус:**\n"
         f"• Регистрация: {reg_status}\n"
         f"• Подписка: {sub_status}\n"
-        f"• Автопродление: {auto_renewal}\n"
-        f"• Trial период: {trial_status}\n"
-        f"• Статус бота: {block_status}\n\n"
-        f"**Даты:**\n"
-        f"• Создан: {created_at}\n"
-        f"• Последнее подключение: {connected_at}\n"
-        f"• Истекает: {expired_at}"
+        f"• Автопродление: {auto_renewal}\n\n"
+        f"💼 **Финансы:**\n"
+        f"• {balance_info}\n"
+        f"• {referrals_info}\n"
     )
-    
-    if user.renew_id:
-        info += f"\n\n**Платежи:**\n• ID платежа: `{user.renew_id}`"
     
     return info
 
@@ -245,73 +407,3 @@ async def show_trial_management(callback, user):
         reply_markup=get_user_management_menu(user.id, user.full_name),
         parse_mode="Markdown"
     )
-
-
-async def show_block_management(callback, user):
-    """Управление статусом блокировки бота"""
-    text = (
-        f"🚫 **УПРАВЛЕНИЕ СТАТУСОМ БЛОКИРОВКИ**\n\n"
-        f"👤 Пользователь: {user.full_name} (`{user.id}`)\n\n"
-        f"**Текущий статус:**\n"
-        f"• Заблокировал бота: {'✅ Да' if user.is_blocked else '❌ Нет'}\n"
-        f"• Дата блокировки: {user.blocked_at.strftime('%d.%m.%Y %H:%M') if user.blocked_at else 'Нет'}\n"
-        f"• Неудачных попыток: {user.failed_message_count}\n\n"
-        f"**Доступные команды:**\n"
-        f"• `/unblock_user {user.id}` - Убрать флаг блокировки\n"
-        f"• `/block_user {user.id} причина` - Пометить как заблокировавшего\n\n"
-        f"**Примечание:** Это управление флагом в БД, а не реальной блокировкой пользователя."
-    )
-    
-    await callback.message.edit_text(
-        text,
-        reply_markup=get_user_management_menu(user.id, user.full_name),
-        parse_mode="Markdown"
-    )
-
-
-async def show_delete_confirmation(callback, user):
-    """Подтверждение удаления пользователя"""
-    text = (
-        f"🗑️ **УДАЛЕНИЕ ПОЛЬЗОВАТЕЛЯ**\n\n"
-        f"⚠️ **ВНИМАНИЕ!** Вы собираетесь полностью удалить пользователя:\n\n"
-        f"👤 **{user.full_name}** (`{user.id}`)\n"
-        f"• Username: {f'@{user.username}' if user.username else 'Нет'}\n"
-        f"• Зарегистрирован: {'✅' if user.is_registered else '❌'}\n"
-        f"• Trial использован: {'✅' if user.used_trial else '❌'}\n\n"
-        f"**Это действие:**\n"
-        f"• Удалит пользователя из базы данных\n"
-        f"• Удалит все его платежи\n"
-        f"• Позволит ему снова получить trial период\n"
-        f"• **НЕОБРАТИМО!**\n\n"
-        f"Вы уверены?"
-    )
-    
-    await callback.message.edit_text(
-        text,
-        reply_markup=get_confirmation_keyboard("delete_user", str(user.id)),
-        parse_mode="Markdown"
-    )
-
-
-# ============ ПОДТВЕРЖДЕНИЯ ДЕЙСТВИЙ ============
-
-@router.callback_query(F.data.startswith("confirm:delete_user:"), IsAdmin())
-async def confirm_delete_user(callback: CallbackQuery):
-    """Подтверждение удаления пользователя"""
-    await callback.answer()
-    
-    user_id = int(callback.data.split(":")[-1])
-    
-    # Используем существующую функцию удаления
-    from .check_subs import admin_delete_user
-    from aiogram.filters import CommandObject
-    
-    # Создаем фейковый CommandObject
-    class FakeCommand:
-        def __init__(self, args):
-            self.args = args
-    
-    fake_message = create_fake_message(callback)
-    fake_command = FakeCommand(str(user_id))
-    
-    await admin_delete_user(fake_message, fake_command) 

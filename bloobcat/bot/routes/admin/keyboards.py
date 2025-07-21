@@ -8,13 +8,11 @@ def get_main_admin_menu() -> InlineKeyboardMarkup:
     
     # Первый ряд
     builder.row(
-        InlineKeyboardButton(text="👥 Управление пользователями", callback_data="admin:users"),
         InlineKeyboardButton(text="📊 Статистика", callback_data="admin:stats")
     )
     
     # Второй ряд
     builder.row(
-        InlineKeyboardButton(text="⚙️ Системные операции", callback_data="admin:system"),
         InlineKeyboardButton(text="📢 Рассылки", callback_data="admin:broadcasts")
     )
     

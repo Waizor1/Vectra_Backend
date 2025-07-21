@@ -290,6 +290,8 @@ async def user_manage_callback(callback: CallbackQuery, state: FSMContext):
         reply_markup=get_back_to_main_menu(),
         parse_mode="Markdown"
     )
+    # Сохраняем ID сообщения для последующего редактирования
+    await state.update_data(search_message_id=callback.message.message_id)
     await state.set_state(UserSearchState.waiting_for_user_id)
 
 
@@ -1260,6 +1262,38 @@ async def utm_page_navigation_callback(callback: CallbackQuery):
 @router.callback_query(F.data == "noop", IsAdmin())
 async def noop_callback(callback: CallbackQuery):
     """Пустой callback для индикаторов страниц"""
+    await callback.answer()
+
+
+# ============ ОБРАБОТКА ПОИСКА ПОЛЬЗОВАТЕЛЕЙ ============
+
+@router.callback_query(F.data.startswith("select_user:"))
+async def select_user_callback(callback: CallbackQuery, state: FSMContext):
+    """Обработчик выбора пользователя из результатов поиска"""
+    from .user_management import show_user_management_menu
+    from bloobcat.db.users import Users
+    
+    logger.info(f"Обработчик select_user вызван: {callback.data}")
+    current_state = await state.get_state()
+    logger.info(f"Текущее состояние: {current_state}")
+    
+    user_id = int(callback.data.split(":")[1])
+    
+    # Получаем пользователя
+    user = await Users.get_or_none(id=user_id)
+    if not user:
+        from .keyboards import get_users_menu
+        await callback.message.edit_text(
+            f"❌ Пользователь с ID {user_id} не найден",
+            reply_markup=get_users_menu()
+        )
+        await state.clear()
+        await callback.answer()
+        return
+    
+    # Показываем меню управления пользователем
+    await show_user_management_menu(callback, user)
+    await state.clear()
     await callback.answer()
 
 
