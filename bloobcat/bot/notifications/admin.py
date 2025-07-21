@@ -18,7 +18,7 @@ async def write_to(user_id: int, referrer_id: int = 0):
 async def send_admin_message(text: str, reply_markup=None):
     """Общая функция для отправки сообщений админу/в канал"""
     try:
-        chat_id = admin_settings.chat_id
+        chat_id = admin_settings.telegram_id
         logger.info(f"Отправка сообщения в чат {chat_id}: {text[:100]}...")
         
         # Проверяем, является ли чат каналом

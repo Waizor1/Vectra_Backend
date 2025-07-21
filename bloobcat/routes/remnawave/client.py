@@ -108,6 +108,12 @@ class UsersAPI:
                 # Не повторяем в случае валидационной ошибки
                 if 'validation' in str(e).lower():
                     raise
+                
+                # Не повторяем в случае ошибок удаления HWID устройств (A101)
+                if 'A101' in str(e) or 'Delete hwid user device error' in str(e):
+                    logger.debug(f"Пропускаем повторные попытки для ошибки удаления HWID: {e}")
+                    raise
+                
                 elapsed = (datetime.now() - start_time).total_seconds()
                 if elapsed > max_total_time:
                     raise

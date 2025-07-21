@@ -47,7 +47,11 @@ async def cleanup_user_hwid_devices(user_id: int, user_uuid: Union[str, object])
                 delete_resp = await client.users.delete_user_hwid_device(str(user_uuid), hwid)
                 logger.debug(f"Ответ API удаления HWID {hwid} для пользователя {user_id}: {delete_resp}")
             except Exception as exc:
-                logger.error(f"Ошибка удаления HWID {hwid} для пользователя {user_id}: {exc}")
+                # Не логируем ошибки для уже удаленных устройств
+                if 'A101' in str(exc) or 'Delete hwid user device error' in str(exc):
+                    logger.debug(f"HWID {hwid} для пользователя {user_id} уже удален или не существует: {exc}")
+                else:
+                    logger.error(f"Ошибка удаления HWID {hwid} для пользователя {user_id}: {exc}")
 
     except Exception as e:
         logger.error(f"Ошибка очистки HWID для пользователя {user_id}: {e}")
