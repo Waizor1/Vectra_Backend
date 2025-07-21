@@ -188,6 +188,10 @@ app.add_middleware(
     allow_origin_regex="https://.*\\.trycloudflare\\.com"  # разрешаем все поддомены cloudflare
 )
 
+# Добавляем rate limiting middleware
+from bloobcat.middleware.rate_limit import rate_limit_middleware
+app.middleware("http")(rate_limit_middleware)
+
 app.mount("/admin", admin_app)
 
 # Ограничиваем права на создание/изменение/удаление: только суперюзеры имеют эти права
