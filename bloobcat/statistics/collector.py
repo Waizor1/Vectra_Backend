@@ -6,9 +6,12 @@ from datetime import date, datetime, timedelta
 from typing import Dict, Any, Optional
 from zoneinfo import ZoneInfo
 
+from tortoise import Tortoise
+
 from bloobcat.db.users import Users
 from bloobcat.db.payments import ProcessedPayments
 from bloobcat.db.active_tariff import ActiveTariffs
+from bloobcat.db.connections import Connections  # Добавляем импорт
 from bloobcat.logger import get_logger
 
 logger = get_logger("statistics_collector")
@@ -35,10 +38,17 @@ class StatisticsCollector:
         ).count()
         
         # Активации ключей (пользователи, которые впервые подключились)
-        new_activations = await Users.filter(
-            connected_at__gte=start_dt,
-            connected_at__lt=end_dt
-        ).count()
+        query = """
+            SELECT COUNT(*) as count FROM (
+                SELECT MIN(at) as first_at
+                FROM connections
+                GROUP BY user_id
+            ) as first_connections
+            WHERE first_at = $1
+        """
+        conn = Tortoise.get_connection("default")
+        result = await conn.execute_query_dict(query, [target_date])
+        new_activations = result[0]['count'] if result else 0
         
         # Платежи
         payments = await ProcessedPayments.filter(
@@ -94,10 +104,18 @@ class StatisticsCollector:
             registration_date__lt=end_dt
         ).count()
         
-        new_activations = await Users.filter(
-            connected_at__gte=start_dt,
-            connected_at__lt=end_dt
-        ).count()
+        # Активации ключей (пользователи, которые впервые подключились за неделю)
+        query = """
+            SELECT COUNT(*) as count FROM (
+                SELECT MIN(at) as first_at
+                FROM connections
+                GROUP BY user_id
+            ) as first_connections
+            WHERE first_at >= $1 AND first_at <= $2
+        """
+        conn = Tortoise.get_connection("default")
+        result = await conn.execute_query_dict(query, [start_date, end_date])
+        new_activations = result[0]['count'] if result else 0
         
         payments = await ProcessedPayments.filter(
             processed_at__gte=start_dt,
@@ -157,10 +175,18 @@ class StatisticsCollector:
             registration_date__lt=end_dt
         ).count()
         
-        new_activations = await Users.filter(
-            connected_at__gte=start_dt,
-            connected_at__lt=end_dt
-        ).count()
+        # Активации ключей (пользователи, которые впервые подключились за месяц)
+        query = """
+            SELECT COUNT(*) as count FROM (
+                SELECT MIN(at) as first_at
+                FROM connections
+                GROUP BY user_id
+            ) as first_connections
+            WHERE first_at >= $1 AND first_at <= $2
+        """
+        conn = Tortoise.get_connection("default")
+        result = await conn.execute_query_dict(query, [start_date, end_date])
+        new_activations = result[0]['count'] if result else 0
         
         payments = await ProcessedPayments.filter(
             processed_at__gte=start_dt,
