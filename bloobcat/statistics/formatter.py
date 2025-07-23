@@ -60,6 +60,7 @@ class StatisticsFormatter:
 💰 Платежи: {current['payments_count']} на {StatisticsFormatter.format_currency(current['payments_sum'])}
 💎 Новые платные: {current['new_paid_users']}
 🔥 Активные пользователи: {current['active_users']}
+🟢 Онлайн за день: {current.get('online_users', 0)}
 
 <b>📊 Тренды (vs вчера):</b>
 👥 Регистрации: {trends_prev['new_registrations']}
@@ -98,6 +99,8 @@ class StatisticsFormatter:
 💰 Платежи: {current['payments_count']} на {StatisticsFormatter.format_currency(current['payments_sum'])}
 💎 Новые платные: {current['new_paid_users']}
 🔥 Активные пользователи: {current['active_users']}
+🟢 Онлайн за неделю: {current.get('online_users', 0)}
+📊 Средний дневной онлайн: {current.get('avg_daily_online', 0)}
 
 <b>📊 Тренды (vs прошлую неделю):</b>
 👥 Регистрации: {trends_prev['new_registrations']}
@@ -136,6 +139,8 @@ class StatisticsFormatter:
 💰 Платежи: {current['payments_count']} на {StatisticsFormatter.format_currency(current['payments_sum'])}
 💎 Новые платные: {current['new_paid_users']}
 🔥 Активные пользователи: {current['active_users']}
+🟢 Онлайн за месяц: {current.get('online_users', 0)}
+📊 Средний дневной онлайн: {current.get('avg_daily_online', 0)}
 
 <b>📊 Тренды (vs прошлый месяц):</b>
 👥 Регистрации: {trends_prev['new_registrations']}
