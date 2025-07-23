@@ -187,6 +187,8 @@ async def show_utm_list(message, page=0, edit_message=False):
         
         builder.row(*nav_row)
     
+    # Кнопка "Главное меню" только для админов, партнеры используют постраничное переключение
+    
     # Соединяем сообщение и отправляем
     message_text = "\n".join(lines)
     
@@ -276,6 +278,8 @@ async def callback_handler(callback: CallbackQuery):
     if callback.data == "stats_noop":
         await callback.answer("Текущая страница")
         return
+        
+
         
     # Обработка навигации по страницам статистики
     if callback.data.startswith("stats_page_"):
@@ -585,3 +589,6 @@ async def test_trial_notification_callback(callback: CallbackQuery):
         "конкретному пользователю с новыми настройками.",
         parse_mode="HTML"
     )
+
+
+

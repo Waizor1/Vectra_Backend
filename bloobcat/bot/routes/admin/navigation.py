@@ -146,7 +146,7 @@ async def show_utm_stats_with_pagination(callback: CallbackQuery, page: int = 0)
             utm_str = str(utm)
             # Формат кнопки как в /stats
             button_text = f"{utm_str} ({amount}|{registered}|{active_now_utm}|{payed})"
-            builder.row(InlineKeyboardButton(text=button_text, callback_data=f"utm:{utm_str}:{page}"))
+            builder.row(InlineKeyboardButton(text=button_text, callback_data=f"admin_utm:{utm_str}:{page}"))
         
         # Кнопки навигации (если больше одной страницы)
         if total_pages > 1:
@@ -154,14 +154,14 @@ async def show_utm_stats_with_pagination(callback: CallbackQuery, page: int = 0)
             
             # Кнопка "Назад"
             if page > 0:
-                nav_row.append(InlineKeyboardButton(text="◀️ Назад", callback_data=f"page_{page-1}"))
+                nav_row.append(InlineKeyboardButton(text="◀️ Назад", callback_data=f"admin_page_{page-1}"))
             
             # Индикатор страницы
-            nav_row.append(InlineKeyboardButton(text=f"{page+1}/{total_pages}", callback_data="noop"))
+            nav_row.append(InlineKeyboardButton(text=f"{page+1}/{total_pages}", callback_data="admin_noop"))
             
             # Кнопка "Вперед"
             if page < total_pages - 1:
-                nav_row.append(InlineKeyboardButton(text="Вперед ▶️", callback_data=f"page_{page+1}"))
+                nav_row.append(InlineKeyboardButton(text="Вперед ▶️", callback_data=f"admin_page_{page+1}"))
             
             builder.row(*nav_row)
     
@@ -1200,9 +1200,9 @@ async def test_stats_monthly_callback(callback: CallbackQuery):
 
 # ============ UTM СТАТИСТИКА ОБРАБОТЧИКИ ============
 
-@router.callback_query(F.data.startswith("utm:"), IsAdmin())
-async def utm_detail_callback(callback: CallbackQuery):
-    """Показывает детальную статистику по UTM"""
+@router.callback_query(F.data.startswith("admin_utm:"), IsAdmin())
+async def admin_utm_detail_callback(callback: CallbackQuery):
+    """Показывает детальную статистику по UTM в админском меню"""
     await callback.answer()
     
     from bloobcat.db.users import Users
@@ -1213,7 +1213,7 @@ async def utm_detail_callback(callback: CallbackQuery):
     MOSCOW_TZ = timezone('Europe/Moscow')
     
     try:
-        # Парсим utm:name:page
+        # Парсим admin_utm:name:page
         parts = callback.data.split(":", 2)
         if len(parts) != 3:
             await callback.answer("❌ Неверный формат данных")
@@ -1271,13 +1271,13 @@ async def utm_detail_callback(callback: CallbackQuery):
         await callback.answer("❌ Ошибка получения данных", show_alert=True)
 
 
-@router.callback_query(F.data.startswith("page_"), IsAdmin())
+@router.callback_query(F.data.startswith("admin_page_"), IsAdmin())
 async def utm_page_navigation_callback(callback: CallbackQuery):
-    """Навигация по страницам UTM"""
+    """Навигация по страницам UTM в админском меню"""
     await callback.answer()
     
     try:
-        page = int(callback.data[5:])  # убираем "page_"
+        page = int(callback.data[12:])  # убираем "admin_page_"
         
         # Вызываем функцию отображения статистики с правильной страницей
         await show_utm_stats_with_pagination(callback, page=page)
@@ -1287,9 +1287,9 @@ async def utm_page_navigation_callback(callback: CallbackQuery):
         await callback.answer("❌ Ошибка навигации", show_alert=True)
 
 
-@router.callback_query(F.data == "noop", IsAdmin())
-async def noop_callback(callback: CallbackQuery):
-    """Пустой callback для индикаторов страниц"""
+@router.callback_query(F.data == "admin_noop", IsAdmin())
+async def admin_noop_callback(callback: CallbackQuery):
+    """Пустой callback для индикаторов страниц в админском меню"""
     await callback.answer()
 
 
