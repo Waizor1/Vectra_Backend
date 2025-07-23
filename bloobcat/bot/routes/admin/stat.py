@@ -169,20 +169,20 @@ async def show_utm_list(message, page=0, edit_message=False):
         if page > 0:
             nav_row.append(InlineKeyboardButton(
                 text="◀️ Назад", 
-                callback_data=f"page_{page-1}"
+                callback_data=f"stats_page_{page-1}"
             ))
         
         # Индикатор страницы
         nav_row.append(InlineKeyboardButton(
             text=f"{page+1}/{total_pages}", 
-            callback_data="noop"
+            callback_data="stats_noop"
         ))
         
         # Кнопка "Вперед"
         if page < total_pages - 1:
             nav_row.append(InlineKeyboardButton(
                 text="Вперед ▶️", 
-                callback_data=f"page_{page+1}"
+                callback_data=f"stats_page_{page+1}"
             ))
         
         builder.row(*nav_row)
@@ -268,23 +268,23 @@ async def show_utm_detail(message, utm, page=0):
         )
 
 
-@router.callback_query(lambda c: c.data and c.data.startswith(("utm:", "page_", "back_to_list_", "noop")), IsPartnerOrAdmin())
+@router.callback_query(lambda c: c.data and c.data.startswith(("utm:", "stats_page_", "back_to_list_", "stats_noop")), IsPartnerOrAdmin())
 async def callback_handler(callback: CallbackQuery):
     # Acknowledge callback to remove loading spinner
     await callback.answer()
     
-    if callback.data == "noop":
+    if callback.data == "stats_noop":
         await callback.answer("Текущая страница")
         return
         
-    # Обработка навигации по страницам
-    if callback.data.startswith("page_"):
+    # Обработка навигации по страницам статистики
+    if callback.data.startswith("stats_page_"):
         try:
-            page = int(callback.data[len("page_"):])
+            page = int(callback.data[len("stats_page_"):])
             await show_utm_list(callback.message, page=page, edit_message=True)
             return
         except ValueError:
-            logger.error(f"Неверный формат страницы: {callback.data}")
+            logger.error(f"Неверный формат страницы статистики: {callback.data}")
     
     # Обработка кнопки "назад к списку"
     if callback.data.startswith("back_to_list_"):
