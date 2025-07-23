@@ -1280,7 +1280,7 @@ async def utm_page_navigation_callback(callback: CallbackQuery):
     await callback.answer()
     
     try:
-        page_str = callback.data[12:]  # убираем "admin_page_"
+        page_str = callback.data[11:]  # убираем "admin_page_" (11 символов)
         logger.debug(f"Admin page navigation: callback_data='{callback.data}', page_str='{page_str}'")
         
         if not page_str:
