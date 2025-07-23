@@ -52,16 +52,14 @@ async def users_menu_callback(callback: CallbackQuery):
     )
 
 
-@router.callback_query(F.data == "admin:stats", IsAdmin())
-async def stats_menu_callback(callback: CallbackQuery):
-    """Показываем общую статистику как в /stats"""
-    await callback.answer()
-    
-    # Получаем общую статистику как в /stats
+async def show_utm_stats_with_pagination(callback: CallbackQuery, page: int = 0):
+    """Показывает UTM статистику с пагинацией"""
     from bloobcat.db.users import Users
     from bloobcat.db.payments import ProcessedPayments
     from datetime import datetime, timedelta
     from pytz import timezone
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    from aiogram.types import InlineKeyboardButton
     
     MOSCOW_TZ = timezone('Europe/Moscow')
     
@@ -102,7 +100,6 @@ async def stats_menu_callback(callback: CallbackQuery):
     stats_text += f"🟢 Сейчас онлайн: <b>{active_users_online}</b>"
     
     # Создаем UTM кнопки как в /stats
-    from aiogram.utils.keyboard import InlineKeyboardBuilder
     builder = InlineKeyboardBuilder()
     
     # Получаем UTM список как в /stats
@@ -113,8 +110,23 @@ async def stats_menu_callback(callback: CallbackQuery):
         utms.sort()
         moscow_today = now_moscow.date()
         
-        # Показываем первые 5 UTM (как в show_utm_list)
-        for utm in utms[:5]:
+        # Пагинация: показываем 5 UTM на страницу
+        items_per_page = 5
+        total_pages = (len(utms) + items_per_page - 1) // items_per_page
+        
+        # Проверяем корректность номера страницы
+        if page < 0:
+            page = 0
+        elif page >= total_pages:
+            page = total_pages - 1
+        
+        # Вычисляем индексы для текущей страницы
+        start_idx = page * items_per_page
+        end_idx = min(start_idx + items_per_page, len(utms))
+        current_page_utms = utms[start_idx:end_idx]
+        
+        # Показываем UTM на текущей странице
+        for utm in current_page_utms:
             amount = await Users.filter(utm=utm).count()
             registered = await Users.filter(utm=utm, is_registered=True).count()
             
@@ -134,13 +146,23 @@ async def stats_menu_callback(callback: CallbackQuery):
             utm_str = str(utm)
             # Формат кнопки как в /stats
             button_text = f"{utm_str} ({amount}|{registered}|{active_now_utm}|{payed})"
-            builder.row(InlineKeyboardButton(text=button_text, callback_data=f"utm:{utm_str}:0"))
+            builder.row(InlineKeyboardButton(text=button_text, callback_data=f"utm:{utm_str}:{page}"))
         
-        # Если UTM больше 5, показываем кнопки навигации
-        if len(utms) > 5:
+        # Кнопки навигации (если больше одной страницы)
+        if total_pages > 1:
             nav_row = []
-            nav_row.append(InlineKeyboardButton(text="1/2", callback_data="noop"))
-            nav_row.append(InlineKeyboardButton(text="Вперед ▶️", callback_data="page_1"))
+            
+            # Кнопка "Назад"
+            if page > 0:
+                nav_row.append(InlineKeyboardButton(text="◀️ Назад", callback_data=f"page_{page-1}"))
+            
+            # Индикатор страницы
+            nav_row.append(InlineKeyboardButton(text=f"{page+1}/{total_pages}", callback_data="noop"))
+            
+            # Кнопка "Вперед"
+            if page < total_pages - 1:
+                nav_row.append(InlineKeyboardButton(text="Вперед ▶️", callback_data=f"page_{page+1}"))
+            
             builder.row(*nav_row)
     
     # Кнопка главного меню
@@ -151,6 +173,13 @@ async def stats_menu_callback(callback: CallbackQuery):
         reply_markup=builder.as_markup(),
         parse_mode="HTML"
     )
+
+
+@router.callback_query(F.data == "admin:stats", IsAdmin())
+async def stats_menu_callback(callback: CallbackQuery):
+    """Показываем общую статистику как в /stats"""
+    await callback.answer()
+    await show_utm_stats_with_pagination(callback, page=0)
 
 
 @router.callback_query(F.data == "admin:system", IsAdmin())
@@ -1250,9 +1279,8 @@ async def utm_page_navigation_callback(callback: CallbackQuery):
     try:
         page = int(callback.data[5:])  # убираем "page_"
         
-        # Вызываем admin:stats снова но с параметром страницы
-        # Для простоты просто редиректим на главную статистику
-        await stats_menu_callback(callback)
+        # Вызываем функцию отображения статистики с правильной страницей
+        await show_utm_stats_with_pagination(callback, page=page)
         
     except Exception as e:
         logger.error(f"Ошибка навигации UTM: {e}")
