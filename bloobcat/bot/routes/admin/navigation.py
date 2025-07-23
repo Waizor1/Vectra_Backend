@@ -1213,9 +1213,12 @@ async def admin_utm_detail_callback(callback: CallbackQuery):
     MOSCOW_TZ = timezone('Europe/Moscow')
     
     try:
+        logger.debug(f"Admin UTM detail: callback_data='{callback.data}'")
+        
         # Парсим admin_utm:name:page
         parts = callback.data.split(":", 2)
         if len(parts) != 3:
+            logger.error(f"Неверный формат admin_utm callback: '{callback.data}', parts={parts}")
             await callback.answer("❌ Неверный формат данных")
             return
             
@@ -1277,11 +1280,22 @@ async def utm_page_navigation_callback(callback: CallbackQuery):
     await callback.answer()
     
     try:
-        page = int(callback.data[12:])  # убираем "admin_page_"
+        page_str = callback.data[12:]  # убираем "admin_page_"
+        logger.debug(f"Admin page navigation: callback_data='{callback.data}', page_str='{page_str}'")
+        
+        if not page_str:
+            logger.error(f"Пустой номер страницы в callback_data: '{callback.data}'")
+            await callback.answer("❌ Неверный номер страницы", show_alert=True)
+            return
+            
+        page = int(page_str)
         
         # Вызываем функцию отображения статистики с правильной страницей
         await show_utm_stats_with_pagination(callback, page=page)
         
+    except ValueError as e:
+        logger.error(f"Ошибка парсинга номера страницы: callback_data='{callback.data}', error={e}")
+        await callback.answer("❌ Неверный формат номера страницы", show_alert=True)
     except Exception as e:
         logger.error(f"Ошибка навигации UTM: {e}")
         await callback.answer("❌ Ошибка навигации", show_alert=True)
@@ -1290,7 +1304,8 @@ async def utm_page_navigation_callback(callback: CallbackQuery):
 @router.callback_query(F.data == "admin_noop", IsAdmin())
 async def admin_noop_callback(callback: CallbackQuery):
     """Пустой callback для индикаторов страниц в админском меню"""
-    await callback.answer()
+    logger.debug(f"Admin noop callback: callback_data='{callback.data}'")
+    await callback.answer("Текущая страница")
 
 
 # ============ ОБРАБОТКА ПОИСКА ПОЛЬЗОВАТЕЛЕЙ ============
@@ -1336,11 +1351,13 @@ async def fallback_admin_callback(callback: CallbackQuery):
 
 @router.callback_query(lambda c: not (
     c.data.startswith(("stats_page_", "utm:", "back_to_list_", "stats_noop")) or
+    c.data.startswith(("admin_page_", "admin_utm:", "admin_noop")) or
     c.data.startswith("partner_") or 
-    c.data.startswith("test:")
+    c.data.startswith("test:") or
+    c.data.startswith("admin:")
 ))
 async def fallback_navigation_callbacks(callback: CallbackQuery):
-    """Fallback обработчик для навигационных callback'ов (исключая статистику)"""
+    """Fallback обработчик для навигационных callback'ов (исключая статистику и админку)"""
     await callback.answer("⚠️ Неизвестная команда", show_alert=False)
     logger.warning(f"Необработанный навигационный callback от пользователя {callback.from_user.id}: {callback.data}") 
 
