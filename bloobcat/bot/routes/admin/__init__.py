@@ -21,12 +21,15 @@ admin_router = Router()
 # Новое админ меню (приоритет)
 admin_router.include_router(admin_menu_router)
 admin_router.include_router(send_router)  # Должен быть перед navigation_router для FSM
+
+# Stat router должен быть ПЕРЕД navigation_router чтобы обрабатывать stats_page_, utm: callback'ы
+admin_router.include_router(stat_router)
+
 admin_router.include_router(navigation_router)
 admin_router.include_router(user_management_router)
 
 # Существующие роутеры
 admin_router.include_router(change_router)
-admin_router.include_router(stat_router)
 admin_router.include_router(check_subs_router)
 admin_router.include_router(utm_generator_router)
 admin_router.include_router(menu_router)

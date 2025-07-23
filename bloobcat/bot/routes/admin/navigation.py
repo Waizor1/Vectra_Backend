@@ -1334,11 +1334,15 @@ async def fallback_admin_callback(callback: CallbackQuery):
     logger.warning(f"Пользователь {callback.from_user.id} попытался использовать админскую функцию без прав: {callback.data}")
 
 
-@router.callback_query()
-async def fallback_all_callbacks(callback: CallbackQuery):
-    """Универсальный fallback обработчик для всех необработанных callback'ов"""
+@router.callback_query(lambda c: not (
+    c.data.startswith(("stats_page_", "utm:", "back_to_list_", "stats_noop")) or
+    c.data.startswith("partner_") or 
+    c.data.startswith("test:")
+))
+async def fallback_navigation_callbacks(callback: CallbackQuery):
+    """Fallback обработчик для навигационных callback'ов (исключая статистику)"""
     await callback.answer("⚠️ Неизвестная команда", show_alert=False)
-    logger.warning(f"Необработанный callback от пользователя {callback.from_user.id}: {callback.data}") 
+    logger.warning(f"Необработанный навигационный callback от пользователя {callback.from_user.id}: {callback.data}") 
 
  
 
