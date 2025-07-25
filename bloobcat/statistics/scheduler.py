@@ -17,9 +17,53 @@ logger = get_logger("statistics_scheduler")
 
 MOSCOW = ZoneInfo("Europe/Moscow")
 
+# Глобальные переменные для отслеживания активных задач
+active_tasks = {
+    "daily": None,
+    "weekly": None, 
+    "monthly": None
+}
+
+
+def get_next_daily_time() -> datetime:
+    """Получает время для следующей дневной статистики (завтра в 23:59)"""
+    tomorrow = date.today() + timedelta(days=1)
+    return datetime.combine(tomorrow, time(23, 59)).replace(tzinfo=MOSCOW)
+
+
+def get_next_weekly_time() -> datetime:
+    """Получает время для следующей недельной статистики (следующее воскресенье в 23:59)"""
+    today = date.today()
+    days_until_sunday = (6 - today.weekday()) % 7
+    if days_until_sunday == 0:  # Сегодня воскресенье
+        days_until_sunday = 7   # Планируем на следующее воскресенье
+    
+    next_sunday = today + timedelta(days=days_until_sunday)
+    return datetime.combine(next_sunday, time(23, 59)).replace(tzinfo=MOSCOW)
+
+
+def get_next_monthly_time() -> datetime:
+    """Получает время для следующей месячной статистики (31 число или последний день месяца в 23:59)"""
+    today = date.today()
+    
+    # Пробуем следующий месяц
+    if today.month == 12:
+        next_month = today.replace(year=today.year + 1, month=1)
+    else:
+        next_month = today.replace(month=today.month + 1)
+    
+    # Пытаемся установить 31 число, если нет - последний день месяца
+    try:
+        monthly_date = next_month.replace(day=31)
+    except ValueError:
+        last_day = calendar.monthrange(next_month.year, next_month.month)[1]
+        monthly_date = next_month.replace(day=last_day)
+    
+    return datetime.combine(monthly_date, time(23, 59)).replace(tzinfo=MOSCOW)
+
 
 async def send_daily_statistics():
-    """Отправляет дневную статистику в канал"""
+    """Отправляет дневную статистику в канал и планирует следующую задачу"""
     try:
         logger.info("Generating daily statistics...")
         
@@ -39,21 +83,18 @@ async def send_daily_statistics():
         
     except Exception as e:
         logger.error(f"Error sending daily statistics: {e}", exc_info=True)
+    finally:
+        # ВАЖНО: Планируем следующую задачу независимо от результата
+        schedule_next_daily_statistics()
 
 
 async def send_weekly_statistics():
-    """Отправляет недельную статистику в канал (воскресенье)"""
+    """Отправляет недельную статистику в канал и планирует следующую задачу"""
     try:
         logger.info("Generating weekly statistics...")
         
-        # Сегодня должно быть воскресенье
-        today = date.today()
-        if today.weekday() != 6:  # 6 = воскресенье
-            logger.warning(f"Weekly statistics called on non-Sunday: {today}")
-            return
-            
-        # Неделя заканчивается сегодня (воскресенье)
-        end_date = today
+        # Статистика за закончившуюся неделю (воскресенье)
+        end_date = date.today()
         
         # Собираем данные и тренды
         trends_data = await TrendsCalculator.calculate_weekly_trends(end_date)
@@ -68,25 +109,21 @@ async def send_weekly_statistics():
         
     except Exception as e:
         logger.error(f"Error sending weekly statistics: {e}", exc_info=True)
+    finally:
+        # ВАЖНО: Планируем следующую задачу независимо от результата
+        schedule_next_weekly_statistics()
 
 
 async def send_monthly_statistics():
-    """Отправляет месячную статистику в канал (31 число или последний день месяца)"""
+    """Отправляет месячную статистику в канал и планирует следующую задачу"""
     try:
         logger.info("Generating monthly statistics...")
         
+        # Статистика за текущий месяц
         today = date.today()
-        
-        # Проверяем, что сегодня 31 число или последний день месяца
-        last_day_of_month = calendar.monthrange(today.year, today.month)[1]
-        if today.day != 31 and today.day != last_day_of_month:
-            logger.warning(f"Monthly statistics called on wrong day: {today}")
-            return
-        
-        # Статистика за текущий месяц (который завершается сегодня)
         target_month = today.month
         target_year = today.year
-            
+        
         # Собираем данные и тренды
         trends_data = await TrendsCalculator.calculate_monthly_trends(target_month, target_year)
         
@@ -100,104 +137,167 @@ async def send_monthly_statistics():
         
     except Exception as e:
         logger.error(f"Error sending monthly statistics: {e}", exc_info=True)
+    finally:
+        # ВАЖНО: Планируем следующую задачу независимо от результата
+        schedule_next_monthly_statistics()
 
 
-def schedule_statistics_coro(target_time: datetime, coro, description: str):
-    """Планирует выполнение корутины статистики в определенное время"""
-    now = datetime.now(MOSCOW)
-    delay = (target_time - now).total_seconds()
+def schedule_next_daily_statistics():
+    """Планирует следующую задачу дневной статистики"""
+    target_time = get_next_daily_time()
+    logger.info(f"Scheduling next daily statistics for {target_time.isoformat()}")
     
-    if delay <= 0:
-        logger.warning(f"Statistics task '{description}' scheduled for past time {target_time.isoformat()}")
-        return None
-    
-    logger.debug(f"Scheduling statistics task '{description}' at {target_time.isoformat()}")
-
-    async def runner():
+    async def daily_runner():
         now = datetime.now(MOSCOW)
         delay = (target_time - now).total_seconds()
         if delay > 0:
+            logger.debug(f"Daily statistics: sleeping for {delay:.1f} seconds until {target_time.isoformat()}")
             await asyncio.sleep(delay)
-        await coro()
+        await send_daily_statistics()
     
-    task = asyncio.create_task(runner())
-    return task
+    # Отменяем предыдущую задачу если есть
+    if active_tasks["daily"] and not active_tasks["daily"].done():
+        active_tasks["daily"].cancel()
+    
+    # Создаем новую задачу
+    active_tasks["daily"] = asyncio.create_task(daily_runner())
 
 
-def setup_statistics_tasks():
-    """Настраивает задачи автоматической отправки статистики"""
-    logger.info("Setting up automatic statistics tasks...")
+def schedule_next_weekly_statistics():
+    """Планирует следующую задачу недельной статистики"""
+    target_time = get_next_weekly_time()
+    logger.info(f"Scheduling next weekly statistics for {target_time.isoformat()}")
+    
+    async def weekly_runner():
+        now = datetime.now(MOSCOW)
+        delay = (target_time - now).total_seconds()
+        if delay > 0:
+            logger.debug(f"Weekly statistics: sleeping for {delay:.1f} seconds until {target_time.isoformat()}")
+            await asyncio.sleep(delay)
+        await send_weekly_statistics()
+    
+    # Отменяем предыдущую задачу если есть
+    if active_tasks["weekly"] and not active_tasks["weekly"].done():
+        active_tasks["weekly"].cancel()
+    
+    # Создаем новую задачу
+    active_tasks["weekly"] = asyncio.create_task(weekly_runner())
+
+
+def schedule_next_monthly_statistics():
+    """Планирует следующую задачу месячной статистики"""
+    target_time = get_next_monthly_time()
+    logger.info(f"Scheduling next monthly statistics for {target_time.isoformat()}")
+    
+    async def monthly_runner():
+        now = datetime.now(MOSCOW)
+        delay = (target_time - now).total_seconds()
+        if delay > 0:
+            logger.debug(f"Monthly statistics: sleeping for {delay:.1f} seconds until {target_time.isoformat()}")
+            await asyncio.sleep(delay)
+        await send_monthly_statistics()
+    
+    # Отменяем предыдущую задачу если есть
+    if active_tasks["monthly"] and not active_tasks["monthly"].done():
+        active_tasks["monthly"].cancel()
+    
+    # Создаем новую задачу
+    active_tasks["monthly"] = asyncio.create_task(monthly_runner())
+
+
+def setup_initial_statistics_tasks():
+    """Настраивает начальные задачи автоматической отправки статистики"""
+    logger.info("Setting up initial automatic statistics tasks...")
     
     now = datetime.now(MOSCOW)
     today = now.date()
     
-    # Дневная статистика: каждый день в 23:59
+    # Дневная статистика: сегодня в 23:59 или завтра если уже прошло
     daily_time = datetime.combine(today, time(23, 59)).replace(tzinfo=MOSCOW)
     if daily_time <= now:
-        daily_time += timedelta(days=1)
+        daily_time = get_next_daily_time()
     
-    schedule_statistics_coro(daily_time, send_daily_statistics, "daily_statistics")
+    # Недельная статистика: ближайшее воскресенье в 23:59
+    weekly_time = get_next_weekly_time()
     
-    # Недельная статистика: каждое воскресенье в 23:59
-    days_until_sunday = (6 - today.weekday()) % 7
-    if days_until_sunday == 0 and now.hour >= 23 and now.minute >= 59:
-        days_until_sunday = 7
-    
-    next_sunday = today + timedelta(days=days_until_sunday)
-    weekly_time = datetime.combine(next_sunday, time(23, 59)).replace(tzinfo=MOSCOW)
-    
-    schedule_statistics_coro(weekly_time, send_weekly_statistics, "weekly_statistics")
-    
-    # Месячная статистика: 31 число каждого месяца в 23:59
-    # Если в текущем месяце нет 31 числа, то в последний день месяца
+    # Месячная статистика: 31 число текущего месяца или следующего
     try:
         monthly_date = today.replace(day=31)
     except ValueError:
-        # В месяце нет 31 числа, берем последний день
         last_day = calendar.monthrange(today.year, today.month)[1]
         monthly_date = today.replace(day=last_day)
     
-    # Если 31 число уже прошло в этом месяце, планируем на следующий месяц
-    if monthly_date <= today or (monthly_date == today and now.hour >= 23 and now.minute >= 59):
-        if today.month == 12:
-            next_month = today.replace(year=today.year + 1, month=1)
-        else:
-            next_month = today.replace(month=today.month + 1)
-        
-        try:
-            monthly_date = next_month.replace(day=31)
-        except ValueError:
-            last_day = calendar.monthrange(next_month.year, next_month.month)[1]
-            monthly_date = next_month.replace(day=last_day)
-    
     monthly_time = datetime.combine(monthly_date, time(23, 59)).replace(tzinfo=MOSCOW)
+    if monthly_time <= now:
+        monthly_time = get_next_monthly_time()
     
-    schedule_statistics_coro(monthly_time, send_monthly_statistics, "monthly_statistics")
-    
-    logger.info(f"Statistics tasks scheduled:")
+    logger.info(f"Initial statistics tasks scheduled:")
     logger.info(f"  Daily: {daily_time.isoformat()}")
     logger.info(f"  Weekly: {weekly_time.isoformat()}")
     logger.info(f"  Monthly: {monthly_time.isoformat()}")
+    
+    # Запускаем первичные задачи
+    async def initial_daily_runner():
+        now = datetime.now(MOSCOW)
+        delay = (daily_time - now).total_seconds()
+        if delay > 0:
+            logger.debug(f"Initial daily statistics: sleeping for {delay:.1f} seconds")
+            await asyncio.sleep(delay)
+        await send_daily_statistics()
+    
+    async def initial_weekly_runner():
+        now = datetime.now(MOSCOW)
+        delay = (weekly_time - now).total_seconds()
+        if delay > 0:
+            logger.debug(f"Initial weekly statistics: sleeping for {delay:.1f} seconds")
+            await asyncio.sleep(delay)
+        await send_weekly_statistics()
+    
+    async def initial_monthly_runner():
+        now = datetime.now(MOSCOW)
+        delay = (monthly_time - now).total_seconds()
+        if delay > 0:
+            logger.debug(f"Initial monthly statistics: sleeping for {delay:.1f} seconds")
+            await asyncio.sleep(delay)
+        await send_monthly_statistics()
+    
+    # Создаем начальные задачи
+    active_tasks["daily"] = asyncio.create_task(initial_daily_runner())
+    active_tasks["weekly"] = asyncio.create_task(initial_weekly_runner())
+    active_tasks["monthly"] = asyncio.create_task(initial_monthly_runner())
 
 
 async def statistics_scheduler():
     """Постоянно работающий планировщик статистики"""
     logger.info("Starting statistics scheduler...")
     
-    # Настраиваем задачи при запуске
-    setup_statistics_tasks()
+    # Настраиваем начальные задачи при запуске
+    setup_initial_statistics_tasks()
     
-    # Проверяем каждый час, нужно ли перепланировать задачи
+    # Мониторим состояние задач каждые 30 минут
     while True:
         try:
-            await asyncio.sleep(3600)  # 1 час
+            await asyncio.sleep(1800)  # 30 минут
             
-            # Проверяем, наступил ли новый день
-            now = datetime.now(MOSCOW)
-            if now.hour == 0 and now.minute < 5:  # Первые 5 минут нового дня
-                logger.debug("New day detected, re-scheduling statistics tasks...")
-                setup_statistics_tasks()
-                
+            # Проверяем состояние задач и перезапускаем упавшие
+            for task_type, task in active_tasks.items():
+                if task is None or task.done():
+                    if task and task.done() and not task.cancelled():
+                        # Задача завершилась, проверяем на ошибки
+                        try:
+                            await task
+                        except Exception as e:
+                            logger.error(f"Statistics task '{task_type}' failed: {e}")
+                    
+                    # Перезапускаем задачу если она не активна
+                    logger.warning(f"Statistics task '{task_type}' is not active, restarting...")
+                    if task_type == "daily":
+                        schedule_next_daily_statistics()
+                    elif task_type == "weekly":
+                        schedule_next_weekly_statistics()
+                    elif task_type == "monthly":
+                        schedule_next_monthly_statistics()
+                        
         except Exception as e:
-            logger.error(f"Error in statistics scheduler: {e}")
+            logger.error(f"Error in statistics scheduler monitor: {e}")
             await asyncio.sleep(300)  # Подождем 5 минут при ошибке 
