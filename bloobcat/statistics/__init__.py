@@ -11,11 +11,9 @@
 from .collector import StatisticsCollector
 from .trends import TrendsCalculator
 from .formatter import StatisticsFormatter
-from .scheduler import setup_statistics_tasks
 
 __all__ = [
     "StatisticsCollector",
     "TrendsCalculator", 
-    "StatisticsFormatter",
-    "setup_statistics_tasks"
+    "StatisticsFormatter"
 ] 
