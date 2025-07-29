@@ -190,6 +190,42 @@ app.add_middleware(
 
 # Добавляем rate limiting middleware
 from bloobcat.middleware.rate_limit import rate_limit_middleware
+
+# Добавляем глобальный обработчик исключений для CORS
+from fastapi import HTTPException
+from fastapi.exception_handlers import http_exception_handler
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+@app.exception_handler(StarletteHTTPException)
+async def custom_http_exception_handler(request, exc):
+    response = await http_exception_handler(request, exc)
+    # Убеждаемся, что CORS заголовки добавляются даже при ошибках
+    origin = request.headers.get("origin")
+    if origin in origins or any(origin.endswith(o.replace("https://", "").replace("*.", "")) for o in origins if "*." in o):
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS, PATCH"
+        response.headers["Access-Control-Allow-Headers"] = "*"
+        response.headers["Access-Control-Expose-Headers"] = "*"
+    return response
+
+@app.exception_handler(500)
+async def internal_server_error_handler(request, exc):
+    from fastapi.responses import JSONResponse
+    response = JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error"}
+    )
+    # Убеждаемся, что CORS заголовки добавляются при 500 ошибках
+    origin = request.headers.get("origin")
+    if origin in origins or any(origin.endswith(o.replace("https://", "").replace("*.", "")) for o in origins if "*." in o):
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS, PATCH"
+        response.headers["Access-Control-Allow-Headers"] = "*"
+        response.headers["Access-Control-Expose-Headers"] = "*"
+    return response
+
 app.middleware("http")(rate_limit_middleware)
 
 app.mount("/admin", admin_app)

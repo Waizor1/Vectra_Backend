@@ -48,82 +48,90 @@ async def check(user: Users = Depends(validate)) -> Dict[str, Any]:
     Возвращает данные пользователя и URL подписки RemnaWave.
     Создает пользователя в RemnaWave при первом обращении.
     """
-    subscription_url = None
-    error_getting_url = None
+    try:
+        logger.info(f"Начало обработки запроса /user для пользователя {user.id}")
+        subscription_url = None
+        error_getting_url = None
     
-    # Убеждаемся, что пользователь есть в RemnaWave (вызов уже был в Users.get_user)
-    if not user.remnawave_uuid:
-        logger.error(f"Пользователь {user.id} прошел валидацию, но не был создан в RemnaWave (_ensure_remnawave_user не сработал?).")
-        # Не прерываем, вернем пользователя без URL
-        error_getting_url = "Failed to initialize user account."
-    else:
-        try:
-            # Получаем URL подписки
-            logger.debug(f"Получаем URL подписки для {user.id} внутри эндпоинта /user")
-            subscription_url = await remnawave_client.users.get_subscription_url(user)
-            logger.debug(f"Пользователь {user.id} получил URL подписки RemnaWave: {subscription_url[:20]}...")
-        except Exception as e:
-            error_getting_url = f"Failed to get subscription URL: {str(e)}"
-            logger.error(f"Ошибка при получении URL подписки для пользователя {user.id} в эндпоинте /user: {error_getting_url}")
-            # Не прерываем запрос, вернем данные пользователя с ошибкой URL
+        # Убеждаемся, что пользователь есть в RemnaWave (вызов уже был в Users.get_user)
+        if not user.remnawave_uuid:
+            logger.error(f"Пользователь {user.id} прошел валидацию, но не был создан в RemnaWave (_ensure_remnawave_user не сработал?).")
+            # Не прерываем, вернем пользователя без URL
+            error_getting_url = "Failed to initialize user account."
+        else:
+            try:
+                # Получаем URL подписки
+                logger.debug(f"Получаем URL подписки для {user.id} внутри эндпоинта /user")
+                subscription_url = await remnawave_client.users.get_subscription_url(user)
+                logger.debug(f"Пользователь {user.id} получил URL подписки RemnaWave: {subscription_url[:20]}...")
+            except Exception as e:
+                error_getting_url = f"Failed to get subscription URL: {str(e)}"
+                logger.error(f"Ошибка при получении URL подписки для пользователя {user.id} в эндпоинте /user: {error_getting_url}")
+                # Не прерываем запрос, вернем данные пользователя с ошибкой URL
 
-    # Получаем стандартные данные пользователя
-    user_data = await User_Pydantic.from_tortoise_orm(user)
-    user_dict = user_data.model_dump()
+        # Получаем стандартные данные пользователя
+        user_data = await User_Pydantic.from_tortoise_orm(user)
+        user_dict = user_data.model_dump()
 
-    # Добавляем URL и возможную ошибку в ответ
-    user_dict["subscription_url"] = subscription_url
-    user_dict["subscription_url_error"] = error_getting_url
+        # Добавляем URL и возможную ошибку в ответ
+        user_dict["subscription_url"] = subscription_url
+        user_dict["subscription_url_error"] = error_getting_url
 
-    # Добавляем количество HWID устройств для пользователя
-    devices_count = 0
-    if user.remnawave_uuid:
-        try:
-            raw_resp = await remnawave_client.users.get_user_hwid_devices(str(user.remnawave_uuid))
-            devices_list = []
-            if isinstance(raw_resp, list):
-                devices_list = raw_resp
-            elif isinstance(raw_resp, dict):
-                resp = raw_resp.get("response")
-                if isinstance(resp, list):
-                    devices_list = resp
-                elif isinstance(resp, dict) and isinstance(resp.get("devices"), list):
-                    devices_list = resp.get("devices")
-            devices_count = len(devices_list)
-        except Exception as e:
-            logger.error(f"Ошибка получения списка устройств для пользователя {user.id}: {e}")
-    user_dict["devices_count"] = devices_count
+        # Добавляем количество HWID устройств для пользователя
+        devices_count = 0
+        if user.remnawave_uuid:
+            try:
+                raw_resp = await remnawave_client.users.get_user_hwid_devices(str(user.remnawave_uuid))
+                devices_list = []
+                if isinstance(raw_resp, list):
+                    devices_list = raw_resp
+                elif isinstance(raw_resp, dict):
+                    resp = raw_resp.get("response")
+                    if isinstance(resp, list):
+                        devices_list = resp
+                    elif isinstance(resp, dict) and isinstance(resp.get("devices"), list):
+                        devices_list = resp.get("devices")
+                devices_count = len(devices_list)
+            except Exception as e:
+                logger.error(f"Ошибка получения списка устройств для пользователя {user.id}: {e}")
+        user_dict["devices_count"] = devices_count
 
-    # --- Определение лимита устройств (только из БД) ---
-    devices_limit = 1  # 1. Значение по умолчанию
-    source = "дефолту"
-    active_tariff_data = None
+        # --- Определение лимита устройств (только из БД) ---
+        devices_limit = 1  # 1. Значение по умолчанию
+        source = "дефолту"
+        active_tariff_data = None
 
-    # 2. Пытаемся получить из тарифа
-    if user.active_tariff_id:
-        tariff = await ActiveTariffs.get_or_none(id=user.active_tariff_id)
-        if tariff:
-            devices_limit = tariff.hwid_limit
-            source = f"тарифу ({tariff.name})"
-            # Добавляем информацию об активном тарифе в ответ
-            active_tariff_data = {
-                "id": tariff.id,
-                "name": tariff.name,
-                "months": tariff.months,
-                "price": tariff.price,
-                "hwid_limit": tariff.hwid_limit
-            }
+        # 2. Пытаемся получить из тарифа
+        if user.active_tariff_id:
+            tariff = await ActiveTariffs.get_or_none(id=user.active_tariff_id)
+            if tariff:
+                devices_limit = tariff.hwid_limit
+                source = f"тарифу ({tariff.name})"
+                # Добавляем информацию об активном тарифе в ответ
+                active_tariff_data = {
+                    "id": tariff.id,
+                    "name": tariff.name,
+                    "months": tariff.months,
+                    "price": tariff.price,
+                    "hwid_limit": tariff.hwid_limit
+                }
     
-    # 3. Личное значение из БД имеет наивысший приоритет
-    if user.hwid_limit is not None:
-        devices_limit = user.hwid_limit
-        source = "личной настройке в БД"
+        # 3. Личное значение из БД имеет наивысший приоритет
+        if user.hwid_limit is not None:
+            devices_limit = user.hwid_limit
+            source = "личной настройке в БД"
 
-    logger.debug(f"Итоговый лимит устройств для пользователя {user.id} установлен по {source}: {devices_limit}")
-    user_dict["devices_limit"] = devices_limit
-    user_dict["active_tariff"] = active_tariff_data
+        logger.debug(f"Итоговый лимит устройств для пользователя {user.id} установлен по {source}: {devices_limit}")
+        user_dict["devices_limit"] = devices_limit
+        user_dict["active_tariff"] = active_tariff_data
 
-    return user_dict
+        logger.info(f"Успешно обработан запрос /user для пользователя {user.id}")
+        return user_dict
+    
+    except Exception as e:
+        logger.error(f"Ошибка в эндпоинте /user для пользователя {getattr(user, 'id', 'unknown')}: {str(e)}", exc_info=True)
+        from fastapi import HTTPException
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.patch("")

@@ -37,7 +37,7 @@ async def webhook():
 
 async def remnawave_updater():
     """Основной процесс синхронизации дат истечения из БД в RemnaWave"""
-    global update_in_progress
+    global update_in_progress, logger
     
     if update_in_progress:
         logger.info("Процесс обновления уже запущен, пропускаем")
