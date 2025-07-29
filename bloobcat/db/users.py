@@ -305,8 +305,6 @@ class Users(models.Model):
                 try:
                     from bloobcat.routes.remnawave.client import RemnaWaveClient
                     from bloobcat.settings import remnawave_settings
-                    
-                    logger = get_logger("users.save")
                     remnawave_client = RemnaWaveClient(
                         remnawave_settings.url, 
                         remnawave_settings.token.get_secret_value()
