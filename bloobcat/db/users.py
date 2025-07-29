@@ -323,9 +323,14 @@ class Users(models.Model):
                         
                 except Exception as e:
                     logger.warning(f"User {self.id} failed to update RemnaWave immediately, will be synced by batch updater: {e}")
-            
+        
+        # Всегда перепланируем задачи пользователя при любом сохранении
+        try:
             from bloobcat.scheduler import schedule_user_tasks
+            logger.debug(f"Rescheduling tasks for user {self.id} after save.")
             await schedule_user_tasks(self)
+        except Exception as e:
+            logger.error(f"Failed to reschedule tasks for user {self.id}: {e}")
 
     class PydanticMeta:
         computed = ["expires", "name", "referral_percent"]
