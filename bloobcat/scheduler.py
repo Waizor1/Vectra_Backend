@@ -350,13 +350,14 @@ async def schedule_user_tasks(user):
                 # Sort by eta (most recent time first) and execute only the first one
                 payment_attempts_needed.sort(key=lambda x: x[0], reverse=True)
                 most_recent_eta, most_recent_days = payment_attempts_needed[0]
+                
                 logger.info(f"Multiple autopay attempts needed for user {user.id}. Executing only most recent: {most_recent_days} days before")
-                task = schedule_coro(most_recent_eta, _exec_auto_payment, user.id, user.expired_at, most_recent_days)
+                task = schedule_coro(most_recent_eta, _exec_auto_payment, user.id, user.expired_at, most_recent_days, skip_if_past=True)
                 scheduled_tasks[user.id].append(task)
 
             # 1 day before: final check. If not paid, cancel subscription.
             eta_cancel = base - timedelta(days=1)
-            task = schedule_coro(eta_cancel, _exec_cancel_if_unpaid, user.id, user.expired_at)
+            task = schedule_coro(eta_cancel, _exec_cancel_if_unpaid, user.id, user.expired_at, skip_if_past=True)
             scheduled_tasks[user.id].append(task)
         else:
             # Logic for users WITHOUT auto-renewal: send expiration reminders
@@ -403,12 +404,12 @@ async def schedule_user_tasks(user):
         task = schedule_coro(exp_notification_eta, _exec_notify_expiring_trial, user.id, user.expired_at, skip_if_past=True)
         scheduled_tasks[user.id].append(task)
         
-        # Trial extension check
+        # Trial extension check - skip if time has passed
         ext_eta = exp_dt - timedelta(days=2)
-        task = schedule_coro(ext_eta, _exec_extend_trial, user.id, user.expired_at)
+        task = schedule_coro(ext_eta, _exec_extend_trial, user.id, user.expired_at, skip_if_past=True)
         scheduled_tasks[user.id].append(task)
-        # Trial end notification
-        task = schedule_coro(exp_dt, _exec_notify_trial_end, user.id, user.expired_at)
+        # Trial end notification - skip if time has passed
+        task = schedule_coro(exp_dt, _exec_notify_trial_end, user.id, user.expired_at, skip_if_past=True)
         scheduled_tasks[user.id].append(task)
 
     # Referral tasks at 18:00 local time
