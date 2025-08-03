@@ -115,14 +115,32 @@ class Users(models.Model):
                 hwid_limit = 1
                 
                 # Создаем пользователя в RemnaWave
-                response = await remnawave.users.create_user(
-                    username=f"{self.id}_TEST" if test_mode else str(self.id),
-                    expire_at=expire_at_date,
-                    telegram_id=self.id,
-                    email=self.email,
-                    description=f"Telegram: {self.name()}",
-                    hwid_device_limit=hwid_limit
-                )
+                base_username = f"{self.id}_TEST" if test_mode else str(self.id)
+                username_to_try = base_username
+                counter = 1
+                while True:
+                    try:
+                        response = await remnawave.users.create_user(
+                            username=username_to_try,
+                            expire_at=expire_at_date,
+                            telegram_id=self.id,
+                            email=self.email,
+                            description=f"Telegram: {self.name()}",
+                            hwid_device_limit=hwid_limit
+                        )
+                        break  # Успешно создали, выходим из цикла
+                    except Exception as e:
+                        # Проверяем, является ли ошибка 'Username already exists'
+                        if "already exists" in str(e).lower():
+                            logger.warning(f"Имя пользователя {username_to_try} уже занято. Пробуем следующее.")
+                            if test_mode:
+                                username_to_try = f"{base_username}_{counter}"
+                            else:
+                                username_to_try = f"{base_username}_{counter}"
+                            counter += 1
+                        else:
+                            raise e # Перевыбрасываем другие ошибки
+
                 
                 # Сохраняем UUID
                 self.remnawave_uuid = response["response"]["uuid"]

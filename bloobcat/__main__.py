@@ -44,6 +44,7 @@ async def setup_webhook_with_retries(webhook_url: str) -> None:
             
             if webhook_info.last_error_message:
                 logger.warning(f"⚠️ Последняя ошибка webhook: {webhook_info.last_error_message}")
+                raise Exception(f"Webhook info contains an error: {webhook_info.last_error_message}")
             
             return  # Успешно установлен, выходим
             
@@ -99,8 +100,8 @@ async def lifespan(fastapi_app: FastAPI):
         + telegram_settings.webhook_secret
     )
     
-    # Устанавливаем webhook для Telegram бота с бесконечными попытками
-    await setup_webhook_with_retries(webhook_url)
+    # Запускаем установку webhook в фоновом режиме
+    asyncio.create_task(setup_webhook_with_retries(webhook_url))
     
     # Запуск фоновых задач после инициализации БД и бота
     async with RegisterTortoise(
