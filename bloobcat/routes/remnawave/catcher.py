@@ -36,7 +36,13 @@ async def webhook():
 
 
 async def remnawave_updater():
-    """Основной процесс синхронизации дат истечения из БД в RemnaWave"""
+    """Основной процесс синхронизации дат истечения из БД в RemnaWave
+    
+    ОПТИМИЗАЦИЯ: Использует батчевое обновление для минимизации нагрузки на БД.
+    Вместо сохранения каждого пользователя отдельно, собирает изменения в списки
+    и выполняет bulk_update в конце. Перепланирование задач происходит только
+    для пользователей, которым это действительно необходимо (первая регистрация).
+    """
     global update_in_progress, logger
     
     if update_in_progress:
@@ -48,6 +54,10 @@ async def remnawave_updater():
     logger.info(f"Запуск remnawave_updater в {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
     updated = 0
     errors = 0
+    
+    # Списки для батчевого обновления
+    users_to_bulk_update = []
+    users_need_task_reschedule = []
     
     # Константы для повторных попыток
     max_retry_time = 30  # максимальное время для повторных попыток в секундах
@@ -197,11 +207,12 @@ async def remnawave_updater():
                         
                         # Проверяем, является ли это первым подключением
                         # (не было connected_at И пользователь не зарегистрирован)
+                        registration_changed = False
                         if not old_connected_at and not user.is_registered:
                             referrer = await user.referrer()
                             await on_activated_key(user.id, user.full_name, referrer_id=referrer.id if referrer else None, referrer_name=referrer.full_name if referrer else None, utm=user.utm)
                             user.is_registered = True
-                            await user.save()
+                            registration_changed = True
                             logger.info(f"Первое подключение пользователя {user.id}, отправлено уведомление")
 
                             if referrer and not referrer.is_partner:
@@ -212,11 +223,19 @@ async def remnawave_updater():
                             elif referrer and referrer.is_partner:
                                 logger.info(f"Реферер {referrer.id} партнер, бонус 50₽ не начисляется за регистрацию {user.id}")
                         
+                        connection_changed = False
                         if not old_connected_at or new_connected_at > old_connected_at:
                             user.connected_at = new_connected_at
-                            await user.save()
+                            connection_changed = True
                             await Connections.process(user.id, new_connected_at.date())
                             logger.debug(f"Обновлен статус подключения для {user.id}: {new_connected_at}")
+                            
+                        # Добавляем пользователя в список для батчевого обновления, если были изменения
+                        if connection_changed or registration_changed:
+                            users_to_bulk_update.append(user)
+                            # Только при первой регистрации нужно перепланировать задачи
+                            if registration_changed:
+                                users_need_task_reschedule.append(user)
 
                     # ----------------- Логика синхронизации `expired_at` (БД -> RemnaWave) -----------------
                     remnawave_expire_at = datetime.fromisoformat(remnawave_user['expireAt'].replace('Z', '+00:00'))
@@ -232,16 +251,23 @@ async def remnawave_updater():
                     remnawave_hwid_limit = remnawave_user.get('hwidDeviceLimit')
                     db_hwid_limit = user.hwid_limit
 
+                    hwid_changed = False
                     if remnawave_hwid_limit is not None and isinstance(remnawave_hwid_limit, int):
                         # Сценарий 1: в БД пусто, берем из RemnaWave
                         if db_hwid_limit is None:
                             user.hwid_limit = remnawave_hwid_limit
-                            await user.save()
+                            hwid_changed = True
                             logger.info(f"Синхронизация (RemnaWave -> БД): hwid_limit для {user.id} установлен в {remnawave_hwid_limit}")
                         # Сценарий 2: в БД есть значение и оно отличается, отправляем в RemnaWave
                         elif db_hwid_limit != remnawave_hwid_limit:
                             logger.debug(f"Обновление лимита устройств в RemnaWave для {user.id}: {remnawave_hwid_limit} -> {db_hwid_limit}")
                             remnawave_updates['hwidDeviceLimit'] = db_hwid_limit
+                    
+                    # Добавляем пользователя в список для батчевого обновления, если hwid изменился
+                    if hwid_changed:
+                        # Проверяем, не добавлен ли уже пользователь в список
+                        if user not in users_to_bulk_update:
+                            users_to_bulk_update.append(user)
 
                     # ----------------- Отправка всех собранных обновлений в RemnaWave -----------------
                     if remnawave_updates:
@@ -269,9 +295,43 @@ async def remnawave_updater():
                 except Exception as e:
                     logger.warning(f"Не удалось получить пользователя {user.id} по UUID {user.remnawave_uuid}: {str(e)}")
         
+        # Выполняем батчевое обновление пользователей
+        if users_to_bulk_update:
+            try:
+                # Используем bulk_update для обновления connected_at, is_registered и hwid_limit
+                await Users.bulk_update(
+                    users_to_bulk_update, 
+                    fields=['connected_at', 'is_registered', 'hwid_limit']
+                )
+                logger.info(f"Батчевое обновление выполнено для {len(users_to_bulk_update)} пользователей")
+            except Exception as e:
+                logger.error(f"Ошибка при батчевом обновлении пользователей: {e}")
+                # Fallback: сохраняем пользователей по одному
+                for user in users_to_bulk_update:
+                    try:
+                        await user.save()
+                    except Exception as save_error:
+                        logger.error(f"Ошибка при сохранении пользователя {user.id}: {save_error}")
+                        errors += 1
+        
+        # Перепланируем задачи только для пользователей, которым это действительно нужно
+        if users_need_task_reschedule:
+            try:
+                from bloobcat.scheduler import schedule_user_tasks
+                for user in users_need_task_reschedule:
+                    try:
+                        await schedule_user_tasks(user)
+                        logger.debug(f"Задачи перепланированы для пользователя {user.id}")
+                    except Exception as e:
+                        logger.error(f"Ошибка при перепланировании задач для пользователя {user.id}: {e}")
+                        errors += 1
+                logger.info(f"Задачи перепланированы для {len(users_need_task_reschedule)} пользователей")
+            except Exception as e:
+                logger.error(f"Ошибка при импорте или выполнении schedule_user_tasks: {e}")
+        
         # Вычисляем время выполнения с учётом одинаковой tz-aware метки
         elapsed = (datetime.now(ZoneInfo("Europe/Moscow")) - start_time).total_seconds()
-        logger.info(f"Синхронизация завершена за {elapsed:.2f} секунд. Обновлено: {updated}, ошибок: {errors}")
+        logger.info(f"Синхронизация завершена за {elapsed:.2f} секунд. Обновлено: {updated}, ошибок: {errors}, батчевых обновлений: {len(users_to_bulk_update)}, перепланировано задач: {len(users_need_task_reschedule)}")
         
     except Exception as e:
         logger.error(f"Критическая ошибка в remnawave_updater: {str(e)}")
@@ -280,4 +340,4 @@ async def remnawave_updater():
         # Лог завершения с использованием той же tz-aware даты
         end_time = datetime.now(ZoneInfo("Europe/Moscow"))
         total_time = (end_time - start_time).total_seconds()
-        logger.info(f"Завершение работы remnawave_updater, время выполнения: {total_time:.2f} секунд") 
+        logger.info(f"Завершение работы remnawave_updater, время выполнения: {total_time:.2f} секунд")
