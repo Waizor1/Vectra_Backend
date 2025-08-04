@@ -45,4 +45,4 @@ async def bot_webhook(
         return {"error": "Invalid secret"}
     telegram_update = types.Update(**update)
     background_tasks.add_task(dp.feed_update, bot=bot, update=telegram_update)
-    return
+    return {"ok": True}

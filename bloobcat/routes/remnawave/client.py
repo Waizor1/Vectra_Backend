@@ -114,6 +114,11 @@ class UsersAPI:
                     logger.debug(f"Пропускаем повторные попытки для ошибки удаления HWID: {e}")
                     raise
                 
+                # Не повторяем в случае ошибки дублирующегося username (A019)
+                if 'A019' in str(e) or 'User username already exists' in str(e):
+                    logger.debug(f"Пропускаем повторные попытки для ошибки дублирующегося username: {e}")
+                    raise
+                
                 elapsed = (datetime.now() - start_time).total_seconds()
                 if elapsed > max_total_time:
                     raise
@@ -281,4 +286,4 @@ class InboundsAPI:
         return await self.client._request("GET", "/api/inbounds")
 
     async def get_full_inbounds(self) -> Dict[str, Any]:
-        return await self.client._request("GET", "/api/inbounds/full") 
+        return await self.client._request("GET", "/api/inbounds/full")

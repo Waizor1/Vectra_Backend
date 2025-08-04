@@ -310,13 +310,38 @@ class Users(models.Model):
         return result
 
     async def save(self, *args, **kwargs):
-        # Check previous expiration date
+        # Check previous values for fields that affect task scheduling
         old_expired_at = None
+        old_is_subscribed = None
+        old_is_trial = None
+        old_is_blocked = None
+        should_reschedule = False
+        
         if self.id is not None:
             orig = await Users.get_or_none(id=self.id)
-            old_expired_at = orig.expired_at if orig else None
+            if orig:
+                old_expired_at = orig.expired_at
+                old_is_subscribed = orig.is_subscribed
+                old_is_trial = orig.is_trial
+                old_is_blocked = orig.is_blocked
+                
+                # Check if any fields that affect scheduling have changed
+                should_reschedule = (
+                    self.expired_at != old_expired_at or
+                    self.is_subscribed != old_is_subscribed or
+                    self.is_trial != old_is_trial or
+                    self.is_blocked != old_is_blocked
+                )
+            else:
+                # New user, always schedule tasks
+                should_reschedule = True
+        else:
+            # New user, always schedule tasks
+            should_reschedule = True
+            
         # Save the user as usual
         await super().save(*args, **kwargs)
+        
         if self.expired_at and self.expired_at != old_expired_at:
             # Немедленно обновляем RemnaWave при изменении expired_at
             if self.remnawave_uuid:
@@ -340,13 +365,16 @@ class Users(models.Model):
                 except Exception as e:
                     logger.warning(f"User {self.id} failed to update RemnaWave immediately, will be synced by batch updater: {e}")
         
-        # Всегда перепланируем задачи пользователя при любом сохранении
-        try:
-            from bloobcat.scheduler import schedule_user_tasks
-            logger.debug(f"Rescheduling tasks for user {self.id} after save.")
-            await schedule_user_tasks(self)
-        except Exception as e:
-            logger.error(f"Failed to reschedule tasks for user {self.id}: {e}")
+        # Перепланируем задачи только при изменении важных полей
+        if should_reschedule:
+            try:
+                from bloobcat.scheduler import schedule_user_tasks
+                logger.debug(f"Rescheduling tasks for user {self.id} after save (fields changed).")
+                await schedule_user_tasks(self)
+            except Exception as e:
+                logger.error(f"Failed to reschedule tasks for user {self.id}: {e}")
+        else:
+            logger.debug(f"User {self.id} saved without rescheduling tasks (no relevant changes).")
 
     class PydanticMeta:
         computed = ["expires", "name", "referral_percent"]
