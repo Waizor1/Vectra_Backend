@@ -33,10 +33,19 @@ def get_next_daily_time() -> datetime:
 
 def get_next_weekly_time() -> datetime:
     """Получает время для следующей недельной статистики (следующее воскресенье в 23:59)"""
-    today = date.today()
+    now = datetime.now(MOSCOW)
+    today = now.date()
     days_until_sunday = (6 - today.weekday()) % 7
+    
     if days_until_sunday == 0:  # Сегодня воскресенье
-        days_until_sunday = 7   # Планируем на следующее воскресенье
+        # Проверяем, не прошло ли уже время отправки (23:59)
+        today_weekly_time = datetime.combine(today, time(23, 59)).replace(tzinfo=MOSCOW)
+        if now < today_weekly_time:
+            # Время еще не прошло, планируем на сегодня
+            return today_weekly_time
+        else:
+            # Время уже прошло, планируем на следующее воскресенье
+            days_until_sunday = 7
     
     next_sunday = today + timedelta(days=days_until_sunday)
     return datetime.combine(next_sunday, time(23, 59)).replace(tzinfo=MOSCOW)
@@ -300,4 +309,4 @@ async def statistics_scheduler():
                         
         except Exception as e:
             logger.error(f"Error in statistics scheduler monitor: {e}")
-            await asyncio.sleep(300)  # Подождем 5 минут при ошибке 
+            await asyncio.sleep(300)  # Подождем 5 минут при ошибке
