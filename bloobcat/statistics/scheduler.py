@@ -54,8 +54,22 @@ def get_next_weekly_time() -> datetime:
 def get_next_monthly_time() -> datetime:
     """Получает время для следующей месячной статистики (31 число или последний день месяца в 23:59)"""
     today = date.today()
+    now = datetime.now(MOSCOW)
     
-    # Пробуем следующий месяц
+    # Сначала проверяем текущий месяц
+    try:
+        current_monthly_date = today.replace(day=31)
+    except ValueError:
+        last_day = calendar.monthrange(today.year, today.month)[1]
+        current_monthly_date = today.replace(day=last_day)
+    
+    current_monthly_time = datetime.combine(current_monthly_date, time(23, 59)).replace(tzinfo=MOSCOW)
+    
+    # Если сегодня последний день месяца и время до 23:59, возвращаем сегодня
+    if today == current_monthly_date and now.time() < time(23, 59):
+        return current_monthly_time
+    
+    # Иначе пробуем следующий месяц
     if today.month == 12:
         next_month = today.replace(year=today.year + 1, month=1)
     else:
@@ -229,16 +243,8 @@ def setup_initial_statistics_tasks():
     # Недельная статистика: ближайшее воскресенье в 23:59
     weekly_time = get_next_weekly_time()
     
-    # Месячная статистика: 31 число текущего месяца или следующего
-    try:
-        monthly_date = today.replace(day=31)
-    except ValueError:
-        last_day = calendar.monthrange(today.year, today.month)[1]
-        monthly_date = today.replace(day=last_day)
-    
-    monthly_time = datetime.combine(monthly_date, time(23, 59)).replace(tzinfo=MOSCOW)
-    if monthly_time <= now:
-        monthly_time = get_next_monthly_time()
+    # Месячная статистика: используем исправленную функцию
+    monthly_time = get_next_monthly_time()
     
     logger.info(f"Initial statistics tasks scheduled:")
     logger.info(f"  Daily: {daily_time.isoformat()}")
