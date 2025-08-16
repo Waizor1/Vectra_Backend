@@ -272,8 +272,20 @@ async def remnawave_updater():
                     # ----------------- Отправка всех собранных обновлений в RemnaWave -----------------
                     if remnawave_updates:
                         logger.info(f"Отправка обновлений в RemnaWave для {user.id}: {remnawave_updates}")
-                        await remnawave.users.update_user(user_uuid_str, **remnawave_updates)
-                        updated += 1
+                        try:
+                            await remnawave.users.update_user(user_uuid_str, **remnawave_updates)
+                            updated += 1
+                        except Exception as update_err:
+                            # Если пользователь отсутствует в RemnaWave – пересоздаём и повторяем
+                            if any(token in str(update_err) for token in ["User not found", "A039", "Update user error"]):
+                                recreated = await user.recreate_remnawave_user()
+                                if recreated:
+                                    # Обновляем локальную переменную UUID
+                                    user_uuid_str = str(user.remnawave_uuid)
+                                    await remnawave.users.update_user(user_uuid_str, **remnawave_updates)
+                                    updated += 1
+                            else:
+                                raise
 
                 except Exception as e:
                     logger.error(f"Ошибка при обработке пользователя {user.id}: {str(e)}")
@@ -293,7 +305,13 @@ async def remnawave_updater():
                         remnawave_users_dict[user.remnawave_uuid] = user_response["response"]
                         logger.info(f"Пользователь {user.id} успешно получен по прямому запросу")
                 except Exception as e:
-                    logger.warning(f"Не удалось получить пользователя {user.id} по UUID {user.remnawave_uuid}: {str(e)}")
+                    logger.warning(f"Не удалось получить пользователя {user.id} по UUID {user.remnawave_uuid}: {str(e)}. Пересоздаем и сохраним новый UUID.")
+                    try:
+                        recreated = await user.recreate_remnawave_user()
+                        if recreated:
+                            logger.info(f"Пользователь {user.id} успешно пересоздан после отсутствия в списке RemnaWave")
+                    except Exception as e2:
+                        logger.error(f"Ошибка при пересоздании пользователя {user.id}: {e2}")
         
         # Выполняем батчевое обновление пользователей
         if users_to_bulk_update:

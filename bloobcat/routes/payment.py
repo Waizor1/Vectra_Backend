@@ -450,10 +450,22 @@ async def yookassa_webhook(request: Request, secret: str):
                                 (f", hwid_limit: {hwid_limit}" if hwid_limit is not None else ", hwid_limit без изменений")
                             )
                             
-                            await remnawave_client.users.update_user(
-                                uuid=user.remnawave_uuid,
-                                **update_params
-                            )
+                            try:
+                                await remnawave_client.users.update_user(
+                                    uuid=user.remnawave_uuid,
+                                    **update_params
+                                )
+                            except Exception as update_err:
+                                # Если юзер удален в RemnaWave – пересоздаём и пытаемся снова
+                                if any(token in str(update_err) for token in ["User not found", "A039", "Update user error"]):
+                                    recreated = await user.recreate_remnawave_user()
+                                    if recreated and user.remnawave_uuid:
+                                        await remnawave_client.users.update_user(
+                                            uuid=user.remnawave_uuid,
+                                            **update_params
+                                        )
+                                else:
+                                    raise
                             
                             logger.info(f"УСПЕХ! Пользователь {user.id} обновлен в RemnaWave с попытки #{retry_count} за {elapsed_time:.1f} сек")
                             success = True

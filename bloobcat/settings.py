@@ -28,6 +28,9 @@ class RemnaWaveSettings(BaseSettings):
 
     url: str
     token: SecretStr
+    # UUID внутреннего сквада по умолчанию (для автоподключения у новых пользователей)
+    # Ожидается переменная окружения REMNAWAVE_DEFAULT_INTERNAL_SQUAD_UUID
+    default_internal_squad_uuid: str | None = None
 
 
 class ScriptSettings(BaseSettings):

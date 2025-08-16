@@ -126,7 +126,12 @@ class Users(models.Model):
                             telegram_id=self.id,
                             email=self.email,
                             description=f"Telegram: {self.name()}",
-                            hwid_device_limit=hwid_limit
+                            hwid_device_limit=hwid_limit,
+                            active_internal_squads=(
+                                [remnawave_settings.default_internal_squad_uuid]
+                                if remnawave_settings.default_internal_squad_uuid
+                                else None
+                            )
                         )
                         break  # Успешно создали, выходим из цикла
                     except Exception as e:
@@ -156,6 +161,64 @@ class Users(models.Model):
         except Exception as e:
             logger.error(f"Ошибка при создании пользователя {self.id} в RemnaWave: {str(e)}")
             # Не перевыбрасываем исключение, чтобы не блокировать работу приложения
+            return False
+
+    async def recreate_remnawave_user(self) -> bool:
+        """
+        Форсирует пересоздание пользователя в RemnaWave даже если `remnawave_uuid` уже установлен.
+        Генерирует имя на основе telegram id, обрабатывает коллизии имени.
+        Возвращает True при успешном создании и сохранении нового UUID.
+        """
+        try:
+            from bloobcat.routes.remnawave.client import RemnaWaveClient
+            from bloobcat.settings import remnawave_settings
+            from datetime import date
+
+            remnawave = RemnaWaveClient(remnawave_settings.url, remnawave_settings.token.get_secret_value())
+            try:
+                # Дата истечения: используем текущую `expired_at` или сегодняшнюю дату
+                expire_at_date = self.expired_at or date.today()
+
+                # Лимит устройств: используем персональный лимит, если задан, иначе 1
+                hwid_limit = self.hwid_limit if self.hwid_limit is not None else 1
+
+                base_username = f"{self.id}_TEST" if test_mode else str(self.id)
+                username_to_try = base_username
+                counter = 1
+                while True:
+                    try:
+                        response = await remnawave.users.create_user(
+                            username=username_to_try,
+                            expire_at=expire_at_date,
+                            telegram_id=self.id,
+                            email=self.email,
+                            description=f"Telegram: {self.name()}",
+                            hwid_device_limit=hwid_limit,
+                            active_internal_squads=(
+                                [remnawave_settings.default_internal_squad_uuid]
+                                if remnawave_settings.default_internal_squad_uuid
+                                else None
+                            )
+                        )
+                        break
+                    except Exception as e:
+                        # Если имя занято – пробуем следующее
+                        if "already exists" in str(e).lower():
+                            logger.warning(f"Имя пользователя {username_to_try} уже занято при пересоздании. Пробуем следующее.")
+                            username_to_try = f"{base_username}_{counter}"
+                            counter += 1
+                        else:
+                            raise
+
+                # Сохраняем новый UUID
+                self.remnawave_uuid = response["response"]["uuid"]
+                await self.save()
+                logger.info(f"Пользователь {self.id} пересоздан в RemnaWave с UUID: {self.remnawave_uuid}")
+                return True
+            finally:
+                await remnawave.close()
+        except Exception as e:
+            logger.error(f"Не удалось пересоздать пользователя {self.id} в RemnaWave: {e}")
             return False
 
     @classmethod
@@ -363,7 +426,30 @@ class Users(models.Model):
                         await remnawave_client.close()
                         
                 except Exception as e:
-                    logger.warning(f"User {self.id} failed to update RemnaWave immediately, will be synced by batch updater: {e}")
+                    # Если пользователь был удален в RemnaWave – пересоздаем и пытаемся обновить снова
+                    err_text = str(e)
+                    if any(token in err_text for token in ["User not found", "A039", "Update user error"]):
+                        recreated = await self.recreate_remnawave_user()
+                        if recreated and self.remnawave_uuid:
+                            try:
+                                from bloobcat.routes.remnawave.client import RemnaWaveClient
+                                from bloobcat.settings import remnawave_settings
+                                remnawave_client = RemnaWaveClient(
+                                    remnawave_settings.url,
+                                    remnawave_settings.token.get_secret_value()
+                                )
+                                try:
+                                    await remnawave_client.users.update_user(
+                                        uuid=self.remnawave_uuid,
+                                        expireAt=self.expired_at
+                                    )
+                                    logger.info(f"User {self.id} RemnaWave re-created and updated immediately")
+                                finally:
+                                    await remnawave_client.close()
+                            except Exception as e2:
+                                logger.warning(f"User {self.id} re-create update attempt failed: {e2}")
+                    else:
+                        logger.warning(f"User {self.id} failed to update RemnaWave immediately, will be synced by batch updater: {e}")
         
         # Перепланируем задачи только при изменении важных полей
         if should_reschedule:

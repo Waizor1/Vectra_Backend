@@ -57,8 +57,12 @@ class RemnaWaveClient:
                 
                 if response.status >= 400:
                     error_msg = response_json.get('message', 'Unknown error')
+                    error_code = response_json.get('errorCode')
                     logger.error(f"API Error Response ({response.status}) from {url}: {response_json}")
-                    raise Exception(f"API error: {error_msg}")
+                    # Включаем errorCode в текст исключения, чтобы можно было на него ориентироваться выше
+                    if error_code:
+                        raise Exception(f"API error [{error_code}]: {error_msg}")
+                    raise Exception(f"API error [{response.status}]: {error_msg}")
                 
                 return response_json
         except aiohttp.ClientError as e:
@@ -118,6 +122,11 @@ class UsersAPI:
                 if 'A019' in str(e) or 'User username already exists' in str(e):
                     logger.debug(f"Пропускаем повторные попытки для ошибки дублирующегося username: {e}")
                     raise
+
+                # Не повторяем для "пользователь не найден" (404/A063), чтобы быстрее перейти к пересозданию
+                if 'A063' in str(e) or 'User with specified params not found' in str(e):
+                    logger.debug(f"Пропускаем повторные попытки для ошибки не найденного пользователя: {e}")
+                    raise
                 
                 elapsed = (datetime.now() - start_time).total_seconds()
                 if elapsed > max_total_time:
@@ -129,7 +138,7 @@ class UsersAPI:
                          status: str = "ACTIVE", traffic_limit_bytes: int = 0,
                          description: str = None, telegram_id: int = None, 
                          email: str = None, hwid_device_limit: int = None,
-                         activate_all_inbounds: bool = True) -> Dict[str, Any]:
+                         active_internal_squads: Optional[List[str]] = None) -> Dict[str, Any]:
         """Создание пользователя с указанием лимита устройств"""
 
         # Формируем expireAt через централизованный метод
@@ -146,7 +155,8 @@ class UsersAPI:
             "telegramId": telegram_id,
             "email": email,
             "hwidDeviceLimit": hwid_device_limit,
-            "activateAllInbounds": activate_all_inbounds
+            # v2.0.8: вместо activateAllInbounds используем внутренние сквады
+            "activeInternalSquads": active_internal_squads
         }
         filtered_data = {k: v for k, v in data.items() if v is not None}
 
@@ -283,7 +293,10 @@ class InboundsAPI:
         self.client = client
 
     async def get_inbounds(self) -> Dict[str, Any]:
-        return await self.client._request("GET", "/api/inbounds")
+        # v2.0.8: inbounds переехали под config-profiles
+        # Возвращаем сразу агрегированный список инбаундов со всех профилей
+        return await self.client._request("GET", "/api/config-profiles/inbounds")
 
     async def get_full_inbounds(self) -> Dict[str, Any]:
-        return await self.client._request("GET", "/api/inbounds/full")
+        # В v2.0.8 отдельного full-эндпоинта нет; используем тот же агрегированный
+        return await self.client._request("GET", "/api/config-profiles/inbounds")
