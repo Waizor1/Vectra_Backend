@@ -111,8 +111,9 @@ class Users(models.Model):
                     expire_at_date = date.today()
                     logger.warning(f"Пользователь {self.id} уже использовал триал, дата истечения: {expire_at_date}")
                 
-                # Базовый лимит устройств
-                hwid_limit = 1
+                # Базовый лимит устройств для триала: сразу сохраняем в БД, если не задано
+                if self.hwid_limit is None:
+                    self.hwid_limit = 1
                 
                 # Создаем пользователя в RemnaWave
                 base_username = f"{self.id}_TEST" if test_mode else str(self.id)
@@ -126,7 +127,7 @@ class Users(models.Model):
                             telegram_id=self.id,
                             email=self.email,
                             description=f"Telegram: {self.name()}",
-                            hwid_device_limit=hwid_limit,
+                            hwid_device_limit=self.hwid_limit,
                             active_internal_squads=(
                                 [remnawave_settings.default_internal_squad_uuid]
                                 if remnawave_settings.default_internal_squad_uuid
