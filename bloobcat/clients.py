@@ -12,6 +12,7 @@ TORTOISE_ORM = {
                 "aerich.models",
                 "bloobcat.db.payments",
                 "bloobcat.db.active_tariff",
+                "bloobcat.db.notifications",
             ],
             "default_connection": "default",
         },

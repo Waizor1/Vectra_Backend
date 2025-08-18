@@ -58,8 +58,6 @@ class Users(models.Model):
     created_at = fields.DatetimeField(auto_now_add=True)
     is_trial = fields.BooleanField(default=False)
     used_trial = fields.BooleanField(default=False)
-    notification_2h_sent = fields.BooleanField(default=False)
-    notification_24h_sent = fields.BooleanField(default=False)
     remnawave_uuid = fields.UUIDField(null=True)  # UUID пользователя в RemnaWave
     last_hwid_reset = fields.DatetimeField(null=True, description="Дата и время последнего ручного сброса HWID устройств")
     familyurl = fields.CharField(max_length=100, null=True)
@@ -584,8 +582,6 @@ class UsersModelAdmin(TortoiseModelAdmin):
         "created_at",
         "is_trial",
         "used_trial",
-        "notification_2h_sent",
-        "notification_24h_sent",
         "remnawave_uuid",
         "familyurl",
         "active_tariff",
