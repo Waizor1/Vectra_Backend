@@ -28,14 +28,14 @@ async def notify_expiring_trial(user):
         text = (
             f"⚠️ Привет, {user.full_name}! Ваш пробный период BlubCat VPN истекает сегодня ночью (в 00:00). \n"
             "Не хотите терять доступ к быстрому и безопасному VPN? Оформите подписку прямо сейчас! 🔒\n"
-            "Возникли вопросы? Обратитесь в поддержку @BlubCatVPN_support"
+            "Возникли вопросы? Обратитесь в поддержку @BloobCat_supbot"
         )
         button = await webapp_inline_button("Оформить подписку", "/pay")
     else:
         text = (
             f"⚠️ Hi {user.full_name}! Your BlubCat VPN trial period will expire tonight (at 00:00). \n"
             "Don't want to lose access to fast and secure VPN? Get a subscription now! 🔒\n"
-            "Questions? Contact support @BlubCatVPN_support"
+            "Questions? Contact support @BloobCat_supbot"
         )
         button = await webapp_inline_button("Get Subscription", "/pay")
     

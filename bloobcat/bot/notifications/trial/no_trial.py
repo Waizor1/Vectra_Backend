@@ -27,14 +27,14 @@ async def notify_no_trial_taken(user, hours_passed: int):
         text = (
             f"👋 Привет, {user.full_name}! Еще не воспользовались бесплатным доступом к VPN? 🔓\n"
             f"Активируйте {trial_duration_days}-дневный пробный период прямо сейчас и оцените все преимущества BlubCat.\n"
-            "Если возникнут вопросы, пишите в поддержку @BlubCatVPN_support"
+            "Если возникнут вопросы, пишите в поддержку @BloobCat_supbot"
         )
         button = await webapp_inline_button("Подключить VPN", "/second")
     else:
         text = (
             f"👋 Hi {user.full_name}! Haven't tried our free VPN access yet? 🔓\n"
             f"Activate a {trial_duration_days}-day trial now and experience all benefits of BlubCat.\n"
-            "Have questions? Contact support @BlubCatVPN_support"
+            "Have questions? Contact support @BloobCat_supbot"
         )
         button = await webapp_inline_button("Connect VPN", "/second")
     try:
