@@ -194,6 +194,7 @@ from bloobcat.middleware.rate_limit import rate_limit_middleware
 
 # Добавляем глобальный обработчик исключений для CORS
 from fastapi import HTTPException
+from fastapi import HTTPException as FastAPIHTTPException
 from fastapi.exception_handlers import http_exception_handler
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -202,7 +203,7 @@ async def custom_http_exception_handler(request, exc):
     response = await http_exception_handler(request, exc)
     # Убеждаемся, что CORS заголовки добавляются даже при ошибках
     origin = request.headers.get("origin")
-    if origin in origins or any(origin.endswith(o.replace("https://", "").replace("*.", "")) for o in origins if "*." in o):
+    if origin and (origin in origins or any(origin.endswith(o.replace("https://", "").replace("*.", "")) for o in origins if "*." in o)):
         response.headers["Access-Control-Allow-Origin"] = origin
         response.headers["Access-Control-Allow-Credentials"] = "true"
         response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS, PATCH"
@@ -219,12 +220,30 @@ async def internal_server_error_handler(request, exc):
     )
     # Убеждаемся, что CORS заголовки добавляются при 500 ошибках
     origin = request.headers.get("origin")
-    if origin in origins or any(origin.endswith(o.replace("https://", "").replace("*.", "")) for o in origins if "*." in o):
+    if origin and (origin in origins or any(origin.endswith(o.replace("https://", "").replace("*.", "")) for o in origins if "*." in o)):
         response.headers["Access-Control-Allow-Origin"] = origin
         response.headers["Access-Control-Allow-Credentials"] = "true"
         response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS, PATCH"
         response.headers["Access-Control-Allow-Headers"] = "*"
         response.headers["Access-Control-Expose-Headers"] = "*"
+    return response
+
+# Гарантируем CORS-заголовки и для FastAPI HTTPException (включая 429)
+@app.exception_handler(FastAPIHTTPException)
+async def custom_fastapi_http_exception_handler(request, exc: FastAPIHTTPException):
+    from fastapi.responses import JSONResponse
+    response = JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+    origin = request.headers.get("origin")
+    if origin and (origin in origins or any(origin.endswith(o.replace("https://", "").replace("*.", "")) for o in origins if "*." in o)):
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS, PATCH"
+        response.headers["Access-Control-Allow-Headers"] = "*"
+        response.headers["Access-Control-Expose-Headers"] = "*"
+    # Пробрасываем служебные заголовки (например, Retry-After)
+    if exc.headers:
+        for k, v in exc.headers.items():
+            response.headers[k] = v
     return response
 
 app.middleware("http")(rate_limit_middleware)

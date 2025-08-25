@@ -1,0 +1,207 @@
+from __future__ import annotations
+
+import hashlib
+import hmac
+from datetime import datetime, date
+from typing import Any, Dict, Optional
+
+from fastadmin import TortoiseModelAdmin, register, WidgetType
+from pydantic import BaseModel as FastAdminBaseModel, Field, validator
+from tortoise import fields, models
+
+
+class PromoBatch(models.Model):
+    """Группа промокодов для удобства управления и аудита."""
+    id = fields.IntField(pk=True)
+    title = fields.CharField(max_length=255, description="Название партии/кампании")
+    notes = fields.TextField(null=True, description="Заметки/описание партии")
+    created_at = fields.DatetimeField(auto_now_add=True)
+    created_by: fields.ForeignKeyNullableRelation["Admin"] = fields.ForeignKeyField(
+        "models.Admin", null=True, related_name="promo_batches", on_delete=fields.SET_NULL
+    )
+
+    class Meta:
+        table = "promo_batches"
+
+    def __str__(self) -> str:  # pragma: no cover
+        return f"{self.title} ({self.id})"
+
+
+class PromoCode(models.Model):
+    """
+    Промокод. Храним только HMAC от исходного текста кода (code_hmac), сам код нигде не сохраняется.
+    Эффекты кодируются в JSON, чтобы можно было добавлять новые типы без миграций.
+    """
+
+    id = fields.IntField(pk=True)
+    batch: fields.ForeignKeyNullableRelation[PromoBatch] = fields.ForeignKeyField(
+        "models.PromoBatch", related_name="codes", null=True, on_delete=fields.SET_NULL
+    )
+
+    # Человеко-читаемое имя промокода (не сам код), показывается в админке и списках
+    name = fields.CharField(max_length=255, null=True, description="Имя промокода")
+
+    code_hmac = fields.CharField(
+        max_length=128,
+        unique=True,
+        description="Введите исходный промокод; HMAC будет сгенерирован автоматически (или вставьте готовый 64-символьный hex)"
+    )
+
+    # Гибкие эффекты, например: {"extend_days": 30, "discount_percent": 20, "add_hwid": 1, "one_time": true}
+    effects: Dict[str, Any] = fields.JSONField(default=dict)
+
+    max_activations = fields.IntField(default=1, description="Максимум активаций для этого промокода (всего)")
+    per_user_limit = fields.IntField(default=1, description="Сколько раз один и тот же пользователь может активировать этот код")
+
+    expires_at = fields.DateField(null=True, description="Дата истечения действия кода (включительно)")
+    disabled = fields.BooleanField(default=False, description="Принудительное отключение")
+
+    created_at = fields.DatetimeField(auto_now_add=True)
+
+    class Meta:
+        table = "promo_codes"
+
+    def __str__(self) -> str:  # pragma: no cover
+        return f"PromoCode {self.id} (batch={self.batch_id})"
+
+    @staticmethod
+    def is_expired(expires_at: Optional[date]) -> bool:
+        if not expires_at:
+            return False
+        # Считаем истекшим, если сегодня позже даты истечения
+        return date.today() > expires_at
+
+
+class PromoUsage(models.Model):
+    """Факт использования промокода конкретным пользователем с произвольным контекстом."""
+
+    id = fields.IntField(pk=True)
+    promo_code: fields.ForeignKeyRelation[PromoCode] = fields.ForeignKeyField(
+        "models.PromoCode", related_name="usages", on_delete=fields.CASCADE
+    )
+    user: fields.ForeignKeyRelation["Users"] = fields.ForeignKeyField(
+        "models.Users", related_name="promo_usages", on_delete=fields.CASCADE
+    )
+
+    used_at = fields.DatetimeField(auto_now_add=True)
+    context: Dict[str, Any] = fields.JSONField(default=dict, description="Доп. контекст применения (например payment_id)")
+
+    class Meta:
+        table = "promo_usages"
+        indexes = ("promo_code", "user",)
+
+
+# ------------------ Custom Schemas ------------------
+class PromoCodeCreateSchema(FastAdminBaseModel):
+    """Схема для создания промокода через админ-панель"""
+    batch_id: Optional[int] = Field(None, description="ID партии промокодов")
+    name: Optional[str] = Field(None, description="Имя промокода для отображения")
+    raw_code: str = Field(..., description="Исходный промокод (будет захеширован)")
+    effects: Dict[str, Any] = Field(default_factory=dict, description="Эффекты промокода в JSON")
+    max_activations: int = Field(1, description="Максимум активаций")
+    per_user_limit: int = Field(1, description="Лимит на пользователя")
+    expires_at: Optional[date] = Field(None, description="Дата истечения")
+    disabled: bool = Field(False, description="Отключен")
+    code_hmac: Optional[str] = Field(None, description="HMAC хеш (генерируется автоматически)")
+    
+    @validator('raw_code')
+    def validate_raw_code(cls, v):
+        if not v or len(v.strip()) < 3:
+            raise ValueError("Промокод должен содержать минимум 3 символа")
+        return v.strip()
+    
+    @validator('code_hmac', always=True)
+    def generate_code_hmac(cls, v, values):
+        """Автоматически генерируем HMAC из raw_code"""
+        if 'raw_code' in values:
+            from bloobcat.settings import promo_settings
+            
+            if not promo_settings.hmac_secret:
+                raise ValueError("PROMO_HMAC_SECRET не настроен")
+            
+            secret = promo_settings.hmac_secret.get_secret_value().encode()
+            raw_code = values['raw_code']
+            return hmac.new(secret, raw_code.encode(), hashlib.sha256).hexdigest()
+        return v
+
+
+class PromoCodeUpdateSchema(FastAdminBaseModel):
+    """Схема для обновления промокода через админ панель"""
+    batch_id: Optional[int] = Field(None, description="ID партии промокодов")
+    name: Optional[str] = Field(None, description="Имя промокода для отображения")
+    effects: Dict[str, Any] = Field(default_factory=dict, description="Эффекты промокода в JSON")
+    max_activations: int = Field(1, description="Максимум активаций")
+    per_user_limit: int = Field(1, description="Лимит на пользователя")
+    expires_at: Optional[date] = Field(None, description="Дата истечения")
+    disabled: bool = Field(False, description="Отключен")
+
+
+# ------------------ FastAdmin ------------------
+@register(PromoBatch)
+class PromoBatchAdmin(TortoiseModelAdmin):
+    list_display = ("id", "title", "created_by", "created_at")
+    readonly_fields = ("id", "created_at")
+    search_fields = ("title", "id")
+    list_filter = ("created_by",)
+    ordering = ("-id",)
+    verbose_name = "Партии промокодов"
+    verbose_name_plural = "Партии промокодов"
+
+
+@register(PromoCode)
+class PromoCodeAdmin(TortoiseModelAdmin):
+    list_display = (
+        "id", "batch_id", "name", "max_activations", "per_user_limit", "expires_at", "disabled", "created_at"
+    )
+    readonly_fields = ("id", "created_at")
+    search_fields = ("id", "name", "code_hmac")
+    list_filter = ("batch_id", "disabled")
+    ordering = ("-id",)
+    verbose_name = "Промокоды"
+    verbose_name_plural = "Промокоды"
+
+    # Кастомные схемы для создания и обновления (если поддерживается версией fastadmin)
+    create_schema = PromoCodeCreateSchema
+    update_schema = PromoCodeUpdateSchema
+
+    # Примечание: поле code_hmac остаётся текстовым без кастомного виджета,
+    # вводите исходный промокод или готовый 64-символьный HMAC (hex)
+
+    async def save_model(self, pk, form_data=None):
+        """Гарантируем генерацию HMAC на сервере. Если введён не hex — считаем, что это исходный код."""
+        if form_data is None:
+            form_data = {}
+        # Приоритет сырого кода, если схема всё-таки подставила raw_code
+        if "raw_code" in form_data:
+            raw_code = str(form_data.get("raw_code") or "").strip()
+            if raw_code:
+                from bloobcat.settings import promo_settings
+                if not promo_settings.hmac_secret:
+                    raise ValueError("PROMO_HMAC_SECRET не настроен")
+                secret = promo_settings.hmac_secret.get_secret_value().encode()
+                form_data["code_hmac"] = hmac.new(secret, raw_code.encode(), hashlib.sha256).hexdigest()
+            form_data.pop("raw_code", None)
+        # Если формы не было поля raw_code, используем code_hmac как универсальное поле ввода
+        if "code_hmac" in form_data:
+            val = str(form_data.get("code_hmac") or "").strip()
+            if val:
+                is_hex = len(val) == 64 and all(c in "0123456789abcdef" for c in val.lower())
+                if not is_hex:
+                    # Пользователь ввёл исходный код — генерируем HMAC
+                    from bloobcat.settings import promo_settings
+                    if not promo_settings.hmac_secret:
+                        raise ValueError("PROMO_HMAC_SECRET не настроен")
+                    secret = promo_settings.hmac_secret.get_secret_value().encode()
+                    form_data["code_hmac"] = hmac.new(secret, val.encode(), hashlib.sha256).hexdigest()
+        return await super().save_model(pk, form_data)
+
+
+@register(PromoUsage)
+class PromoUsageAdmin(TortoiseModelAdmin):
+    list_display = ("id", "promo_code_id", "user_id", "used_at")
+    readonly_fields = ("id", "used_at")
+    search_fields = ("promo_code_id", "user_id")
+    list_filter = ("promo_code_id",)
+    ordering = ("-id",)
+    verbose_name = "Использования промокодов"
+    verbose_name_plural = "Использования промокодов"

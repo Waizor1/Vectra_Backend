@@ -74,3 +74,12 @@ class AppSettings(BaseSettings):
     # No env_prefix means it will look for TRIAL_DAYS directly.
 
 app_settings = AppSettings()
+
+# Promo settings
+class PromoSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="PROMO_")
+
+    # Секрет для HMAC промокодов; делаем необязательным, чтобы не падать при отсутствии
+    hmac_secret: SecretStr | None = None
+
+promo_settings = PromoSettings()

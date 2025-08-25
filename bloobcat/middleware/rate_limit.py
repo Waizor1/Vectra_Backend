@@ -47,6 +47,8 @@ class RateLimiter:
 # Создаем экземпляры rate limiter для разных эндпоинтов
 reset_devices_limiter = RateLimiter(requests_per_minute=2, window_seconds=60)  # 2 запроса в минуту
 family_revoke_limiter = RateLimiter(requests_per_minute=1, window_seconds=300)  # 1 запрос в 5 минут
+promo_validate_limiter = RateLimiter(requests_per_minute=5, window_seconds=60)  # 5 запросов в минуту
+promo_redeem_limiter = RateLimiter(requests_per_minute=2, window_seconds=60)  # 2 запроса в минуту
 
 async def rate_limit_middleware(request: Request, call_next):
     """Middleware для rate limiting"""
@@ -58,12 +60,10 @@ async def rate_limit_middleware(request: Request, call_next):
             allowed, wait_time = reset_devices_limiter.is_allowed(str(user_id))
             if not allowed:
                 logger.warning(f"Rate limit exceeded for reset_devices by user {user_id}, wait {wait_time}s")
-                return JSONResponse(
+                raise HTTPException(
                     status_code=429,
-                    content={
-                        "detail": f"Слишком много запросов. Попробуйте снова через {wait_time} секунд.",
-                        "retry_after": wait_time
-                    }
+                    detail=f"Слишком много запросов. Попробуйте снова через {wait_time} секунд.",
+                    headers={"Retry-After": str(wait_time)}
                 )
     
     elif request.url.path == "/user/family/revoke" and request.method == "POST":
@@ -72,12 +72,34 @@ async def rate_limit_middleware(request: Request, call_next):
             allowed, wait_time = family_revoke_limiter.is_allowed(str(user_id))
             if not allowed:
                 logger.warning(f"Rate limit exceeded for family/revoke by user {user_id}, wait {wait_time}s")
-                return JSONResponse(
+                raise HTTPException(
                     status_code=429,
-                    content={
-                        "detail": f"Слишком много запросов. Попробуйте снова через {wait_time} секунд.",
-                        "retry_after": wait_time
-                    }
+                    detail=f"Слишком много запросов. Попробуйте снова через {wait_time} секунд.",
+                    headers={"Retry-After": str(wait_time)}
+                )
+
+    elif request.url.path == "/promo/validate" and request.method == "POST":
+        user_id = await get_user_id_from_request(request)
+        if user_id:
+            allowed, wait_time = promo_validate_limiter.is_allowed(str(user_id))
+            if not allowed:
+                logger.warning(f"Rate limit exceeded for promo/validate by user {user_id}, wait {wait_time}s")
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"Слишком много запросов к проверке промокодов. Попробуйте снова через {wait_time} секунд.",
+                    headers={"Retry-After": str(wait_time)}
+                )
+
+    elif request.url.path == "/promo/redeem" and request.method == "POST":
+        user_id = await get_user_id_from_request(request)
+        if user_id:
+            allowed, wait_time = promo_redeem_limiter.is_allowed(str(user_id))
+            if not allowed:
+                logger.warning(f"Rate limit exceeded for promo/redeem by user {user_id}, wait {wait_time}s")
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"Слишком много запросов к активации промокодов. Попробуйте снова через {wait_time} секунд.",
+                    headers={"Retry-After": str(wait_time)}
                 )
     
     # Продолжаем обработку запроса
@@ -105,4 +127,4 @@ async def get_user_id_from_request(request: Request) -> Optional[int]:
         return user.user.id
     except Exception as e:
         logger.debug(f"Failed to extract user_id from request: {e}")
-        return None 
+        return None

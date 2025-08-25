@@ -13,6 +13,7 @@ TORTOISE_ORM = {
                 "bloobcat.db.payments",
                 "bloobcat.db.active_tariff",
                 "bloobcat.db.notifications",
+                "bloobcat.db.promotions",
             ],
             "default_connection": "default",
         },
