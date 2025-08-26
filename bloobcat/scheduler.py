@@ -11,6 +11,7 @@ from bloobcat.bot.notifications.subscription.key import on_disabled
 from bloobcat.bot.notifications.trial.extended import notify_trial_extended
 from bloobcat.bot.notifications.trial.end import notify_trial_ended
 from bloobcat.bot.notifications.trial.expiring import notify_expiring_trial
+from bloobcat.bot.notifications.trial.pre_expiring_3d import notify_trial_three_days_left
 from bloobcat.tasks.referral_prompts import run_referral_prompts_scheduler
 from bloobcat.logger import get_logger
 from bloobcat.settings import app_settings
@@ -317,6 +318,20 @@ async def _exec_notify_expiring_trial(user_id: int, planned_expired: date):
     await notify_expiring_trial(user)
     await NotificationMarks.create(user_id=user.id, type="trial_expiring", key=key)
 
+async def _exec_notify_trial_3_days_left(user_id: int, planned_expired: date):
+    user = await Users.get_or_none(id=user_id)
+    if not user or not user.is_trial or user.expired_at != planned_expired:
+        logger.debug(f"Skipping 3-day trial notify for user {user_id}")
+        return
+    # Idempotency via notification marks
+    key = f"3d:{planned_expired}"
+    already = await NotificationMarks.filter(user_id=user.id, type="trial_pre_expiring", key=key).exists()
+    if already:
+        logger.debug(f"Skipping duplicate 3-day trial notify for user {user_id}, key={key}")
+        return
+    await notify_trial_three_days_left(user)
+    await NotificationMarks.create(user_id=user.id, type="trial_pre_expiring", key=key)
+
 async def schedule_user_tasks(user):
     """Schedule subscription, trial, and referral tasks for a user."""
     # Skip blocked users
@@ -389,6 +404,11 @@ async def schedule_user_tasks(user):
     # Only for users with trial assigned and not subscribed
     if user.is_trial and not user.is_subscribed and user.expired_at:
         exp_dt = datetime.combine(user.expired_at, time.min).replace(tzinfo=MOSCOW)
+        # 3 days before at 12:00 MSK
+        three_days_before = exp_dt - timedelta(days=3)
+        three_days_eta = datetime.combine(three_days_before.date(), time(hour=12, minute=0)).replace(tzinfo=MOSCOW)
+        task = schedule_coro(three_days_eta, _exec_notify_trial_3_days_left, user.id, user.expired_at, skip_if_past=True)
+        scheduled_tasks[user.id].append(task)
         # 2h/24h moved to periodic batch (retry_trial_notifications)
         # Notification about expiring trial - at 12:00 the day before
         day_before = exp_dt - timedelta(days=1)
