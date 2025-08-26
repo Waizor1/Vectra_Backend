@@ -991,7 +991,7 @@ async def create_auto_payment(user: Users, disable_on_fail: bool = True) -> bool
                 "capture": True,
                 "description": f"Автопродление подписки пользователя {user.id} ({active_tariff.name})",
                 "receipt": {
-                    "customer": {"email": user.email if user.email else "auto@bloobcat.ru"},
+                    "customer": {"email": user.email if user.email else "auto@bloopcat.ru"},
                     "items": [{
                         "description": f"Автопродление подписки пользователя {user.id} ({active_tariff.name})",
                         "quantity": "1",
