@@ -19,6 +19,7 @@ from bloobcat.tasks.remnawave_updater import run_remnawave_scheduler
 from bloobcat.tasks.retry_trial_notifications import run_retry_trial_notifications_scheduler
 from bloobcat.tasks.retry_trial_extensions import run_retry_trial_extensions_scheduler
 from bloobcat.tasks.retry_trial_endings import run_retry_trial_endings_scheduler
+from bloobcat.tasks.retry_trial_extension_notifications import run_retry_trial_extension_notifications_scheduler
 from bloobcat.tasks.cleanup_missed_cancellations import run_cleanup_missed_cancellations_scheduler
 from bloobcat.tasks.trial_expiring_catchup import run_trial_expiring_catchup_scheduler
 from bloobcat.tasks.subscription_expiring_catchup import run_subscription_expiring_catchup_scheduler
@@ -143,13 +144,32 @@ def schedule_coro(at_time: datetime, coro, *args, skip_if_past=False):
 
 def cancel_user_tasks(user_id: int):
     """Cancel all scheduled tasks for a given user."""
-    tasks = scheduled_tasks.pop(user_id, [])
-    if tasks:
-        logger.debug(f"Cancelling {len(tasks)} scheduled tasks for user {user_id}")
-    else:
+    tasks = scheduled_tasks.get(user_id, [])
+    if not tasks:
         logger.debug(f"No scheduled tasks to cancel for user {user_id}")
+        return
+
+    current_task = asyncio.current_task()
+    to_cancel = []
+    to_keep = []
     for t in tasks:
-        t.cancel()
+        if t is current_task:
+            to_keep.append(t)
+        else:
+            to_cancel.append(t)
+
+    if to_cancel:
+        logger.debug(f"Cancelling {len(to_cancel)} scheduled tasks for user {user_id} (keeping {len(to_keep)} running)")
+        for t in to_cancel:
+            t.cancel()
+    else:
+        logger.debug(f"No cancellable tasks for user {user_id} (only current running task present)")
+
+    # Update registry: keep running task if any, else remove key
+    if to_keep:
+        scheduled_tasks[user_id] = to_keep
+    else:
+        scheduled_tasks.pop(user_id, None)
 
 # State-validation wrappers before executing tasks
 async def _exec_auto_payment(user_id: int, planned_expired: date, days_before: int):
@@ -210,6 +230,23 @@ async def _exec_extend_trial(user_id: int, planned_expired: date):
         logger.debug(f"[{user_id}] Skipping extend trial for user because conditions not met (user: {bool(user)}, is_trial: {user.is_trial if user else 'N/A'}, expired_at: {user.expired_at if user else 'N/A'} vs {planned_expired}, connected_at: {user.connected_at if user else 'N/A'})")
         return
     
+    # Idempotency: skip if extension already applied for this planned_expired
+    key = str(planned_expired)
+    already_applied = await NotificationMarks.filter(user_id=user.id, type="trial_extension_applied", key=key).exists()
+    if already_applied:
+        logger.debug(f"[{user_id}] Skipping trial extension: already applied for key={key}")
+        # Try to send missing notification if not sent yet (do not block here)
+        already_notified = await NotificationMarks.filter(user_id=user.id, type="trial_extension_notified", key=key).exists()
+        if not already_notified:
+            # Fire-and-forget notify; dedicated periodic task will also retry
+            try:
+                extension_days = app_settings.trial_days // 2
+                await notify_trial_extended(user, extension_days)
+                await NotificationMarks.create(user_id=user.id, type="trial_extension_notified", key=key)
+            except Exception as e:
+                logger.warning(f"[{user_id}] Failed to send missing trial extension notification for key={key}: {e}")
+        return
+
     logger.debug(f"[{user_id}] Attempting to extend trial. Current expired_at: {user.expired_at}")
     
     # Инициализация статистики производительности
@@ -225,6 +262,8 @@ async def _exec_extend_trial(user_id: int, planned_expired: date):
     user.expired_at += timedelta(days=extension_days)
     await user.save()
     logger.debug(f"[{user_id}] Trial extended by {extension_days} days. New expired_at: {user.expired_at}")
+    # Mark that extension has been applied for idempotency/catch-up detection
+    await NotificationMarks.create(user_id=user.id, type="trial_extension_applied", key=key)
     
     # Rate limiting для уведомлений
     current_time = asyncio.get_event_loop().time()
@@ -245,6 +284,11 @@ async def _exec_extend_trial(user_id: int, planned_expired: date):
         if notification_result:
             _trial_extension_stats["successful_notifications"] += 1
             logger.debug(f"[{user_id}] Trial extension notification sent successfully")
+            # Mark notification as sent to avoid duplicates and enable catch-up logic
+            try:
+                await NotificationMarks.create(user_id=user.id, type="trial_extension_notified", key=key)
+            except Exception as e:
+                logger.warning(f"[{user_id}] Failed to create trial_extension_notified mark: {e}")
         else:
             _trial_extension_stats["failed_notifications"] += 1
             logger.error(f"[{user_id}] Trial extension notification failed to send")
@@ -539,6 +583,8 @@ async def schedule_all_tasks():
     asyncio.create_task(run_blocked_users_cleanup_scheduler())
     # Start periodic retry of missed trial notifications
     asyncio.create_task(run_retry_trial_notifications_scheduler())
+    # Start periodic retry of missed trial extension notifications
+    asyncio.create_task(run_retry_trial_extension_notifications_scheduler())
     # Start periodic retry of missed trial extensions
     asyncio.create_task(run_retry_trial_extensions_scheduler())
     # Start periodic retry of missed trial endings
