@@ -1,0 +1,36 @@
+name: Auto Deploy Backend
+
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - '**'
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Setup SSH
+      uses: webfactory/ssh-agent@v0.8.0
+      with:
+        ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+    - name: Add server to known hosts
+      run: |
+        ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts
+
+    - name: Deploy to server
+      env:
+        SERVER_HOST: ${{ secrets.SERVER_HOST }}
+        SERVER_USER: ${{ secrets.SERVER_USER }}
+        PROJECT_PATH: ${{ secrets.PROJECT_PATH }}
+      run: |
+        ssh $SERVER_USER@$SERVER_HOST << EOF
+        cd $PROJECT_PATH
+        echo "🚀 Выполняем деплой..."
+        git pull
+        docker compose up -d --build
+        echo "✅ Деплой завершен"
+        EOF
