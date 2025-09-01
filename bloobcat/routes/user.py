@@ -1,7 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, EmailStr
 from typing import Dict, Any
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, date
+from decimal import Decimal, ROUND_HALF_UP, getcontext
 import uuid  # For generating new familyurl
 
 from bloobcat.db.users import User_Pydantic, Users
@@ -13,6 +14,7 @@ from fastapi import FastAPI
 from starlette.background import BackgroundTask
 from bloobcat.routes.remnawave.hwid_utils import cleanup_user_hwid_devices
 from bloobcat.db.active_tariff import ActiveTariffs
+from bloobcat.db.tariff import Tariffs
 from bloobcat.bot.notifications.admin import cancel_subscription
 
 logger = get_logger("routes.user")
@@ -76,6 +78,9 @@ async def check(user: Users = Depends(validate)) -> Dict[str, Any]:
         # Добавляем URL и возможную ошибку в ответ
         user_dict["subscription_url"] = subscription_url
         user_dict["subscription_url_error"] = error_getting_url
+        logger.debug(
+            f"[/user check] sub_url_present={bool(subscription_url)}, url_error={error_getting_url}"
+        )
 
         # Добавляем количество HWID устройств для пользователя
         devices_count = 0
@@ -95,6 +100,7 @@ async def check(user: Users = Depends(validate)) -> Dict[str, Any]:
             except Exception as e:
                 logger.error(f"Ошибка получения списка устройств для пользователя {user.id}: {e}")
         user_dict["devices_count"] = devices_count
+        logger.debug(f"[/user check] devices_count={devices_count}")
 
         # --- Определение лимита устройств (только из БД) ---
         devices_limit = 1  # 1. Значение по умолчанию
@@ -178,6 +184,157 @@ async def reset_devices(user: Users = Depends(validate)):
     user.last_hwid_reset = now
     await user.save()
     return {"status": "ok"}
+
+
+class ChangeDevicesRequest(BaseModel):
+    device_count: int
+
+
+@router.patch("/active_tariff")
+async def change_active_tariff_devices(payload: ChangeDevicesRequest, user: Users = Depends(validate)) -> Dict[str, Any]:
+    """
+    Меняет количество устройств (hwid_limit) в текущем активном тарифе пользователя
+    и пропорционально пересчитывает дату окончания подписки без новой покупки.
+    Алгоритм: считаем стоимость неиспользованной части текущего тарифа и
+    конвертируем её в дни по новой цене (с учётом device_count).
+    """
+    logger.debug(f"[change_active_tariff_devices] user_id={user.id}, payload={payload.model_dump()}")
+    if payload.device_count is None or payload.device_count < 1:
+        raise HTTPException(status_code=400, detail="Некорректное количество устройств")
+
+    if not user.active_tariff_id:
+        raise HTTPException(status_code=400, detail="У пользователя нет активного тарифа")
+
+    logger.debug(f"[change_active_tariff_devices] active_tariff_id={user.active_tariff_id}")
+    active_tariff = await ActiveTariffs.get_or_none(id=user.active_tariff_id)
+    if not active_tariff:
+        raise HTTPException(status_code=404, detail="Активный тариф не найден")
+
+    # Находим соответствующий базовый тариф по имени и количеству месяцев
+    # Находим базовый тариф (если есть), иначе используем снапшот из ActiveTariffs
+    original = await Tariffs.filter(name=active_tariff.name, months=active_tariff.months).first()
+
+    current_date = date.today()
+    # Остаток дней по текущей подписке
+    if not user.expired_at or user.expired_at <= current_date:
+        days_remaining = 0
+    else:
+        days_remaining = (user.expired_at - current_date).days
+    logger.debug(f"[change_active_tariff_devices] days_remaining={days_remaining}, expired_at={user.expired_at}, current_date={current_date}")
+
+    # Полный период текущего тарифа в днях
+    target_date_old = current_date.replace(
+        year=current_date.year + ((current_date.month + active_tariff.months - 1) // 12),
+        month=((current_date.month + active_tariff.months - 1) % 12) + 1
+    )
+    total_days_old = (target_date_old - current_date).days
+    logger.debug(f"[change_active_tariff_devices] total_days_old={total_days_old}, target_date_old={target_date_old}")
+
+    # Денежная стоимость неиспользованной части текущего тарифа
+    # Точная математика: избегаем накопления ошибки за счет Decimal и округления к ближайшему дню
+    getcontext().prec = 28
+    unused_percent = (Decimal(days_remaining) / Decimal(total_days_old)) if total_days_old > 0 else Decimal(0)
+    active_price_dec = Decimal(active_tariff.price)
+    unused_value = (unused_percent * active_price_dec)
+    logger.debug(f"[change_active_tariff_devices] unused_percent={float(unused_percent):.6f}, unused_value={float(unused_value):.6f}, active_price={active_tariff.price}")
+
+    # Новое количество устройств
+    new_device_count = int(payload.device_count)
+    if new_device_count < 1:
+        new_device_count = 1
+
+    # Рассчитываем цену тарифа для нового количества устройств
+    if original:
+        # Если нашли базовый тариф — используем его актуальный multiplier
+        base_price = original.base_price
+        multiplier = active_tariff.progressive_multiplier or original.progressive_multiplier
+    else:
+        # Нет в магазине — используем снапшот цены и множитель (если есть) для восстановления base_price
+        multiplier = (active_tariff.progressive_multiplier or 0.9)
+        # Если текущая цена была рассчитана с прогрессивным множителем, восстановим base через сумму геометрической прогрессии
+        # S_n = base * (1 - m^n) / (1 - m) при n>=1
+        n = max(1, active_tariff.hwid_limit)
+        if n == 1:
+            base_price = active_tariff.price
+        else:
+            denom = (1 - multiplier)
+            geom_sum = (1 - (multiplier ** n)) / denom if denom != 0 else n
+            base_price = active_tariff.price / geom_sum if geom_sum > 0 else active_tariff.price
+
+    def calc_price_dec(base: Decimal, mult: Decimal, devices: int) -> Decimal:
+        if devices <= 1:
+            return base
+        total = base
+        for device_num in range(2, devices + 1):
+            total += base * (mult ** (device_num - 1))
+        return total
+
+    mult_dec = Decimal(str(multiplier))
+    base_dec = Decimal(str(base_price))
+    new_calculated_price_dec = calc_price_dec(base_dec, mult_dec, new_device_count)
+    new_calculated_price = int(new_calculated_price_dec.to_integral_value(rounding=ROUND_HALF_UP))
+    logger.debug(f"[change_active_tariff_devices] new_device_count={new_device_count}, new_calculated_price={new_calculated_price}")
+
+    # Полный период тарифа (в днях) для перерасчёта по новой цене
+    months_length = active_tariff.months  # сохраняем длительность из снапшота, даже если её нет в магазине
+    target_date_new = current_date.replace(
+        year=current_date.year + ((current_date.month + months_length - 1) // 12),
+        month=((current_date.month + months_length - 1) % 12) + 1
+    )
+    total_days_new = (target_date_new - current_date).days
+    logger.debug(f"[change_active_tariff_devices] total_days_new={total_days_new}, target_date_new={target_date_new}")
+
+    # Конвертируем неиспользованную стоимость в дни по новой цене
+    # Пропорция: x = (unused_value * total_days_new) / new_calculated_price
+    new_days = 0
+    residual = Decimal(str(active_tariff.residual_day_fraction or 0))
+    if new_calculated_price > 0 and total_days_new > 0 and unused_value > 0:
+        new_days_dec = (unused_value * Decimal(total_days_new)) / Decimal(new_calculated_price)
+        # Добавляем накопленную дробную часть
+        new_days_dec_total = new_days_dec + residual
+        # Берем целую часть к добавлению, остаток сохраняем
+        integer_part = int(new_days_dec_total.to_integral_value(rounding=ROUND_HALF_UP))
+        # Чтобы не перепрыгивать, возьмем floor через int(new_days_dec_total)
+        integer_part = int(new_days_dec_total)
+        fractional_part = new_days_dec_total - Decimal(integer_part)
+        # Гарантируем минимум 1 день, если что-то осталось
+        new_days = max(1, integer_part)
+        residual = fractional_part
+    logger.debug(f"[change_active_tariff_devices] computed new_days={new_days}, residual={float(residual):.6f}")
+
+    # Обновляем пользователя и активный тариф
+    user.expired_at = current_date + timedelta(days=new_days)
+    user.hwid_limit = new_device_count
+    await user.save()
+    logger.debug(f"[change_active_tariff_devices] user updated: expired_at={user.expired_at}, hwid_limit={user.hwid_limit}")
+
+    # Обновляем snapshot активного тарифа
+    active_tariff.hwid_limit = new_device_count
+    active_tariff.price = new_calculated_price
+    active_tariff.progressive_multiplier = multiplier
+    active_tariff.residual_day_fraction = float(residual)
+    await active_tariff.save()
+    logger.debug(f"[change_active_tariff_devices] active_tariff updated: id={active_tariff.id}, hwid_limit={active_tariff.hwid_limit}, price={active_tariff.price}, residual={active_tariff.residual_day_fraction}")
+
+    # Синхронизируем с RemnaWave
+    if user.remnawave_uuid:
+        try:
+            await remnawave_client.users.update_user(
+                uuid=user.remnawave_uuid,
+                expireAt=user.expired_at,
+                hwidDeviceLimit=new_device_count
+            )
+            logger.debug(f"[change_active_tariff_devices] RemnaWave updated: uuid={user.remnawave_uuid}, expireAt={user.expired_at}, hwidDeviceLimit={new_device_count}")
+        except Exception as e:
+            logger.error(f"Ошибка обновления RemnaWave при смене устройств: {e}")
+            # Не прерываем из-за ошибки внешнего сервиса
+
+    return {
+        "status": "ok",
+        "new_expired_at": user.expired_at,
+        "hwid_limit": new_device_count,
+        "price": new_calculated_price
+    }
 
 @router.get("/family/{familyurl}")
 async def get_family_subscription(familyurl: str):

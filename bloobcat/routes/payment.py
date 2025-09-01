@@ -378,7 +378,9 @@ async def yookassa_webhook(request: Request, secret: str):
                         name=original.name,
                         months=original.months,
                         price=calculated_price,  # Используем рассчитанную цену
-                        hwid_limit=device_count  # Используем выбранное количество устройств
+                        hwid_limit=device_count,  # Используем выбранное количество устройств
+                        progressive_multiplier=original.progressive_multiplier,
+                        residual_day_fraction=0.0
                     )
                     # Link user to this active tariff
                     user.active_tariff_id = active_tariff.id
@@ -739,7 +741,9 @@ async def pay(tariff_id: int, email: str, device_count: int = 1, user: Users = D
             name=tariff.name,
             months=tariff.months,
             price=full_price,  # Используем рассчитанную цену
-            hwid_limit=device_count  # Используем выбранное количество устройств
+            hwid_limit=device_count,  # Используем выбранное количество устройств
+            progressive_multiplier=tariff.progressive_multiplier,
+            residual_day_fraction=0.0
         )
         user.active_tariff_id = active_tariff.id
         
