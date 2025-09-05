@@ -126,7 +126,7 @@ def setup_logging():
     # Настройка перехвата стандартных логов
     logging.basicConfig(handlers=[InterceptHandler()], level=0, force=True)
     
-    # Явно отключаем все логи некоторых модулей
+    # Явно отключаем/повышаем уровни логов некоторых модулей
     for logger_name in [
         'sqlalchemy', 
         'sqlalchemy.engine', 
@@ -141,6 +141,14 @@ def setup_logging():
         'httpcore._trace'
     ]:
         logging.getLogger(logger_name).setLevel(logging.ERROR)
+        logging.getLogger(logger_name).propagate = False
+    # Подавляем информационные логи aiogram
+    for logger_name in [
+        'aiogram',
+        'aiogram.dispatcher',
+        'aiogram.dispatcher.dispatcher'
+    ]:
+        logging.getLogger(logger_name).setLevel(logging.WARNING)
         logging.getLogger(logger_name).propagate = False
     
     # Повышаем уровень для некоторых библиотек

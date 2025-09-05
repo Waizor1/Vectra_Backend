@@ -244,19 +244,19 @@ class Users(models.Model):
             )
             
             # Логируем, является ли пользователь новым
-            logger.info(f"Пользователь {user.id} - новый: {is_new}, текущий UTM: {user.utm}")
+            logger.debug(f"Пользователь {user.id} - новый: {is_new}, текущий UTM: {user.utm}")
             
             needs_save = False
             
             # Обработка UTM - устанавливаем только для новых пользователей
             if utm:
-                logger.info(f"Получен параметр UTM: {utm} для пользователя {user.id}")
+                logger.debug(f"Получен параметр UTM: {utm} для пользователя {user.id}")
                 if is_new:
                     user.utm = utm
                     needs_save = True
-                    logger.info(f"Пользователь новый, устанавливаем UTM: {utm}")
+                    logger.debug(f"Пользователь новый, устанавливаем UTM: {utm}")
                 else:
-                    logger.info(f"Пользователь {user.id} уже существует, пропускаем UTM")
+                    logger.debug(f"Пользователь {user.id} уже существует, пропускаем UTM")
             
             if is_new:
                 # Обработка реферала (только для новых пользователей)
@@ -266,7 +266,7 @@ class Users(models.Model):
                     if referrer:
                         user.referred_by = referred_by
                         needs_save = True
-                        logger.info(f"Пользователю {user.id} назначен реферер {referred_by}")
+                        logger.debug(f"Пользователю {user.id} назначен реферер {referred_by}")
 
                 # Отправляем уведомление о новом пользователе
                 try:
