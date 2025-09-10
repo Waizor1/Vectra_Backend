@@ -15,6 +15,7 @@ from .menu import router as menu_router
 from .test_notifications import router as test_notifications_router
 from .blocked_users import router as blocked_users_router
 from .statistics_commands import router as statistics_commands_router
+from .prize_wheel import router as prize_wheel_router
 
 admin_router = Router()
 
@@ -25,6 +26,7 @@ admin_router.include_router(send_router)  # Должен быть перед nav
 # Stat router должен быть ПЕРЕД navigation_router чтобы обрабатывать stats_page_, utm: callback'ы
 admin_router.include_router(stat_router)
 
+admin_router.include_router(prize_wheel_router)  # Важно: перед navigation_router
 admin_router.include_router(navigation_router)
 admin_router.include_router(user_management_router)
 

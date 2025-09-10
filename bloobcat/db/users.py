@@ -69,6 +69,8 @@ class Users(models.Model):
     blocked_at = fields.DatetimeField(null=True, description="Дата и время блокировки")
     last_failed_message_at = fields.DatetimeField(null=True, description="Последняя неуспешная попытка отправки")
     failed_message_count = fields.IntField(default=0, description="Количество неуспешных попыток подряд")
+    # Колесо призов: количество доступных попыток для пользователя
+    prize_wheel_attempts = fields.IntField(default=0, description="Доступные попытки на колесе призов")
 
     async def _ensure_remnawave_user(self) -> bool:
         """
@@ -349,6 +351,10 @@ class Users(models.Model):
         self.referrals = referrals
         await self.save()
 
+    async def get_prize_wheel_attempts(self) -> int:
+        """Возвращает количество попыток пользователя на колесе призов"""
+        return int(self.prize_wheel_attempts or 0)
+
     async def delete(self, *args, **kwargs):
         """Удаляет пользователя: отзывает задачи Celery, удаляет в RemnaWave и из локальной БД"""
         # Cancel all scheduled asyncio tasks for this user
@@ -552,6 +558,10 @@ class UsersModelAdmin(TortoiseModelAdmin):
         "is_partner",
         "is_blocked",
         "blocked_at",
+        "prize_wheel_attempts",
+    )
+    list_editable = (
+        "prize_wheel_attempts",
     )
     readonly_fields = (
         "id",
@@ -590,6 +600,7 @@ class UsersModelAdmin(TortoiseModelAdmin):
         "blocked_at",
         "last_failed_message_at",
         "failed_message_count",
+        "prize_wheel_attempts",
     )
     search_help_text = "Юзернейм, имя, айди"
     verbose_name = "Пользователи"

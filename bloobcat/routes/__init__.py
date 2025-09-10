@@ -3,12 +3,14 @@ from fastapi import APIRouter
 from .payment import router as payment_router
 from .user import router as user_router
 from .promo import router as promo_router
+from .prize_wheel import router as prize_wheel_router
 
 main_router = APIRouter()
 
 main_router.include_router(payment_router)
 main_router.include_router(user_router)
 main_router.include_router(promo_router)
+main_router.include_router(prize_wheel_router)
 
 # Флаг для отслеживания, был ли уже включен маршрутизатор бота
 _bot_router_included = False
