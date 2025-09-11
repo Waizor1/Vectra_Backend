@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from bloobcat.db.promotions import PromoCode, PromoUsage
 from bloobcat.funcs.validate import validate
+from bloobcat.db.discounts import PersonalDiscount
 from bloobcat.settings import promo_settings
 from tortoise.transactions import atomic, in_transaction
 
@@ -166,6 +167,23 @@ async def redeem_promo(req: PromoValidateRequest, user=Depends(validate)):
                 except Exception:
                     # Проглатываем ошибки синхронизации: бэкенд периодически делает батч-синк
                     pass
+
+        # 3) Персональная скидка (discount_percent)
+        discount_percent = effects.get("discount_percent")
+        if isinstance(discount_percent, int) and discount_percent > 0:
+            is_permanent = bool(effects.get("permanent") or effects.get("is_permanent") or False)
+            remaining_uses = int(effects.get("uses") or (0 if is_permanent else 1))
+            expires_at = effects.get("discount_expires_at") or effects.get("expires_at")
+
+            await PersonalDiscount.create(
+                user_id=user.id,
+                percent=min(100, discount_percent),
+                is_permanent=is_permanent,
+                remaining_uses=max(0, remaining_uses),
+                expires_at=expires_at,
+                source="promo",
+                metadata={"promo_id": promo.id}
+            )
 
         # Обновляем остатки после записи
         total_used_after = await PromoUsage.filter(promo_code=promo).count()

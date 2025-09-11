@@ -12,6 +12,7 @@ from bloobcat.logger import get_logger
 from bloobcat.bot.bot import bot as tg_bot
 from bloobcat.bot.notifications.admin import write_to
 from bloobcat.bot.notifications.prize_wheel import notify_prize_won
+from bloobcat.db.discounts import PersonalDiscount
 
 
 logger = get_logger("prize_wheel_service")
@@ -146,6 +147,48 @@ class PrizeWheelService:
                 await user.save()
                 await history_entry.mark_as_claimed()
                 logger.info(f"Пользователь {user_id} получил дополнительную попытку (+1)")
+
+            elif ptype == "discount_percent":
+                # prize_value может быть вида "15" или "15:perm" или "15:uses=2" или "15:exp=2025-12-31"
+                raw = str(prize.prize_value).strip()
+                try:
+                    head, *tail = raw.split(":")
+                    percent = int(head)
+                except Exception:
+                    percent = 0
+                is_permanent = False
+                remaining_uses = 1
+                expires_at = None
+                for part in tail:
+                    p = part.strip().lower()
+                    if p in {"perm", "permanent"}:
+                        is_permanent = True
+                        remaining_uses = 0
+                    elif p.startswith("uses="):
+                        try:
+                            remaining_uses = max(0, int(p.split("=", 1)[1]))
+                        except Exception:
+                            pass
+                    elif p.startswith("exp="):
+                        try:
+                            from datetime import date
+                            y, m, d = p.split("=", 1)[1].split("-")
+                            expires_at = date(int(y), int(m), int(d))
+                        except Exception:
+                            expires_at = None
+
+                if percent > 0:
+                    await PersonalDiscount.create(
+                        user_id=user_id,
+                        percent=min(100, percent),
+                        is_permanent=is_permanent,
+                        remaining_uses=remaining_uses,
+                        expires_at=expires_at,
+                        source="prize_wheel",
+                        metadata={"history_id": history_entry.id, "prize_id": getattr(prize, "id", None)},
+                    )
+                    await history_entry.mark_as_claimed()
+                    logger.info(f"Пользователь {user_id} получил персональную скидку {percent}% (perm={is_permanent}, uses={remaining_uses})")
 
             elif ptype == "nothing":
                 await history_entry.mark_as_claimed()

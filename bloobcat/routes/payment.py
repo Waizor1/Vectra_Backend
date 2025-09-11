@@ -25,6 +25,10 @@ from bloobcat.logger import get_payment_logger
 from bloobcat.db.active_tariff import ActiveTariffs
 from bloobcat.routes.remnawave.client import RemnaWaveClient
 from bloobcat.routes.remnawave.hwid_utils import cleanup_user_hwid_devices
+from bloobcat.services.discounts import (
+    apply_personal_discount,
+    consume_discount_if_needed,
+)
 
 # Инициализируем клиент ЮKассы
 Configuration.account_id = yookassa_settings.shop_id
@@ -116,6 +120,7 @@ async def yookassa_webhook(request: Request, secret: str):
             user.is_subscribed = False
             user.renew_id = None
             await user.save()
+            # Резервации отключены
             
             # Сохраняем информацию о возврате
             await ProcessedPayments.create(
@@ -144,6 +149,7 @@ async def yookassa_webhook(request: Request, secret: str):
                 amount=float(payment.amount.value),
                 status="canceled"
             )
+            # Резервации отключены
             
             logger.info(
                 f"Автопродление отключено для пользователя {user.id} из-за отмены платежа",
@@ -190,6 +196,17 @@ async def yookassa_webhook(request: Request, secret: str):
             )
             return {"status": "error", "message": "Invalid month value"}
         
+        # Достаём скидку, применённую при создании платежа (если была)
+        discount_id = data.get("discount_id")
+        discount_percent = int(data.get("discount_percent") or 0)
+
+        # Сразу пытаемся списать скидку: если списалась, пропорциональная коррекция не нужна
+        consumed = False
+        try:
+            consumed = await consume_discount_if_needed(discount_id)
+        except Exception:
+            consumed = False
+
         # Новый тариф из webhook
         tariff_id = data.get("tariff_id")
         if tariff_id is not None:
@@ -232,7 +249,8 @@ async def yookassa_webhook(request: Request, secret: str):
                     )
                     
                     # ИСПРАВЛЕННАЯ ЛОГИКА: рассчитываем через пропорцию от общей суммы
-                    if new_tariff.price > 0:
+                    # Выполняем ТОЛЬКО если скидка не была списана (например, повторная оплата без скидки)
+                    if new_tariff.price > 0 and not consumed:
                         # Получаем сумму, которую заплатил пользователь
                         amount_paid_by_user = float(payment.amount.value)
                         amount_from_balance = float(data.get("amount_from_balance", 0))
@@ -541,9 +559,46 @@ async def yookassa_webhook(request: Request, secret: str):
                     'amount': payment.amount.value, # Сумма платежа Yookassa
                     'amount_from_balance': amount_from_balance, # Сумма списания с баланса
                     'status': "succeeded",
-                    'is_auto': is_auto
+                    'is_auto': is_auto,
+                    'discount_percent': discount_percent,
+                    'discount_id': discount_id,
                 }
             )
+
+            # Списываем использование скидки напрямую
+            consumed = False
+            try:
+                consumed = await consume_discount_if_needed(discount_id)
+            except Exception:
+                consumed = False
+
+            # Если скидка не была списана (например, второй платёж без доступной скидки),
+            # корректируем дни пропорционально фактически оплаченной сумме
+            if not consumed and tariff_id is not None:
+                try:
+                    original = await Tariffs.get_or_none(id=tariff_id)
+                    if original:
+                        try:
+                            device_count = int(data.get("device_count", 1))
+                        except (ValueError, TypeError):
+                            device_count = 1
+                        if device_count < 1:
+                            device_count = 1
+                        correct_new_tariff_price = original.calculate_price(device_count)
+                        amount_paid_by_user = float(payment.amount.value)
+                        amount_from_balance = float(data.get("amount_from_balance", 0))
+                        total_paid_now = amount_paid_by_user + amount_from_balance
+                        current_date = date.today()
+                        new_target_date = current_date.replace(
+                            year=current_date.year + ((current_date.month + original.months - 1) // 12),
+                            month=((current_date.month + original.months - 1) % 12) + 1
+                        )
+                        new_total_days = (new_target_date - current_date).days
+                        proportional_days = int(total_paid_now * new_total_days / max(1, correct_new_tariff_price))
+                        # Берём минимум, чтобы не подарить лишние дни
+                        days = min(days, proportional_days)
+                except Exception:
+                    pass
             
             # Уведомляем пользователя об успешном продлении, ТОЛЬКО ЕСЛИ это был автоплатеж
             if is_auto:
@@ -617,7 +672,9 @@ async def pay(tariff_id: int, email: str, device_count: int = 1, user: Users = D
         device_count = 1
     
     # Рассчитываем цену для указанного количества устройств
-    full_price = float(tariff.calculate_price(device_count))
+    base_full_price = int(tariff.calculate_price(device_count))
+    discounted_price, discount_id, discount_percent = await apply_personal_discount(user.id, base_full_price)
+    full_price = float(discounted_price)
     user_balance = float(user.balance)
     months = int(tariff.months)
 
@@ -637,7 +694,7 @@ async def pay(tariff_id: int, email: str, device_count: int = 1, user: Users = D
     if user_balance >= full_price:
         logger.info(
             f"Оплата тарифа {tariff_id} для пользователя {user.id} полностью с баланса. "
-            f"Цена: {full_price}, Баланс: {user_balance}"
+            f"Цена: {full_price}, Баланс: {user_balance}, Скидка: {discount_percent}% (id={discount_id})"
         )
 
         current_date = date.today()
@@ -782,9 +839,12 @@ async def pay(tariff_id: int, email: str, device_count: int = 1, user: Users = D
         await ProcessedPayments.create(
             payment_id=payment_id,
             user_id=user.id,
-            amount=full_price, # Полная стоимость тарифа
+            amount=full_price, # Итоговая стоимость (с учетом скидки)
             status="succeeded" # Статус как при обычной успешной оплате
         )
+
+        # Списываем одно использование скидки (если не постоянная)
+        await consume_discount_if_needed(discount_id)
 
         referrer = await user.referrer() # Получаем реферера для уведомления админу
         try:
@@ -792,7 +852,7 @@ async def pay(tariff_id: int, email: str, device_count: int = 1, user: Users = D
                 user_id=user.id,
                 is_sub=user.is_subscribed, # Передаем текущий статус автопродления
                 referrer=referrer.name() if referrer else None,
-                amount=full_price, # Сумма уведомления - полная цена тарифа
+                amount=full_price, # Сумма уведомления - итоговая цена с учетом скидки
                 months=months,
                 method="balance", # Указываем метод оплаты
                 payment_id=payment_id,
@@ -821,7 +881,11 @@ async def pay(tariff_id: int, email: str, device_count: int = 1, user: Users = D
             "month": months,
             "amount_from_balance": amount_from_balance, # Добавляем сумму списания с баланса
             "tariff_id": tariff.id,
-            "device_count": device_count  # Добавляем количество устройств
+            "device_count": device_count,  # Добавляем количество устройств
+            "base_full_price": base_full_price,
+            "discounted_price": discounted_price,
+            "discount_percent": discount_percent,
+            "discount_id": discount_id,
         }
 
         payment = Payment.create({
@@ -852,6 +916,8 @@ async def pay(tariff_id: int, email: str, device_count: int = 1, user: Users = D
                 }]
             }
         }, str(randint(100000, 999999999999)))
+
+        # Резервации отключены
 
         return {"redirect_to": payment.confirmation.confirmation_url}
 
@@ -893,7 +959,10 @@ async def create_auto_payment(user: Users, disable_on_fail: bool = True) -> bool
 
         logger.info(f"Автопродление для пользователя {user.id}. Используется активный тариф ID={active_tariff.id} (Name: {active_tariff.name}, Price: {active_tariff.price})")
 
-        full_price = float(active_tariff.price)
+        base_full_price = int(active_tariff.price)
+        # Применяем персональную скидку (если есть)
+        discounted_price, discount_id, discount_percent = await apply_personal_discount(user.id, base_full_price)
+        full_price = float(discounted_price)
         user_balance = float(user.balance)
         months = int(active_tariff.months)
 
@@ -932,13 +1001,13 @@ async def create_auto_payment(user: Users, disable_on_fail: bool = True) -> bool
             await ProcessedPayments.create(
                 payment_id=payment_id,
                 user_id=user.id,
-                amount=full_price, # Полная стоимость тарифа
+                amount=full_price, # Итоговая стоимость с учетом скидки
                 status="succeeded" # Статус как при обычной успешной оплате
             )
             
             logger.info(
                  f"Автоплатеж для пользователя {user.id} успешно выполнен с баланса. "
-                 f"Списано: {full_price}. Баланс до: {initial_balance}, После: {user.balance}"
+                 f"Списано: {full_price}. Баланс до: {initial_balance}, После: {user.balance}, Скидка: {discount_percent}% (id={discount_id})"
             )
 
             # Уведомления (админу)
@@ -960,6 +1029,9 @@ async def create_auto_payment(user: Users, disable_on_fail: bool = True) -> bool
                     extra={'payment_id': payment_id, 'user_id': user.id}
                 )
             
+            # Списываем использование скидки (если не постоянная)
+            await consume_discount_if_needed(discount_id)
+
             # Уведомляем пользователя об успешном автопродлении с баланса
             await notify_auto_renewal_success_balance(user, days=days, amount=full_price)
             
@@ -982,6 +1054,10 @@ async def create_auto_payment(user: Users, disable_on_fail: bool = True) -> bool
                 "is_auto": True,
                 "amount_from_balance": amount_from_balance,
                 "disable_on_fail": disable_on_fail,
+                "base_full_price": base_full_price,
+                "discounted_price": discounted_price,
+                "discount_percent": discount_percent,
+                "discount_id": discount_id,
             }
 
             # Создаем автоплатеж Yookassa
