@@ -73,6 +73,9 @@ class AppSettings(BaseSettings):
     # model_config = SettingsConfigDict(env_prefix="APP_") # If we want APP_TRIAL_DAYS
     # No env_prefix means it will look for TRIAL_DAYS directly.
 
+    # Колесо призов
+    prize_wheel_spin_bonus_price: int = 50  # Стоимость одной крутки при оплате бонусным балансом (₽)
+
 app_settings = AppSettings()
 
 # Promo settings

@@ -7,6 +7,7 @@ from bloobcat.services.prize_wheel import PrizeWheelService
 from bloobcat.db.users import Users
 from bloobcat.funcs.validate import validate
 from bloobcat.bot.bot import bot
+from bloobcat.settings import app_settings
 
 
 router = APIRouter(prefix="/prize-wheel", tags=["prize-wheel"])
@@ -14,6 +15,8 @@ router = APIRouter(prefix="/prize-wheel", tags=["prize-wheel"])
 
 class PrizeWheelAttemptsResponse(BaseModel):
     attempts_available: int
+    bonus_price: int
+    bonus_attempts_available: int
 
 
 class PrizeWheelSpinResponse(BaseModel):
@@ -47,15 +50,33 @@ async def get_current_user(user: Users = Depends(validate)) -> Users:
 @router.get("/attempts", response_model=PrizeWheelAttemptsResponse)
 async def get_attempts(user: Users = Depends(get_current_user)):
     attempts = await PrizeWheelService.get_user_attempts(user.id)
-    return PrizeWheelAttemptsResponse(attempts_available=attempts)
+    price = int(app_settings.prize_wheel_spin_bonus_price or 0)
+    bonus_attempts = (int(user.balance or 0) // price) if price > 0 else 0
+    return PrizeWheelAttemptsResponse(
+        attempts_available=attempts,
+        bonus_price=price,
+        bonus_attempts_available=bonus_attempts,
+    )
+
+
+class PrizeWheelSpinRequest(BaseModel):
+    mode: str = "attempt"  # attempt | bonus
 
 
 @router.post("/spin", response_model=PrizeWheelSpinResponse)
-async def spin_wheel(user: Users = Depends(get_current_user)):
+async def spin_wheel(payload: PrizeWheelSpinRequest | None = None, user: Users = Depends(get_current_user)):
     # 1) Явно проверяем наличие попыток, чтобы возвращать точную ошибку
-    attempts = await PrizeWheelService.get_user_attempts(user.id)
-    if attempts <= 0:
-        raise HTTPException(status_code=400, detail="Нет доступных попыток")
+    mode = (payload.mode if payload else "attempt").strip()
+    if mode == "attempt":
+        attempts = await PrizeWheelService.get_user_attempts(user.id)
+        if attempts <= 0:
+            raise HTTPException(status_code=400, detail="Нет доступных попыток")
+    elif mode == "bonus":
+        price = int(app_settings.prize_wheel_spin_bonus_price or 0)
+        if price <= 0:
+            raise HTTPException(status_code=400, detail="Колесо временно недоступно")
+        if int(user.balance or 0) < price:
+            raise HTTPException(status_code=400, detail=f"Недостаточно бонусного баланса (нужно {price}₽)")
 
     # 2) Проверяем, что есть активные призы
     config = await PrizeWheelService.get_prizes_config()
@@ -63,7 +84,7 @@ async def spin_wheel(user: Users = Depends(get_current_user)):
         raise HTTPException(status_code=400, detail="Колесо временно недоступно: нет активных призов")
 
     # 3) Запускаем спин (сервис сам атомарно спишет попытку и создаст запись истории)
-    result = await PrizeWheelService.spin_wheel(user.id, bot=bot)
+    result = await PrizeWheelService.spin_wheel(user.id, bot=bot, mode=mode)
     if not result:
         # Если сюда попали, значит внутри сервиса произошла другая ошибка
         # (например, гонка сняла попытку раньше). Сообщим аккуратнее.

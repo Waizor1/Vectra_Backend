@@ -13,6 +13,7 @@ from bloobcat.bot.bot import bot as tg_bot
 from bloobcat.bot.notifications.admin import write_to
 from bloobcat.bot.notifications.prize_wheel import notify_prize_won
 from bloobcat.db.discounts import PersonalDiscount
+from bloobcat.settings import app_settings
 
 
 logger = get_logger("prize_wheel_service")
@@ -29,16 +30,34 @@ class PrizeWheelService:
         return int(getattr(user, "prize_wheel_attempts", 0) or 0)
 
     @staticmethod
-    async def spin_wheel(user_id: int, bot=None) -> Optional[Dict[str, Any]]:
+    async def spin_wheel(user_id: int, bot=None, *, mode: str = "attempt") -> Optional[Dict[str, Any]]:
         """Крутит колесо призов для пользователя.
-        Требует наличия хотя бы 1 попытки у пользователя (будет добавлено миграцией).
+        Режимы:
+          - attempt: использовать доступные попытки (требует prize_wheel_attempts > 0)
+          - bonus: списать стоимость с бонусного баланса (app_settings.prize_wheel_spin_bonus_price)
         """
-        # Атомарное списание попытки
-        updated = await Users.filter(id=user_id, prize_wheel_attempts__gt=0).update(
-            prize_wheel_attempts=F("prize_wheel_attempts") - 1
-        )
-        if updated == 0:
-            logger.info(f"[PRIZE_WHEEL] spin_denied_no_attempts user={user_id}")
+        # Режим attempt — списание попытки
+        if mode == "attempt":
+            updated = await Users.filter(id=user_id, prize_wheel_attempts__gt=0).update(
+                prize_wheel_attempts=F("prize_wheel_attempts") - 1
+            )
+            if updated == 0:
+                logger.info(f"[PRIZE_WHEEL] spin_denied_no_attempts user={user_id}")
+                return None
+        elif mode == "bonus":
+            # Режим bonus — списание с бонусного баланса
+            price = int(app_settings.prize_wheel_spin_bonus_price or 0)
+            if price <= 0:
+                logger.warning("prize_wheel_spin_bonus_price is not positive; denying spin")
+                return None
+            updated = await Users.filter(id=user_id, balance__gte=price).update(
+                balance=F("balance") - price
+            )
+            if updated == 0:
+                logger.info(f"[PRIZE_WHEEL] spin_denied_insufficient_bonus user={user_id}")
+                return None
+        else:
+            logger.warning(f"Unknown prize wheel mode: {mode}")
             return None
 
         prizes = await PrizeWheelConfig.get_active_prizes()
