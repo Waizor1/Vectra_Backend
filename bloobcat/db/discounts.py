@@ -13,7 +13,7 @@ class PersonalDiscount(models.Model):
     - is_permanent: постоянная скидка (без списывания оставшихся использований)
     - remaining_uses: сколько применений осталось (для разовых/многоразовых)
     - expires_at: дата истечения действия скидки
-    - source: источник (promo|prize_wheel|admin|other)
+    - source: источник (promo|prize_wheel|admin|other|winback)
     - metadata: произвольные данные об источнике
     """
 
@@ -41,17 +41,35 @@ class PersonalDiscount(models.Model):
             return True
         return remaining_uses > 0
 
+    @staticmethod
+    def _source_priority(source: Optional[str]) -> int:
+        """Больший приоритет выигрывает. Промо и колесо выше, winback ниже."""
+        if not source:
+            return 2
+        src = str(source).lower()
+        if src in {"promo", "prize_wheel"}:
+            return 3
+        if src in {"winback"}:
+            return 1
+        return 2  # admin/other/default
+
     @classmethod
     async def get_best_active_for_user(cls, user_id: int) -> Optional[Tuple["PersonalDiscount", int]]:
-        """Возвращает (скидка, процент) с максимальным percent среди активных."""
+        """Возвращает (скидка, процент) с учетом приоритета источника и процента.
+        Сначала выбираем по приоритету источника, затем по максимальному percent.
+        """
         candidates = await cls.filter(user_id=user_id).all()
         best: Optional[PersonalDiscount] = None
         best_percent = 0
+        best_prio = -1
         for c in candidates:
             if cls._is_active_row(c.percent, c.is_permanent, int(c.remaining_uses or 0), c.expires_at):
-                if int(c.percent) > best_percent:
+                prio = cls._source_priority(c.source)
+                pct = int(c.percent)
+                if prio > best_prio or (prio == best_prio and pct > best_percent):
                     best = c
-                    best_percent = int(c.percent)
+                    best_percent = pct
+                    best_prio = prio
         return (best, best_percent) if best else None
 
     async def consume_one(self) -> None:

@@ -23,6 +23,7 @@ from bloobcat.tasks.retry_trial_extension_notifications import run_retry_trial_e
 from bloobcat.tasks.cleanup_missed_cancellations import run_cleanup_missed_cancellations_scheduler
 from bloobcat.tasks.trial_expiring_catchup import run_trial_expiring_catchup_scheduler
 from bloobcat.tasks.subscription_expiring_catchup import run_subscription_expiring_catchup_scheduler
+from bloobcat.tasks.winback_discounts import run_winback_discounts_scheduler
 
 logger = get_logger("scheduler")
 
@@ -597,6 +598,8 @@ async def schedule_all_tasks():
     asyncio.create_task(run_subscription_expiring_catchup_scheduler())
     # Start periodic referral prompts (7d, 14d, then every 30d)
     asyncio.create_task(run_referral_prompts_scheduler())
+    # Start winback discounts scheduler
+    asyncio.create_task(run_winback_discounts_scheduler())
     # Start automatic statistics scheduler
     from bloobcat.statistics.scheduler import statistics_scheduler
     asyncio.create_task(statistics_scheduler()) 
