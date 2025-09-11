@@ -565,12 +565,12 @@ async def yookassa_webhook(request: Request, secret: str):
                 }
             )
 
-            # Списываем использование скидки напрямую
-            consumed = False
-            try:
-                consumed = await consume_discount_if_needed(discount_id)
-            except Exception:
-                consumed = False
+            # Списываем использование скидки напрямую, если не списали ранее
+            if not consumed:
+                try:
+                    consumed = await consume_discount_if_needed(discount_id)
+                except Exception:
+                    consumed = False
 
             # Если скидка не была списана (например, второй платёж без доступной скидки),
             # корректируем дни пропорционально фактически оплаченной сумме
@@ -793,11 +793,14 @@ async def pay(tariff_id: int, email: str, device_count: int = 1, user: Users = D
             # await cleanup_user_hwid_devices(user.id, user.remnawave_uuid)
 
         # Создаём новый активный тариф
+        # ВАЖНО: сохраняем в price базовую стоимость тарифа без персональной скидки,
+        # чтобы автоплатежи не применяли скидку дважды
+        base_calculated_price = tariff.calculate_price(device_count)
         active_tariff = await ActiveTariffs.create(
             user=user,
             name=tariff.name,
             months=tariff.months,
-            price=full_price,  # Используем рассчитанную цену
+            price=base_calculated_price,  # Цена без персональной скидки
             hwid_limit=device_count,  # Используем выбранное количество устройств
             progressive_multiplier=tariff.progressive_multiplier,
             residual_day_fraction=0.0
