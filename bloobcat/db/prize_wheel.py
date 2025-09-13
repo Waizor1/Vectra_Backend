@@ -62,7 +62,7 @@ class PrizeWheelConfig(models.Model):
 
     class Meta:
         table = "prize_wheel_config"
-        unique_together = (("prize_type",),)
+        unique_together = (("prize_type", "prize_value"),)
 
     @classmethod
     async def get_active_prizes(cls) -> List["PrizeWheelConfig"]:

@@ -17,7 +17,7 @@
 
 Важно:
 - Сумма `probability` по активным призам должна быть ≤ 1.0. Остаток — это вероятность "nothing".
-- В текущей схеме в таблице `prize_wheel_config` действует уникальность по полю `prize_type`, то есть одна запись на тип.
+- Уникальность теперь по паре (`prize_type`, `prize_value`), что позволяет несколько призов одного типа (например, несколько подписок с разной длительностью).
 
 ### Добавление призов через FastAdmin
 
@@ -133,9 +133,8 @@ curl -sS -X POST http://localhost:8000/prize-wheel/initialize | jq
 ```sql
 INSERT INTO prize_wheel_config (prize_type, prize_name, prize_value, probability, is_active, requires_admin)
 VALUES ('subscription', 'Подписка (7 дней)', '7', 0.05, TRUE, FALSE)
-ON CONFLICT (prize_type) DO UPDATE SET
+ON CONFLICT (prize_type, prize_value) DO UPDATE SET
   prize_name=EXCLUDED.prize_name,
-  prize_value=EXCLUDED.prize_value,
   probability=EXCLUDED.probability,
   is_active=EXCLUDED.is_active,
   requires_admin=EXCLUDED.requires_admin;
@@ -146,9 +145,8 @@ ON CONFLICT (prize_type) DO UPDATE SET
 ```sql
 INSERT INTO prize_wheel_config (prize_type, prize_name, prize_value, probability, is_active, requires_admin)
 VALUES ('extra_spin', 'Еще одна попытка', '1', 0.20, TRUE, FALSE)
-ON CONFLICT (prize_type) DO UPDATE SET
+ON CONFLICT (prize_type, prize_value) DO UPDATE SET
   prize_name=EXCLUDED.prize_name,
-  prize_value=EXCLUDED.prize_value,
   probability=EXCLUDED.probability,
   is_active=EXCLUDED.is_active,
   requires_admin=EXCLUDED.requires_admin;
@@ -159,9 +157,8 @@ ON CONFLICT (prize_type) DO UPDATE SET
 ```sql
 INSERT INTO prize_wheel_config (prize_type, prize_name, prize_value, probability, is_active, requires_admin)
 VALUES ('discount_percent', 'Скидка 15%', '15', 0.10, TRUE, FALSE)
-ON CONFLICT (prize_type) DO UPDATE SET
+ON CONFLICT (prize_type, prize_value) DO UPDATE SET
   prize_name=EXCLUDED.prize_name,
-  prize_value=EXCLUDED.prize_value,
   probability=EXCLUDED.probability,
   is_active=EXCLUDED.is_active,
   requires_admin=EXCLUDED.requires_admin;
@@ -172,9 +169,8 @@ ON CONFLICT (prize_type) DO UPDATE SET
 ```sql
 INSERT INTO prize_wheel_config (prize_type, prize_name, prize_value, probability, is_active, requires_admin)
 VALUES ('discount_percent', 'Скидка 20% навсегда', '20:perm', 0.03, TRUE, FALSE)
-ON CONFLICT (prize_type) DO UPDATE SET
+ON CONFLICT (prize_type, prize_value) DO UPDATE SET
   prize_name=EXCLUDED.prize_name,
-  prize_value=EXCLUDED.prize_value,
   probability=EXCLUDED.probability,
   is_active=EXCLUDED.is_active,
   requires_admin=EXCLUDED.requires_admin;
@@ -185,9 +181,8 @@ ON CONFLICT (prize_type) DO UPDATE SET
 ```sql
 INSERT INTO prize_wheel_config (prize_type, prize_name, prize_value, probability, is_active, requires_admin)
 VALUES ('discount_percent', 'Скидка 10% ×3 до 2025-12-31', '10:uses=3:exp=2025-12-31', 0.06, TRUE, FALSE)
-ON CONFLICT (prize_type) DO UPDATE SET
+ON CONFLICT (prize_type, prize_value) DO UPDATE SET
   prize_name=EXCLUDED.prize_name,
-  prize_value=EXCLUDED.prize_value,
   probability=EXCLUDED.probability,
   is_active=EXCLUDED.is_active,
   requires_admin=EXCLUDED.requires_admin;
@@ -198,9 +193,8 @@ ON CONFLICT (prize_type) DO UPDATE SET
 ```sql
 INSERT INTO prize_wheel_config (prize_type, prize_name, prize_value, probability, is_active, requires_admin)
 VALUES ('material_prize', 'Футболка', 'Размер M', 0.01, TRUE, TRUE)
-ON CONFLICT (prize_type) DO UPDATE SET
+ON CONFLICT (prize_type, prize_value) DO UPDATE SET
   prize_name=EXCLUDED.prize_name,
-  prize_value=EXCLUDED.prize_value,
   probability=EXCLUDED.probability,
   is_active=EXCLUDED.is_active,
   requires_admin=EXCLUDED.requires_admin;

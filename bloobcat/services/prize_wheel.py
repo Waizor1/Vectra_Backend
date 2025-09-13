@@ -287,8 +287,11 @@ class PrizeWheelService:
         ]
 
         for prize_data in default_prizes:
+            # теперь различаем призы одного типа по prize_value
             await PrizeWheelConfig.get_or_create(
-                prize_type=prize_data["prize_type"], defaults=prize_data
+                prize_type=prize_data["prize_type"],
+                prize_value=prize_data["prize_value"],
+                defaults=prize_data,
             )
 
         # На всякий случай — деактивируем явно заданную пустышку, если кто-то ее добавил вручную
