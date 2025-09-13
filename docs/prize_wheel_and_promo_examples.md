@@ -218,6 +218,7 @@ ON CONFLICT (prize_type) DO UPDATE SET
   - `permanent` или `is_permanent`: true/false;
   - `uses`: int (если permanent=true, uses=0);
   - `discount_expires_at` или `expires_at`: дата в формате YYYY-MM-DD.
+ - **add_prize_wheel_attempts**: int > 0 — добавить попытки на колесе призов пользователю.
 
 Ограничения использования кода задаются на уровне записи:
 - `max_activations` — общий лимит активаций;
@@ -249,6 +250,11 @@ ON CONFLICT (prize_type) DO UPDATE SET
 
 ```json
 { "extend_days": 15, "add_hwid": 1, "discount_percent": 10, "uses": 2 }
+```
+
+- Добавить +1 попытку колеса призов:
+```json
+{ "add_prize_wheel_attempts": 1 }
 ```
 
 #### Создание напрямую через SQL
@@ -294,6 +300,13 @@ VALUES (NULL, 'Скидка 20% навсегда', '<CODE_HMAC>', '{"discount_pe
 ```sql
 INSERT INTO promo_codes (batch_id, name, code_hmac, effects, max_activations, per_user_limit, expires_at, disabled)
 VALUES (NULL, '15 дней + HWID + 10% ×2', '<CODE_HMAC>', '{"extend_days": 15, "add_hwid": 1, "discount_percent": 10, "uses": 2}', 100, 1, NULL, FALSE);
+```
+
+- **Добавить +1 попытку колеса призов**
+
+```sql
+INSERT INTO promo_codes (batch_id, name, code_hmac, effects, max_activations, per_user_limit, expires_at, disabled)
+VALUES (NULL, 'Доп. попытка колеса (+1)', '<CODE_HMAC>', '{"add_prize_wheel_attempts": 1}', 100, 1, NULL, FALSE);
 ```
 
 ### Проверка и активация промокода через API

@@ -185,6 +185,13 @@ async def redeem_promo(req: PromoValidateRequest, user=Depends(validate)):
                 metadata={"promo_id": promo.id}
             )
 
+        # 4) Дополнительные попытки колеса призов
+        add_attempts = effects.get("add_prize_wheel_attempts")
+        if isinstance(add_attempts, int) and add_attempts > 0:
+            current_attempts = int(getattr(user, "prize_wheel_attempts", 0) or 0)
+            user.prize_wheel_attempts = current_attempts + add_attempts
+            await user.save()
+
         # Обновляем остатки после записи
         total_used_after = await PromoUsage.filter(promo_code=promo).count()
         remaining_total_after = max(0, promo.max_activations - total_used_after)
