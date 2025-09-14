@@ -646,6 +646,9 @@ async def yookassa_webhook(request: Request, secret: str):
                 method="yookassa",
                 payment_id=payment.id,
                 is_auto=is_auto,
+                utm=user.utm if hasattr(user, "utm") else None,
+                discount_percent=discount_percent,
+                device_count=(int(data.get("device_count", 1)) if isinstance(data.get("device_count"), (int, str)) else None),
             )
         except Exception as e:
             logger.error(
@@ -859,6 +862,9 @@ async def pay(tariff_id: int, email: str, device_count: int = 1, user: Users = D
                 months=months,
                 method="balance", # Указываем метод оплаты
                 payment_id=payment_id,
+                utm=user.utm if hasattr(user, "utm") else None,
+                discount_percent=discount_percent,
+                device_count=device_count,
             )
         except Exception as e:
             logger.error(
@@ -1025,6 +1031,9 @@ async def create_auto_payment(user: Users, disable_on_fail: bool = True) -> bool
                     method="balance_auto", # Указываем метод
                     payment_id=payment_id,
                     is_auto=True,
+                    utm=user.utm if hasattr(user, "utm") else None,
+                    discount_percent=discount_percent,
+                    device_count=active_tariff.hwid_limit if hasattr(active_tariff, "hwid_limit") else None,
                 )
             except Exception as e:
                 logger.error(
