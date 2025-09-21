@@ -65,6 +65,14 @@ class StatisticsCollector:
             expired_at__gte=target_date,
             is_registered=True
         ).count()
+
+        # Пользователи с активным автосписанием
+        auto_renewal_users = await Users.filter(
+            expired_at__gte=target_date,
+            is_registered=True,
+            is_subscribed=True,
+            renew_id__isnull=False
+        ).count()
         
         # Новые платные подписки (пользователи, впервые оплатившие)
         new_paid_users = 0
@@ -89,6 +97,7 @@ class StatisticsCollector:
             "payments_sum": payments_sum,
             "new_paid_users": new_paid_users,
             "active_users": active_users,
+            "auto_renewal_users": auto_renewal_users,
             "online_users": online_stats["unique_online_users"],
             "total_connections": online_stats["total_connections"]
         }
@@ -135,6 +144,13 @@ class StatisticsCollector:
             expired_at__gte=end_date,
             is_registered=True
         ).count()
+
+        auto_renewal_users = await Users.filter(
+            expired_at__gte=end_date,
+            is_registered=True,
+            is_subscribed=True,
+            renew_id__isnull=False
+        ).count()
         
         # Новые платные подписки за неделю
         new_paid_users = 0
@@ -159,6 +175,7 @@ class StatisticsCollector:
             "payments_sum": payments_sum,
             "new_paid_users": new_paid_users,
             "active_users": active_users,
+            "auto_renewal_users": auto_renewal_users,
             "online_users": online_stats["unique_online_users"],
             "avg_daily_online": online_stats["avg_daily_online"],
             "total_connections": online_stats["total_connections"]
@@ -212,6 +229,13 @@ class StatisticsCollector:
             expired_at__gte=end_date,
             is_registered=True
         ).count()
+
+        auto_renewal_users = await Users.filter(
+            expired_at__gte=end_date,
+            is_registered=True,
+            is_subscribed=True,
+            renew_id__isnull=False
+        ).count()
         
         # Новые платные подписки за месяц
         new_paid_users = 0
@@ -238,6 +262,7 @@ class StatisticsCollector:
             "payments_sum": payments_sum,
             "new_paid_users": new_paid_users,
             "active_users": active_users,
+            "auto_renewal_users": auto_renewal_users,
             "online_users": online_stats["unique_online_users"],
             "avg_daily_online": online_stats["avg_daily_online"],
             "total_connections": online_stats["total_connections"]
@@ -343,11 +368,19 @@ class StatisticsCollector:
             float(payment.amount) 
             for payment in await ProcessedPayments.filter(status="succeeded")
         )
-        
+
+        auto_renewal_users = await Users.filter(
+            expired_at__gte=today,
+            is_registered=True,
+            is_subscribed=True,
+            renew_id__isnull=False
+        ).count()
+
         return {
             "total_users": total_users,
             "registered_users": registered_users,
             "active_users": active_users,
             "total_payments": total_payments,
-            "total_revenue": total_revenue
-        } 
+            "total_revenue": total_revenue,
+            "auto_renewal_users": auto_renewal_users
+        }

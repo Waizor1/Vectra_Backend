@@ -77,22 +77,16 @@ async def show_utm_list(message, page=0, edit_message=False):
     utms = list(set([utm for utm in raw_utms if utm is not None and utm != ""]))
     logger.debug(f"UTMs после фильтрации: {utms}")
     
-    if not utms:
-        return await message.answer("Нет зарегистрированных UTM", parse_mode="HTML")
-    
-    # Сортируем UTM для консистентности
-    utms.sort()
-    
     # Считаем общую статистику (включая пользователей без UTM)
     total_users = await Users.all().count()
     total_registered = await Users.filter(is_registered=True).count()
-    
+
     # Получаем количество пользователей онлайн
     now_moscow = datetime.now(MOSCOW_TZ)
     active_users_online = await Users.filter(
         connected_at__gte=now_moscow - timedelta(minutes=15)
     ).count()
-    
+
     # Получаем все ID зарегистрированных пользователей
     registered_ids_all = await Users.filter(is_registered=True).values_list("id", flat=True)
     total_paid = 0
@@ -101,27 +95,55 @@ async def show_utm_list(message, page=0, edit_message=False):
             user_id__in=registered_ids_all, status="succeeded"
         ).values_list("user_id", flat=True)
         total_paid = len(set(paid_user_ids_all))
-    
+
     # Считаем активных пользователей (подписка не истекла)
     # Для проверки истечения подписки используем дату в московском времени
     moscow_today = now_moscow.date()
     total_active_now = await Users.filter(is_registered=True, expired_at__gt=moscow_today).count()
-    
+
+    # Пользователи с активным автосписанием
+    total_auto_renewal_users = await Users.filter(
+        is_registered=True,
+        is_subscribed=True,
+        renew_id__isnull=False,
+        expired_at__gt=moscow_today
+    ).count()
+
     now_str = now_moscow.strftime("%d.%m.%Y %H:%M:%S")
     percent_registered_total = total_users and total_registered / total_users * 100 or 0
     percent_paid_total = total_registered and total_paid / total_registered * 100 or 0
-    percent_active_now = total_registered and total_active_now / total_registered * 100 or 0 # Calculate percentage of active users
-    
+    percent_active_now = total_registered and total_active_now / total_registered * 100 or 0
+    percent_auto_renewal = total_registered and total_auto_renewal_users / total_registered * 100 or 0
+
     # Создаем сообщение с общей статистикой
     lines = [
         f"📊 <b>Общая статистика:</b> <i>отчет на {now_str}</i>\n",
         f"👥 Всего пользователей: <b>{total_users}</b>",
         f"✅ Активировано: <b>{total_registered}</b> (<i>{percent_registered_total:.1f}%</i>)",
-        f"⚡ Активны сейчас: <b>{total_active_now}</b> (<i>{percent_active_now:.1f}%)</i>", # Add new line for active users
+        f"⚡ Активны сейчас: <b>{total_active_now}</b> (<i>{percent_active_now:.1f}%</i>)",
+        f"🔄 Автосписание включено: <b>{total_auto_renewal_users}</b> (<i>{percent_auto_renewal:.1f}%</i>)",
         f"💰 Оплачено: <b>{total_paid}</b> (<i>{percent_paid_total:.1f}%</i>)",
-        f"🟢 Сейчас онлайн: <b>{active_users_online}</b>" # Use correct variable name
+        f"🟢 Сейчас онлайн: <b>{active_users_online}</b>"
     ]
-    
+
+    message_text = "\n".join(lines)
+
+    if not utms:
+        message_text = "\n".join([message_text, "", "ℹ️ UTM-метки отсутствуют."])
+
+        if edit_message and hasattr(message, "edit_text"):
+            try:
+                await message.edit_text(message_text, parse_mode="HTML")
+            except Exception as e:
+                logger.error(f"Ошибка при редактировании сообщения без UTM: {e}")
+                await message.answer(message_text, parse_mode="HTML")
+        else:
+            await message.answer(message_text, parse_mode="HTML")
+        return
+
+    # Сортируем UTM для консистентности
+    utms.sort()
+
     # Определяем пагинацию
     items_per_page = 5  # Показываем 5 UTM на странице
     total_pages = (len(utms) + items_per_page - 1) // items_per_page
@@ -589,6 +611,4 @@ async def test_trial_notification_callback(callback: CallbackQuery):
         "конкретному пользователю с новыми настройками.",
         parse_mode="HTML"
     )
-
-
 

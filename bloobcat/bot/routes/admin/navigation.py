@@ -85,17 +85,27 @@ async def show_utm_stats_with_pagination(callback: CallbackQuery, page: int = 0)
     # Считаем активных пользователей (подписка не истекла)
     moscow_today = now_moscow.date()
     total_active_now = await Users.filter(is_registered=True, expired_at__gt=moscow_today).count()
+
+    # Пользователи с активным автосписанием
+    total_auto_renewal_users = await Users.filter(
+        is_registered=True,
+        is_subscribed=True,
+        renew_id__isnull=False,
+        expired_at__gt=moscow_today
+    ).count()
     
     now_str = now_moscow.strftime("%d.%m.%Y %H:%M:%S")
     percent_registered_total = total_users and total_registered / total_users * 100 or 0
     percent_paid_total = total_registered and total_paid / total_registered * 100 or 0
     percent_active_now = total_registered and total_active_now / total_registered * 100 or 0
+    percent_auto_renewal = total_registered and total_auto_renewal_users / total_registered * 100 or 0
     
     # Формируем сообщение с общей статистикой как в /stats
     stats_text = f"📊 <b>Общая статистика:</b> <i>отчет на {now_str}</i>\n\n"
     stats_text += f"👥 Всего пользователей: <b>{total_users}</b>\n"
     stats_text += f"✅ Активировано: <b>{total_registered}</b> (<i>{percent_registered_total:.1f}%</i>)\n"
     stats_text += f"⚡ Активны сейчас: <b>{total_active_now}</b> (<i>{percent_active_now:.1f}%</i>)\n"
+    stats_text += f"🔄 Автосписание включено: <b>{total_auto_renewal_users}</b> (<i>{percent_auto_renewal:.1f}%</i>)\n"
     stats_text += f"💰 Оплачено: <b>{total_paid}</b> (<i>{percent_paid_total:.1f}%</i>)\n"
     stats_text += f"🟢 Сейчас онлайн: <b>{active_users_online}</b>"
     
@@ -855,9 +865,9 @@ async def utils_utm_callback(callback: CallbackQuery):
     await callback.answer()
     await callback.message.edit_text(
         "🔗 **UTM ГЕНЕРАТОР**\n\n"
-        "Используйте команду `/utm [название]` для создания UTM ссылки\n\n"
-        "Пример: `/utm telegram_channel`\n\n"
-        "Название должно содержать только латиницу, цифры и символ подчеркивания.",
+        "Просто отправьте команду `/utm`, чтобы сгенерировать ссылку\n\n"
+        "Пример: `/utm`\n\n"
+        "Бот попросит указать название — используйте латиницу, цифры и нижнее подчеркивание.",
         reply_markup=get_utils_menu(),
         parse_mode="Markdown"
     )
@@ -909,7 +919,7 @@ async def utils_help_callback(callback: CallbackQuery):
         "• `/admin` - Главное админ меню\n"
         "• `/user_info [id]` - Информация о пользователе\n"
         "• `/stat [utm]` - Статистика по UTM\n"
-        "• `/utm [название]` - Генератор UTM ссылок\n"
+        "• `/utm` - Генератор UTM ссылок\n"
         "• `/send` - Массовая рассылка\n\n"
         "📚 **Полная справка:** `/admin_help`\n\n"
         "💡 *Большинство функций доступно через это меню!*",

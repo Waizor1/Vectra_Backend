@@ -60,6 +60,7 @@ class StatisticsFormatter:
 💰 Платежи: {current['payments_count']} на {StatisticsFormatter.format_currency(current['payments_sum'])}
 💎 Новые платные: {current['new_paid_users']}
 🔥 Активные пользователи: {current['active_users']}
+🔄 Автосписание активно: {current.get('auto_renewal_users', 0)}
 🟢 Онлайн за день: {current.get('online_users', 0)}
 
 <b>📊 Тренды (vs вчера):</b>
@@ -99,6 +100,7 @@ class StatisticsFormatter:
 💰 Платежи: {current['payments_count']} на {StatisticsFormatter.format_currency(current['payments_sum'])}
 💎 Новые платные: {current['new_paid_users']}
 🔥 Активные пользователи: {current['active_users']}
+🔄 Автосписание активно: {current.get('auto_renewal_users', 0)}
 🟢 Онлайн за неделю: {current.get('online_users', 0)}
 📊 Средний дневной онлайн: {current.get('avg_daily_online', 0)}
 
@@ -139,6 +141,7 @@ class StatisticsFormatter:
 💰 Платежи: {current['payments_count']} на {StatisticsFormatter.format_currency(current['payments_sum'])}
 💎 Новые платные: {current['new_paid_users']}
 🔥 Активные пользователи: {current['active_users']}
+🔄 Автосписание активно: {current.get('auto_renewal_users', 0)}
 🟢 Онлайн за месяц: {current.get('online_users', 0)}
 📊 Средний дневной онлайн: {current.get('avg_daily_online', 0)}
 
@@ -187,6 +190,7 @@ class StatisticsFormatter:
 💰 Платежи: {stats_data['payments_count']} на {StatisticsFormatter.format_currency(stats_data['payments_sum'])}
 💎 Новые платные: {stats_data['new_paid_users']}
 🔥 Активные пользователи: {stats_data['active_users']}
+🔄 Автосписание активно: {stats_data.get('auto_renewal_users', 0)}
 
 #тест #статистика"""
         

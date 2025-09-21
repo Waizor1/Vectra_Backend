@@ -179,6 +179,7 @@ async def admin_stats_total(message: Message):
 • Всего зарегистрировано: {stats['total_users']}
 • Активировали бота: {stats['registered_users']}
 • С активной подпиской: {stats['active_users']}
+• С автопродлением: {stats['auto_renewal_users']}
 
 <b>💰 Платежи:</b>
 • Всего успешных платежей: {stats['total_payments']}
