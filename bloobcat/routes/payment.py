@@ -602,6 +602,17 @@ async def yookassa_webhook(request: Request, secret: str):
             
             # Уведомляем пользователя об успешном продлении, ТОЛЬКО ЕСЛИ это был автоплатеж
             if is_auto:
+                # Начисление круток за автосписание: 1 крутка за каждый месяц
+                try:
+                    attempts_before = int(getattr(user, "prize_wheel_attempts", 0) or 0)
+                    if months and months > 0:
+                        user.prize_wheel_attempts = attempts_before + int(months)
+                        await user.save()
+                        logger.info(
+                            f"Начислено {months} круток за автосписание пользователю {user.id}. Было: {attempts_before}, стало: {user.prize_wheel_attempts}"
+                        )
+                except Exception as award_exc:
+                    logger.error(f"Не удалось начислить крутки за автосписание для {user.id}: {award_exc}")
                 try:
                     await notify_renewal_success_yookassa(
                         user=user,
@@ -1046,6 +1057,18 @@ async def create_auto_payment(user: Users, disable_on_fail: bool = True) -> bool
 
             # Уведомляем пользователя об успешном автопродлении с баланса
             await notify_auto_renewal_success_balance(user, days=days, amount=full_price)
+
+            # Начисление круток за автосписание с баланса: 1 крутка за каждый месяц
+            try:
+                attempts_before = int(getattr(user, "prize_wheel_attempts", 0) or 0)
+                if months and months > 0:
+                    user.prize_wheel_attempts = attempts_before + int(months)
+                    await user.save()
+                    logger.info(
+                        f"Начислено {months} круток за автосписание (баланс) пользователю {user.id}. Было: {attempts_before}, стало: {user.prize_wheel_attempts}"
+                    )
+            except Exception as award_exc:
+                logger.error(f"Не удалось начислить крутки за автосписание (баланс) для {user.id}: {award_exc}")
             
             return True # Автоплатеж успешен
 
