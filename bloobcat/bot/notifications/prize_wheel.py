@@ -250,3 +250,24 @@ async def handle_prize_confirmation(
         logger.error(f"Ошибка при обработке подтверждения приза: {e}")
 
 
+
+async def notify_spin_awarded(user_id: int, added_attempts: int, total_attempts: int, bot: Bot):
+    try:
+        user = await Users.get_or_none(id=user_id)
+        if not user:
+            logger.error(f"Пользователь {user_id} не найден для уведомления о начислении круток")
+            return
+
+        plural = "крутка" if int(added_attempts) == 1 else "крутки"
+        message = (
+            f"🎰 Начислены {added_attempts} {plural} за автопродление.\n"
+            f"Доступно попыток: {total_attempts}"
+        )
+
+        await bot.send_message(chat_id=user_id, text=message)
+        logger.info(
+            f"Отправлено уведомление о начислении круток пользователю {user_id}: +{added_attempts}, всего {total_attempts}"
+        )
+    except Exception as e:
+        logger.error(f"Ошибка при отправке уведомления о начислении круток пользователю {user_id}: {e}")
+
