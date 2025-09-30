@@ -1,11 +1,20 @@
 from datetime import datetime
 
 from aiogram import Bot
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from bloobcat.db.prize_wheel import PrizeWheelHistory
 from bloobcat.db.users import Users
 from bloobcat.logger import get_logger
+from bloobcat.bot.bot import bot
+from bloobcat.bot.notifications.localization import get_user_locale
+from bloobcat.bot.error_handler import (
+    handle_telegram_forbidden_error,
+    handle_telegram_bad_request,
+    reset_user_failed_count,
+)
+from bloobcat.bot.keyboard import webapp_inline_button
 from bloobcat.settings import telegram_settings, admin_settings
 
 
@@ -251,23 +260,48 @@ async def handle_prize_confirmation(
 
 
 
-async def notify_spin_awarded(user_id: int, added_attempts: int, total_attempts: int, bot: Bot):
+async def notify_spin_awarded(user: Users, added_attempts: int, total_attempts: int):
     try:
-        user = await Users.get_or_none(id=user_id)
         if not user:
-            logger.error(f"Пользователь {user_id} не найден для уведомления о начислении круток")
+            logger.error("Пользователь не найден для уведомления о начислении круток")
             return
 
-        plural = "крутка" if int(added_attempts) == 1 else "крутки"
-        message = (
-            f"🎰 Начислены {added_attempts} {plural} за автопродление.\n"
-            f"Доступно попыток: {total_attempts}"
-        )
+        def ru_spins(n: int) -> str:
+            n = int(n)
+            n_mod_10 = n % 10
+            n_mod_100 = n % 100
+            if n_mod_10 == 1 and n_mod_100 != 11:
+                return "крутка"
+            if n_mod_10 in (2, 3, 4) and n_mod_100 not in (12, 13, 14):
+                return "крутки"
+            return "круток"
 
-        await bot.send_message(chat_id=user_id, text=message)
+        lang = get_user_locale(user)
+        if lang == 'ru':
+            text = (
+                f"🎰 Начислены {int(added_attempts)} {ru_spins(added_attempts)} за автопродление.\n"
+                f"Доступно попыток: {int(total_attempts)}"
+            )
+            button = await webapp_inline_button("Личный кабинет")
+        else:
+            plural = "spin attempt" if int(added_attempts) == 1 else "spin attempts"
+            text = (
+                f"🎰 You received {int(added_attempts)} {plural} for auto-renewal.\n"
+                f"Available attempts: {int(total_attempts)}"
+            )
+            button = await webapp_inline_button("Dashboard")
+
+        await bot.send_message(chat_id=user.id, text=text, reply_markup=button)
         logger.info(
-            f"Отправлено уведомление о начислении круток пользователю {user_id}: +{added_attempts}, всего {total_attempts}"
+            f"Отправлено уведомление о начислении круток пользователю {user.id}: +{added_attempts}, всего {total_attempts}"
         )
+        await reset_user_failed_count(user.id)
+    except TelegramForbiddenError as e:
+        logger.warning(f"User {user.id} blocked the bot: {e}")
+        await handle_telegram_forbidden_error(user.id, e)
+    except TelegramBadRequest as e:
+        logger.error(f"Bad request error for user {user.id}: {e}")
+        await handle_telegram_bad_request(user.id, e)
     except Exception as e:
-        logger.error(f"Ошибка при отправке уведомления о начислении круток пользователю {user_id}: {e}")
+        logger.error(f"Ошибка при отправке уведомления о начислении круток пользователю {getattr(user, 'id', 'unknown')}: {e}")
 

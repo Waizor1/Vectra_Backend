@@ -625,7 +625,7 @@ async def yookassa_webhook(request: Request, secret: str):
                      logger.error(f"Ошибка при отправке уведомления об успешном АВТОпродлении для {user.id}: {notify_exc}")
                 # Сообщение пользователю о начислении круток
                 try:
-                    await notify_spin_awarded(user_id=user.id, added_attempts=int(months), total_attempts=int(user.prize_wheel_attempts or 0), bot=getattr(__import__('bloobcat.bot.bot', fromlist=['bot']), 'bot'))
+                    await notify_spin_awarded(user=user, added_attempts=int(months), total_attempts=int(user.prize_wheel_attempts or 0))
                 except Exception as e_notify_spins:
                     logger.error(f"Ошибка уведомления о крутках (вебхук) для {user.id}: {e_notify_spins}")
             
@@ -1065,7 +1065,7 @@ async def create_auto_payment(user: Users, disable_on_fail: bool = True) -> bool
             await notify_auto_renewal_success_balance(user, days=days, amount=full_price)
             # Сообщение пользователю о начислении круток
             try:
-                await notify_spin_awarded(user_id=user.id, added_attempts=int(months), total_attempts=int(user.prize_wheel_attempts or 0), bot=getattr(__import__('bloobcat.bot.bot', fromlist=['bot']), 'bot'))
+                await notify_spin_awarded(user=user, added_attempts=int(months), total_attempts=int(user.prize_wheel_attempts or 0))
             except Exception as e_notify_spins:
                 logger.error(f"Ошибка уведомления о крутках (баланс) для {user.id}: {e_notify_spins}")
 
