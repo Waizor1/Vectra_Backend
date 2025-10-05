@@ -59,7 +59,7 @@ class Users(models.Model):
     is_trial = fields.BooleanField(default=False)
     used_trial = fields.BooleanField(default=False)
     remnawave_uuid = fields.UUIDField(null=True)  # UUID пользователя в RemnaWave
-    last_hwid_reset = fields.DatetimeField(null=True, description="Дата и время последнего ручного сброса HWID устройств")
+    last_hwid_reset = fields.DatetimeField(null=True, description="Дата и время последнего ручного отключения HWID устройств")
     familyurl = fields.CharField(max_length=100, null=True)
     active_tariff: fields.ForeignKeyNullableRelation["ActiveTariffs"] = fields.ForeignKeyField(
         "models.ActiveTariffs", related_name="users", null=True, on_delete=fields.SET_NULL, description="ID активного тарифа пользователя"

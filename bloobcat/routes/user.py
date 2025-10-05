@@ -173,11 +173,11 @@ async def unsubscribe(user: Users = Depends(validate)):
 @router.post("/reset_devices")
 async def reset_devices(user: Users = Depends(validate)):
     """
-    Ручной сброс HWID устройств пользователя. Доступен не чаще, чем раз в 24 часа.
+    Ручное отключение HWID устройств пользователя. Доступно не чаще, чем раз в 24 часа.
     """
     now = datetime.now(timezone.utc)
     if user.last_hwid_reset and (now - user.last_hwid_reset) < timedelta(hours=24):
-        raise HTTPException(status_code=400, detail="Сброс устройств можно выполнять не чаще, чем раз в 24 часа")
+        raise HTTPException(status_code=400, detail="Отключение устройств можно выполнять не чаще, чем раз в 24 часа")
     if not user.remnawave_uuid:
         raise HTTPException(status_code=400, detail="У пользователя нет RemnaWave UUID")
     await cleanup_user_hwid_devices(user.id, user.remnawave_uuid)
