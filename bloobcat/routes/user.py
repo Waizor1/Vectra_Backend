@@ -222,6 +222,25 @@ async def change_active_tariff_devices(payload: ChangeDevicesRequest, user: User
         days_remaining = (user.expired_at - current_date).days
     logger.debug(f"[change_active_tariff_devices] days_remaining={days_remaining}, expired_at={user.expired_at}, current_date={current_date}")
 
+    # Если количество устройств не изменилось, нет смысла пересчитывать срок подписки.
+    new_device_count = int(payload.device_count)
+    if new_device_count < 1:
+        new_device_count = 1
+
+    stored_limits = [value for value in (user.hwid_limit, active_tariff.hwid_limit) if value]
+    current_hwid_limit = stored_limits[0] if stored_limits else 1
+    if new_device_count == current_hwid_limit and all(value == new_device_count for value in stored_limits):
+        logger.debug(
+            "[change_active_tariff_devices] device count unchanged (%s), skipping recalculation",
+            new_device_count,
+        )
+        return {
+            "status": "ok",
+            "new_expired_at": user.expired_at,
+            "hwid_limit": current_hwid_limit,
+            "price": active_tariff.price,
+        }
+
     # Полный период текущего тарифа в днях
     target_date_old = current_date.replace(
         year=current_date.year + ((current_date.month + active_tariff.months - 1) // 12),
@@ -237,11 +256,6 @@ async def change_active_tariff_devices(payload: ChangeDevicesRequest, user: User
     active_price_dec = Decimal(active_tariff.price)
     unused_value = (unused_percent * active_price_dec)
     logger.debug(f"[change_active_tariff_devices] unused_percent={float(unused_percent):.6f}, unused_value={float(unused_value):.6f}, active_price={active_tariff.price}")
-
-    # Новое количество устройств
-    new_device_count = int(payload.device_count)
-    if new_device_count < 1:
-        new_device_count = 1
 
     # Рассчитываем цену тарифа для нового количества устройств
     if original:
