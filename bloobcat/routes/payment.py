@@ -30,6 +30,7 @@ from bloobcat.services.discounts import (
     apply_personal_discount,
     consume_discount_if_needed,
 )
+from bloobcat.utils.dates import add_months_safe
 
 # Инициализируем клиент ЮKассы
 Configuration.account_id = yookassa_settings.shop_id
@@ -232,11 +233,8 @@ async def yookassa_webhook(request: Request, secret: str):
                     logger.info(f"У пользователя {user.id} осталось {days_remaining} дней подписки")
                     
                     # Рассчитываем количество дней, которое давал старый тариф
-                    old_months = active_tariff.months
-                    old_target_date = current_date.replace(
-                        year=current_date.year + ((current_date.month + old_months - 1) // 12),
-                        month=((current_date.month + old_months - 1) % 12) + 1
-                    )
+                    old_months = int(active_tariff.months)
+                    old_target_date = add_months_safe(current_date, old_months)
                     old_total_days = (old_target_date - current_date).days
                     
                     # Рассчитываем процент неиспользованной подписки
@@ -272,10 +270,8 @@ async def yookassa_webhook(request: Request, secret: str):
                         total_amount = total_paid + unused_value
                         
                         # Рассчитываем новый период подписки (стандартный для тарифа)
-                        new_target_date = current_date.replace(
-                            year=current_date.year + ((current_date.month + new_tariff.months - 1) // 12),
-                            month=((current_date.month + new_tariff.months - 1) % 12) + 1
-                        )
+                        tariff_months = int(new_tariff.months)
+                        new_target_date = add_months_safe(current_date, tariff_months)
                         new_total_days = (new_target_date - current_date).days
                         
                         # Пропорция: x дней / общая_сумма = полный_период_тарифа / цена_тарифа
@@ -301,10 +297,7 @@ async def yookassa_webhook(request: Request, secret: str):
             if 'calculated_days' not in locals():
                 # Обычная покупка нового тарифа без смены
                 current_date = date.today()
-                target_date = current_date.replace(
-                    year=current_date.year + ((current_date.month + months - 1) // 12),
-                    month=((current_date.month + months - 1) % 12) + 1
-                )
+                target_date = add_months_safe(current_date, months)
                 days = (target_date - current_date).days
                 logger.info(f"Стандартное количество дней подписки: {days}")
             else:
@@ -313,10 +306,7 @@ async def yookassa_webhook(request: Request, secret: str):
         else:
             # Если нет tariff_id, значит это автоплатеж или другой тип платежа, просто рассчитываем дни как обычно
             current_date = date.today()
-            target_date = current_date.replace(
-                year=current_date.year + ((current_date.month + months - 1) // 12),
-                month=((current_date.month + months - 1) % 12) + 1
-            )
+            target_date = add_months_safe(current_date, months)
             days = (target_date - current_date).days
             logger.info(f"Стандартное количество дней подписки: {days}")
         
@@ -590,10 +580,8 @@ async def yookassa_webhook(request: Request, secret: str):
                         amount_from_balance = float(data.get("amount_from_balance", 0))
                         total_paid_now = amount_paid_by_user + amount_from_balance
                         current_date = date.today()
-                        new_target_date = current_date.replace(
-                            year=current_date.year + ((current_date.month + original.months - 1) // 12),
-                            month=((current_date.month + original.months - 1) % 12) + 1
-                        )
+                        original_months = int(original.months)
+                        new_target_date = add_months_safe(current_date, original_months)
                         new_total_days = (new_target_date - current_date).days
                         proportional_days = int(total_paid_now * new_total_days / max(1, correct_new_tariff_price))
                         # Берём минимум, чтобы не подарить лишние дни
@@ -700,8 +688,7 @@ async def pay(tariff_id: int, email: str, device_count: int = 1, user: Users = D
 
     try:
         current_date = date.today()
-        target_date = current_date.replace(year=current_date.year + ((current_date.month + months - 1) // 12),
-                                     month=((current_date.month + months - 1) % 12) + 1)
+        target_date = add_months_safe(current_date, months)
         days = (target_date - current_date).days
     except Exception as e:
         logger.error(
@@ -725,11 +712,8 @@ async def pay(tariff_id: int, email: str, device_count: int = 1, user: Users = D
                 active_tariff = await ActiveTariffs.get(id=user.active_tariff_id)
                 days_remaining = (user.expired_at - current_date).days
                 logger.info(f"У пользователя {user.id} осталось {days_remaining} дней подписки")
-                old_months = active_tariff.months
-                old_target_date = current_date.replace(
-                    year=current_date.year + ((current_date.month + old_months - 1) // 12),
-                    month=((current_date.month + old_months - 1) % 12) + 1
-                )
+                old_months = int(active_tariff.months)
+                old_target_date = add_months_safe(current_date, old_months)
                 old_total_days = (old_target_date - current_date).days
                 unused_percent = days_remaining / old_total_days if old_total_days > 0 else 0
                 unused_value = unused_percent * active_tariff.price
@@ -743,10 +727,8 @@ async def pay(tariff_id: int, email: str, device_count: int = 1, user: Users = D
                     total_amount = full_price + unused_value
                     
                     # Рассчитываем новый период подписки (стандартный для тарифа)
-                    new_target_date = current_date.replace(
-                        year=current_date.year + ((current_date.month + tariff.months - 1) // 12),
-                        month=((current_date.month + tariff.months - 1) % 12) + 1
-                    )
+                    tariff_months = int(tariff.months)
+                    new_target_date = add_months_safe(current_date, tariff_months)
                     new_total_days = (new_target_date - current_date).days
                     
                     # Пропорция: x дней / общая_сумма = полный_период_тарифа / цена_тарифа
@@ -994,8 +976,7 @@ async def create_auto_payment(user: Users, disable_on_fail: bool = True) -> bool
 
         try:
             current_date = date.today()
-            target_date = current_date.replace(year=current_date.year + ((current_date.month + months - 1) // 12),
-                                         month=((current_date.month + months - 1) % 12) + 1)
+            target_date = add_months_safe(current_date, months)
             days = (target_date - current_date).days
         except Exception as e:
             logger.error(

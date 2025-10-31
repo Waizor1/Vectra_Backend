@@ -16,6 +16,7 @@ from bloobcat.routes.remnawave.hwid_utils import cleanup_user_hwid_devices
 from bloobcat.db.active_tariff import ActiveTariffs
 from bloobcat.db.tariff import Tariffs
 from bloobcat.bot.notifications.admin import cancel_subscription
+from bloobcat.utils.dates import add_months_safe
 
 logger = get_logger("routes.user")
 
@@ -242,10 +243,8 @@ async def change_active_tariff_devices(payload: ChangeDevicesRequest, user: User
         }
 
     # Полный период текущего тарифа в днях
-    target_date_old = current_date.replace(
-        year=current_date.year + ((current_date.month + active_tariff.months - 1) // 12),
-        month=((current_date.month + active_tariff.months - 1) % 12) + 1
-    )
+    active_months = int(active_tariff.months)
+    target_date_old = add_months_safe(current_date, active_months)
     total_days_old = (target_date_old - current_date).days
     logger.debug(f"[change_active_tariff_devices] total_days_old={total_days_old}, target_date_old={target_date_old}")
 
@@ -290,11 +289,8 @@ async def change_active_tariff_devices(payload: ChangeDevicesRequest, user: User
     logger.debug(f"[change_active_tariff_devices] new_device_count={new_device_count}, new_calculated_price={new_calculated_price}")
 
     # Полный период тарифа (в днях) для перерасчёта по новой цене
-    months_length = active_tariff.months  # сохраняем длительность из снапшота, даже если её нет в магазине
-    target_date_new = current_date.replace(
-        year=current_date.year + ((current_date.month + months_length - 1) // 12),
-        month=((current_date.month + months_length - 1) % 12) + 1
-    )
+    months_length = int(active_tariff.months)  # сохраняем длительность из снапшота, даже если её нет в магазине
+    target_date_new = add_months_safe(current_date, months_length)
     total_days_new = (target_date_new - current_date).days
     logger.debug(f"[change_active_tariff_devices] total_days_new={total_days_new}, target_date_new={target_date_new}")
 

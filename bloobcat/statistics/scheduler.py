@@ -12,6 +12,7 @@ from .trends import TrendsCalculator
 from .formatter import StatisticsFormatter
 from bloobcat.bot.notifications.admin import send_admin_message
 from bloobcat.logger import get_logger
+from bloobcat.utils.dates import add_months_safe
 
 logger = get_logger("statistics_scheduler")
 
@@ -70,10 +71,7 @@ def get_next_monthly_time() -> datetime:
         return current_monthly_time
     
     # Иначе пробуем следующий месяц
-    if today.month == 12:
-        next_month = today.replace(year=today.year + 1, month=1)
-    else:
-        next_month = today.replace(month=today.month + 1)
+    next_month = add_months_safe(today, 1)
     
     # Пытаемся установить 31 число, если нет - последний день месяца
     try:
