@@ -15,7 +15,7 @@ from starlette.background import BackgroundTask
 from bloobcat.routes.remnawave.hwid_utils import cleanup_user_hwid_devices
 from bloobcat.db.active_tariff import ActiveTariffs
 from bloobcat.db.tariff import Tariffs
-from bloobcat.bot.notifications.admin import cancel_subscription
+from bloobcat.bot.notifications.admin import cancel_subscription, notify_active_tariff_change
 from bloobcat.utils.dates import add_months_safe
 
 logger = get_logger("routes.user")
@@ -230,6 +230,11 @@ async def change_active_tariff_devices(payload: ChangeDevicesRequest, user: User
 
     stored_limits = [value for value in (user.hwid_limit, active_tariff.hwid_limit) if value]
     current_hwid_limit = stored_limits[0] if stored_limits else 1
+    old_hwid_limit = current_hwid_limit
+    old_expired_at = user.expired_at
+    old_tariff_price = active_tariff.price
+    tariff_name = active_tariff.name
+    tariff_months = active_tariff.months
     if new_device_count == current_hwid_limit and all(value == new_device_count for value in stored_limits):
         logger.debug(
             "[change_active_tariff_devices] device count unchanged (%s), skipping recalculation",
@@ -338,6 +343,22 @@ async def change_active_tariff_devices(payload: ChangeDevicesRequest, user: User
         except Exception as e:
             logger.error(f"Ошибка обновления RemnaWave при смене устройств: {e}")
             # Не прерываем из-за ошибки внешнего сервиса
+
+    try:
+        await notify_active_tariff_change(
+            user=user,
+            tariff_name=tariff_name,
+            months=tariff_months,
+            old_limit=old_hwid_limit,
+            new_limit=new_device_count,
+            old_price=old_tariff_price,
+            new_price=new_calculated_price,
+            old_expired_at=old_expired_at,
+            new_expired_at=user.expired_at,
+            auto_renew_enabled=bool(user.renew_id),
+        )
+    except Exception as e:
+        logger.error(f"Ошибка отправки уведомления об изменении активного тарифа: {e}")
 
     return {
         "status": "ok",
