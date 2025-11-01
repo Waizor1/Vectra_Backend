@@ -43,7 +43,7 @@ class PersonalDiscount(models.Model):
 
     @staticmethod
     def _source_priority(source: Optional[str]) -> int:
-        """Больший приоритет выигрывает. Промо и колесо выше, winback ниже."""
+        """Используется как тай-брейкер: больший приоритет выигрывает."""
         if not source:
             return 2
         src = str(source).lower()
@@ -55,8 +55,8 @@ class PersonalDiscount(models.Model):
 
     @classmethod
     async def get_best_active_for_user(cls, user_id: int) -> Optional[Tuple["PersonalDiscount", int]]:
-        """Возвращает (скидка, процент) с учетом приоритета источника и процента.
-        Сначала выбираем по приоритету источника, затем по максимальному percent.
+        """Возвращает (скидка, процент) среди активных записей.
+        Сначала выбираем максимальный percent, при равенстве — более приоритетный источник.
         """
         candidates = await cls.filter(user_id=user_id).all()
         best: Optional[PersonalDiscount] = None
@@ -66,7 +66,7 @@ class PersonalDiscount(models.Model):
             if cls._is_active_row(c.percent, c.is_permanent, int(c.remaining_uses or 0), c.expires_at):
                 prio = cls._source_priority(c.source)
                 pct = int(c.percent)
-                if prio > best_prio or (prio == best_prio and pct > best_percent):
+                if best is None or pct > best_percent or (pct == best_percent and prio > best_prio):
                     best = c
                     best_percent = pct
                     best_prio = prio
@@ -85,5 +85,4 @@ class PersonalDiscount(models.Model):
 """
 Админские классы намеренно удалены по требованию: эти модели не отображаются в FastAdmin.
 """
-
 
