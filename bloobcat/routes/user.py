@@ -217,10 +217,18 @@ async def change_active_tariff_devices(payload: ChangeDevicesRequest, user: User
 
     current_date = date.today()
     # Остаток дней по текущей подписке
-    if not user.expired_at or user.expired_at <= current_date:
+    if not user.expired_at:
         days_remaining = 0
     else:
-        days_remaining = (user.expired_at - current_date).days
+        if user.expired_at <= current_date:
+            days_remaining = 0
+        else:
+            days_remaining = (user.expired_at - current_date).days
+            if days_remaining <= 1:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Изменение активного тарифа недоступно в последний день подписки",
+                )
     logger.debug(f"[change_active_tariff_devices] days_remaining={days_remaining}, expired_at={user.expired_at}, current_date={current_date}")
 
     # Если количество устройств не изменилось, нет смысла пересчитывать срок подписки.
@@ -312,8 +320,8 @@ async def change_active_tariff_devices(payload: ChangeDevicesRequest, user: User
         # Чтобы не перепрыгивать, возьмем floor через int(new_days_dec_total)
         integer_part = int(new_days_dec_total)
         fractional_part = new_days_dec_total - Decimal(integer_part)
-        # Гарантируем минимум 1 день, если что-то осталось
-        new_days = max(1, integer_part)
+        # Не допускаем отрицательного количества дней, 0 — корректный результат
+        new_days = max(0, integer_part)
         residual = fractional_part
     logger.debug(f"[change_active_tariff_devices] computed new_days={new_days}, residual={float(residual):.6f}")
 
