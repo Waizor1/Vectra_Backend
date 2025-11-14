@@ -25,6 +25,20 @@ class ActiveSubscription(BaseModel):
     )
 
 
+class RemnaWaveSnapshot(BaseModel):
+    uuid: str
+    username: str | None = None
+    status: str | None = None
+    expire_at: datetime | None = None
+    online_at: datetime | None = None
+    hwid_limit: int | None = None
+    traffic_limit_bytes: int | None = None
+    subscription_url: str | None = None
+    telegram_id: int | None = None
+    email: str | None = None
+    active_internal_squads: Sequence[str] | None = None
+
+
 class CaptainUserProfile(BaseModel):
     """Ответ Captain User Lookup."""
 
@@ -41,20 +55,6 @@ class CaptainUserProfile(BaseModel):
     registered_at: datetime
     last_login: datetime
     remnawave: RemnaWaveSnapshot | None = None
-
-
-class RemnaWaveSnapshot(BaseModel):
-    uuid: str
-    username: str | None = None
-    status: str | None = None
-    expire_at: datetime | None = None
-    online_at: datetime | None = None
-    hwid_limit: int | None = None
-    traffic_limit_bytes: int | None = None
-    subscription_url: str | None = None
-    telegram_id: int | None = None
-    email: str | None = None
-    active_internal_squads: Sequence[str] | None = None
 
 
 class ErrorResponse(BaseModel):
