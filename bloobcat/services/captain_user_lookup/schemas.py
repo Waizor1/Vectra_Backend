@@ -25,6 +25,17 @@ class ActiveSubscription(BaseModel):
     )
 
 
+class RemnaWaveDevice(BaseModel):
+    hwid: str
+    user_uuid: str | None = None
+    platform: str | None = None
+    os_version: str | None = None
+    device_model: str | None = None
+    user_agent: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
 class RemnaWaveSnapshot(BaseModel):
     uuid: str
     username: str | None = None
@@ -37,6 +48,7 @@ class RemnaWaveSnapshot(BaseModel):
     telegram_id: int | None = None
     email: str | None = None
     active_internal_squads: Sequence[str] | None = None
+    devices: Sequence[RemnaWaveDevice] | None = None
 
 
 class CaptainUserProfile(BaseModel):

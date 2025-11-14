@@ -11,7 +11,12 @@ from bloobcat.logger import get_logger
 from bloobcat.routes.remnawave.client import RemnaWaveClient
 from bloobcat.settings import remnawave_settings
 
-from .schemas import ActiveSubscription, CaptainUserProfile, RemnaWaveSnapshot
+from .schemas import (
+    ActiveSubscription,
+    CaptainUserProfile,
+    RemnaWaveDevice,
+    RemnaWaveSnapshot,
+)
 
 logger = get_logger("captain_user_lookup.repository")
 
@@ -184,8 +189,10 @@ class CaptainUserLookupRepository:
         client = RemnaWaveClient(
             remnawave_settings.url, remnawave_settings.token.get_secret_value()
         )
+        devices: list[RemnaWaveDevice] | None = None
         try:
             response = await client.users.get_user_by_uuid(str(user.remnawave_uuid))
+            devices = await self._fetch_hwid_devices(client, str(user.remnawave_uuid))
         except Exception as exc:
             logger.warning(
                 "Failed to fetch RemnaWave data for user {}: {}",
@@ -216,6 +223,7 @@ class CaptainUserLookupRepository:
             telegram_id=payload.get("telegramId"),
             email=payload.get("email"),
             active_internal_squads=active_squads,
+            devices=devices,
         )
 
     @staticmethod
@@ -229,6 +237,57 @@ class CaptainUserLookupRepository:
             return datetime.fromisoformat(value)
         except Exception:
             return None
+
+    async def _fetch_hwid_devices(
+        self, client: RemnaWaveClient, user_uuid: str
+    ) -> list[RemnaWaveDevice] | None:
+        try:
+            raw = await client.users.get_user_hwid_devices(str(user_uuid))
+        except Exception as exc:
+            logger.warning(
+                "Failed to fetch HWID devices for user {}: {}",
+                user_uuid,
+                exc,
+            )
+            return None
+
+        devices_payload: list[dict] = []
+        if isinstance(raw, list):
+            devices_payload = [item for item in raw if isinstance(item, dict)]
+        elif isinstance(raw, dict):
+            data = raw.get("response", raw)
+            if isinstance(data, dict):
+                maybe_devices = data.get("devices")
+                if isinstance(maybe_devices, list):
+                    devices_payload = [item for item in maybe_devices if isinstance(item, dict)]
+                elif isinstance(data.get("response"), list):
+                    devices_payload = [
+                        item for item in data.get("response", []) if isinstance(item, dict)
+                    ]
+            elif isinstance(data, list):
+                devices_payload = [item for item in data if isinstance(item, dict)]
+
+        parsed_devices: list[RemnaWaveDevice] = []
+        for item in devices_payload:
+            hwid = item.get("hwid")
+            if not hwid:
+                continue
+            parsed_devices.append(
+                RemnaWaveDevice(
+                    hwid=str(hwid),
+                    user_uuid=str(item.get("userUuid")) if item.get("userUuid") else None,
+                    platform=item.get("platform"),
+                    os_version=item.get("osVersion"),
+                    device_model=item.get("deviceModel"),
+                    user_agent=item.get("userAgent"),
+                    created_at=self._parse_iso_datetime(item.get("createdAt")),
+                    updated_at=self._parse_iso_datetime(
+                        item.get("updatedAt") or item.get("UpdatedAt")
+                    ),
+                )
+            )
+
+        return parsed_devices or None
 
 
 user_repository = CaptainUserLookupRepository()

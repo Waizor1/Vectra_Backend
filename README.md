@@ -102,6 +102,18 @@ ALLOWLIST_DOMAINS=api.example.com,admin.example.com
     "email": "captain.demo@example.com",
     "active_internal_squads": [
       "default-squad"
+    ],
+    "devices": [
+      {
+        "hwid": "abcd-1234",
+        "user_uuid": "7d0f6f97-3de9-4250-9b37-92f83a3d11ac",
+        "platform": "android",
+        "os_version": "14",
+        "device_model": "Pixel 7",
+        "user_agent": "org.telegram.messenger/10.2",
+        "created_at": "2024-07-01T12:00:00",
+        "updated_at": "2024-07-26T09:00:00"
+      }
     ]
   }
 }
@@ -129,4 +141,4 @@ curl \
 - `country` — маппинг кода языка (`language_code`) пользователя на ISO страну.
 - `status` — рассчитывается из `is_blocked`, `is_trial` и `expired_at` (`blocked`, `trial_active`, `trial_expired`, `active`, `expired`, `new`).
 - `active_subscriptions` — первый элемент описывает действующий тариф (`ActiveTariffs`), дополнительные элементы — последние успешные платежи (`ProcessedPayments`).
-- `remnawave` — снэпшот данных из панели через `RemnaWaveClient.get_user_by_uuid` (UUID, статус, даты, лимиты, squad-ы, crypto link). При ошибках обращение логируется, поле выставляется в `null`.
+- `remnawave` — снэпшот данных из панели через `RemnaWaveClient.get_user_by_uuid` (UUID, статус, даты, лимиты, squad-ы, crypto link) плюс список устройств из `GET /api/hwid/devices/{uuid}`. При ошибках обращение логируется, поле выставляется в `null`.
