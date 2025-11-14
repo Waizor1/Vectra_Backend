@@ -1,69 +1,234 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
-from typing import Dict, Iterable, Optional
+from dataclasses import dataclass
+from datetime import date, datetime, time
+from typing import Iterable, List, Optional, Sequence
 
-from .schemas import ActiveSubscription, CaptainUserProfile
+from bloobcat.db.active_tariff import ActiveTariffs
+from bloobcat.db.payments import ProcessedPayments
+from bloobcat.db.users import Users
+from bloobcat.logger import get_logger
+from bloobcat.routes.remnawave.client import RemnaWaveClient
+from bloobcat.settings import remnawave_settings
+
+from .schemas import ActiveSubscription, CaptainUserProfile, RemnaWaveSnapshot
+
+logger = get_logger("captain_user_lookup.repository")
 
 
-class InMemoryUserRepository:
-    """Простейшее in-memory хранилище пользователей."""
+@dataclass
+class _PaymentSnapshot:
+    payment_id: str
+    amount: float
+    processed_at: datetime
+    status: str
 
-    def __init__(self, seed: Iterable[CaptainUserProfile]):
-        self._storage: Dict[int, CaptainUserProfile] = {
-            profile.telegram_id: profile for profile in seed
+
+class CaptainUserLookupRepository:
+    """Достаёт реальные данные пользователя из БД."""
+
+    async def get_profile(self, telegram_id: int) -> Optional[CaptainUserProfile]:
+        user = (
+            await Users.filter(id=telegram_id)
+            .select_related("active_tariff")
+            .first()
+        )
+        if not user:
+            return None
+
+        tariffs = await ActiveTariffs.filter(user_id=user.id)
+        payments = await self._get_recent_payments(user.id)
+
+        first_name, last_name = self._split_name(user.full_name)
+        remnawave_snapshot = await self._fetch_remnawave_snapshot(user)
+
+        profile = CaptainUserProfile(
+            telegram_id=user.id,
+            first_name=first_name,
+            last_name=last_name,
+            username=user.username or "",
+            email=user.email or "",
+            phone=None,
+            country=self._map_language_to_country(user.language_code),
+            status=self._determine_status(user),
+            active_subscriptions=self._build_subscriptions(
+                user, tariffs, payments
+            ),
+            balance=float(user.balance or 0),
+            registered_at=self._to_datetime(user.registration_date or user.created_at),
+            last_login=self._to_datetime(user.connected_at or user.registration_date),
+            remnawave=remnawave_snapshot,
+        )
+        return profile
+
+    async def _get_recent_payments(self, user_id: int) -> List[_PaymentSnapshot]:
+        payments = (
+            await ProcessedPayments.filter(user_id=user_id, status="succeeded")
+            .order_by("-processed_at")
+            .limit(5)
+        )
+        return [
+            _PaymentSnapshot(
+                payment_id=p.payment_id,
+                amount=float(p.amount),
+                processed_at=p.processed_at,
+                status=p.status,
+            )
+            for p in payments
+        ]
+
+    def _build_subscriptions(
+        self,
+        user: Users,
+        tariffs: Iterable[ActiveTariffs],
+        payments: Iterable[_PaymentSnapshot],
+    ) -> List[ActiveSubscription]:
+        entries: List[ActiveSubscription] = []
+        payments_list = list(payments)
+
+        for tariff in tariffs:
+            entries.append(
+                ActiveSubscription(
+                    name=tariff.name,
+                    status=self._determine_status(user),
+                    months=tariff.months,
+                    price=float(tariff.price),
+                    started_at=self._guess_subscription_start(user, payments_list),
+                    expires_at=self._to_datetime(user.expired_at),
+                )
+            )
+
+        if not entries and getattr(user, "active_tariff", None):
+            active_tariff = user.active_tariff
+            entries.append(
+                ActiveSubscription(
+                    name=active_tariff.name,
+                    status=self._determine_status(user),
+                    months=active_tariff.months,
+                    price=float(active_tariff.price),
+                    started_at=self._guess_subscription_start(user, payments_list),
+                    expires_at=self._to_datetime(user.expired_at),
+                )
+            )
+
+        payment_entries = [
+            ActiveSubscription(
+                name=f"Payment {payment.payment_id}",
+                status=payment.status,
+                months=None,
+                price=payment.amount,
+                started_at=payment.processed_at,
+                expires_at=None,
+            )
+            for payment in payments_list
+        ]
+        entries.extend(payment_entries)
+
+        return entries
+
+    def _guess_subscription_start(
+        self, user: Users, payments: Sequence[_PaymentSnapshot]
+    ) -> Optional[datetime]:
+        if payments:
+            return payments[0].processed_at
+        if user.connected_at:
+            return user.connected_at
+        return self._to_datetime(user.registration_date)
+
+    @staticmethod
+    def _split_name(full_name: str) -> tuple[str, str]:
+        if not full_name:
+            return "", ""
+        parts = full_name.split(" ", 1)
+        if len(parts) == 1:
+            return parts[0], ""
+        return parts[0], parts[1]
+
+    @staticmethod
+    def _to_datetime(value: datetime | date | None) -> Optional[datetime]:
+        if isinstance(value, datetime):
+            return value
+        if isinstance(value, date):
+            return datetime.combine(value, time.min)
+        return None
+
+    @staticmethod
+    def _map_language_to_country(language_code: Optional[str]) -> Optional[str]:
+        if not language_code:
+            return None
+        mapping = {
+            "ru": "RU",
+            "uk": "UA",
+            "be": "BY",
+            "kk": "KZ",
+            "uz": "UZ",
+            "en": "US",
+            "tr": "TR",
         }
+        return mapping.get(language_code.lower(), language_code.upper())
 
-    async def get_by_telegram_id(self, telegram_id: int) -> Optional[CaptainUserProfile]:
-        return self._storage.get(telegram_id)
+    @staticmethod
+    def _determine_status(user: Users) -> str:
+        if user.is_blocked:
+            return "blocked"
+        if user.is_trial and user.expired_at:
+            return "trial_active" if user.expired_at >= date.today() else "trial_expired"
+        if user.expired_at:
+            return "active" if user.expired_at >= date.today() else "expired"
+        return "new"
+
+    async def _fetch_remnawave_snapshot(self, user: Users) -> Optional[RemnaWaveSnapshot]:
+        if not user.remnawave_uuid:
+            return None
+
+        client = RemnaWaveClient(
+            remnawave_settings.url, remnawave_settings.token.get_secret_value()
+        )
+        try:
+            response = await client.users.get_user_by_uuid(str(user.remnawave_uuid))
+        except Exception as exc:
+            logger.warning(
+                "Failed to fetch RemnaWave data for user {}: {}",
+                user.id,
+                exc,
+            )
+            return None
+        finally:
+            await client.close()
+
+        payload = response.get("response") or {}
+        subscription_url = payload.get("happ", {}).get("cryptoLink")
+        active_squads = payload.get("activeInternalSquads")
+        if isinstance(active_squads, list):
+            active_squads = [str(item) for item in active_squads]
+        else:
+            active_squads = None
+
+        return RemnaWaveSnapshot(
+            uuid=str(payload.get("uuid") or user.remnawave_uuid),
+            username=payload.get("username"),
+            status=payload.get("status"),
+            expire_at=self._parse_iso_datetime(payload.get("expireAt")),
+            online_at=self._parse_iso_datetime(payload.get("onlineAt")),
+            hwid_limit=payload.get("hwidDeviceLimit"),
+            traffic_limit_bytes=payload.get("trafficLimitBytes"),
+            subscription_url=subscription_url,
+            telegram_id=payload.get("telegramId"),
+            email=payload.get("email"),
+            active_internal_squads=active_squads,
+        )
+
+    @staticmethod
+    def _parse_iso_datetime(raw_value: Optional[str]) -> Optional[datetime]:
+        if not raw_value:
+            return None
+        try:
+            value = raw_value
+            if value.endswith("Z"):
+                value = value[:-1] + "+00:00"
+            return datetime.fromisoformat(value)
+        except Exception:
+            return None
 
 
-def _build_default_dataset() -> list[CaptainUserProfile]:
-    now = datetime.utcnow()
-    return [
-        CaptainUserProfile(
-            telegram_id=101010101,
-            first_name="Captain",
-            last_name="Demo",
-            username="captain_demo",
-            email="captain.demo@example.com",
-            phone="+1234567890",
-            country="US",
-            status="active",
-            active_subscriptions=[
-                ActiveSubscription(
-                    name="BloobCat Premium",
-                    status="active",
-                    started_at=now - timedelta(days=90),
-                    expires_at=now + timedelta(days=30),
-                )
-            ],
-            balance=42.50,
-            registered_at=now - timedelta(days=365),
-            last_login=now - timedelta(hours=5),
-        ),
-        CaptainUserProfile(
-            telegram_id=303030303,
-            first_name="Jane",
-            last_name="Doe",
-            username="jane_guard",
-            email="jane@example.com",
-            phone="+987654321",
-            country="DE",
-            status="trial",
-            active_subscriptions=[
-                ActiveSubscription(
-                    name="Starter Pack",
-                    status="trial",
-                    started_at=now - timedelta(days=5),
-                    expires_at=now + timedelta(days=5),
-                )
-            ],
-            balance=5.0,
-            registered_at=now - timedelta(days=180),
-            last_login=now - timedelta(days=1, hours=2),
-        ),
-    ]
-
-
-user_repository = InMemoryUserRepository(_build_default_dataset())
+user_repository = CaptainUserLookupRepository()

@@ -78,7 +78,7 @@ async def lookup_user(
         _log_lookup(telegram_id, status.HTTP_400_BAD_REQUEST)
         return _error_response(status.HTTP_400_BAD_REQUEST, "invalid_telegram_id")
 
-    user = await user_repository.get_by_telegram_id(telegram_id)
+    user = await user_repository.get_profile(telegram_id)
 
     if not user:
         _log_lookup(telegram_id, status.HTTP_404_NOT_FOUND)

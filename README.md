@@ -1,6 +1,6 @@
 # BloobCat Backend – Captain User Lookup
 
-Captain User Lookup — это защищённый HTTPS-endpoint FastAPI, встраиваемый в существующий backend. Он принимает Telegram ID и возвращает все известные поля пользователя. Доступ контролируется обязательным Bearer API-ключом и allowlist доменов.
+Captain User Lookup — это защищённый HTTPS-endpoint FastAPI, встраиваемый в существующий backend. Он принимает Telegram ID и возвращает все известные поля пользователя, включая оперативные данные из панели RemnaWave. Доступ контролируется обязательным Bearer API-ключом и allowlist доменов.
 
 ## Установка и запуск
 
@@ -65,20 +65,45 @@ ALLOWLIST_DOMAINS=api.example.com,admin.example.com
   "last_name": "Demo",
   "username": "captain_demo",
   "email": "captain.demo@example.com",
-  "phone": "+1234567890",
-  "country": "US",
+  "phone": null,
+  "country": "RU",
   "status": "active",
   "active_subscriptions": [
     {
       "name": "BloobCat Premium",
       "status": "active",
+      "months": 12,
+      "price": 1290,
       "started_at": "2024-07-01T12:00:00",
       "expires_at": "2024-08-30T12:00:00"
+    },
+    {
+      "name": "Payment 90342",
+      "status": "succeeded",
+      "months": null,
+      "price": 1290,
+      "started_at": "2024-06-25T10:15:00",
+      "expires_at": null
     }
   ],
   "balance": 42.5,
   "registered_at": "2023-07-01T12:00:00",
-  "last_login": "2024-07-26T09:00:00"
+  "last_login": "2024-07-26T09:00:00",
+  "remnawave": {
+    "uuid": "7d0f6f97-3de9-4250-9b37-92f83a3d11ac",
+    "username": "101010101",
+    "status": "ACTIVE",
+    "expire_at": "2024-08-30T00:00:00+00:00",
+    "online_at": "2024-07-26T09:00:00+00:00",
+    "hwid_limit": 3,
+    "traffic_limit_bytes": 0,
+    "subscription_url": "https://panel.example.com/link/abcd",
+    "telegram_id": 101010101,
+    "email": "captain.demo@example.com",
+    "active_internal_squads": [
+      "default-squad"
+    ]
+  }
 }
 ```
 
@@ -94,4 +119,14 @@ curl \
 
 - Логи содержат только Telegram ID и статус ответа (персональные данные не записываются).
 - Запрос отклоняется, если домен не входит в allowlist.
-- Mock-хранилище пользователей можно заменить на реальный репозиторий.
+- Для каждого запроса дополнительно выполняется вызов RemnaWave API (если у пользователя есть UUID); ошибки панели не ломают ответ — поле `remnawave` вернёт `null`.
+
+### Откуда берутся данные
+
+- `telegram_id`, `username`, `full_name`, `email`, `balance`, `registration_date`, `connected_at`, `is_trial`, `expired_at`, `is_subscribed`, `is_blocked` — поля модели `bloobcat.db.users.Users`.
+- `first_name`/`last_name` — разбивка `full_name` по первому пробелу.
+- `phone` — в текущей схеме не хранится, поэтому возвращается `null`.
+- `country` — маппинг кода языка (`language_code`) пользователя на ISO страну.
+- `status` — рассчитывается из `is_blocked`, `is_trial` и `expired_at` (`blocked`, `trial_active`, `trial_expired`, `active`, `expired`, `new`).
+- `active_subscriptions` — первый элемент описывает действующий тариф (`ActiveTariffs`), дополнительные элементы — последние успешные платежи (`ProcessedPayments`).
+- `remnawave` — снэпшот данных из панели через `RemnaWaveClient.get_user_by_uuid` (UUID, статус, даты, лимиты, squad-ы, crypto link). При ошибках обращение логируется, поле выставляется в `null`.

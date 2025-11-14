@@ -1,10 +1,16 @@
-from .repository import InMemoryUserRepository, user_repository
-from .schemas import ActiveSubscription, CaptainUserProfile, ErrorResponse
+from .repository import CaptainUserLookupRepository, user_repository
+from .schemas import (
+    ActiveSubscription,
+    CaptainUserProfile,
+    ErrorResponse,
+    RemnaWaveSnapshot,
+)
 
 __all__ = [
     "ActiveSubscription",
     "CaptainUserProfile",
     "ErrorResponse",
-    "InMemoryUserRepository",
+    "RemnaWaveSnapshot",
+    "CaptainUserLookupRepository",
     "user_repository",
 ]
