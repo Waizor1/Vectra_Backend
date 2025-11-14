@@ -91,6 +91,8 @@ promo_settings = PromoSettings()
 class CaptainUserLookupSettings(BaseSettings):
     """Настройки HTTPS-сервиса Captain User Lookup."""
 
+    model_config = SettingsConfigDict(json_loads=lambda v: v)
+
     api_key: SecretStr = SecretStr("change-me")
     allowlist_domains: list[str] = []
 
