@@ -1,5 +1,5 @@
 from dotenv import load_dotenv
-from pydantic import SecretStr
+from pydantic import SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 import os
 
@@ -86,3 +86,26 @@ class PromoSettings(BaseSettings):
     hmac_secret: SecretStr | None = None
 
 promo_settings = PromoSettings()
+
+
+class CaptainUserLookupSettings(BaseSettings):
+    """Настройки HTTPS-сервиса Captain User Lookup."""
+
+    api_key: SecretStr = SecretStr("change-me")
+    allowlist_domains: list[str] = []
+
+    @field_validator("allowlist_domains", mode="before")
+    @classmethod
+    def parse_allowlist(cls, value):
+        if not value:
+            return []
+        if isinstance(value, str):
+            cleaned = [item.strip().lower() for item in value.split(",") if item.strip()]
+            return cleaned
+        if isinstance(value, (list, tuple, set)):
+            cleaned = [str(item).strip().lower() for item in value if str(item).strip()]
+            return cleaned
+        return value
+
+
+captain_lookup_settings = CaptainUserLookupSettings()
