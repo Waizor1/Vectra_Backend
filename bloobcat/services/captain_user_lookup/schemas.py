@@ -40,7 +40,7 @@ class CaptainUserProfile(BaseModel):
     balance: float
     registered_at: datetime
     last_login: datetime
-    remnawave: "RemnaWaveSnapshot" | None = None
+    remnawave: RemnaWaveSnapshot | None = None
 
 
 class RemnaWaveSnapshot(BaseModel):
