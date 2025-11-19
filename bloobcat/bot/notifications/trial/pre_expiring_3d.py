@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -10,6 +12,8 @@ from bloobcat.bot.notifications.localization import get_user_locale
 from bloobcat.bot.error_handler import handle_telegram_forbidden_error, handle_telegram_bad_request, reset_user_failed_count
 from bloobcat.routes.remnawave.client import RemnaWaveClient
 from bloobcat.settings import remnawave_settings
+from bloobcat.db.tariff import Tariffs
+from bloobcat.services.discounts import get_best_discount
 
 logger = get_logger("notifications.trial.pre_expiring_3d")
 
@@ -57,15 +61,15 @@ def _plural_ru(n: int, forms: tuple[str, str, str]) -> str:
 def _format_tenure_ru(total_days: int) -> str:
     if total_days >= 365:
         years = total_days // 365
-        return f"{years} {_plural_ru(years, ("год", "года", "лет"))}"
+        return f"{years} {_plural_ru(years, ('год', 'года', 'лет'))}"
     if total_days >= 30:
         months = total_days // 30
-        return f"{months} {_plural_ru(months, ("месяц", "месяца", "месяцев"))}"
+        return f"{months} {_plural_ru(months, ('месяц', 'месяца', 'месяцев'))}"
     if total_days >= 7:
         weeks = total_days // 7
-        return f"{weeks} {_plural_ru(weeks, ("неделя", "недели", "недель"))}"
+        return f"{weeks} {_plural_ru(weeks, ('неделя', 'недели', 'недель'))}"
     days = max(total_days, 0)
-    return f"{days} {_plural_ru(days, ("день", "дня", "дней"))}"
+    return f"{days} {_plural_ru(days, ('день', 'дня', 'дней'))}"
 
 
 def _format_tenure_en(total_days: int) -> str:
@@ -82,6 +86,76 @@ def _format_tenure_en(total_days: int) -> str:
     return f"{days} day{'s' if days != 1 else ''}"
 
 
+def _apply_percent(price: int, percent: int) -> int:
+    if percent <= 0:
+        return max(0, int(price))
+    discount_value = int(round(price * (percent / 100.0)))
+    return max(0, int(price) - discount_value)
+
+
+async def _get_pricing_suggestions(user):
+    """
+    Возвращает словарь с ценами за устройство в месяц для 1/2/10 устройств
+    с учётом персональной скидки пользователя.
+    """
+    annual_tariff = (
+        await Tariffs.filter(months__gte=12).order_by("-months").first()
+        or await Tariffs.order_by("-months").first()
+    )
+    if not annual_tariff:
+        return None
+
+    discount_percent = 0
+    best_discount = await get_best_discount(user.id)
+    if best_discount:
+        _, discount_percent = best_discount
+        discount_percent = int(discount_percent or 0)
+
+    months = max(1, int(annual_tariff.months or 1))
+    prices = {}
+    for device_count in (1, 2, 10):
+        total_price = annual_tariff.calculate_price(device_count)
+        if discount_percent > 0:
+            total_price = _apply_percent(total_price, discount_percent)
+        per_device_month = total_price / months / max(1, device_count)
+        prices[device_count] = max(1, int(round(per_device_month)))
+
+    return {
+        "prices": prices,
+        "months": months,
+        "discount_percent": discount_percent,
+        "tariff_name": annual_tariff.name,
+    }
+
+
+def _billing_note_ru(months: int | None, discount_percent: int) -> str:
+    if months == 12:
+        base = "при оплате за год"
+    elif months == 1:
+        base = "при помесячной оплате"
+    elif months:
+        base = f"при оплате за {months} мес"
+    else:
+        base = "при выбранном тарифе"
+    if discount_percent > 0:
+        return f"{base}, с учётом вашей скидки {discount_percent}%"
+    return base
+
+
+def _billing_note_en(months: int | None, discount_percent: int) -> str:
+    if months == 12:
+        base = "for annual billing"
+    elif months == 1:
+        base = "for monthly billing"
+    elif months:
+        base = f"for the {months}-month plan"
+    else:
+        base = "for the current plan"
+    if discount_percent > 0:
+        return f"{base}, incl. your {discount_percent}% discount"
+    return base
+
+
 async def notify_trial_three_days_left(user):
     """
     Sends a marketing reminder 3 days before trial ends with device count included.
@@ -96,6 +170,14 @@ async def notify_trial_three_days_left(user):
     except Exception:
         tenure_days = 0
     devices_count = await _get_devices_count(user)
+    pricing = await _get_pricing_suggestions(user)
+    default_prices = {1: 75, 2: 71, 10: 49}
+    prices = pricing["prices"] if pricing else {}
+    price_one = prices.get(1, default_prices[1])
+    price_two = prices.get(2, default_prices[2])
+    price_family = prices.get(10, default_prices[10])
+    discount_percent = pricing["discount_percent"] if pricing else 0
+    months = pricing["months"] if pricing else 12
 
     if locale == "ru":
         tenure_text = _format_tenure_ru(tenure_days)
@@ -105,10 +187,10 @@ async def notify_trial_three_days_left(user):
             "⏳ До окончания триала: <b>3 дня</b>\n"
             f"📱 Вы использовали: <b>{devices_count}</b> устройство(а)\n\n"
             "<b>Рассказываем как продлить и платить меньше</b>:\n"
-            "• <b>Зайдите в \"Подписку\" и выберите 2 устройства — выйдет всего 71 ₽/мес</b>\n"
-            "• <b>Если нужно только 1 устройство — 75 ₽/мес</b>\n"
-            "• <b>Хотите выгоднее? Соберите семью до 10 устройств — всего 49 ₽/мес за устройство</b>\n\n"
-            "<i>(цены указаны при оплате за год — так намного выгоднее)</i>\n\n"
+            f"• <b>Зайдите в \"Подписку\" и выберите 2 устройства — выйдет всего {price_two} ₽/мес</b>\n"
+            f"• <b>Если нужно только 1 устройство — {price_one} ₽/мес</b>\n"
+            f"• <b>Хотите выгоднее? Соберите семью до 10 устройств — всего {price_family} ₽/мес за устройство</b>\n\n"
+            f"<i>(цены указаны {_billing_note_ru(months, discount_percent)} — так намного выгоднее)</i>\n\n"
             "Если не уверены, что выбрать, или нужны спецусловия — напишите в поддержку @BloopCat_supbot. Мы рядом, подскажем и даже поможем с настройкой."
         )
         button_text = "Открыть приложение"
@@ -121,10 +203,10 @@ async def notify_trial_three_days_left(user):
             "⏳ Trial ends in: <b>3 days</b>\n"
             f"📱 Devices used: <b>{devices_count}</b>\n\n"
             "<b>How to renew and pay less</b>:\n"
-            "• <b>Select 2 devices in \"Subscription\" — just 71 RUB/mo</b>\n"
-            "• <b>Only 1 device needed — 75 RUB/mo</b>\n"
-            "• <b>Want the best deal? Family up to 10 devices — 49 RUB/mo per device</b>\n\n"
-            "<i>(prices shown for annual billing)</i>\n\n"
+            f"• <b>Select 2 devices in \"Subscription\" — just {price_two} RUB/mo</b>\n"
+            f"• <b>Only 1 device needed — {price_one} RUB/mo</b>\n"
+            f"• <b>Want the best deal? Family up to 10 devices — {price_family} RUB/mo per device</b>\n\n"
+            f"<i>(prices shown {_billing_note_en(months, discount_percent)})</i>\n\n"
             "If you’re not sure what to choose or need special terms — contact support @BloopCat_supbot. We’ll help and even assist with setup."
         )
         button_text = "Open App"
@@ -147,5 +229,3 @@ async def notify_trial_three_days_left(user):
         await handle_telegram_bad_request(user.id, e)
     except Exception as e:
         logger.error(f"Ошибка при отправке 3-дневного напоминания о триале пользователю {user.id}: {e}")
-
-
