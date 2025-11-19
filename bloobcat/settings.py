@@ -75,6 +75,7 @@ class AppSettings(BaseSettings):
 
     # Колесо призов
     prize_wheel_spin_bonus_price: int = 50  # Стоимость одной крутки при оплате бонусным балансом (₽)
+    devices_decrease_limit: int = 1  # Сколько раз можно уменьшить лимит устройств за период
 
 app_settings = AppSettings()
 

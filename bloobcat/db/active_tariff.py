@@ -22,6 +22,10 @@ class ActiveTariffs(models.Model):
     months = fields.IntField()
     price = fields.IntField()
     hwid_limit = fields.IntField(default=1, description="Лимит количества устройств")
+    devices_decrease_count = fields.IntField(
+        default=0,
+        description="Сколько раз пользователь уменьшал лимит устройств в текущем периоде",
+    )
     progressive_multiplier = fields.FloatField(null=True, description="Снапшот множителя прогрессивной скидки")
     residual_day_fraction = fields.FloatField(null=True, description="Накопленная дробная часть дней при конвертациях")
 
@@ -31,7 +35,27 @@ class ActiveTariffs(models.Model):
 
 @register(ActiveTariffs)
 class ActiveTariffsModelAdmin(TortoiseModelAdmin):
-    list_display = ("id", "user", "name", "months", "price", "hwid_limit", "progressive_multiplier", "residual_day_fraction")
-    readonly_fields = ("id", "user", "name", "months", "price", "hwid_limit", "progressive_multiplier", "residual_day_fraction") # Make fields read-only in admin
+    list_display = (
+        "id",
+        "user",
+        "name",
+        "months",
+        "price",
+        "hwid_limit",
+        "progressive_multiplier",
+        "residual_day_fraction",
+        "devices_decrease_count",
+    )
+    readonly_fields = (
+        "id",
+        "user",
+        "name",
+        "months",
+        "price",
+        "hwid_limit",
+        "progressive_multiplier",
+        "residual_day_fraction",
+        "devices_decrease_count",
+    ) # Make fields read-only in admin
     verbose_name = "Активный Тариф"
     verbose_name_plural = "Активные Тарифы" 

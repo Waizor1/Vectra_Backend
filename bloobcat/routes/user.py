@@ -8,7 +8,7 @@ import uuid  # For generating new familyurl
 from bloobcat.db.users import User_Pydantic, Users
 from bloobcat.funcs.validate import validate
 from bloobcat.routes.remnawave.client import RemnaWaveClient
-from bloobcat.settings import remnawave_settings
+from bloobcat.settings import remnawave_settings, app_settings
 from bloobcat.logger import get_logger
 from fastapi import FastAPI
 from starlette.background import BackgroundTask
@@ -109,20 +109,31 @@ async def check(user: Users = Depends(validate)) -> Dict[str, Any]:
         active_tariff_data = None
 
         # 2. Пытаемся получить из тарифа
+        devices_decrease_limit = max(
+            0, int(getattr(app_settings, "devices_decrease_limit", 0) or 0)
+        )
         if user.active_tariff_id:
             tariff = await ActiveTariffs.get_or_none(id=user.active_tariff_id)
             if tariff:
                 devices_limit = tariff.hwid_limit
                 source = f"тарифу ({tariff.name})"
                 # Добавляем информацию об активном тарифе в ответ
+                remaining_decreases = (
+                    max(0, devices_decrease_limit - int(tariff.devices_decrease_count or 0))
+                    if devices_decrease_limit
+                    else None
+                )
                 active_tariff_data = {
                     "id": tariff.id,
                     "name": tariff.name,
                     "months": tariff.months,
                     "price": tariff.price,
-                    "hwid_limit": tariff.hwid_limit
+                    "hwid_limit": tariff.hwid_limit,
+                    "devices_decrease_count": int(tariff.devices_decrease_count or 0),
+                    "devices_decrease_limit": devices_decrease_limit or None,
+                    "devices_decrease_remaining": remaining_decreases,
                 }
-    
+        
         # 3. Личное значение из БД имеет наивысший приоритет
         if user.hwid_limit is not None:
             devices_limit = user.hwid_limit
@@ -238,6 +249,12 @@ async def change_active_tariff_devices(payload: ChangeDevicesRequest, user: User
 
     stored_limits = [value for value in (user.hwid_limit, active_tariff.hwid_limit) if value]
     current_hwid_limit = stored_limits[0] if stored_limits else 1
+    decrease_limit = max(
+        0, int(getattr(app_settings, "devices_decrease_limit", 0) or 0)
+    )
+    devices_decrease_count = int(
+        getattr(active_tariff, "devices_decrease_count", 0) or 0
+    )
     old_hwid_limit = current_hwid_limit
     old_expired_at = user.expired_at
     old_tariff_price = active_tariff.price
@@ -254,6 +271,21 @@ async def change_active_tariff_devices(payload: ChangeDevicesRequest, user: User
             "hwid_limit": current_hwid_limit,
             "price": active_tariff.price,
         }
+
+    is_decrease = new_device_count < current_hwid_limit
+    if is_decrease and decrease_limit and devices_decrease_count >= decrease_limit:
+        remaining_text = (
+            "0"
+            if decrease_limit == devices_decrease_count
+            else str(max(0, decrease_limit - devices_decrease_count))
+        )
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Исчерпан лимит уменьшений устройств в этом периоде. "
+                f"Доступно уменьшений: {remaining_text} из {decrease_limit}."
+            ),
+        )
 
     # Полный период текущего тарифа в днях
     active_months = int(active_tariff.months)
@@ -336,6 +368,8 @@ async def change_active_tariff_devices(payload: ChangeDevicesRequest, user: User
     active_tariff.price = new_calculated_price
     active_tariff.progressive_multiplier = multiplier
     active_tariff.residual_day_fraction = float(residual)
+    if is_decrease:
+        active_tariff.devices_decrease_count = devices_decrease_count + 1
     await active_tariff.save()
     logger.debug(f"[change_active_tariff_devices] active_tariff updated: id={active_tariff.id}, hwid_limit={active_tariff.hwid_limit}, price={active_tariff.price}, residual={active_tariff.residual_day_fraction}")
 
@@ -426,18 +460,29 @@ async def get_family_subscription(familyurl: str):
     active_tariff_data = None
 
     # 2. Пытаемся получить из тарифа
+    devices_decrease_limit = max(
+        0, int(getattr(app_settings, "devices_decrease_limit", 0) or 0)
+    )
     if user.active_tariff_id:
         tariff = await ActiveTariffs.get_or_none(id=user.active_tariff_id)
         if tariff:
             devices_limit = tariff.hwid_limit
             source = f"тарифу ({tariff.name})"
             # Добавляем информацию об активном тарифе в ответ
+            remaining_decreases = (
+                max(0, devices_decrease_limit - int(tariff.devices_decrease_count or 0))
+                if devices_decrease_limit
+                else None
+            )
             active_tariff_data = {
                 "id": tariff.id,
                 "name": tariff.name,
                 "months": tariff.months,
                 "price": tariff.price,
-                "hwid_limit": tariff.hwid_limit
+                "hwid_limit": tariff.hwid_limit,
+                "devices_decrease_count": int(tariff.devices_decrease_count or 0),
+                "devices_decrease_limit": devices_decrease_limit or None,
+                "devices_decrease_remaining": remaining_decreases,
             }
     
     # 3. Личное значение из БД имеет наивысший приоритет

@@ -400,6 +400,10 @@ async def yookassa_webhook(request: Request, secret: str):
                 else:
                     logger.error(f"Original tariff {tariff_id} not found; skipping ActiveTariffs")
             
+            # После успешной оплаты сбрасываем счётчик уменьшений лимита устройств
+            if user.active_tariff_id:
+                await ActiveTariffs.filter(id=user.active_tariff_id).update(devices_decrease_count=0)
+            
             # Синхронизируем данные с RemnaWave
             if user.remnawave_uuid:
                 # Настройки бесконечных повторных попыток с ограничением по времени
@@ -815,6 +819,10 @@ async def pay(tariff_id: int, email: str, device_count: int = 1, user: Users = D
 
         # Сохраняем пользователя (до синхронизации RemnaWave)
         await user.save()
+
+        # После оплаты с баланса также обнуляем счётчик уменьшений
+        if user.active_tariff_id:
+            await ActiveTariffs.filter(id=user.active_tariff_id).update(devices_decrease_count=0)
 
         # Синхронизируем лимит устройств и дату окончания с RemnaWave
         if user.remnawave_uuid:
