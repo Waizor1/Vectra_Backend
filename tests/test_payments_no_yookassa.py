@@ -267,3 +267,49 @@ async def test_create_auto_payment_from_balance_no_double_discount():
     assert user.expired_at >= date.today()
 
 
+@pytest.mark.asyncio
+async def test_discount_respects_min_max_months():
+    from bloobcat.db.users import Users
+    from bloobcat.db.tariff import Tariffs
+    from bloobcat.db.discounts import PersonalDiscount
+    from bloobcat.routes.payment import pay
+
+    user = await Users.create(id=789, username="months", full_name="Month User", balance=10_000, is_registered=True)
+
+    tariff_1m = await Tariffs.create(id=11, name="1m", months=1, base_price=1000, progressive_multiplier=0.9, order=1)
+    tariff_6m = await Tariffs.create(id=12, name="6m", months=6, base_price=3000, progressive_multiplier=0.9, order=2)
+    tariff_12m = await Tariffs.create(id=13, name="12m", months=12, base_price=4000, progressive_multiplier=0.9, order=3)
+
+    discount = await PersonalDiscount.create(
+        user_id=user.id,
+        percent=30,
+        is_permanent=False,
+        remaining_uses=2,
+        min_months=3,
+        max_months=6,
+    )
+
+    # 1 месяц — скидка не должна примениться
+    result_1m = await pay(tariff_id=tariff_1m.id, email="m1@example.com", device_count=1, user=user)
+    assert result_1m["status"] == "success"
+    user = await Users.get(id=user.id)
+    assert int(user.balance) == 9_000  # 10_000 - 1000, скидка не применена
+    discount = await PersonalDiscount.get(id=discount.id)
+    assert int(discount.remaining_uses or 0) == 2
+
+    # 6 месяцев — скидка применяется (попадает в диапазон)
+    result_6m = await pay(tariff_id=tariff_6m.id, email="m6@example.com", device_count=1, user=user)
+    assert result_6m["status"] == "success"
+    user = await Users.get(id=user.id)
+    assert int(user.balance) == 6_900  # 9_000 - (3000 * 0.7)
+    discount = await PersonalDiscount.get(id=discount.id)
+    assert int(discount.remaining_uses or 0) == 1
+
+    # 12 месяцев — выше max_months, скидка не должна примениться и не должна списаться
+    result_12m = await pay(tariff_id=tariff_12m.id, email="m12@example.com", device_count=1, user=user)
+    assert result_12m["status"] == "success"
+    user = await Users.get(id=user.id)
+    assert int(user.balance) == 2_900  # 6_900 - 4000, скидка не применена
+    discount = await PersonalDiscount.get(id=discount.id)
+    assert int(discount.remaining_uses or 0) == 1
+

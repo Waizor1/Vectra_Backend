@@ -19,6 +19,8 @@ class DiscountItem(BaseModel):
     remaining_uses: int
     expires_at: str | None
     source: str | None
+    min_months: int | None = None
+    max_months: int | None = None
 
 
 @router.get("/my", response_model=List[DiscountItem])
@@ -34,8 +36,9 @@ async def my_discounts(user=Depends(validate)):
                 remaining_uses=int(r.remaining_uses or 0),
                 expires_at=(r.expires_at.isoformat() if r.expires_at else None),
                 source=r.source,
+                min_months=getattr(r, "min_months", None),
+                max_months=getattr(r, "max_months", None),
             )
         )
     return result
-
 

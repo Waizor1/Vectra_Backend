@@ -683,12 +683,12 @@ async def pay(tariff_id: int, email: str, device_count: int = 1, user: Users = D
     if device_count < 1:
         device_count = 1
     
+    months = int(tariff.months)
     # Рассчитываем цену для указанного количества устройств
     base_full_price = int(tariff.calculate_price(device_count))
-    discounted_price, discount_id, discount_percent = await apply_personal_discount(user.id, base_full_price)
+    discounted_price, discount_id, discount_percent = await apply_personal_discount(user.id, base_full_price, months)
     full_price = float(discounted_price)
     user_balance = float(user.balance)
-    months = int(tariff.months)
 
     try:
         current_date = date.today()
@@ -975,12 +975,12 @@ async def create_auto_payment(user: Users, disable_on_fail: bool = True) -> bool
 
         logger.info(f"Автопродление для пользователя {user.id}. Используется активный тариф ID={active_tariff.id} (Name: {active_tariff.name}, Price: {active_tariff.price})")
 
+        months = int(active_tariff.months)
         base_full_price = int(active_tariff.price)
         # Применяем персональную скидку (если есть)
-        discounted_price, discount_id, discount_percent = await apply_personal_discount(user.id, base_full_price)
+        discounted_price, discount_id, discount_percent = await apply_personal_discount(user.id, base_full_price, months)
         full_price = float(discounted_price)
         user_balance = float(user.balance)
-        months = int(active_tariff.months)
 
         try:
             current_date = date.today()

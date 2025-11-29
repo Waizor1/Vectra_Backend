@@ -50,6 +50,14 @@ async def _hash_code(raw_code: str) -> str:
     return hmac.new(secret, raw_code.encode(), hashlib.sha256).hexdigest()
 
 
+def _get_positive_int(val: Any) -> Optional[int]:
+    try:
+        num = int(val)
+    except (TypeError, ValueError):
+        return None
+    return num if num > 0 else None
+
+
 @router.post("/validate", response_model=PromoValidateResponse)
 async def validate_promo(req: PromoValidateRequest, user=Depends(validate)):
     code_hmac = await _hash_code(req.code)
@@ -174,6 +182,8 @@ async def redeem_promo(req: PromoValidateRequest, user=Depends(validate)):
             is_permanent = bool(effects.get("permanent") or effects.get("is_permanent") or False)
             remaining_uses = int(effects.get("uses") or (0 if is_permanent else 1))
             expires_at = effects.get("discount_expires_at") or effects.get("expires_at")
+            min_months = _get_positive_int(effects.get("min_months"))
+            max_months = _get_positive_int(effects.get("max_months"))
 
             await PersonalDiscount.create(
                 user_id=user.id,
@@ -182,6 +192,8 @@ async def redeem_promo(req: PromoValidateRequest, user=Depends(validate)):
                 remaining_uses=max(0, remaining_uses),
                 expires_at=expires_at,
                 source="promo",
+                min_months=min_months,
+                max_months=max_months,
                 metadata={"promo_id": promo.id}
             )
 

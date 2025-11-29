@@ -14,7 +14,7 @@ from bloobcat.clients import TORTOISE_ORM
 from bloobcat.db.admins import Admin
 from bloobcat.routes import main_router, include_bot_router
 from bloobcat.routes import app_info # Добавляем импорт нового роутера
-from bloobcat.settings import script_settings, telegram_settings
+from bloobcat.settings import script_settings, telegram_settings, test_mode
 from bloobcat.logger import get_logger
 
 # Получаем основной логгер приложения
@@ -111,6 +111,13 @@ async def lifespan(fastapi_app: FastAPI):
     ):
         logger.info("Фоновые задачи запущены")
         from bloobcat.scheduler import schedule_all_tasks
+        if test_mode:
+            try:
+                from bloobcat.testdata import seed_test_fixtures
+
+                await seed_test_fixtures()
+            except Exception as e:
+                logger.error(f"Не удалось подготовить тестовые данные (TESTMODE): {e}", exc_info=True)
         await schedule_all_tasks()
         yield
     

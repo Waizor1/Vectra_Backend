@@ -13,19 +13,19 @@ def _apply_percent_to_price(base_price: int, percent: int) -> int:
     return final_price
 
 
-async def get_best_discount(user_id: int) -> Optional[Tuple[PersonalDiscount, int]]:
-    return await PersonalDiscount.get_best_active_for_user(user_id)
+async def get_best_discount(user_id: int, months: Optional[int] = None) -> Optional[Tuple[PersonalDiscount, int]]:
+    return await PersonalDiscount.get_best_active_for_user(user_id, months)
 
 
     
 
 
-async def apply_personal_discount(user_id: int, base_price: int) -> tuple[int, Optional[int], int]:
+async def apply_personal_discount(user_id: int, base_price: int, months: Optional[int] = None) -> tuple[int, Optional[int], int]:
     """
     Возвращает (финальная_цена, discount_id, percent).
     Если активной скидки нет — возвращает исходную цену, None, 0.
     """
-    best = await get_best_discount(user_id)
+    best = await get_best_discount(user_id, months)
     if not best:
         return int(base_price), None, 0
     discount_obj, percent = best
@@ -51,5 +51,4 @@ async def consume_discount_if_needed(discount_id: Optional[int]) -> bool:
 
 
     
-
 
