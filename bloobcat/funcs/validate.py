@@ -22,8 +22,14 @@ async def validate(init_data: str = Depends(oauth2_scheme)) -> Users:
         user = safe_parse_webapp_init_data(
             telegram_settings.token.get_secret_value(), init_data
         )
+
+        # Проверка на None после парсинга - защита от некорректных данных
+        if not user or not user.user:
+            logger.error("Парсинг вернул пустой объект пользователя")
+            raise HTTPException(status_code=403, detail="Invalid user data")
+
         logger.debug(f"Успешная валидация для пользователя {user.user.id}")
-        
+
         referred_by = 0
         utm = None
         logger.debug(f"Проверка start_param для пользователя {user.user.id}: {user.start_param!r}") 

@@ -41,12 +41,20 @@ async def setup_webhook_with_retries(webhook_url: str) -> None:
             # Проверяем статус webhook
             webhook_info = await bot.get_webhook_info()
             logger.info(f"📊 Статус webhook: URL={webhook_info.url}, pending_updates={webhook_info.pending_update_count}")
-            
+
+            # last_error_message - это ИСТОРИЧЕСКАЯ ошибка от Telegram API
+            # Она сохраняется даже если webhook сейчас работает нормально
+            # Проверяем только URL - если он совпадает, значит webhook установлен успешно
             if webhook_info.last_error_message:
-                logger.warning(f"⚠️ Последняя ошибка webhook: {webhook_info.last_error_message}")
-                raise Exception(f"Webhook info contains an error: {webhook_info.last_error_message}")
-            
-            return  # Успешно установлен, выходим
+                logger.warning(f"⚠️ Историческая ошибка webhook (можно игнорировать если webhook работает): {webhook_info.last_error_message}")
+
+            # Webhook успешно установлен если URL совпадает
+            if webhook_info.url == webhook_url:
+                logger.info(f"✅ Webhook подтвержден и активен")
+                return  # Успешно установлен, выходим
+            else:
+                # URL не совпадает - это реальная проблема
+                raise Exception(f"Webhook URL не совпадает: ожидалось {webhook_url}, получено {webhook_info.url}")
             
         except Exception as e:
             # Рассчитываем задержку с экспоненциальным backoff
