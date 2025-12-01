@@ -245,6 +245,11 @@ class UsersAPI:
         """Получение списка HWID устройств пользователя"""
         return await self._execute_with_retry(self.client._request, "GET", f"/api/hwid/devices/{user_uuid}")
 
+    async def get_hwid_devices(self, start: int = 0, size: int = 100) -> Dict[str, Any]:
+        """Постраничное получение HWID устройств всех пользователей"""
+        params = {"start": start, "size": size}
+        return await self._execute_with_retry(self.client._request, "GET", "/api/hwid/devices", params=params)
+
     async def add_user_hwid_device(self, user_uuid: str, hwid: str, 
                                  platform: str = None, os_version: str = None,
                                  device_model: str = None, user_agent: str = None) -> Dict[str, Any]:

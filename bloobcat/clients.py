@@ -16,6 +16,7 @@ TORTOISE_ORM = {
                 "bloobcat.db.promotions",
                 "bloobcat.db.prize_wheel",
                 "bloobcat.db.discounts",
+                "bloobcat.db.hwid_local",
             ],
             "default_connection": "default",
         },

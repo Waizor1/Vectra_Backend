@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
 import asyncio
 from typing import Dict, Any, Optional
@@ -9,9 +9,11 @@ from bloobcat.db.users import Users
 from bloobcat.db.connections import Connections
 from bloobcat.db.payments import ProcessedPayments
 from bloobcat.logger import get_logger
+from bloobcat.db.hwid_local import HwidDeviceLocal
 from .client import RemnaWaveClient
-from bloobcat.settings import remnawave_settings
+from bloobcat.settings import remnawave_settings, test_mode
 from bloobcat.bot.notifications.general.referral import on_referral_registration
+from bloobcat.bot.notifications.trial.revoked_hwid import notify_trial_revoked_hwid
 
 router = APIRouter(prefix="/remnawave", tags=["remnawave"])
 logger = get_logger("remnawave_catcher")
@@ -176,6 +178,75 @@ async def remnawave_updater():
                 await asyncio.sleep(retry_interval)
         
         logger.debug(f"Всего получено {len(remnawave_users)} пользователей из RemnaWave")
+
+        # Анти-твинк: выключаем только в тестовом режиме
+        anti_twink_enabled = not test_mode
+
+        hwid_index: dict[str, set[str]] = {}
+        if anti_twink_enabled:
+            try:
+                # 0) Берем локальный кеш, чтобы учитывать старые HWID (даже если удалены на панели)
+                cached = await HwidDeviceLocal.all().values("hwid", "user_uuid")
+                for item in cached:
+                    hwid_value = item.get("hwid")
+                    user_uuid_value = item.get("user_uuid")
+                    if hwid_value and user_uuid_value:
+                        hwid_index.setdefault(str(hwid_value), set()).add(str(user_uuid_value))
+
+                # 1) Для каждого нашего пользователя тянем его устройства и сохраняем локально
+                for user in users_with_uuid:
+                    user_uuid_str = str(user.remnawave_uuid)
+                    try:
+                        raw_devices = await remnawave.users.get_user_hwid_devices(user_uuid_str)
+                    except Exception as e:
+                        logger.warning("Не удалось получить HWID для %s: %s", user_uuid_str, e)
+                        continue
+
+                    devices_payload = []
+                    if isinstance(raw_devices, list):
+                        devices_payload = [item for item in raw_devices if isinstance(item, dict)]
+                    elif isinstance(raw_devices, dict):
+                        data = raw_devices.get("response", raw_devices) or {}
+                        maybe_devices = data.get("devices") or data.get("response") or []
+                        if isinstance(maybe_devices, list):
+                            devices_payload = [item for item in maybe_devices if isinstance(item, dict)]
+
+                    for item in devices_payload:
+                        hwid = item.get("hwid")
+                        if not hwid:
+                            continue
+                        hwid_str = str(hwid)
+                        hwid_index.setdefault(hwid_str, set()).add(user_uuid_str)
+
+                        try:
+                            obj, created = await HwidDeviceLocal.get_or_create(
+                                hwid=hwid_str,
+                                user_uuid=user_uuid_str,
+                                defaults={"telegram_user_id": user.id},
+                            )
+                            need_update = False
+                            if obj.telegram_user_id != user.id:
+                                obj.telegram_user_id = user.id
+                                need_update = True
+                            obj.last_seen_at = datetime.now(ZoneInfo("UTC"))
+                            need_update = True
+                            if need_update:
+                                await obj.save(update_fields=["telegram_user_id", "last_seen_at"])
+                        except Exception as persist_exc:
+                            logger.warning(
+                                "Не удалось сохранить HWID %s/%s локально: %s",
+                                hwid_str,
+                                user_uuid_str,
+                                persist_exc,
+                            )
+
+                logger.debug("Индекс HWID собран (лок+панель): %s записей", len(hwid_index))
+            except Exception as e:
+                anti_twink_enabled = False
+                logger.warning(
+                    "Не удалось собрать индекс HWID, анти-твинк отключен для цикла: %s",
+                    e,
+                )
         
         # Создаем словарь с UUID в качестве ключей
         remnawave_users_dict = {}
@@ -189,6 +260,7 @@ async def remnawave_updater():
         for user in users_with_uuid:
             # Получаем UUID пользователя как строку
             user_uuid_str = str(user.remnawave_uuid)
+            msk_today = datetime.now(ZoneInfo("Europe/Moscow")).date()
             
             if user_uuid_str in remnawave_users_dict:
                 remnawave_user = remnawave_users_dict[user_uuid_str]
@@ -204,11 +276,59 @@ async def remnawave_updater():
                     if online_at:
                         new_connected_at = datetime.fromisoformat(online_at.replace('Z', '+00:00'))
                         old_connected_at = user.connected_at
-                        
-                        # Проверяем, является ли это первым подключением
-                        # (не было connected_at И пользователь не зарегистрирован)
+
                         registration_changed = False
-                        if not old_connected_at and not user.is_registered:
+                        connection_changed = False
+
+                        # Анти-твинк: проверяем только для новых подключений
+                        block_registration = False
+                        sanction_changed = False
+                        has_paid_subscription = bool(
+                            user.active_tariff_id
+                            and user.expired_at
+                            and user.expired_at >= msk_today
+                            and not user.is_trial
+                        )
+                        if (
+                            anti_twink_enabled
+                            and not old_connected_at
+                            and not user.is_registered
+                        ):
+                            current_uuid = str(user.remnawave_uuid) if user.remnawave_uuid else None
+                            user_devices_hwid = []
+                            if current_uuid:
+                                for hwid_value, owners in hwid_index.items():
+                                    if current_uuid in owners:
+                                        user_devices_hwid.append(hwid_value)
+
+                            duplicate_hwid = False
+                            for hwid_value in user_devices_hwid:
+                                owners = hwid_index.get(hwid_value, set())
+                                if any(owner != current_uuid for owner in owners):
+                                    duplicate_hwid = True
+                                    break
+
+                            if duplicate_hwid and not has_paid_subscription:
+                                block_registration = True
+                                user.is_trial = False
+                                user.used_trial = True
+                                user.expired_at = msk_today
+                                sanction_changed = True
+                                try:
+                                    await notify_trial_revoked_hwid(user)
+                                except Exception as notify_err:
+                                    logger.warning(
+                                        "Не удалось отправить уведомление об отзыве триала пользователю %s: %s",
+                                        user.id,
+                                        notify_err,
+                                    )
+                                logger.info(
+                                    "Анти-твинк: HWID повтор у пользователя %s, триал отозван",
+                                    user.id,
+                                )
+
+                        # Разрешаем регистрацию, если не заблокирован или если уже есть оплаченная подписка
+                        if not user.is_registered and (not block_registration or has_paid_subscription):
                             referrer = await user.referrer()
                             await on_activated_key(user.id, user.full_name, referrer_id=referrer.id if referrer else None, referrer_name=referrer.full_name if referrer else None, utm=user.utm)
                             user.is_registered = True
@@ -223,7 +343,6 @@ async def remnawave_updater():
                             elif referrer and referrer.is_partner:
                                 logger.info(f"Реферер {referrer.id} партнер, бонус 50₽ не начисляется за регистрацию {user.id}")
                         
-                        connection_changed = False
                         if not old_connected_at or new_connected_at > old_connected_at:
                             user.connected_at = new_connected_at
                             connection_changed = True
@@ -236,11 +355,14 @@ async def remnawave_updater():
                             # Только при первой регистрации нужно перепланировать задачи
                             if registration_changed:
                                 users_need_task_reschedule.append(user)
+                        elif sanction_changed:
+                            # Сохраняем пользователя, чтобы зафиксировать отзыв триала
+                            users_to_bulk_update.append(user)
 
                     # ----------------- Логика синхронизации `expired_at` (БД -> RemnaWave) -----------------
                     remnawave_expire_at = datetime.fromisoformat(remnawave_user['expireAt'].replace('Z', '+00:00'))
                     db_expire_at_date = user.expired_at
-                    today = datetime.now(ZoneInfo("Europe/Moscow")).date()
+                    today = msk_today
                     remnawave_expire_date = remnawave_expire_at.astimezone(ZoneInfo("Europe/Moscow")).date()
                     
                     if db_expire_at_date >= today and db_expire_at_date != remnawave_expire_date:
@@ -319,7 +441,7 @@ async def remnawave_updater():
                 # Используем bulk_update для обновления connected_at, is_registered и hwid_limit
                 await Users.bulk_update(
                     users_to_bulk_update, 
-                    fields=['connected_at', 'is_registered', 'hwid_limit']
+                    fields=['connected_at', 'is_registered', 'hwid_limit', 'is_trial', 'used_trial', 'expired_at']
                 )
                 logger.info(f"Батчевое обновление выполнено для {len(users_to_bulk_update)} пользователей")
             except Exception as e:
