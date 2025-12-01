@@ -4,7 +4,7 @@ from zoneinfo import ZoneInfo
 import asyncio
 from typing import Dict, Any, Optional
 
-from bloobcat.bot.notifications.admin import on_activated_key
+from bloobcat.bot.notifications.admin import on_activated_key, send_admin_message, write_to
 from bloobcat.db.users import Users
 from bloobcat.db.connections import Connections
 from bloobcat.db.payments import ProcessedPayments
@@ -321,6 +321,35 @@ async def remnawave_updater():
                                         "Не удалось отправить уведомление об отзыве триала пользователю %s: %s",
                                         user.id,
                                         notify_err,
+                                    )
+                                try:
+                                    referrer = await user.referrer()
+                                    ref_text = (
+                                        f"{referrer.full_name} (ID: <code>{referrer.id}</code>)"
+                                        if referrer
+                                        else "Отсутствует"
+                                    )
+                                    hwid_preview = ", ".join(user_devices_hwid[:5]) if user_devices_hwid else "—"
+                                    text = f"""🚫 Отозван триал (дублирующий HWID)
+
+👤 Пользователь: {user.full_name} ({'@'+user.username if user.username else 'нет юзернейма'})
+🆔 ID: <code>{user.id}</code>
+👨‍👩‍👧‍👦 Реферер: {ref_text}
+🖥 HWID: {hwid_preview}
+📅 expireAt → {msk_today}
+
+#trial #hwid #antitwink"""
+                                    await send_admin_message(
+                                        text=text,
+                                        reply_markup=await write_to(
+                                            user.id, referrer.id if referrer else 0
+                                        ),
+                                    )
+                                except Exception as admin_log_err:
+                                    logger.warning(
+                                        "Не удалось отправить лог в админ-чат об отзыве триала %s: %s",
+                                        user.id,
+                                        admin_log_err,
                                     )
                                 logger.info(
                                     "Анти-твинк: HWID повтор у пользователя %s, триал отозван",

@@ -20,34 +20,21 @@ async def send_admin_message(text: str, reply_markup=None):
     try:
         chat_id = admin_settings.telegram_id
         logger.info(f"Отправка сообщения в чат {chat_id}: {text[:100]}...")
-        
-        # Проверяем, является ли чат каналом
-        is_channel = str(chat_id).startswith('-100')
-        
-        # Для каналов используем HTML-разметку без reply_markup
-        if is_channel:
+        try:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                reply_markup=reply_markup,
+                parse_mode="HTML"
+            )
+        except Exception as btn_error:
+            logger.warning(f"Не удалось отправить сообщение с кнопками: {str(btn_error)}. Отправляем без кнопок.")
             await bot.send_message(
                 chat_id=chat_id,
                 text=text,
                 parse_mode="HTML"
             )
-        else:
-            # Для личных сообщений используем reply_markup
-            try:
-                await bot.send_message(
-                    chat_id=chat_id,
-                    text=text,
-                    reply_markup=reply_markup,
-                    parse_mode="HTML"
-                )
-            except Exception as btn_error:
-                logger.warning(f"Не удалось отправить сообщение с кнопками: {str(btn_error)}. Отправляем без кнопок.")
-                await bot.send_message(
-                    chat_id=chat_id,
-                    text=text,
-                    parse_mode="HTML"
-                )
-            
+        
     except TelegramBadRequest as e:
         if "chat not found" in str(e):
             logger.error(f"Чат {chat_id} не найден. Убедитесь, что бот добавлен в канал или начат диалог с админом")
