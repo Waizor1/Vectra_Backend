@@ -3,10 +3,13 @@ from datetime import date, datetime, timedelta
 import json
 import asyncio
 import random
+from functools import partial
 
 from fastapi import APIRouter, Depends, HTTPException, Header, Request # type: ignore
 from yookassa import Configuration, Payment, Webhook
 from yookassa.domain.notification import WebhookNotification, WebhookNotificationEventType
+from urllib3.exceptions import ConnectTimeoutError, ReadTimeoutError
+from requests.exceptions import ConnectionError as RequestsConnectionError, Timeout as RequestsTimeout
 
 from bloobcat.bot.bot import get_bot_username
 from bloobcat.bot.notifications.admin import on_payment, cancel_subscription
@@ -904,34 +907,74 @@ async def pay(tariff_id: int, email: str, device_count: int = 1, user: Users = D
             "discount_id": discount_id,
         }
 
-        payment = Payment.create({
-            "amount": {
-                "value": str(amount_to_pay),
-                "currency": "RUB"
-            },
-            "confirmation": {
-                "type": "redirect",
-                "return_url": f"https://t.me/{await get_bot_username()}/"
-            },
-            "metadata": metadata,
-            "capture": True,
-            "description": f"Оплата подписки пользователя {user.id} (Тариф: {tariff.name})",
-            "save_payment_method": True,
-            "receipt": {
-                "customer": {"email": email},
-                "items": [{
-                    "description": f"Подписка пользователя {user.id} ({tariff.name})",
-                    "quantity": "1",
-                    "amount": {
-                        "value": str(amount_to_pay),
-                        "currency": "RUB"
-                    },
-                    "vat_code": 1, # TODO: Проверить НДС
-                    "payment_subject": "service",
-                    "payment_mode": "full_payment"
-                }]
+        # Обернуть синхронный вызов YooKassa в async с таймаутом
+        try:
+            payment_data = {
+                "amount": {
+                    "value": str(amount_to_pay),
+                    "currency": "RUB"
+                },
+                "confirmation": {
+                    "type": "redirect",
+                    "return_url": f"https://t.me/{await get_bot_username()}/"
+                },
+                "metadata": metadata,
+                "capture": True,
+                "description": f"Оплата подписки пользователя {user.id} (Тариф: {tariff.name})",
+                "save_payment_method": True,
+                "receipt": {
+                    "customer": {"email": email},
+                    "items": [{
+                        "description": f"Подписка пользователя {user.id} ({tariff.name})",
+                        "quantity": "1",
+                        "amount": {
+                            "value": str(amount_to_pay),
+                            "currency": "RUB"
+                        },
+                        "vat_code": 1, # TODO: Проверить НДС
+                        "payment_subject": "service",
+                        "payment_mode": "full_payment"
+                    }]
+                }
             }
-        }, str(randint(100000, 999999999999)))
+
+            idempotence_key = str(randint(100000, 999999999999))
+
+            # Используем asyncio.to_thread для неблокирующего вызова с таймаутом
+            payment = await asyncio.wait_for(
+                asyncio.to_thread(partial(Payment.create, payment_data, idempotence_key)),
+                timeout=30.0
+            )
+
+        except asyncio.TimeoutError:
+            logger.error(
+                f"Таймаут при создании платежа YooKassa для пользователя {user.id}. "
+                f"Тариф: {tariff_id}, Сумма: {amount_to_pay}",
+                extra={'user_id': user.id, 'tariff_id': tariff_id, 'amount': amount_to_pay}
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Сервис оплаты временно недоступен. Пожалуйста, попробуйте позже."
+            )
+        except (ConnectTimeoutError, ReadTimeoutError, RequestsConnectionError, RequestsTimeout) as network_err:
+            logger.error(
+                f"Сетевая ошибка при создании платежа YooKassa для пользователя {user.id}: {network_err}",
+                extra={'user_id': user.id, 'tariff_id': tariff_id, 'amount': amount_to_pay, 'error_type': type(network_err).__name__}
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Сервис оплаты временно недоступен. Пожалуйста, попробуйте позже."
+            )
+        except Exception as e:
+            logger.error(
+                f"Неожиданная ошибка при создании платежа YooKassa для пользователя {user.id}: {e}",
+                extra={'user_id': user.id, 'tariff_id': tariff_id, 'amount': amount_to_pay, 'error_type': type(e).__name__},
+                exc_info=True
+            )
+            raise HTTPException(
+                status_code=500,
+                detail="Ошибка при создании платежа. Пожалуйста, попробуйте позже."
+            )
 
         # Резервации отключены
 
@@ -1095,31 +1138,72 @@ async def create_auto_payment(user: Users, disable_on_fail: bool = True) -> bool
                 "discount_id": discount_id,
             }
 
-            # Создаем автоплатеж Yookassa
-            payment = Payment.create({
-                "amount": {
-                    "value": str(amount_to_pay),
-                    "currency": "RUB"
-                },
-                "payment_method_id": user.renew_id,
-                "metadata": metadata,
-                "capture": True,
-                "description": f"Автопродление подписки пользователя {user.id} ({active_tariff.name})",
-                "receipt": {
-                    "customer": {"email": user.email if user.email else "auto@bloopcat.ru"},
-                    "items": [{
-                        "description": f"Автопродление подписки пользователя {user.id} ({active_tariff.name})",
-                        "quantity": "1",
-                        "amount": {
-                            "value": str(amount_to_pay),
-                            "currency": "RUB"
-                        },
-                        "vat_code": 1, # TODO: Проверить НДС
-                        "payment_subject": "service",
-                        "payment_mode": "full_payment"
-                    }]
+            # Создаем автоплатеж Yookassa с таймаутом
+            try:
+                payment_data = {
+                    "amount": {
+                        "value": str(amount_to_pay),
+                        "currency": "RUB"
+                    },
+                    "payment_method_id": user.renew_id,
+                    "metadata": metadata,
+                    "capture": True,
+                    "description": f"Автопродление подписки пользователя {user.id} ({active_tariff.name})",
+                    "receipt": {
+                        "customer": {"email": user.email if user.email else "auto@bloopcat.ru"},
+                        "items": [{
+                            "description": f"Автопродление подписки пользователя {user.id} ({active_tariff.name})",
+                            "quantity": "1",
+                            "amount": {
+                                "value": str(amount_to_pay),
+                                "currency": "RUB"
+                            },
+                            "vat_code": 1, # TODO: Проверить НДС
+                            "payment_subject": "service",
+                            "payment_mode": "full_payment"
+                        }]
+                    }
                 }
-            }, str(randint(100000, 999999999999)))
+
+                idempotence_key = str(randint(100000, 999999999999))
+
+                # Используем asyncio.to_thread для неблокирующего вызова с таймаутом
+                payment = await asyncio.wait_for(
+                    asyncio.to_thread(partial(Payment.create, payment_data, idempotence_key)),
+                    timeout=30.0
+                )
+
+            except asyncio.TimeoutError:
+                logger.error(
+                    f"Таймаут при создании автоплатежа YooKassa для пользователя {user.id}. "
+                    f"Тариф: {active_tariff.id}, Сумма: {amount_to_pay}",
+                    extra={'user_id': user.id, 'tariff_id': active_tariff.id, 'amount': amount_to_pay}
+                )
+                await notify_auto_renewal_failure(
+                    user,
+                    reason="Сервис оплаты временно недоступен (таймаут)",
+                    will_retry=(user.expired_at and (user.expired_at - date.today()).days >= 0)
+                )
+                return False
+            except (ConnectTimeoutError, ReadTimeoutError, RequestsConnectionError, RequestsTimeout) as network_err:
+                logger.error(
+                    f"Сетевая ошибка при создании автоплатежа YooKassa для пользователя {user.id}: {network_err}",
+                    extra={'user_id': user.id, 'tariff_id': active_tariff.id, 'amount': amount_to_pay, 'error_type': type(network_err).__name__}
+                )
+                await notify_auto_renewal_failure(
+                    user,
+                    reason="Сервис оплаты временно недоступен (ошибка сети)",
+                    will_retry=(user.expired_at and (user.expired_at - date.today()).days >= 0)
+                )
+                return False
+            except Exception as create_exc:
+                logger.error(
+                    f"Неожиданная ошибка при создании автоплатежа YooKassa для пользователя {user.id}: {create_exc}",
+                    extra={'user_id': user.id, 'tariff_id': active_tariff.id, 'amount': amount_to_pay, 'error_type': type(create_exc).__name__},
+                    exc_info=True
+                )
+                # Для непредвиденных ошибок пробрасываем дальше
+                raise
 
             # Сбрасываем триал, если пользователь платит первый раз (даже автоплатежом)
             if user.is_trial:

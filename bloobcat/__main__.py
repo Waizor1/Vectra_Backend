@@ -1,11 +1,13 @@
 import asyncio
+import time
 from contextlib import asynccontextmanager
+from datetime import datetime
 
 import uvicorn # type: ignore
 from aerich import Command # type: ignore
 from aiogram.types import BotCommand, MenuButtonWebApp, WebAppInfo
 from fastadmin import fastapi_app as admin_app # type: ignore
-from fastapi import FastAPI # type: ignore
+from fastapi import FastAPI, Request # type: ignore
 from fastapi.middleware.cors import CORSMiddleware # type: ignore
 from tortoise.contrib.fastapi import RegisterTortoise # type: ignore
 
@@ -181,6 +183,77 @@ async def lifespan(fastapi_app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan, openapi_url=None)
+
+# Healthcheck endpoint - должен быть ПЕРЕД middleware для быстрой проверки
+@app.get("/health")
+async def health_check():
+    """
+    Простой healthcheck endpoint для мониторинга состояния приложения.
+    Возвращает текущий статус и timestamp.
+    """
+    return {
+        "status": "ok",
+        "timestamp": datetime.now().isoformat(),
+        "service": "bloobcat"
+    }
+
+# Middleware для мониторинга долгих запросов
+@app.middleware("http")
+async def monitor_slow_requests(request: Request, call_next):
+    """
+    Мониторинг времени выполнения запросов.
+    Логирует предупреждения для запросов > 5 сек и ошибки для запросов > 30 сек.
+    Исключает /health из мониторинга для предотвращения засорения логов.
+    """
+    # Пропускаем мониторинг для healthcheck endpoint
+    if request.url.path == "/health":
+        return await call_next(request)
+
+    start_time = time.time()
+
+    try:
+        response = await call_next(request)
+    except Exception as e:
+        duration = time.time() - start_time
+        logger.error(
+            f"Ошибка при обработке запроса: {request.method} {request.url.path} "
+            f"(заняло {duration:.2f} сек): {e}",
+            extra={
+                'method': request.method,
+                'path': request.url.path,
+                'duration': duration,
+                'error': str(e)
+            }
+        )
+        raise
+
+    duration = time.time() - start_time
+
+    # Логируем медленные запросы (> 5 секунд)
+    if duration > 5.0:
+        logger.warning(
+            f"Медленный запрос: {request.method} {request.url.path} "
+            f"занял {duration:.2f} сек",
+            extra={
+                'method': request.method,
+                'path': request.url.path,
+                'duration': duration
+            }
+        )
+
+    # Логируем критически долгие запросы (> 30 секунд)
+    if duration > 30.0:
+        logger.error(
+            f"КРИТИЧЕСКИ медленный запрос: {request.method} {request.url.path} "
+            f"занял {duration:.2f} сек",
+            extra={
+                'method': request.method,
+                'path': request.url.path,
+                'duration': duration
+            }
+        )
+
+    return response
 
 origins = [
     "https://ttestapp.guarddogvpn.com",
