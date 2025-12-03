@@ -114,7 +114,7 @@ async def remnawave_updater():
             return
             
         logger.debug(f"Найдено {len(users_with_uuid)} пользователей с UUID и датой истечения")
-        
+
         # Получаем данные из RemnaWave с повторными попытками
         remnawave_users = []
         start_retry_time = datetime.now()
@@ -254,7 +254,15 @@ async def remnawave_updater():
             uuid_key = user.get('uuid')
             if uuid_key:
                 remnawave_users_dict[uuid_key] = user
-                
+
+        # Загружаем актуальные данные expired_at и hwid_limit из БД для избежания race condition
+        # Важно: делаем это ПОСЛЕ получения данных из RemnaWave, чтобы минимизировать окно race condition
+        # (если промокод был применён во время загрузки данных из RemnaWave)
+        user_ids = [u.id for u in users_with_uuid]
+        fresh_users_data = await Users.filter(id__in=user_ids).values('id', 'expired_at', 'hwid_limit')
+        fresh_data_map = {item['id']: item for item in fresh_users_data}
+        logger.debug(f"Загружены актуальные данные для {len(fresh_data_map)} пользователей")
+
         # Выполним проверку пользователей
         not_found_users = []
         for user in users_with_uuid:
@@ -389,18 +397,23 @@ async def remnawave_updater():
                             users_to_bulk_update.append(user)
 
                     # ----------------- Логика синхронизации `expired_at` (БД -> RemnaWave) -----------------
+                    # Используем актуальное значение expired_at из fresh_data_map (загруженного в начале)
+                    # чтобы избежать race condition (например, если промокод был применён во время работы цикла)
+                    fresh_data = fresh_data_map.get(user.id)
+                    db_expire_at_date = fresh_data['expired_at'] if fresh_data else user.expired_at
+
                     remnawave_expire_at = datetime.fromisoformat(remnawave_user['expireAt'].replace('Z', '+00:00'))
-                    db_expire_at_date = user.expired_at
                     today = msk_today
                     remnawave_expire_date = remnawave_expire_at.astimezone(ZoneInfo("Europe/Moscow")).date()
-                    
-                    if db_expire_at_date >= today and db_expire_at_date != remnawave_expire_date:
+
+                    if db_expire_at_date and db_expire_at_date >= today and db_expire_at_date != remnawave_expire_date:
                         logger.debug(f"Обновление даты истечения в RemnaWave для {user.id}: {remnawave_expire_date} -> {db_expire_at_date}")
                         remnawave_updates['expireAt'] = db_expire_at_date
 
                     # ----------------- Логика синхронизации `hwid_limit` (двусторонняя) -----------------
                     remnawave_hwid_limit = remnawave_user.get('hwidDeviceLimit')
-                    db_hwid_limit = user.hwid_limit
+                    # Используем актуальное значение hwid_limit из fresh_data_map
+                    db_hwid_limit = fresh_data['hwid_limit'] if fresh_data else user.hwid_limit
 
                     hwid_changed = False
                     if remnawave_hwid_limit is not None and isinstance(remnawave_hwid_limit, int):
