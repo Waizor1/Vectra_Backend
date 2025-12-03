@@ -60,6 +60,7 @@ async def remnawave_updater():
     # Списки для батчевого обновления
     users_to_bulk_update = []
     users_need_task_reschedule = []
+    users_with_sanctions = []
     
     # Константы для повторных попыток
     max_retry_time = 30  # максимальное время для повторных попыток в секундах
@@ -322,6 +323,7 @@ async def remnawave_updater():
                                 user.used_trial = True
                                 user.expired_at = msk_today
                                 sanction_changed = True
+                                users_with_sanctions.append(user)
                                 try:
                                     await notify_trial_revoked_hwid(user)
                                 except Exception as notify_err:
@@ -484,7 +486,7 @@ async def remnawave_updater():
                 # Используем bulk_update для обновления connected_at, is_registered и hwid_limit
                 await Users.bulk_update(
                     users_to_bulk_update, 
-                    fields=['connected_at', 'is_registered', 'hwid_limit', 'is_trial', 'used_trial', 'expired_at']
+                    fields=['connected_at', 'is_registered', 'hwid_limit', 'is_trial', 'used_trial']
                 )
                 logger.info(f"Батчевое обновление выполнено для {len(users_to_bulk_update)} пользователей")
             except Exception as e:
@@ -496,6 +498,15 @@ async def remnawave_updater():
                     except Exception as save_error:
                         logger.error(f"Ошибка при сохранении пользователя {user.id}: {save_error}")
                         errors += 1
+
+        # Точечно фиксируем санкционные изменения expire_at
+        if users_with_sanctions:
+            for user in users_with_sanctions:
+                try:
+                    await user.save(update_fields=['is_trial', 'used_trial', 'expired_at'])
+                except Exception as e:
+                    logger.error(f"Ошибка при сохранении санкционных изменений пользователя {user.id}: {e}")
+                    errors += 1
         
         # Перепланируем задачи только для пользователей, которым это действительно нужно
         if users_need_task_reschedule:
