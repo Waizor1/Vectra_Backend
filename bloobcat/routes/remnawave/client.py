@@ -183,7 +183,10 @@ class UsersAPI:
         if 'expireAt' in kwargs and isinstance(kwargs['expireAt'], date):
             moscow_tz = ZoneInfo("Europe/Moscow")
             today = datetime.now(moscow_tz).date()
-            if kwargs['expireAt'] <= today:
+            # Нормализуем expireAt к date для безопасного сравнения
+            expire_val = kwargs['expireAt']
+            expire_date = expire_val.date() if isinstance(expire_val, datetime) else expire_val
+            if expire_date <= today:
                 # Формируем новое время: текущее +1 минута по МСК и конвертим в UTC
                 async def _bump_expire():
                     now_msk = datetime.now(moscow_tz)
@@ -203,7 +206,9 @@ class UsersAPI:
         data = {"uuid": uuid}
         for key, value in kwargs.items():
             if key == 'expireAt' and isinstance(value, date):
-                data['expireAt'] = self._format_expire_at(value)
+                # Нормализуем к date перед форматированием (datetime наследуется от date)
+                normalized = value.date() if isinstance(value, datetime) else value
+                data['expireAt'] = self._format_expire_at(normalized)
             else:
                 data[key] = value
         logger.debug(f"Данные для API: {data}")
