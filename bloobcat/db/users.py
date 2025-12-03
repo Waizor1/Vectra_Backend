@@ -1,5 +1,5 @@
-from datetime import date, timedelta
-from typing import Optional, Any
+from datetime import date, datetime, timedelta
+from typing import Optional, Any, Union
 
 from aiogram.types import User
 from aiogram.utils.web_app import WebAppUser
@@ -24,6 +24,25 @@ import zlib
 from bloobcat.bot.notifications.trial.granted import notify_trial_granted
 
 logger = get_logger("users_db")
+
+
+def normalize_date(val: Optional[Union[date, datetime]]) -> Optional[date]:
+    """Нормализует datetime/date к date для безопасного сравнения.
+
+    Args:
+        val: datetime.datetime или datetime.date, либо None
+
+    Returns:
+        datetime.date или None
+    """
+    if val is None:
+        return None
+    if isinstance(val, datetime):
+        return val.date()
+    if isinstance(val, date):
+        return val
+    # Fallback для неожиданных типов (не должно происходить при корректной типизации)
+    return val
 
 
 def crc32(a: str):
@@ -309,7 +328,8 @@ class Users(models.Model):
         # Если expired_at не установлен, возвращаем None
         if not self.expired_at:
             return None
-        days_left = (self.expired_at - date.today()).days
+        expired_at = normalize_date(self.expired_at)
+        days_left = (expired_at - date.today()).days
         # Возвращаем 0, если подписка истекла сегодня или раньше
         return max(days_left, 0)
 
@@ -326,12 +346,14 @@ class Users(models.Model):
 
     async def extend_subscription(self, days: int):
         current_date = date.today()
-        
+
         # Определяем базовую дату для продления.
         # Если подписка/триал активны (дата окончания в будущем), используем ее.
         # Иначе (подписка истекла или ее не было), используем текущую дату.
-        start_date = max(self.expired_at, current_date) if self.expired_at else current_date
-        
+        # Используем normalize_date для безопасного сравнения datetime/date
+        expired_at_normalized = normalize_date(self.expired_at)
+        start_date = max(expired_at_normalized, current_date) if expired_at_normalized else current_date
+
         self.expired_at = start_date + timedelta(days=days)
         
         await self.save()
@@ -389,18 +411,19 @@ class Users(models.Model):
         old_is_trial = None
         old_is_blocked = None
         should_reschedule = False
-        
+
         if self.id is not None:
             orig = await Users.get_or_none(id=self.id)
             if orig:
-                old_expired_at = orig.expired_at
+                old_expired_at = normalize_date(orig.expired_at)
                 old_is_subscribed = orig.is_subscribed
                 old_is_trial = orig.is_trial
                 old_is_blocked = orig.is_blocked
-                
+
                 # Check if any fields that affect scheduling have changed
+                current_expired_at = normalize_date(self.expired_at)
                 should_reschedule = (
-                    self.expired_at != old_expired_at or
+                    current_expired_at != old_expired_at or
                     self.is_subscribed != old_is_subscribed or
                     self.is_trial != old_is_trial or
                     self.is_blocked != old_is_blocked
@@ -411,11 +434,11 @@ class Users(models.Model):
         else:
             # New user, always schedule tasks
             should_reschedule = True
-            
+
         # Save the user as usual
         await super().save(*args, **kwargs)
-        
-        if self.expired_at and self.expired_at != old_expired_at:
+
+        if self.expired_at and normalize_date(self.expired_at) != old_expired_at:
             # Немедленно обновляем RemnaWave при изменении expired_at
             if self.remnawave_uuid:
                 try:
@@ -640,11 +663,13 @@ class UsersModelAdmin(TortoiseModelAdmin):
             updates_needed = {}
             
             # Проверяем изменение даты истечения
-            if obj.expired_at and obj.expired_at != original_expired_at:
+            obj_expired_at = normalize_date(obj.expired_at)
+            orig_expired_at = normalize_date(original_expired_at)
+            if obj_expired_at and obj_expired_at != orig_expired_at:
                 from datetime import date
                 today = date.today()
-                
-                if obj.expired_at < today:
+
+                if obj_expired_at < today:
                     logger.warning(f"Дата истечения {obj.expired_at} в прошлом. Пропускаем обновление даты.")
                 else:
                     updates_needed["expireAt"] = obj.expired_at

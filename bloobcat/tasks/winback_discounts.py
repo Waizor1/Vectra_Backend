@@ -2,7 +2,7 @@ import asyncio
 from datetime import date, timedelta, time, datetime
 from zoneinfo import ZoneInfo
 
-from bloobcat.db.users import Users
+from bloobcat.db.users import Users, normalize_date
 from bloobcat.db.discounts import PersonalDiscount
 from bloobcat.db.notifications import NotificationMarks
 from bloobcat.logger import get_logger
@@ -123,7 +123,8 @@ async def create_winback_discounts():
             sent_at__gte=datetime.now(MOSCOW) - timedelta(days=NOTIFICATION_COOLDOWN_DAYS)
         ).exists()
 
-        days_since_expired = (date.today() - user.expired_at).days if user.expired_at else 0
+        expired_at = normalize_date(user.expired_at)
+        days_since_expired = (date.today() - expired_at).days if expired_at else 0
         discount_percent = _compute_winback_discount_percent(days_since_expired)
         if discount_percent <= 0:
             logger.debug(f"User {user.id} not eligible for winback discount yet (days_since_expired={days_since_expired}).")

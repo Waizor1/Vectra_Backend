@@ -811,20 +811,20 @@ async def system_expiring_callback(callback: CallbackQuery):
     # Получаем истекающие подписки напрямую
     from datetime import datetime, timedelta
     from pytz import timezone
-    from bloobcat.db.users import Users
-    
+    from bloobcat.db.users import Users, normalize_date
+
     MOSCOW_TZ = timezone('Europe/Moscow')
     today = datetime.now(MOSCOW_TZ).date()
-    
+
     # Ищем подписки истекающие в ближайшие 7 дней
     future_date = today + timedelta(days=7)
-    
+
     users = await Users.filter(
         is_registered=True,
         expired_at__gte=today,
         expired_at__lte=future_date
     ).order_by('expired_at').limit(10)
-    
+
     if not users:
         await callback.message.edit_text(
             "⏰ **ИСТЕКАЮЩИЕ ПОДПИСКИ**\n\n"
@@ -834,18 +834,19 @@ async def system_expiring_callback(callback: CallbackQuery):
             parse_mode="Markdown"
         )
         return
-    
+
     # Формируем список
     expiring_text = f"⏰ **ИСТЕКАЮЩИЕ ПОДПИСКИ** (7 дней)\n\n"
-    
+
     for user in users:
-        days_left = (user.expired_at - today).days
+        user_expired_at = normalize_date(user.expired_at)
+        days_left = (user_expired_at - today).days if user_expired_at else 0
         auto_renewal = "✅" if user.is_subscribed and user.renew_id else "❌"
         trial_info = "🆓" if user.is_trial else "💰"
-        
+
         expiring_text += f"👤 **{user.full_name or 'Без имени'}**\n"
         expiring_text += f"   ID: `{user.id}`\n"
-        expiring_text += f"   📅 Истекает: {user.expired_at.strftime('%d.%m.%Y')} (через {days_left} дн.)\n"
+        expiring_text += f"   📅 Истекает: {user_expired_at.strftime('%d.%m.%Y') if user_expired_at else 'N/A'} (через {days_left} дн.)\n"
         expiring_text += f"   {trial_info} Автопродление: {auto_renewal}\n\n"
     
     expiring_text += f"📊 *Показано: {len(users)} из истекающих*"

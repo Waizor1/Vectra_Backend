@@ -7,7 +7,7 @@ from pytz import timezone
 
 from bloobcat.bot.routes.admin.functions import IsAdmin, search_user
 from bloobcat.routes.remnawave.catcher import remnawave_updater
-from bloobcat.db.users import Users
+from bloobcat.db.users import Users, normalize_date
 from bloobcat.db.payments import ProcessedPayments
 from bloobcat.logger import get_logger
 from bloobcat.routes.payment import create_auto_payment
@@ -77,14 +77,15 @@ async def admin_expiring_subs(message: Message):
         response = f"Подписки, истекающие в ближайшие {days} дней ({len(users)} пользователей):\n\n"
         
         for user in users:
-            days_left = (user.expired_at - today).days
+            user_expired_at = normalize_date(user.expired_at)
+            days_left = (user_expired_at - today).days if user_expired_at else 0
             auto_renewal = "✅" if user.is_subscribed and user.renew_id else "❌"
             trial_info = "🆓 Пробный" if user.is_trial else "💰 Платный"
             used_trial = "✅" if user.used_trial else "❌"
-            
+
             response += (f"ID: {user.id}\n"
                         f"Имя: {user.name()}\n"
-                        f"Истекает: {user.expired_at.strftime('%d.%m.%Y')} (через {days_left} дн.)\n"
+                        f"Истекает: {user_expired_at.strftime('%d.%m.%Y') if user_expired_at else 'N/A'} (через {days_left} дн.)\n"
                         f"Тип: {trial_info}\n"
                         f"Пробный использован: {used_trial}\n"
                         f"Автопродление: {auto_renewal}\n\n")
@@ -253,10 +254,11 @@ async def admin_user_info(message: Message):
         today = moscow_now.date()
         
         # Формируем статус подписки
+        user_expired_at = normalize_date(user.expired_at)
         if not user.is_registered:
             subscription_status = "❌ Не зарегистрирован"
-        elif user.expired_at and user.expired_at > today:
-            days_left = (user.expired_at - today).days
+        elif user_expired_at and user_expired_at > today:
+            days_left = (user_expired_at - today).days
             trial_info = " (пробный период)" if user.is_trial else ""
             subscription_status = f"✅ Активна{trial_info} (осталось {days_left} дн.)"
         else:

@@ -5,7 +5,7 @@ import asyncio
 from typing import Dict, Any, Optional
 
 from bloobcat.bot.notifications.admin import on_activated_key, send_admin_message, write_to
-from bloobcat.db.users import Users
+from bloobcat.db.users import Users, normalize_date
 from bloobcat.db.connections import Connections
 from bloobcat.db.payments import ProcessedPayments
 from bloobcat.logger import get_logger
@@ -294,7 +294,7 @@ async def remnawave_updater():
                         has_paid_subscription = bool(
                             user.active_tariff_id
                             and user.expired_at
-                            and user.expired_at >= msk_today
+                            and normalize_date(user.expired_at) >= msk_today
                             and not user.is_trial
                         )
                         if (
@@ -400,7 +400,8 @@ async def remnawave_updater():
                     # Используем актуальное значение expired_at из fresh_data_map (загруженного в начале)
                     # чтобы избежать race condition (например, если промокод был применён во время работы цикла)
                     fresh_data = fresh_data_map.get(user.id)
-                    db_expire_at_date = fresh_data['expired_at'] if fresh_data else user.expired_at
+                    raw_expire = fresh_data['expired_at'] if fresh_data else user.expired_at
+                    db_expire_at_date = normalize_date(raw_expire)
 
                     remnawave_expire_at = datetime.fromisoformat(remnawave_user['expireAt'].replace('Z', '+00:00'))
                     today = msk_today

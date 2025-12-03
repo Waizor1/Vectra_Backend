@@ -3,7 +3,7 @@ from zoneinfo import ZoneInfo
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from bloobcat.bot.bot import bot
 from bloobcat.bot.keyboard import webapp_inline_button
-from bloobcat.db.users import Users
+from bloobcat.db.users import Users, normalize_date
 from bloobcat.db.payments import ProcessedPayments
 from bloobcat.logger import get_logger
 from bloobcat.bot.notifications.localization import get_user_locale
@@ -25,7 +25,8 @@ async def notify_auto_payment(user: Users):
     if not last_payment:
         logger.warning(f"Не найден успешный платеж для пользователя {user.id}, уведомление об автоплатеже не отправлено")
         return
-    days_remaining = (user.expired_at - datetime.now().date()).days
+    user_expired_at = normalize_date(user.expired_at)
+    days_remaining = (user_expired_at - datetime.now().date()).days if user_expired_at else 0
     logger.info(f"Отправка уведомления об автоплатеже пользователю {user.id}, дней до списания: {days_remaining}, сумма: {last_payment.amount}")
     if lang == 'ru':
         text = (

@@ -6,7 +6,7 @@ from bloobcat.bot.routes.admin.functions import IsAdmin, search_user, search_use
 from bloobcat.bot.routes.admin.navigation import UserSearchState, create_fake_message
 from bloobcat.logger import get_logger
 from .keyboards import get_user_management_menu, get_users_menu, get_main_admin_menu, get_confirmation_keyboard
-from bloobcat.db.users import Users
+from bloobcat.db.users import Users, normalize_date
 from bloobcat.settings import app_settings
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.types import InlineKeyboardButton
@@ -254,10 +254,11 @@ async def get_user_brief_info(user):
     reg_status = "✅ Зарегистрирован" if user.is_registered else "❌ Не зарегистрирован"
     
     # Статус подписки
+    user_expired_at = normalize_date(user.expired_at)
     if not user.is_registered:
         sub_status = "❌ Не активирован"
-    elif user.expired_at and user.expired_at > today:
-        days_left = (user.expired_at - today).days
+    elif user_expired_at and user_expired_at > today:
+        days_left = (user_expired_at - today).days
         trial_info = " (trial)" if user.is_trial else ""
         sub_status = f"✅ Активна{trial_info} (осталось {days_left} дн.)"
     else:
@@ -338,16 +339,17 @@ async def show_user_info_detail(callback, user):
 async def show_subscription_management(callback, user):
     """Управление подпиской пользователя"""
     from datetime import date
-    
+
     today = date.today()
-    days_left = (user.expired_at - today).days if user.expired_at else 0
-    
+    user_expired_at = normalize_date(user.expired_at)
+    days_left = (user_expired_at - today).days if user_expired_at else 0
+
     text = (
         f"💰 **УПРАВЛЕНИЕ ПОДПИСКОЙ**\n\n"
         f"👤 Пользователь: {user.full_name} (`{user.id}`)\n\n"
         f"**Текущий статус:**\n"
         f"• Зарегистрирован: {'✅' if user.is_registered else '❌'}\n"
-        f"• Дата истечения: {user.expired_at.strftime('%d.%m.%Y') if user.expired_at else 'Нет'}\n"
+        f"• Дата истечения: {user_expired_at.strftime('%d.%m.%Y') if user_expired_at else 'Нет'}\n"
         f"• Дней осталось: {days_left if days_left > 0 else 0}\n"
         f"• Тип: {'🆓 Trial' if user.is_trial else '💰 Платная'}\n\n"
         f"**Доступные команды:**\n"

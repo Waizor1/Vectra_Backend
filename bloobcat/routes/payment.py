@@ -21,7 +21,7 @@ from bloobcat.bot.notifications.subscription.renewal import (
 )
 from bloobcat.bot.notifications.prize_wheel import notify_spin_awarded
 from bloobcat.db.tariff import Tariffs
-from bloobcat.db.users import Users
+from bloobcat.db.users import Users, normalize_date
 from bloobcat.funcs.validate import validate
 from bloobcat.settings import yookassa_settings, remnawave_settings
 from bloobcat.db.payments import ProcessedPayments
@@ -97,7 +97,11 @@ async def yookassa_webhook(request: Request, secret: str):
                 extra={'payment_id': payment.id if payment else 'unknown'}
             )
             return {"status": "error", "message": "User not found"}
-        
+
+        # Вычисляем will_retry для уведомлений об ошибках
+        user_expired_at = normalize_date(user.expired_at)
+        will_retry = user_expired_at is not None and (user_expired_at - date.today()).days >= 0
+
         # Проверяем, не обработан ли уже этот платеж
         if not payment.id:
             logger.error(
@@ -173,7 +177,7 @@ async def yookassa_webhook(request: Request, secret: str):
                     await user.save()
                     # Уведомляем админа об отключении автопродления из-за отмены платежа
                     await cancel_subscription(user, reason="Автоплатеж был отменен")
-                await notify_auto_renewal_failure(user, reason="Платеж был отменен", will_retry=(user.expired_at and (user.expired_at - date.today()).days >= 0))
+                await notify_auto_renewal_failure(user, reason="Платеж был отменен", will_retry=will_retry)
             return {"status": "ok"}
         
         if event != WebhookNotificationEventType.PAYMENT_SUCCEEDED:
@@ -189,7 +193,7 @@ async def yookassa_webhook(request: Request, secret: str):
                     await user.save()
                     # Уведомляем админа об отключении автопродления из-за неуспешного платежа
                     await cancel_subscription(user, reason=f"Автоплатеж завершился со статусом: {payment.status}")
-                await notify_auto_renewal_failure(user, reason=f"Платеж не прошел (статус: {payment.status})", will_retry=(user.expired_at and (user.expired_at - date.today()).days >= 0))
+                await notify_auto_renewal_failure(user, reason=f"Платеж не прошел (статус: {payment.status})", will_retry=will_retry)
             return {"status": "ok"}
         
         try:
@@ -224,15 +228,16 @@ async def yookassa_webhook(request: Request, secret: str):
             # Проверяем, есть ли у пользователя активная подписка и активный тариф
             current_date = date.today()
             additional_days = 0
-            
-            if user.expired_at and user.expired_at > current_date and user.active_tariff_id:
+            user_expired_at = normalize_date(user.expired_at)
+
+            if user_expired_at and user_expired_at > current_date and user.active_tariff_id:
                 # У пользователя есть действующая подписка
                 try:
                     # Получаем активный тариф
                     active_tariff = await ActiveTariffs.get(id=user.active_tariff_id)
                     
                     # Вычисляем оставшиеся дни подписки
-                    days_remaining = (user.expired_at - current_date).days
+                    days_remaining = (user_expired_at - current_date).days
                     logger.info(f"У пользователя {user.id} осталось {days_remaining} дней подписки")
                     
                     # Рассчитываем количество дней, которое давал старый тариф
@@ -713,11 +718,12 @@ async def pay(tariff_id: int, email: str, device_count: int = 1, user: Users = D
 
         current_date = date.today()
         additional_days = 0
+        user_expired_at = normalize_date(user.expired_at)
         # --- NEW: перерасчёт остатка по старому тарифу ---
-        if user.expired_at and user.expired_at > current_date and user.active_tariff_id:
+        if user_expired_at and user_expired_at > current_date and user.active_tariff_id:
             try:
                 active_tariff = await ActiveTariffs.get(id=user.active_tariff_id)
-                days_remaining = (user.expired_at - current_date).days
+                days_remaining = (user_expired_at - current_date).days
                 logger.info(f"У пользователя {user.id} осталось {days_remaining} дней подписки")
                 old_months = int(active_tariff.months)
                 old_target_date = add_months_safe(current_date, old_months)
@@ -986,11 +992,15 @@ async def create_auto_payment(user: Users, disable_on_fail: bool = True) -> bool
     Returns:
         bool: True если платеж успешно создан, False в случае ошибки
     """
+    # Вычисляем will_retry один раз для всех уведомлений об ошибках
+    user_expired_at = normalize_date(user.expired_at)
+    will_retry = user_expired_at is not None and (user_expired_at - date.today()).days >= 0
+
     try:
         # --- Modify auto-payment logic to use active_tariff_id ---
         if not user.active_tariff_id:
             logger.error(f"У пользователя {user.id} не установлен active_tariff_id. Автопродление невозможно.")
-            await notify_auto_renewal_failure(user, reason="Отсутствует информация о последнем активном тарифе", will_retry=(user.expired_at and (user.expired_at - date.today()).days >= 0))
+            await notify_auto_renewal_failure(user, reason="Отсутствует информация о последнем активном тарифе", will_retry=will_retry)
             # Отключаем подписку, если нет активного тарифа
             user.is_subscribed = False
             user.renew_id = None
@@ -1011,7 +1021,7 @@ async def create_auto_payment(user: Users, disable_on_fail: bool = True) -> bool
             user.renew_id = None
             await user.save()
             logger.warning(f"Автопродление отключено для {user.id} из-за отсутствия активного тарифа ID={user.active_tariff_id} в базе.")
-            await notify_auto_renewal_failure(user, reason=f"Не найден активный тариф (ID: {user.active_tariff_id}) для автопродления", will_retry=(user.expired_at and (user.expired_at - date.today()).days >= 0))
+            await notify_auto_renewal_failure(user, reason=f"Не найден активный тариф (ID: {user.active_tariff_id}) для автопродления", will_retry=will_retry)
             # Уведомляем админа об отключении автопродления из-за отсутствия тарифа в базе
             await cancel_subscription(user, reason=f"Не найден активный тариф (ID: {user.active_tariff_id}) в базе")
             return False
@@ -1035,7 +1045,7 @@ async def create_auto_payment(user: Users, disable_on_fail: bool = True) -> bool
                 extra={'user_id': user.id, 'tariff_id': active_tariff.id, 'months': months}
             )
             # Уведомляем пользователя о неудаче (здесь маловероятно, но все же)
-            await notify_auto_renewal_failure(user, reason="Ошибка при расчете срока продления", will_retry=(user.expired_at and (user.expired_at - date.today()).days >= 0))
+            await notify_auto_renewal_failure(user, reason="Ошибка при расчете срока продления", will_retry=will_retry)
             return False
 
         # Проверка полной оплаты с баланса
@@ -1182,7 +1192,7 @@ async def create_auto_payment(user: Users, disable_on_fail: bool = True) -> bool
                 await notify_auto_renewal_failure(
                     user,
                     reason="Сервис оплаты временно недоступен (таймаут)",
-                    will_retry=(user.expired_at and (user.expired_at - date.today()).days >= 0)
+                    will_retry=will_retry
                 )
                 return False
             except (ConnectTimeoutError, ReadTimeoutError, RequestsConnectionError, RequestsTimeout) as network_err:
@@ -1193,7 +1203,7 @@ async def create_auto_payment(user: Users, disable_on_fail: bool = True) -> bool
                 await notify_auto_renewal_failure(
                     user,
                     reason="Сервис оплаты временно недоступен (ошибка сети)",
-                    will_retry=(user.expired_at and (user.expired_at - date.today()).days >= 0)
+                    will_retry=will_retry
                 )
                 return False
             except Exception as create_exc:
@@ -1241,5 +1251,5 @@ async def create_auto_payment(user: Users, disable_on_fail: bool = True) -> bool
             # Уведомляем админа об отключении автопродления из-за ошибки
             await cancel_subscription(user, reason=f"Ошибка при создании автоплатежа: {str(e)}")
         logger.warning(f"Автопродление отключено для {user.id} из-за ошибки при создании автоплатежа: {e}")
-        await notify_auto_renewal_failure(user, reason=f"Внутренняя ошибка сервера при попытке автопродления", will_retry=(user.expired_at and (user.expired_at - date.today()).days >= 0))
+        await notify_auto_renewal_failure(user, reason=f"Внутренняя ошибка сервера при попытке автопродления", will_retry=will_retry)
         return False

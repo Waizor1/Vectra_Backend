@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone, date
 from decimal import Decimal, ROUND_HALF_UP, getcontext
 import uuid  # For generating new familyurl
 
-from bloobcat.db.users import User_Pydantic, Users
+from bloobcat.db.users import User_Pydantic, Users, normalize_date
 from bloobcat.funcs.validate import validate
 from bloobcat.routes.remnawave.client import RemnaWaveClient
 from bloobcat.settings import remnawave_settings, app_settings
@@ -227,14 +227,15 @@ async def change_active_tariff_devices(payload: ChangeDevicesRequest, user: User
     original = await Tariffs.filter(name=active_tariff.name, months=active_tariff.months).first()
 
     current_date = date.today()
+    user_expired_at = normalize_date(user.expired_at)
     # Остаток дней по текущей подписке
-    if not user.expired_at:
+    if not user_expired_at:
         days_remaining = 0
     else:
-        if user.expired_at <= current_date:
+        if user_expired_at <= current_date:
             days_remaining = 0
         else:
-            days_remaining = (user.expired_at - current_date).days
+            days_remaining = (user_expired_at - current_date).days
             if days_remaining <= 1:
                 raise HTTPException(
                     status_code=400,

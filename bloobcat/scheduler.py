@@ -2,7 +2,7 @@ import asyncio
 from datetime import datetime, date, time, timedelta
 from zoneinfo import ZoneInfo
 
-from bloobcat.db.users import Users
+from bloobcat.db.users import Users, normalize_date
 from bloobcat.db.notifications import NotificationMarks
 from bloobcat.routes.payment import create_auto_payment
 from bloobcat.bot.notifications.subscription.expiration import notify_expiring_subscription
@@ -175,14 +175,14 @@ def cancel_user_tasks(user_id: int):
 # State-validation wrappers before executing tasks
 async def _exec_auto_payment(user_id: int, planned_expired: date, days_before: int):
     user = await Users.get_or_none(id=user_id)
-    if not user or user.expired_at != planned_expired or not user.renew_id:
+    if not user or normalize_date(user.expired_at) != planned_expired or not user.renew_id:
         logger.debug(f"Skipping auto payment for user {user_id}")
         return
     await create_auto_payment(user, disable_on_fail=(days_before == 0))
 
 async def _exec_notify_expiring(user_id: int, planned_expired: date, days_before: int):
     user = await Users.get_or_none(id=user_id)
-    if not user or user.expired_at != planned_expired or user.renew_id:
+    if not user or normalize_date(user.expired_at) != planned_expired or user.renew_id:
         logger.debug(f"Skipping notify expiring for user {user_id}")
         return
     # Idempotency via notification marks
@@ -198,7 +198,7 @@ async def _exec_cancel_if_unpaid(user_id: int, planned_expired: date):
     """Checks if a subscription was renewed, and if not, cancels it."""
     user = await Users.get_or_none(id=user_id)
     # If user does not exist, or subscription was renewed (expired_at changed), or auto-renewal was cancelled, do nothing.
-    if not user or user.expired_at != planned_expired or not user.renew_id:
+    if not user or normalize_date(user.expired_at) != planned_expired or not user.renew_id:
         logger.debug(f"Skipping cancel_if_unpaid for user {user_id}. Conditions not met.")
         return
 
@@ -213,7 +213,7 @@ async def _exec_cancel_if_unpaid(user_id: int, planned_expired: date):
 
 async def _exec_notify_expired(user_id: int, planned_expired: date):
     user = await Users.get_or_none(id=user_id)
-    if not user or user.expired_at != planned_expired or user.renew_id:
+    if not user or normalize_date(user.expired_at) != planned_expired or user.renew_id:
         logger.debug(f"Skipping notify expired for user {user_id}")
         return
     await on_disabled(user)
@@ -227,7 +227,7 @@ async def _exec_extend_trial(user_id: int, planned_expired: date):
     global _last_trial_notification_time, _trial_extension_stats
     
     user = await Users.get_or_none(id=user_id)
-    if not user or not user.is_trial or user.expired_at != planned_expired or user.connected_at:
+    if not user or not user.is_trial or normalize_date(user.expired_at) != planned_expired or user.connected_at:
         logger.debug(f"[{user_id}] Skipping extend trial for user because conditions not met (user: {bool(user)}, is_trial: {user.is_trial if user else 'N/A'}, expired_at: {user.expired_at if user else 'N/A'} vs {planned_expired}, connected_at: {user.connected_at if user else 'N/A'})")
         return
     
@@ -333,7 +333,7 @@ async def _exec_extend_trial(user_id: int, planned_expired: date):
 
 async def _exec_notify_trial_end(user_id: int, planned_expired: date):
     user = await Users.get_or_none(id=user_id)
-    if not user or not user.is_trial or user.expired_at != planned_expired:
+    if not user or not user.is_trial or normalize_date(user.expired_at) != planned_expired:
         logger.debug(f"Skipping notify trial end for user {user_id}")
         return
     # Idempotency via notification marks
@@ -351,7 +351,7 @@ async def _exec_notify_trial_end(user_id: int, planned_expired: date):
 
 async def _exec_notify_expiring_trial(user_id: int, planned_expired: date):
     user = await Users.get_or_none(id=user_id)
-    if not user or not user.is_trial or user.expired_at != planned_expired:
+    if not user or not user.is_trial or normalize_date(user.expired_at) != planned_expired:
         logger.debug(f"Skipping notify expiring trial for user {user_id}")
         return
     # Idempotency via notification marks
@@ -365,7 +365,7 @@ async def _exec_notify_expiring_trial(user_id: int, planned_expired: date):
 
 async def _exec_notify_trial_3_days_left(user_id: int, planned_expired: date):
     user = await Users.get_or_none(id=user_id)
-    if not user or not user.is_trial or user.expired_at != planned_expired:
+    if not user or not user.is_trial or normalize_date(user.expired_at) != planned_expired:
         logger.debug(f"Skipping 3-day trial notify for user {user_id}")
         return
     # Idempotency via notification marks

@@ -6,7 +6,7 @@ from typing import Iterable, List, Optional, Sequence
 
 from bloobcat.db.active_tariff import ActiveTariffs
 from bloobcat.db.payments import ProcessedPayments
-from bloobcat.db.users import Users
+from bloobcat.db.users import Users, normalize_date
 from bloobcat.logger import get_logger
 from bloobcat.routes.remnawave.client import RemnaWaveClient
 from bloobcat.settings import remnawave_settings
@@ -176,10 +176,12 @@ class CaptainUserLookupRepository:
     def _determine_status(user: Users) -> str:
         if user.is_blocked:
             return "blocked"
-        if user.is_trial and user.expired_at:
-            return "trial_active" if user.expired_at >= date.today() else "trial_expired"
-        if user.expired_at:
-            return "active" if user.expired_at >= date.today() else "expired"
+        expired_at = normalize_date(user.expired_at)
+        today = date.today()
+        if user.is_trial and expired_at:
+            return "trial_active" if expired_at >= today else "trial_expired"
+        if expired_at:
+            return "active" if expired_at >= today else "expired"
         return "new"
 
     async def _fetch_remnawave_snapshot(self, user: Users) -> Optional[RemnaWaveSnapshot]:
