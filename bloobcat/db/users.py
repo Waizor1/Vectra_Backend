@@ -244,7 +244,7 @@ class Users(models.Model):
                     familyurl=get_family_url(telegram_user.id),
                 ),
             )
-            
+
             # Логируем, является ли пользователь новым
             logger.debug(f"Пользователь {user.id} - новый: {is_new}, текущий UTM: {user.utm}")
             
@@ -345,11 +345,16 @@ class Users(models.Model):
         return None
 
     async def count_referrals(self):
+        """Обновляет счётчик рефералов атомарно, не трогая другие поля"""
         referrals = await Users.filter(
             referred_by=self.id, is_registered=True
         ).count()
+
+        # Атомарное обновление только поля referrals (не перезаписывает expired_at и др.)
+        await Users.filter(id=self.id).update(referrals=referrals)
+
+        # Синхронизируем in-memory значение
         self.referrals = referrals
-        await self.save()
 
     async def get_prize_wheel_attempts(self) -> int:
         """Возвращает количество попыток пользователя на колесе призов"""
