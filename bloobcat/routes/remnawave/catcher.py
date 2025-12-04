@@ -289,7 +289,7 @@ async def remnawave_updater():
                         registration_changed = False
                         connection_changed = False
 
-                        # Анти-твинк: проверяем только для новых подключений
+                        # Флаги регистрации и санкций
                         block_registration = False
                         sanction_changed = False
                         has_paid_subscription = bool(
@@ -298,6 +298,19 @@ async def remnawave_updater():
                             and normalize_date(user.expired_at) >= msk_today
                             and not user.is_trial
                         )
+
+                        # Уже санкционирован ранее за дубль HWID — сохраняем блок, чтобы не прошло повторно
+                        persisted_expired_at = fresh_data_map.get(user.id, {}).get('expired_at') if fresh_data_map else user.expired_at
+                        persisted_expired_date = normalize_date(persisted_expired_at)
+                        is_antitwink_sanction = bool(
+                            not user.is_trial
+                            and user.used_trial
+                            and persisted_expired_date
+                            and persisted_expired_date <= msk_today
+                            and not has_paid_subscription
+                        )
+                        if is_antitwink_sanction:
+                            block_registration = True
                         if (
                             anti_twink_enabled
                             and not old_connected_at
@@ -366,8 +379,12 @@ async def remnawave_updater():
                                     user.id,
                                 )
 
-                        # Разрешаем регистрацию, если не заблокирован или если уже есть оплаченная подписка
-                        if not user.is_registered and (not block_registration or has_paid_subscription):
+                        # Разрешаем регистрацию, только если нет блокировки (включая сохранённую анти-твинк санкцию)
+                        if (
+                            not user.is_registered
+                            and not block_registration
+                            and not is_antitwink_sanction
+                        ):
                             referrer = await user.referrer()
                             await on_activated_key(user.id, user.full_name, referrer_id=referrer.id if referrer else None, referrer_name=referrer.full_name if referrer else None, utm=user.utm)
                             user.is_registered = True
