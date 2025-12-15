@@ -134,11 +134,20 @@ class UsersAPI:
                 logger.warning(f"Ошибка RemnaWave API: {e}. Повторная попытка через {retry_interval} сек.")
                 await asyncio.sleep(retry_interval)
 
-    async def create_user(self, username: str, expire_at: date, traffic_limit_strategy: str = "NO_RESET",
-                         status: str = "ACTIVE", traffic_limit_bytes: int = 0,
-                         description: str = None, telegram_id: int = None, 
-                         email: str = None, hwid_device_limit: int = None,
-                         active_internal_squads: Optional[List[str]] = None) -> Dict[str, Any]:
+    async def create_user(
+        self,
+        username: str,
+        expire_at: date,
+        traffic_limit_strategy: str = "NO_RESET",
+        status: str = "ACTIVE",
+        traffic_limit_bytes: int = 0,
+        description: str = None,
+        telegram_id: int = None,
+        email: str = None,
+        hwid_device_limit: int = None,
+        active_internal_squads: Optional[List[str]] = None,
+        external_squad_uuid: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Создание пользователя с указанием лимита устройств"""
 
         # Формируем expireAt через централизованный метод
@@ -156,7 +165,9 @@ class UsersAPI:
             "email": email,
             "hwidDeviceLimit": hwid_device_limit,
             # v2.0.8: вместо activateAllInbounds используем внутренние сквады
-            "activeInternalSquads": active_internal_squads
+            "activeInternalSquads": active_internal_squads,
+            # External squad (optional)
+            "externalSquadUuid": external_squad_uuid,
         }
         filtered_data = {k: v for k, v in data.items() if v is not None}
 

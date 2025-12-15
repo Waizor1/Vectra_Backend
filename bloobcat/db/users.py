@@ -151,7 +151,8 @@ class Users(models.Model):
                                 [remnawave_settings.default_internal_squad_uuid]
                                 if remnawave_settings.default_internal_squad_uuid
                                 else None
-                            )
+                            ),
+                            external_squad_uuid=remnawave_settings.default_external_squad_uuid,
                         )
                         break  # Успешно создали, выходим из цикла
                     except Exception as e:
@@ -218,7 +219,8 @@ class Users(models.Model):
                                 [remnawave_settings.default_internal_squad_uuid]
                                 if remnawave_settings.default_internal_squad_uuid
                                 else None
-                            )
+                            ),
+                            external_squad_uuid=remnawave_settings.default_external_squad_uuid,
                         )
                         break
                     except Exception as e:
