@@ -1,6 +1,7 @@
 import asyncio
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
+import json
 
 from bloobcat.db.users import Users
 from bloobcat.db.notifications import NotificationMarks
@@ -12,7 +13,7 @@ MOSCOW = ZoneInfo("Europe/Moscow")
 logger = get_logger("tasks.referral_prompts")
 
 
-async def _should_send_today(now_msk: datetime) -> bool:
+def _should_send_today(now_msk: datetime) -> bool:
     # Отправляем около 18:00 МСК; допускаем окно в 1 час
     target = time(18, 0)
     start = datetime.combine(now_msk.date(), target, tzinfo=MOSCOW)
@@ -30,25 +31,86 @@ async def _send_referral_prompt_if_due(user: Users, now_msk: datetime) -> bool:
     if days_since < 7:
         return False
 
-    # 7 и 14 дней — по одному разу
-    for d in (7, 14):
-        if days_since >= d:
-            exists = await NotificationMarks.filter(user_id=user.id, type="referral_prompt", key=f"{d}d").exists()
-            if not exists and _should_send_today(now_msk):
-                await on_referral_prompt(user, d)
-                await NotificationMarks.create(user_id=user.id, type="referral_prompt", key=f"{d}d")
-                logger.debug(f"Referral prompt {d}d sent to user {user.id}")
-                return True
+    should_send_now = _should_send_today(now_msk)
+    # region agent log
+    try:
+        with open("/Users/urijgurov/Documents/resilcio/documents/PROJECTS/Разработки/BloobCat/BloobCatbot/.cursor/debug.log", "a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "sessionId": "debug-session",
+                "runId": "pre-fix",
+                "hypothesisId": "A",
+                "location": "bloobcat/tasks/referral_prompts.py:_send_referral_prompt_if_due",
+                "message": "Referral prompt decision (pre-send gate)",
+                "data": {"daysSince": days_since, "shouldSendNow": should_send_now},
+                "timestamp": int(datetime.now().timestamp() * 1000),
+            }, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+    # endregion
 
-    # 30 дней и далее — каждые 30 дней бесконечно
+    # Важно: не "догоняем" пропущенные этапы (7/14/30) пачкой.
+    # Отправляем только самый актуальный этап для текущего days_since.
+    if not should_send_now:
+        return False
+
+    # 30 дней и далее — не чаще, чем раз в 30 дней (по sent_at)
     if days_since >= 30:
-        sent_30d_count = await NotificationMarks.filter(user_id=user.id, type="referral_prompt", key="30d").count()
-        expected_30d_count = ((days_since - 30) // 30) + 1
-        if sent_30d_count < expected_30d_count and _should_send_today(now_msk):
+        last_30d = (
+            await NotificationMarks.filter(user_id=user.id, type="referral_prompt", key="30d")
+            .order_by("-sent_at")
+            .first()
+        )
+        # region agent log
+        try:
+            last_age_days = None
+            if last_30d and last_30d.sent_at:
+                last_age_days = (now_msk.date() - last_30d.sent_at.astimezone(MOSCOW).date()).days
+            with open("/Users/urijgurov/Documents/resilcio/documents/PROJECTS/Разработки/BloobCat/BloobCatbot/.cursor/debug.log", "a", encoding="utf-8") as f:
+                f.write(json.dumps({
+                    "sessionId": "debug-session",
+                    "runId": "pre-fix",
+                    "hypothesisId": "B",
+                    "location": "bloobcat/tasks/referral_prompts.py:_send_referral_prompt_if_due",
+                    "message": "30d last mark age",
+                    "data": {"lastAgeDays": last_age_days, "hasLast": bool(last_30d)},
+                    "timestamp": int(datetime.now().timestamp() * 1000),
+                }, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+        # endregion
+
+        if last_30d is None:
             await on_referral_prompt(user, 30)
             await NotificationMarks.create(user_id=user.id, type="referral_prompt", key="30d")
-            logger.debug(f"Referral prompt 30d sent to user {user.id} (#{sent_30d_count + 1})")
+            logger.debug(f"Referral prompt 30d sent to user {user.id} (#1)")
             return True
+
+        last_sent_date = last_30d.sent_at.astimezone(MOSCOW).date()
+        if (now_msk.date() - last_sent_date).days >= 30:
+            await on_referral_prompt(user, 30)
+            await NotificationMarks.create(user_id=user.id, type="referral_prompt", key="30d")
+            logger.debug(f"Referral prompt 30d sent to user {user.id} (>=30d since last)")
+            return True
+
+        return False
+
+    # 14 дней — по одному разу (и только если ещё не отправляли)
+    if days_since >= 14:
+        exists_14 = await NotificationMarks.filter(user_id=user.id, type="referral_prompt", key="14d").exists()
+        if not exists_14:
+            await on_referral_prompt(user, 14)
+            await NotificationMarks.create(user_id=user.id, type="referral_prompt", key="14d")
+            logger.debug(f"Referral prompt 14d sent to user {user.id}")
+            return True
+        return False
+
+    # 7 дней — по одному разу
+    exists_7 = await NotificationMarks.filter(user_id=user.id, type="referral_prompt", key="7d").exists()
+    if not exists_7:
+        await on_referral_prompt(user, 7)
+        await NotificationMarks.create(user_id=user.id, type="referral_prompt", key="7d")
+        logger.debug(f"Referral prompt 7d sent to user {user.id}")
+        return True
 
     return False
 

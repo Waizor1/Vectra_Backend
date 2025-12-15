@@ -1217,9 +1217,9 @@ async def admin_utm_detail_callback(callback: CallbackQuery):
     await callback.answer()
     
     from bloobcat.db.users import Users
-    from bloobcat.db.payments import ProcessedPayments
     from datetime import datetime
     from pytz import timezone
+    from bloobcat.services.utm_stats import get_utm_stats
     
     MOSCOW_TZ = timezone('Europe/Moscow')
     
@@ -1237,35 +1237,37 @@ async def admin_utm_detail_callback(callback: CallbackQuery):
         page = int(parts[2])
         
         # Получаем статистику для UTM
-        amount = await Users.filter(utm=utm).count()
-        registered = await Users.filter(utm=utm, is_registered=True).count()
-        
-        # Считаем оплативших
-        registered_ids = await Users.filter(utm=utm, is_registered=True).values_list("id", flat=True)
-        payed = 0
-        if registered_ids:
-            paid_user_ids = await ProcessedPayments.filter(
-                user_id__in=registered_ids, status="succeeded"
-            ).values_list("user_id", flat=True)
-            payed = len(set(paid_user_ids))
-
-        # Считаем активных сейчас
         now_moscow = datetime.now(MOSCOW_TZ)
         moscow_today = now_moscow.date()
-        active_now = await Users.filter(utm=utm, is_registered=True, expired_at__gt=moscow_today).count()
+        stats = await get_utm_stats(utm, moscow_today=moscow_today)
         
         now_str = now_moscow.strftime("%d.%m.%Y %H:%M:%S")
-        percent_registered = amount and registered / amount * 100 or 0
-        percent_payed = registered and payed / registered * 100 or 0
-        percent_active_now = registered and active_now / registered * 100 or 0
+        percent_registered_direct = stats.direct.total and stats.direct.registered / stats.direct.total * 100 or 0
+        percent_payed_direct = stats.direct.registered and stats.direct.paid / stats.direct.registered * 100 or 0
+        percent_active_now_direct = stats.direct.registered and stats.direct.active_now / stats.direct.registered * 100 or 0
+
+        percent_registered_total = stats.total.total and stats.total.registered / stats.total.total * 100 or 0
+        percent_payed_total = stats.total.registered and stats.total.paid / stats.total.registered * 100 or 0
+        percent_active_now_total = stats.total.registered and stats.total.active_now / stats.total.registered * 100 or 0
         
         stats_message = (
             f"📊 <b>Статистика по UTM:</b> <code>{utm}</code>\n"
             f"<i>отчет на {now_str}</i>\n\n"
-            f"👥 Всего зашли: <b>{amount}</b>\n"
-            f"✅ Активировали: <b>{registered}</b> (<i>{percent_registered:.1f}%</i>)\n"
-            f"⚡ Активны сейчас: <b>{active_now}</b> (<i>{percent_active_now:.1f}%</i>)\n"
-            f"💰 Оплатили: <b>{payed}</b> (<i>{percent_payed:.1f}%</i>)"
+            f"🎯 <b>Прямые (utm={utm})</b>\n"
+            f"👥 Всего: <b>{stats.direct.total}</b>\n"
+            f"✅ Активировали: <b>{stats.direct.registered}</b> (<i>{percent_registered_direct:.1f}%</i>)\n"
+            f"⚡ Активны сейчас: <b>{stats.direct.active_now}</b> (<i>{percent_active_now_direct:.1f}%</i>)\n"
+            f"💰 Оплатили: <b>{stats.direct.paid}</b> (<b>{stats.direct.paid_amount_external:.2f}₽</b>, <i>{percent_payed_direct:.1f}%</i>)\n\n"
+            f"🔁 <b>Косвенные (рефералы от UTM-пользователей)</b>\n"
+            f"👥 Всего: <b>{stats.indirect.total}</b>\n"
+            f"✅ Активировали: <b>{stats.indirect.registered}</b>\n"
+            f"⚡ Активны сейчас: <b>{stats.indirect.active_now}</b>\n"
+            f"💰 Оплатили: <b>{stats.indirect.paid}</b> (<b>{stats.indirect.paid_amount_external:.2f}₽</b>)\n\n"
+            f"🧾 <b>Итого (прямые + косвенные)</b>\n"
+            f"👥 Всего: <b>{stats.total.total}</b>\n"
+            f"✅ Активировали: <b>{stats.total.registered}</b> (<i>{percent_registered_total:.1f}%</i>)\n"
+            f"⚡ Активны сейчас: <b>{stats.total.active_now}</b> (<i>{percent_active_now_total:.1f}%</i>)\n"
+            f"💰 Оплатили: <b>{stats.total.paid}</b> (<b>{stats.total.paid_amount_external:.2f}₽</b>, <i>{percent_payed_total:.1f}%</i>)"
         )
         
         # Кнопка назад к общей статистике

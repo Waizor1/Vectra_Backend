@@ -136,6 +136,8 @@ async def yookassa_webhook(request: Request, secret: str):
                 payment_id=payment.id,
                 user_id=user.id,
                 amount=float(payment.amount.value),
+                amount_external=float(payment.amount.value),
+                amount_from_balance=0,
                 status="refunded"
             )
             
@@ -156,6 +158,8 @@ async def yookassa_webhook(request: Request, secret: str):
                 payment_id=payment.id,
                 user_id=user.id,
                 amount=float(payment.amount.value),
+                amount_external=float(payment.amount.value),
+                amount_from_balance=0,
                 status="canceled"
             )
             # Резервации отключены
@@ -551,6 +555,8 @@ async def yookassa_webhook(request: Request, secret: str):
                 payment_id=payment.id,
                 user_id=user.id,
                 amount=full_tariff_price_for_history, # Используем полную стоимость тарифа
+                amount_external=amount_paid_via_yookassa,
+                amount_from_balance=amount_from_balance,
                 status="succeeded"
             )
             
@@ -862,6 +868,8 @@ async def pay(tariff_id: int, email: str, device_count: int = 1, user: Users = D
             payment_id=payment_id,
             user_id=user.id,
             amount=full_price, # Итоговая стоимость (с учетом скидки)
+            amount_external=0,
+            amount_from_balance=full_price,
             status="succeeded" # Статус как при обычной успешной оплате
         )
 
@@ -1070,6 +1078,8 @@ async def create_auto_payment(user: Users, disable_on_fail: bool = True) -> bool
                 payment_id=payment_id,
                 user_id=user.id,
                 amount=full_price, # Итоговая стоимость с учетом скидки
+                amount_external=0,
+                amount_from_balance=full_price,
                 status="succeeded" # Статус как при обычной успешной оплате
             )
             
