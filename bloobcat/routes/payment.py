@@ -405,10 +405,18 @@ async def yookassa_webhook(request: Request, secret: str):
                     )
                     # Link user to this active tariff
                     user.active_tariff_id = active_tariff.id
-                    
+
                     # Устанавливаем hwid_limit пользователю из выбранного количества устройств
                     user.hwid_limit = device_count
                     logger.info(f"Created ActiveTariff {active_tariff.id} for user {user.id} based on tariff {original.id}, device_count={device_count}, установлен hwid_limit={device_count}")
+
+                    # ВАЖНО: сохраняем active_tariff_id и hwid_limit в БД как можно раньше
+                    # чтобы минимизировать race condition с remnawave_updater
+                    try:
+                        await user.save(update_fields=["active_tariff_id", "hwid_limit"])
+                        logger.debug(f"Ранее сохранены active_tariff_id={active_tariff.id} и hwid_limit={device_count} для пользователя {user.id}")
+                    except Exception as persist_exc:
+                        logger.warning(f"Не удалось рано сохранить active_tariff_id/hwid_limit для {user.id}: {persist_exc}")
                 else:
                     logger.error(f"Original tariff {tariff_id} not found; skipping ActiveTariffs")
             
@@ -827,12 +835,20 @@ async def pay(tariff_id: int, email: str, device_count: int = 1, user: Users = D
             residual_day_fraction=0.0
         )
         user.active_tariff_id = active_tariff.id
-        
+
         # Устанавливаем hwid_limit пользователю из выбранного количества устройств
         user.hwid_limit = device_count
         logger.info(f"При покупке с баланса установлен hwid_limit={device_count} для пользователя {user.id}")
 
-        # Сохраняем пользователя (до синхронизации RemnaWave)
+        # ВАЖНО: сохраняем active_tariff_id и hwid_limit в БД как можно раньше
+        # чтобы минимизировать race condition с remnawave_updater
+        try:
+            await user.save(update_fields=["active_tariff_id", "hwid_limit"])
+            logger.debug(f"Ранее сохранены active_tariff_id={active_tariff.id} и hwid_limit={device_count} для пользователя {user.id}")
+        except Exception as persist_exc:
+            logger.warning(f"Не удалось рано сохранить active_tariff_id/hwid_limit для {user.id}: {persist_exc}")
+
+        # Сохраняем ВСЕ изменения пользователя (баланс, дата, is_trial и т.д.)
         await user.save()
 
         # После оплаты с баланса также обнуляем счётчик уменьшений

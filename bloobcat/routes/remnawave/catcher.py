@@ -256,11 +256,11 @@ async def remnawave_updater():
             if uuid_key:
                 remnawave_users_dict[uuid_key] = user
 
-        # Загружаем актуальные данные expired_at и hwid_limit из БД для избежания race condition
+        # Загружаем актуальные данные expired_at, hwid_limit и active_tariff_id из БД для избежания race condition
         # Важно: делаем это ПОСЛЕ получения данных из RemnaWave, чтобы минимизировать окно race condition
         # (если промокод был применён во время загрузки данных из RemnaWave)
         user_ids = [u.id for u in users_with_uuid]
-        fresh_users_data = await Users.filter(id__in=user_ids).values('id', 'expired_at', 'hwid_limit')
+        fresh_users_data = await Users.filter(id__in=user_ids).values('id', 'expired_at', 'hwid_limit', 'active_tariff_id')
         fresh_data_map = {item['id']: item for item in fresh_users_data}
         logger.debug(f"Загружены актуальные данные для {len(fresh_data_map)} пользователей")
 
@@ -432,16 +432,24 @@ async def remnawave_updater():
 
                     # ----------------- Логика синхронизации `hwid_limit` (двусторонняя) -----------------
                     remnawave_hwid_limit = remnawave_user.get('hwidDeviceLimit')
-                    # Используем актуальное значение hwid_limit из fresh_data_map
+                    # Используем актуальное значение hwid_limit и active_tariff_id из fresh_data_map
                     db_hwid_limit = fresh_data['hwid_limit'] if fresh_data else user.hwid_limit
+                    db_active_tariff_id = fresh_data['active_tariff_id'] if fresh_data else user.active_tariff_id
 
                     hwid_changed = False
                     if remnawave_hwid_limit is not None and isinstance(remnawave_hwid_limit, int):
                         # Сценарий 1: в БД пусто, берем из RemnaWave
                         if db_hwid_limit is None:
-                            user.hwid_limit = remnawave_hwid_limit
-                            hwid_changed = True
-                            logger.info(f"Синхронизация (RemnaWave -> БД): hwid_limit для {user.id} установлен в {remnawave_hwid_limit}")
+                            # ВАЖНО: если у пользователя есть активный тариф, НЕ переносим hwid_limit из панели в БД.
+                            # Источник истины для лимита в этом случае — тариф/покупка (иначе возможен race condition с webhook оплаты).
+                            if db_active_tariff_id:
+                                logger.debug(
+                                    f"Пропуск синхронизации (RemnaWave -> БД) hwid_limit для {user.id}: active_tariff_id={db_active_tariff_id} присутствует"
+                                )
+                            else:
+                                user.hwid_limit = remnawave_hwid_limit
+                                hwid_changed = True
+                                logger.info(f"Синхронизация (RemnaWave -> БД): hwid_limit для {user.id} установлен в {remnawave_hwid_limit}")
                         # Сценарий 2: в БД есть значение и оно отличается, отправляем в RemnaWave
                         elif db_hwid_limit != remnawave_hwid_limit:
                             logger.debug(f"Обновление лимита устройств в RemnaWave для {user.id}: {remnawave_hwid_limit} -> {db_hwid_limit}")
