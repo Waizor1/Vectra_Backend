@@ -21,6 +21,7 @@ class RemnaWaveClient:
         self.users = UsersAPI(self)
         self.nodes = NodesAPI(self)
         self.inbounds = InboundsAPI(self)
+        self.tools = ToolsAPI(self)
 
     async def _ensure_session(self):
         if not self.session:
@@ -59,6 +60,10 @@ class RemnaWaveClient:
                     error_msg = response_json.get('message', 'Unknown error')
                     error_code = response_json.get('errorCode')
                     logger.error(f"API Error Response ({response.status}) from {url}: {response_json}")
+                    # Новая панель возвращает детали валидации в errors[]. Важно пометить это как validation,
+                    # чтобы верхний retry-слой не тратил 60 сек на бессмысленные повторы.
+                    if response.status in (400, 422) and isinstance(response_json.get("errors"), list):
+                        raise Exception(f"Validation error: {error_msg}")
                     # Включаем errorCode в текст исключения, чтобы можно было на него ориентироваться выше
                     if error_code:
                         raise Exception(f"API error [{error_code}]: {error_msg}")
@@ -243,7 +248,15 @@ class UsersAPI:
         try:
             logger.debug(f"Запрос данных пользователя по UUID: {user_db.remnawave_uuid}")
             user_data = await self.get_user_by_uuid(user_db.remnawave_uuid)
-            subscription_url = user_data["response"].get("happ", {}).get("cryptoLink", "")
+            resp = user_data.get("response") or {}
+
+            # В новой панели happ.cryptoLink может отсутствовать (в OpenAPI он больше не required).
+            # Fallback: берём subscriptionUrl и шифруем через /api/system/tools/happ/encrypt.
+            subscription_url = (resp.get("happ") or {}).get("cryptoLink") or ""
+            if not subscription_url:
+                raw_sub_url = resp.get("subscriptionUrl") or ""
+                if raw_sub_url:
+                    subscription_url = await self.client.tools.encrypt_happ_crypto_link(raw_sub_url)
             
             if not subscription_url:
                 logger.error(f"В данных пользователя {user_db.id} (UUID: {user_db.remnawave_uuid}) отсутствует ссылка. Данные: {user_data}")
@@ -321,3 +334,20 @@ class InboundsAPI:
     async def get_full_inbounds(self) -> Dict[str, Any]:
         # В v2.0.8 отдельного full-эндпоинта нет; используем тот же агрегированный
         return await self.client._request("GET", "/api/config-profiles/inbounds")
+
+
+class ToolsAPI:
+    def __init__(self, client: RemnaWaveClient):
+        self.client = client
+
+    async def encrypt_happ_crypto_link(self, link_to_encrypt: str) -> str:
+        """Шифрует subscriptionUrl в encryptedLink через RemnaWave tool /api/system/tools/happ/encrypt."""
+        raw_resp = await self.client._request(
+            "POST",
+            "/api/system/tools/happ/encrypt",
+            json={"linkToEncrypt": link_to_encrypt},
+        )
+        encrypted = (raw_resp.get("response") or {}).get("encryptedLink") or ""
+        if not encrypted:
+            raise ValueError("Encrypted link not found in encrypt tool response")
+        return encrypted
