@@ -206,7 +206,32 @@ class CaptainUserLookupRepository:
             await client.close()
 
         payload = response.get("response") or {}
-        subscription_url = payload.get("happ", {}).get("cryptoLink")
+        # В новой панели happ.cryptoLink может отсутствовать — используем fallback через encrypt tool
+        subscription_url = (payload.get("happ") or {}).get("cryptoLink")
+        if not subscription_url:
+            raw_sub_url = payload.get("subscriptionUrl")
+            if raw_sub_url:
+                encrypt_client: RemnaWaveClient | None = None
+                try:
+                    encrypt_client = RemnaWaveClient(
+                        remnawave_settings.url,
+                        remnawave_settings.token.get_secret_value(),
+                    )
+                    subscription_url = await encrypt_client.tools.encrypt_happ_crypto_link(
+                        raw_sub_url
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to encrypt subscriptionUrl for user {}: {}",
+                        user.id,
+                        exc,
+                    )
+                finally:
+                    if encrypt_client:
+                        try:
+                            await encrypt_client.close()
+                        except Exception:
+                            pass
         active_squads = payload.get("activeInternalSquads")
         if isinstance(active_squads, list):
             active_squads = [str(item) for item in active_squads]
