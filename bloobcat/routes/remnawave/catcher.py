@@ -279,8 +279,11 @@ async def remnawave_updater():
                     remnawave_updates = {}
 
                     # ----------------- Логика обработки подключений (onlineAt) -----------------
-                    online_at = remnawave_user.get('onlineAt')
-                    logger.debug(f"Пользователь {user.id}: onlineAt={online_at}, текущий connected_at={user.connected_at}")
+                    # В новой панели onlineAt может быть перенесён в userTraffic.onlineAt
+                    online_at = remnawave_user.get("onlineAt") or (remnawave_user.get("userTraffic") or {}).get("onlineAt")
+                    logger.debug(
+                        f"Пользователь {user.id}: onlineAt={online_at}, текущий connected_at={user.connected_at}"
+                    )
                     
                     if online_at:
                         new_connected_at = datetime.fromisoformat(online_at.replace('Z', '+00:00'))

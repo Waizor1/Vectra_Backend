@@ -243,7 +243,10 @@ class CaptainUserLookupRepository:
             username=payload.get("username"),
             status=payload.get("status"),
             expire_at=self._parse_iso_datetime(payload.get("expireAt")),
-            online_at=self._parse_iso_datetime(payload.get("onlineAt")),
+            # В новой панели onlineAt может быть перенесён в userTraffic.onlineAt
+            online_at=self._parse_iso_datetime(
+                payload.get("onlineAt") or (payload.get("userTraffic") or {}).get("onlineAt")
+            ),
             hwid_limit=payload.get("hwidDeviceLimit"),
             traffic_limit_bytes=payload.get("trafficLimitBytes"),
             subscription_url=subscription_url,
