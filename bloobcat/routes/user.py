@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, EmailStr
 from typing import Dict, Any
 from datetime import datetime, timedelta, timezone, date
@@ -74,7 +75,7 @@ async def check(user: Users = Depends(validate)) -> Dict[str, Any]:
 
         # Получаем стандартные данные пользователя
         user_data = await User_Pydantic.from_tortoise_orm(user)
-        user_dict = user_data.model_dump()
+        user_dict = user_data.model_dump(mode='json')
 
         # Добавляем URL и возможную ошибку в ответ
         user_dict["subscription_url"] = subscription_url
@@ -144,7 +145,11 @@ async def check(user: Users = Depends(validate)) -> Dict[str, Any]:
         user_dict["active_tariff"] = active_tariff_data
 
         logger.info(f"Успешно обработан запрос /user для пользователя {user.id}")
-        return user_dict
+        response = JSONResponse(content=user_dict)
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
     
     except Exception as e:
         logger.error(f"Ошибка в эндпоинте /user для пользователя {getattr(user, 'id', 'unknown')}: {str(e)}", exc_info=True)
@@ -164,10 +169,14 @@ async def update_user_profile(
     await user.save()
     # Можно вернуть новый формат ответа, как в check, или оставить старый
     user_data = await User_Pydantic.from_tortoise_orm(user)
-    user_dict = user_data.model_dump()
+    user_dict = user_data.model_dump(mode='json')
     # Опционально: добавить сюда получение URL, если нужно
     # user_dict["subscription_url"] = await remnawave_client.users.get_subscription_url(user)
-    return user_dict
+    response = JSONResponse(content=user_dict)
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
 
 
 @router.post("/unsubscribe")
@@ -429,7 +438,7 @@ async def get_family_subscription(familyurl: str):
 
     # Сериализация данных пользователя
     user_data = await User_Pydantic.from_tortoise_orm(user)
-    user_dict = user_data.model_dump()
+    user_dict = user_data.model_dump(mode='json')
     user_dict["subscription_url"] = subscription_url
     user_dict["subscription_url_error"] = error_getting_url
 
