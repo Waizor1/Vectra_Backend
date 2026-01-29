@@ -61,6 +61,8 @@ async def remnawave_updater():
     users_to_bulk_update = []
     users_need_task_reschedule = []
     users_with_sanctions = []
+    users_hwid_limit_updates = []
+    users_hwid_limit_update_ids = set()
     
     # Константы для повторных попыток
     max_retry_time = 30  # максимальное время для повторных попыток в секундах
@@ -256,11 +258,13 @@ async def remnawave_updater():
             if uuid_key:
                 remnawave_users_dict[uuid_key] = user
 
-        # Загружаем актуальные данные expired_at, hwid_limit и active_tariff_id из БД для избежания race condition
+        # Загружаем актуальные данные expired_at, hwid_limit, active_tariff_id и флагов триала из БД для избежания race condition
         # Важно: делаем это ПОСЛЕ получения данных из RemnaWave, чтобы минимизировать окно race condition
         # (если промокод был применён во время загрузки данных из RemnaWave)
         user_ids = [u.id for u in users_with_uuid]
-        fresh_users_data = await Users.filter(id__in=user_ids).values('id', 'expired_at', 'hwid_limit', 'active_tariff_id')
+        fresh_users_data = await Users.filter(id__in=user_ids).values(
+            'id', 'expired_at', 'hwid_limit', 'active_tariff_id', 'is_trial', 'used_trial'
+        )
         fresh_data_map = {item['id']: item for item in fresh_users_data}
         logger.debug(f"Загружены актуальные данные для {len(fresh_data_map)} пользователей")
 
@@ -275,6 +279,13 @@ async def remnawave_updater():
                 remnawave_user = remnawave_users_dict[user_uuid_str]
                 
                 try:
+                    fresh_data = fresh_data_map.get(user.id) or {}
+                    db_expired_at = fresh_data.get('expired_at', user.expired_at)
+                    db_hwid_limit = fresh_data.get('hwid_limit', user.hwid_limit)
+                    db_active_tariff_id = fresh_data.get('active_tariff_id', user.active_tariff_id)
+                    db_is_trial = fresh_data.get('is_trial', user.is_trial)
+                    db_used_trial = fresh_data.get('used_trial', user.used_trial)
+
                     # Словарь для сбора обновлений для RemnaWave
                     remnawave_updates = {}
 
@@ -296,18 +307,18 @@ async def remnawave_updater():
                         block_registration = False
                         sanction_changed = False
                         has_paid_subscription = bool(
-                            user.active_tariff_id
-                            and user.expired_at
-                            and normalize_date(user.expired_at) >= msk_today
-                            and not user.is_trial
+                            db_active_tariff_id
+                            and db_expired_at
+                            and normalize_date(db_expired_at) >= msk_today
+                            and not db_is_trial
                         )
 
                         # Уже санкционирован ранее за дубль HWID — сохраняем блок, чтобы не прошло повторно
-                        persisted_expired_at = fresh_data_map.get(user.id, {}).get('expired_at') if fresh_data_map else user.expired_at
+                        persisted_expired_at = db_expired_at
                         persisted_expired_date = normalize_date(persisted_expired_at)
                         is_antitwink_sanction = bool(
-                            not user.is_trial
-                            and user.used_trial
+                            not db_is_trial
+                            and db_used_trial
                             and persisted_expired_date
                             and persisted_expired_date <= msk_today
                             and not has_paid_subscription
@@ -421,9 +432,7 @@ async def remnawave_updater():
                     # ----------------- Логика синхронизации `expired_at` (БД -> RemnaWave) -----------------
                     # Используем актуальное значение expired_at из fresh_data_map (загруженного в начале)
                     # чтобы избежать race condition (например, если промокод был применён во время работы цикла)
-                    fresh_data = fresh_data_map.get(user.id)
-                    raw_expire = fresh_data['expired_at'] if fresh_data else user.expired_at
-                    db_expire_at_date = normalize_date(raw_expire)
+                    db_expire_at_date = normalize_date(db_expired_at)
 
                     remnawave_expire_at = datetime.fromisoformat(remnawave_user['expireAt'].replace('Z', '+00:00'))
                     today = msk_today
@@ -436,8 +445,6 @@ async def remnawave_updater():
                     # ----------------- Логика синхронизации `hwid_limit` (двусторонняя) -----------------
                     remnawave_hwid_limit = remnawave_user.get('hwidDeviceLimit')
                     # Используем актуальное значение hwid_limit и active_tariff_id из fresh_data_map
-                    db_hwid_limit = fresh_data['hwid_limit'] if fresh_data else user.hwid_limit
-                    db_active_tariff_id = fresh_data['active_tariff_id'] if fresh_data else user.active_tariff_id
 
                     hwid_changed = False
                     if remnawave_hwid_limit is not None and isinstance(remnawave_hwid_limit, int):
@@ -460,9 +467,9 @@ async def remnawave_updater():
                     
                     # Добавляем пользователя в список для батчевого обновления, если hwid изменился
                     if hwid_changed:
-                        # Проверяем, не добавлен ли уже пользователь в список
-                        if user not in users_to_bulk_update:
-                            users_to_bulk_update.append(user)
+                        if user.id not in users_hwid_limit_update_ids:
+                            users_hwid_limit_updates.append(user)
+                            users_hwid_limit_update_ids.add(user.id)
 
                     # ----------------- Отправка всех собранных обновлений в RemnaWave -----------------
                     if remnawave_updates:
@@ -511,10 +518,10 @@ async def remnawave_updater():
         # Выполняем батчевое обновление пользователей
         if users_to_bulk_update:
             try:
-                # Используем bulk_update для обновления connected_at, is_registered и hwid_limit
+                # Используем bulk_update для обновления connected_at и is_registered
                 await Users.bulk_update(
                     users_to_bulk_update, 
-                    fields=['connected_at', 'is_registered', 'hwid_limit', 'is_trial', 'used_trial']
+                    fields=['connected_at', 'is_registered']
                 )
                 logger.info(f"Батчевое обновление выполнено для {len(users_to_bulk_update)} пользователей")
             except Exception as e:
@@ -522,9 +529,25 @@ async def remnawave_updater():
                 # Fallback: сохраняем пользователей по одному
                 for user in users_to_bulk_update:
                     try:
-                        await user.save()
+                        await user.save(update_fields=['connected_at', 'is_registered'])
                     except Exception as save_error:
                         logger.error(f"Ошибка при сохранении пользователя {user.id}: {save_error}")
+                        errors += 1
+
+        if users_hwid_limit_updates:
+            try:
+                await Users.bulk_update(
+                    users_hwid_limit_updates,
+                    fields=['hwid_limit']
+                )
+                logger.info(f"Батчевое обновление hwid_limit выполнено для {len(users_hwid_limit_updates)} пользователей")
+            except Exception as e:
+                logger.error(f"Ошибка при батчевом обновлении hwid_limit: {e}")
+                for user in users_hwid_limit_updates:
+                    try:
+                        await user.save(update_fields=['hwid_limit'])
+                    except Exception as save_error:
+                        logger.error(f"Ошибка при сохранении hwid_limit пользователя {user.id}: {save_error}")
                         errors += 1
 
         # Точечно фиксируем санкционные изменения expire_at
