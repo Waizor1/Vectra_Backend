@@ -60,19 +60,21 @@ async def notify_lte_full_limit(user, used_gb: float, total_gb: float, is_trial:
     if lang == "ru":
         text = (
             f"⛔️ LTE-лимит исчерпан: {used} из {total} GB.\n"
-            "Мы отключили доступ к LTE-нодам до обновления лимита."
+            "Мы отключили доступ к LTE-нодам до обновления лимита.\n"
+            "Можно увеличить LTE в разделе «Подписка → Изменить тариф»."
         )
         if is_trial:
             text += "\n\nЭто ограничение пробного периода."
-        button = await webapp_inline_button("Личный кабинет")
+        button = await webapp_inline_button("Докупить LTE", "subscription/change")
     else:
         text = (
             f"⛔️ LTE limit reached: {used} out of {total} GB.\n"
-            "We disabled LTE access until the limit is refreshed."
+            "We disabled LTE access until the limit is refreshed.\n"
+            "You can increase LTE in Subscription → Change plan."
         )
         if is_trial:
             text += "\n\nThis is the trial limit."
-        button = await webapp_inline_button("Dashboard")
+        button = await webapp_inline_button("Add LTE", "subscription/change")
 
     try:
         await bot.send_message(user.id, text, reply_markup=button)
