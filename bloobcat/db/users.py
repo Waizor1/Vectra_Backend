@@ -735,9 +735,23 @@ class UsersModelAdmin(TortoiseModelAdmin):
                 except Exception as e:
                     logger.error(f"Ошибка обновления LTE лимита для {obj.id}: {e}")
             else:
-                logger.warning(
-                    f"Пользователь {obj.id} без active_tariff_id — LTE лимит не обновлен"
-                )
+                try:
+                    from bloobcat.routes.remnawave.lte_utils import set_lte_squad_status
+                    from bloobcat.db.notifications import NotificationMarks
+                    # Для пользователей без active_tariff_id (триал/партнеры) включаем LTE,
+                    # если лимит > 0.
+                    should_enable = lte_gb_total > 0
+                    if obj.remnawave_uuid:
+                        await set_lte_squad_status(str(obj.remnawave_uuid), enable=should_enable)
+                    await NotificationMarks.filter(user_id=obj.id, type="lte_usage").delete()
+                    logger.info(
+                        "Admin LTE update without active_tariff: user=%s total=%s enable=%s",
+                        obj.id,
+                        lte_gb_total,
+                        should_enable,
+                    )
+                except Exception as e:
+                    logger.error(f"Ошибка обновления LTE лимита для {obj.id} (без active_tariff): {e}")
         
         logger.debug(f"Пользователь {obj.id} сохранен. Проверяем необходимость обновления в RemnaWave")
         
