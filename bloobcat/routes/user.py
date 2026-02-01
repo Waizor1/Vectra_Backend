@@ -528,6 +528,8 @@ async def change_active_tariff_devices(payload: ChangeDevicesRequest, user: User
                 months=tariff_months,
                 old_limit=old_hwid_limit,
                 new_limit=pending_device_update["hwid_limit"],
+                old_lte_gb=current_lte_gb_total,
+                new_lte_gb=new_lte_gb_total if lte_change_needed else current_lte_gb_total,
                 old_price=old_tariff_price,
                 new_price=pending_device_update["price"],
                 old_expired_at=old_expired_at,

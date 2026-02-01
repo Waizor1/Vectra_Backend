@@ -147,6 +147,8 @@ async def yookassa_webhook(request: Request, secret: str):
             )
             return {"status": "error", "message": "User not found"}
 
+        old_expired_at = user.expired_at
+
         # Вычисляем will_retry для уведомлений об ошибках
         user_expired_at = normalize_date(user.expired_at)
         will_retry = user_expired_at is not None and (user_expired_at - date.today()).days >= 0
@@ -928,6 +930,15 @@ async def yookassa_webhook(request: Request, secret: str):
                 )
 
         try:
+            lte_gb_for_log = None
+            if isinstance(data, dict) and data.get("lte_gb") is not None:
+                try:
+                    lte_gb_for_log = int(data.get("lte_gb"))
+                except (TypeError, ValueError):
+                    lte_gb_for_log = None
+            if lte_gb_for_log is None:
+                lte_gb_for_log = user.lte_gb_total if hasattr(user, "lte_gb_total") else None
+
             await on_payment(
                 user_id=user.id,
                 is_sub=user.is_subscribed,
@@ -940,6 +951,9 @@ async def yookassa_webhook(request: Request, secret: str):
                 utm=user.utm if hasattr(user, "utm") else None,
                 discount_percent=discount_percent,
                 device_count=(int(data.get("device_count", 1)) if isinstance(data.get("device_count"), (int, str)) else None),
+                old_expired_at=old_expired_at,
+                new_expired_at=user.expired_at,
+                lte_gb_total=lte_gb_for_log,
             )
         except Exception as e:
             logger.error(
@@ -993,6 +1007,7 @@ async def pay(
     )
     full_price = int(discounted_price) + lte_cost
     user_balance = float(user.balance)
+    old_expired_at = user.expired_at
     old_active_tariff = None
     lte_refund_amount = 0
     if user.active_tariff_id:
@@ -1227,6 +1242,9 @@ async def pay(
                 utm=user.utm if hasattr(user, "utm") else None,
                 discount_percent=discount_percent,
                 device_count=device_count,
+                old_expired_at=old_expired_at,
+                new_expired_at=user.expired_at,
+                lte_gb_total=lte_gb,
             )
         except Exception as e:
             logger.error(
@@ -1404,6 +1422,7 @@ async def create_auto_payment(user: Users, disable_on_fail: bool = True) -> bool
 
         # Проверка полной оплаты с баланса
         if user_balance >= full_price:
+            old_expired_at = user.expired_at
             logger.info(
                 f"Автопродление тарифа {active_tariff.id} для пользователя {user.id} полностью с баланса. "
                 f"Цена: {full_price}, Баланс: {user_balance}, LTE: {lte_gb_total} GB"
@@ -1473,6 +1492,9 @@ async def create_auto_payment(user: Users, disable_on_fail: bool = True) -> bool
                     utm=user.utm if hasattr(user, "utm") else None,
                     discount_percent=discount_percent,
                     device_count=active_tariff.hwid_limit if hasattr(active_tariff, "hwid_limit") else None,
+                    old_expired_at=old_expired_at,
+                    new_expired_at=user.expired_at,
+                    lte_gb_total=lte_gb_total,
                 )
             except Exception as e:
                 logger.error(

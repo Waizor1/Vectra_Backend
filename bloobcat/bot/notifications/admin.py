@@ -131,6 +131,9 @@ async def on_payment(
     utm: str | None = None,
     discount_percent: int | None = None,
     device_count: int | None = None,
+    old_expired_at=None,
+    new_expired_at=None,
+    lte_gb_total: int | None = None,
 ):
     try:
         # Получаем информацию о пользователе
@@ -150,6 +153,23 @@ async def on_payment(
         is_auto_payment = is_auto or ("auto" in method.lower())
         auto_payment_status = "✅ Да" if is_auto_payment else "❌ Нет"
         
+        def format_date(value) -> str:
+            if not value:
+                return "—"
+            try:
+                return value.strftime("%d.%m.%Y")
+            except AttributeError:
+                return str(value)
+
+        old_expired_display = format_date(old_expired_at)
+        new_expired_display = format_date(new_expired_at or (user.expired_at if user else None))
+        lte_display = "нет"
+        if lte_gb_total is not None:
+            try:
+                lte_display = f"{int(lte_gb_total)} GB" if int(lte_gb_total) > 0 else "нет"
+            except (TypeError, ValueError):
+                lte_display = "нет"
+
         text = f"""💰 Успешная оплата пользователя!
 
 👤 Пользователь: {user_name} ({username})
@@ -157,6 +177,8 @@ async def on_payment(
 💸 Сумма платежа: {amount}₽
 📅 Период подписки: {months} месяц(ев)
 📱 Устройств: {device_count if device_count is not None else (user.hwid_limit if user and user.hwid_limit else 1)}
+📅 Дата окончания: {old_expired_display} → {new_expired_display}
+📶 LTE: {lte_display}
 🔄 Автоматическое списание: {auto_payment_status}
 ♻️ Автопродление: {recurrent_status}
 💳 Метод оплаты: {method}
@@ -258,6 +280,8 @@ async def notify_active_tariff_change(
     new_price: int | None,
     old_expired_at,
     new_expired_at,
+    old_lte_gb: int | None = None,
+    new_lte_gb: int | None = None,
     auto_renew_enabled: bool,
 ):
     """
@@ -274,6 +298,14 @@ async def notify_active_tariff_change(
                 return value.strftime("%d.%m.%Y")
             except AttributeError:
                 return str(value)
+
+        def format_lte(value: int | None) -> str:
+            if value is None:
+                return "LTE нет"
+            try:
+                return f"{int(value)} GB" if int(value) > 0 else "LTE нет"
+            except (TypeError, ValueError):
+                return "LTE нет"
 
         user_name = getattr(user, "full_name", "Неизвестно")
         username = getattr(user, "username", None)
@@ -295,6 +327,7 @@ async def notify_active_tariff_change(
 
 📦 Тариф: {tariff_name} · {months} мес.
 🛠 Лимит устройств: {old_limit} → {new_limit}
+📶 LTE: {format_lte(old_lte_gb)} → {format_lte(new_lte_gb)}
 💰 Стоимость тарифа: {format_price(old_price)} → {format_price(new_price)}
 📅 Дата окончания: {format_date(old_expired_at)} → {format_date(new_expired_at)}
 
