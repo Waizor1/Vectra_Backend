@@ -738,11 +738,56 @@ class UsersModelAdmin(TortoiseModelAdmin):
                 try:
                     from bloobcat.routes.remnawave.lte_utils import set_lte_squad_status
                     from bloobcat.db.notifications import NotificationMarks
-                    # Для пользователей без active_tariff_id (триал/партнеры) включаем LTE,
-                    # если лимит > 0.
+                    # Для пользователей без active_tariff_id (триал/партнеры) сверяем
+                    # фактический расход в RemnaWave, чтобы не включать LTE при нулевом остатке.
                     should_enable = lte_gb_total > 0
                     if obj.remnawave_uuid:
+                        from datetime import datetime, timezone, timedelta, time as dt_time
+                        from bloobcat.routes.remnawave.client import RemnaWaveClient
+                        from bloobcat.settings import remnawave_settings
+
+                        BYTES_IN_GB = 1024 ** 3
+                        MSK_TZ = timezone(timedelta(hours=3))
+                        marker_upper = (remnawave_settings.lte_node_marker or "").upper()
+
+                        created_at = obj.created_at
+                        if created_at:
+                            if getattr(created_at, "tzinfo", None):
+                                start_date = created_at.astimezone(MSK_TZ).date()
+                            else:
+                                created_at_utc = created_at.replace(tzinfo=timezone.utc)
+                                start_date = created_at_utc.astimezone(MSK_TZ).date()
+                        else:
+                            start_date = datetime.now(MSK_TZ).date()
+
+                        start_dt = datetime.combine(start_date, dt_time.min, tzinfo=MSK_TZ)
+                        start_str = start_dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+                        end_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+                        client = RemnaWaveClient(
+                            remnawave_settings.url,
+                            remnawave_settings.token.get_secret_value()
+                        )
+                        try:
+                            resp = await client.users.get_user_usage_by_range(
+                                str(obj.remnawave_uuid),
+                                start_str,
+                                end_str,
+                            )
+                            items = resp.get("response") or []
+                            used_gb = 0.0
+                            for item in items:
+                                node_name = str(item.get("nodeName") or "").upper()
+                                if marker_upper and marker_upper not in node_name:
+                                    continue
+                                total_bytes = float(item.get("total") or 0)
+                                used_gb += total_bytes / BYTES_IN_GB
+                            should_enable = float(lte_gb_total) > used_gb
+                        finally:
+                            await client.close()
+
                         await set_lte_squad_status(str(obj.remnawave_uuid), enable=should_enable)
+
                     await NotificationMarks.filter(user_id=obj.id, type="lte_usage").delete()
                     logger.info(
                         "Admin LTE update without active_tariff: user=%s total=%s enable=%s",
