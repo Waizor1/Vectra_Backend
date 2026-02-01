@@ -1,5 +1,6 @@
 from random import randint
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, time, timezone
+from decimal import Decimal, ROUND_HALF_UP
 import json
 import asyncio
 import random
@@ -27,8 +28,10 @@ from bloobcat.settings import yookassa_settings, remnawave_settings
 from bloobcat.db.payments import ProcessedPayments
 from bloobcat.logger import get_payment_logger
 from bloobcat.db.active_tariff import ActiveTariffs
+from bloobcat.db.notifications import NotificationMarks
 from bloobcat.routes.remnawave.client import RemnaWaveClient
 from bloobcat.routes.remnawave.hwid_utils import cleanup_user_hwid_devices
+from bloobcat.routes.remnawave.lte_utils import set_lte_squad_status
 from bloobcat.services.discounts import (
     apply_personal_discount,
     consume_discount_if_needed,
@@ -41,6 +44,52 @@ Configuration.secret_key = yookassa_settings.secret_key.get_secret_value()
 
 router = APIRouter(prefix="/pay", tags=["pay"])
 logger = get_payment_logger()
+
+BYTES_IN_GB = 1024 ** 3
+MSK_TZ = timezone(timedelta(hours=3))
+
+def _round_rub(value: float) -> int:
+    try:
+        dec = Decimal(str(value))
+    except Exception:
+        return 0
+    return int(dec.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+def _format_range_start(start_date: date) -> str:
+    start_dt = datetime.combine(start_date, time.min, tzinfo=MSK_TZ)
+    return start_dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def _format_range_end(end_dt: datetime) -> str:
+    return end_dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+async def _fetch_today_lte_usage_gb(user_uuid: str) -> float | None:
+    marker_upper = (remnawave_settings.lte_node_marker or "").upper()
+    if not marker_upper:
+        return 0.0
+    client = RemnaWaveClient(
+        remnawave_settings.url, remnawave_settings.token.get_secret_value()
+    )
+    try:
+        msk_today = datetime.now(MSK_TZ).date()
+        start_str = _format_range_start(msk_today)
+        end_str = _format_range_end(datetime.now(timezone.utc))
+        resp = await client.users.get_user_usage_by_range(user_uuid, start_str, end_str)
+        items = resp.get("response") or []
+        total_gb = 0.0
+        for item in items:
+            node_name = str(item.get("nodeName") or "").upper()
+            if marker_upper and marker_upper not in node_name:
+                continue
+            total_bytes = float(item.get("total") or 0)
+            total_gb += total_bytes / BYTES_IN_GB
+        return total_gb
+    except Exception as e:
+        logger.error(f"Ошибка получения LTE usage snapshot для {user_uuid}: {e}")
+        return None
+    finally:
+        await client.close()
 
 @router.get("/tariffs")
 async def get_tariffs():
@@ -199,6 +248,138 @@ async def yookassa_webhook(request: Request, secret: str):
                     await cancel_subscription(user, reason=f"Автоплатеж завершился со статусом: {payment.status}")
                 await notify_auto_renewal_failure(user, reason=f"Платеж не прошел (статус: {payment.status})", will_retry=will_retry)
             return {"status": "ok"}
+
+        if data.get("lte_topup"):
+            lte_gb_delta = int(data.get("lte_gb_delta") or 0)
+            lte_price_per_gb = float(data.get("lte_price_per_gb") or 0)
+            amount_from_balance = _round_rub(data.get("amount_from_balance", 0))
+            active_tariff = await ActiveTariffs.get_or_none(id=user.active_tariff_id) if user.active_tariff_id else None
+            if not active_tariff:
+                logger.error(f"LTE пополнение: активный тариф не найден для пользователя {user.id}")
+                return {"status": "error", "message": "Active tariff not found"}
+
+            if amount_from_balance > 0:
+                initial_balance = user.balance
+                user.balance = max(0, user.balance - amount_from_balance)
+                await user.save(update_fields=["balance"])
+                logger.info(
+                    f"LTE пополнение: списано {amount_from_balance:.2f} с бонусного баланса пользователя {user.id}. "
+                    f"Баланс до: {initial_balance}, после: {user.balance}"
+                )
+
+            if lte_gb_delta > 0:
+                active_tariff.lte_gb_total = int(active_tariff.lte_gb_total or 0) + lte_gb_delta
+                await active_tariff.save(update_fields=["lte_gb_total"])
+                user.lte_gb_total = int(active_tariff.lte_gb_total or 0)
+                await user.save(update_fields=["lte_gb_total"])
+
+            await NotificationMarks.filter(user_id=user.id, type="lte_usage").delete()
+
+            pending_device_count = data.get("pending_device_count")
+            if pending_device_count is not None:
+                try:
+                    pending_device_count = int(pending_device_count)
+                except (TypeError, ValueError):
+                    pending_device_count = None
+            if pending_device_count and pending_device_count > 0:
+                pending_expired_at = None
+                pending_expired_at_raw = data.get("pending_expired_at")
+                if pending_expired_at_raw:
+                    try:
+                        pending_expired_at = date.fromisoformat(str(pending_expired_at_raw))
+                    except Exception:
+                        pending_expired_at = None
+
+                pending_active_tariff_price = data.get("pending_active_tariff_price")
+                try:
+                    pending_active_tariff_price = (
+                        int(pending_active_tariff_price) if pending_active_tariff_price is not None else None
+                    )
+                except (TypeError, ValueError):
+                    pending_active_tariff_price = None
+
+                pending_progressive_multiplier = data.get("pending_progressive_multiplier")
+                try:
+                    pending_progressive_multiplier = (
+                        float(pending_progressive_multiplier) if pending_progressive_multiplier is not None else None
+                    )
+                except (TypeError, ValueError):
+                    pending_progressive_multiplier = None
+
+                pending_residual_day_fraction = data.get("pending_residual_day_fraction")
+                try:
+                    pending_residual_day_fraction = (
+                        float(pending_residual_day_fraction) if pending_residual_day_fraction is not None else None
+                    )
+                except (TypeError, ValueError):
+                    pending_residual_day_fraction = None
+
+                pending_devices_decrease_count = data.get("pending_devices_decrease_count")
+                try:
+                    pending_devices_decrease_count = (
+                        int(pending_devices_decrease_count) if pending_devices_decrease_count is not None else None
+                    )
+                except (TypeError, ValueError):
+                    pending_devices_decrease_count = None
+
+                user.expired_at = pending_expired_at or user.expired_at
+                user.hwid_limit = pending_device_count
+                await user.save()
+
+                active_tariff.hwid_limit = pending_device_count
+                if pending_active_tariff_price is not None:
+                    active_tariff.price = pending_active_tariff_price
+                if pending_progressive_multiplier is not None:
+                    active_tariff.progressive_multiplier = pending_progressive_multiplier
+                if pending_residual_day_fraction is not None:
+                    active_tariff.residual_day_fraction = pending_residual_day_fraction
+                if pending_devices_decrease_count is not None:
+                    active_tariff.devices_decrease_count = pending_devices_decrease_count
+                await active_tariff.save()
+
+                if user.remnawave_uuid:
+                    remnawave_client = None
+                    try:
+                        remnawave_client = RemnaWaveClient(
+                            remnawave_settings.url,
+                            remnawave_settings.token.get_secret_value(),
+                        )
+                        await remnawave_client.users.update_user(
+                            uuid=user.remnawave_uuid,
+                            expireAt=user.expired_at,
+                            hwidDeviceLimit=pending_device_count
+                        )
+                    except Exception as e:
+                        logger.error(f"LTE пополнение: ошибка обновления RemnaWave при изменении устройств для {user.id}: {e}")
+                    finally:
+                        if remnawave_client:
+                            try:
+                                await remnawave_client.close()
+                            except Exception:
+                                pass
+
+            if user.remnawave_uuid:
+                try:
+                    should_enable_lte = (active_tariff.lte_gb_total or 0) > (active_tariff.lte_gb_used or 0)
+                    await set_lte_squad_status(str(user.remnawave_uuid), enable=should_enable_lte)
+                except Exception as e:
+                    logger.error(f"LTE пополнение: ошибка обновления LTE-сквада для {user.id}: {e}")
+
+            amount_external = float(payment.amount.value)
+            total_amount = amount_external + amount_from_balance
+            await ProcessedPayments.create(
+                payment_id=payment.id,
+                user_id=user.id,
+                amount=total_amount,
+                amount_external=amount_external,
+                amount_from_balance=amount_from_balance,
+                status="succeeded"
+            )
+
+            logger.info(
+                f"LTE пополнение успешно: user={user.id}, delta={lte_gb_delta}, price={lte_price_per_gb}"
+            )
+            return {"status": "ok"}
         
         try:
             months = int(data["month"])
@@ -208,6 +389,15 @@ async def yookassa_webhook(request: Request, secret: str):
                 extra={'payment_id': payment.id}
             )
             return {"status": "error", "message": "Invalid month value"}
+
+        lte_gb = int(data.get("lte_gb") or 0)
+        lte_price_per_gb = float(data.get("lte_price_per_gb") or 0)
+        lte_cost = _round_rub(data.get("lte_cost") or (lte_gb * lte_price_per_gb))
+        discounted_raw = data.get("discounted_price")
+        if discounted_raw is None:
+            base_paid_price = float(data.get("base_full_price") or 0)
+        else:
+            base_paid_price = float(discounted_raw)
         
         # Достаём скидку, применённую при создании платежа (если была)
         discount_id = data.get("discount_id")
@@ -221,6 +411,7 @@ async def yookassa_webhook(request: Request, secret: str):
             consumed = False
 
         # Новый тариф из webhook
+        active_tariff_for_lte = None
         tariff_id = data.get("tariff_id")
         if tariff_id is not None:
             # Получаем новый тариф
@@ -262,11 +453,6 @@ async def yookassa_webhook(request: Request, secret: str):
                     # ИСПРАВЛЕННАЯ ЛОГИКА: рассчитываем через пропорцию от общей суммы
                     # Выполняем ТОЛЬКО если скидка не была списана (например, повторная оплата без скидки)
                     if new_tariff.price > 0 and not consumed:
-                        # Получаем сумму, которую заплатил пользователь
-                        amount_paid_by_user = float(payment.amount.value)
-                        amount_from_balance = float(data.get("amount_from_balance", 0))
-                        total_paid = amount_paid_by_user + amount_from_balance
-                        
                         # Получаем device_count и рассчитываем правильную цену
                         try:
                             device_count = int(data.get("device_count", 1))
@@ -279,6 +465,7 @@ async def yookassa_webhook(request: Request, secret: str):
                         correct_new_tariff_price = new_tariff.calculate_price(device_count)
                         
                         # Общая сумма = заплачено пользователем + компенсация за старый тариф
+                        total_paid = max(0.0, base_paid_price)
                         total_amount = total_paid + unused_value
                         
                         # Рассчитываем новый период подписки (стандартный для тарифа)
@@ -324,7 +511,25 @@ async def yookassa_webhook(request: Request, secret: str):
         
         # Рассчитываем точное количество дней для указанного количества месяцев
         try:
-            amount_from_balance = float(data.get("amount_from_balance", 0))
+            if tariff_id is not None and user.active_tariff_id:
+                old_active_tariff = await ActiveTariffs.get_or_none(id=user.active_tariff_id)
+                if old_active_tariff:
+                    remaining_gb = max(
+                        0.0,
+                        float(old_active_tariff.lte_gb_total or 0)
+                        - float(old_active_tariff.lte_gb_used or 0),
+                    )
+                    lte_refund_amount = _round_rub(
+                        remaining_gb * float(old_active_tariff.lte_price_per_gb or 0)
+                    )
+                    if lte_refund_amount > 0:
+                        user.balance += lte_refund_amount
+                        logger.info(
+                            f"Начислен бонус за остаток LTE-трафика {remaining_gb:.2f} GB "
+                            f"({lte_refund_amount:.2f} руб.) пользователю {user.id}"
+                        )
+
+            amount_from_balance = _round_rub(data.get("amount_from_balance", 0))
             if amount_from_balance > 0:
                 initial_balance = user.balance
                 user.balance = max(0, user.balance - amount_from_balance)
@@ -393,18 +598,35 @@ async def yookassa_webhook(request: Request, secret: str):
                     # if user.remnawave_uuid:
                         # await cleanup_user_hwid_devices(user.id, user.remnawave_uuid)
                     
+                    msk_today = datetime.now(MSK_TZ).date()
+                    usage_snapshot = None
+                    if user.remnawave_uuid:
+                        usage_snapshot = await _fetch_today_lte_usage_gb(
+                            str(user.remnawave_uuid)
+                        )
                     # Create a new active tariff entry with random ID
+                    if "lte_price_per_gb" in data:
+                        lte_price_snapshot = float(data.get("lte_price_per_gb") or 0)
+                    else:
+                        lte_price_snapshot = float(original.lte_price_per_gb or 0)
                     active_tariff = await ActiveTariffs.create(
                         user=user,  # Link to this user
                         name=original.name,
                         months=original.months,
                         price=calculated_price,  # Используем рассчитанную цену
                         hwid_limit=device_count,  # Используем выбранное количество устройств
+                        lte_gb_total=lte_gb,
+                        lte_gb_used=0.0,
+                        lte_price_per_gb=lte_price_snapshot,
+                        lte_usage_last_date=msk_today,
+                        lte_usage_last_total_gb=usage_snapshot if usage_snapshot is not None else 0.0,
                         progressive_multiplier=original.progressive_multiplier,
                         residual_day_fraction=0.0
                     )
+                    active_tariff_for_lte = active_tariff
                     # Link user to this active tariff
                     user.active_tariff_id = active_tariff.id
+                    user.lte_gb_total = lte_gb
 
                     # Устанавливаем hwid_limit пользователю из выбранного количества устройств
                     user.hwid_limit = device_count
@@ -554,6 +776,43 @@ async def yookassa_webhook(request: Request, secret: str):
                 )
             
             await user.save()  # Сохраняем пользователя (включая обновленный баланс)
+
+            active_tariff_current = active_tariff_for_lte
+            if active_tariff_current is None and user.active_tariff_id:
+                active_tariff_current = await ActiveTariffs.get_or_none(id=user.active_tariff_id)
+
+            if active_tariff_current:
+                if is_auto:
+                    active_tariff_current.lte_gb_used = 0.0
+                    msk_today = datetime.now(MSK_TZ).date()
+                    update_fields = ["lte_gb_used"]
+                    usage_snapshot = None
+                    if user.remnawave_uuid:
+                        usage_snapshot = await _fetch_today_lte_usage_gb(
+                            str(user.remnawave_uuid)
+                        )
+                    if usage_snapshot is not None:
+                        active_tariff_current.lte_usage_last_date = msk_today
+                        active_tariff_current.lte_usage_last_total_gb = usage_snapshot
+                        update_fields.extend(
+                            ["lte_usage_last_date", "lte_usage_last_total_gb"]
+                        )
+                    elif active_tariff_current.lte_usage_last_date != msk_today:
+                        active_tariff_current.lte_usage_last_date = msk_today
+                        active_tariff_current.lte_usage_last_total_gb = 0.0
+                        update_fields.extend(
+                            ["lte_usage_last_date", "lte_usage_last_total_gb"]
+                        )
+                    await active_tariff_current.save(update_fields=update_fields)
+                await NotificationMarks.filter(user_id=user.id, type="lte_usage").delete()
+                if user.remnawave_uuid:
+                    try:
+                        should_enable_lte = (active_tariff_current.lte_gb_total or 0) > (
+                            active_tariff_current.lte_gb_used or 0
+                        )
+                        await set_lte_squad_status(str(user.remnawave_uuid), enable=should_enable_lte)
+                    except Exception as e:
+                        logger.error(f"Ошибка обновления LTE-сквада после оплаты для {user.id}: {e}")
             
             amount_paid_via_yookassa = float(payment.amount.value)
             full_tariff_price_for_history = amount_paid_via_yookassa + amount_from_balance
@@ -603,13 +862,14 @@ async def yookassa_webhook(request: Request, secret: str):
                             device_count = 1
                         correct_new_tariff_price = original.calculate_price(device_count)
                         amount_paid_by_user = float(payment.amount.value)
-                        amount_from_balance = float(data.get("amount_from_balance", 0))
+                        amount_from_balance = _round_rub(data.get("amount_from_balance", 0))
                         total_paid_now = amount_paid_by_user + amount_from_balance
+                        base_paid_now = max(0.0, total_paid_now - lte_cost)
                         current_date = date.today()
                         original_months = int(original.months)
                         new_target_date = add_months_safe(current_date, original_months)
                         new_total_days = (new_target_date - current_date).days
-                        proportional_days = int(total_paid_now * new_total_days / max(1, correct_new_tariff_price))
+                        proportional_days = int(base_paid_now * new_total_days / max(1, correct_new_tariff_price))
                         # Берём минимум, чтобы не подарить лишние дни
                         days = min(days, proportional_days)
                 except Exception:
@@ -696,7 +956,13 @@ async def yookassa_webhook(request: Request, secret: str):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @router.get("/{tariff_id}")
-async def pay(tariff_id: int, email: str, device_count: int = 1, user: Users = Depends(validate)):
+async def pay(
+    tariff_id: int,
+    email: str,
+    device_count: int = 1,
+    lte_gb: int = 0,
+    user: Users = Depends(validate),
+):
     tariff = await Tariffs.get_or_none(id=tariff_id)
     if tariff is None:
         raise HTTPException(status_code=404, detail="Tariff not found")
@@ -706,11 +972,40 @@ async def pay(tariff_id: int, email: str, device_count: int = 1, user: Users = D
         device_count = 1
     
     months = int(tariff.months)
-    # Рассчитываем цену для указанного количества устройств
+    if lte_gb is None:
+        lte_gb = 0
+    try:
+        lte_gb = int(lte_gb)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Некорректное значение LTE лимита")
+    if lte_gb < 0:
+        raise HTTPException(status_code=400, detail="Некорректное значение LTE лимита")
+    if lte_gb > 0 and not tariff.lte_enabled:
+        raise HTTPException(status_code=400, detail="LTE недоступен для выбранного тарифа")
+
+    lte_price_per_gb = float(tariff.lte_price_per_gb or 0) if tariff.lte_enabled else 0.0
+    lte_cost = _round_rub(lte_gb * lte_price_per_gb)
+
+    # Рассчитываем цену для указанного количества устройств (без LTE)
     base_full_price = int(tariff.calculate_price(device_count))
-    discounted_price, discount_id, discount_percent = await apply_personal_discount(user.id, base_full_price, months)
-    full_price = float(discounted_price)
+    discounted_price, discount_id, discount_percent = await apply_personal_discount(
+        user.id, base_full_price, months
+    )
+    full_price = int(discounted_price) + lte_cost
     user_balance = float(user.balance)
+    old_active_tariff = None
+    lte_refund_amount = 0
+    if user.active_tariff_id:
+        old_active_tariff = await ActiveTariffs.get_or_none(id=user.active_tariff_id)
+        if old_active_tariff:
+            remaining_gb = max(
+                0.0,
+                float(old_active_tariff.lte_gb_total or 0)
+                - float(old_active_tariff.lte_gb_used or 0),
+            )
+            lte_refund_amount = _round_rub(
+                remaining_gb * float(old_active_tariff.lte_price_per_gb or 0)
+            )
 
     try:
         current_date = date.today()
@@ -724,11 +1019,19 @@ async def pay(tariff_id: int, email: str, device_count: int = 1, user: Users = D
         raise HTTPException(status_code=500, detail="Error calculating subscription days")
 
     # Проверка полной оплаты с баланса
-    if user_balance >= full_price:
+    effective_balance = user_balance + lte_refund_amount
+    if effective_balance >= full_price:
         logger.info(
             f"Оплата тарифа {tariff_id} для пользователя {user.id} полностью с баланса. "
-            f"Цена: {full_price}, Баланс: {user_balance}, Скидка: {discount_percent}% (id={discount_id})"
+            f"Цена: {full_price}, Баланс: {user_balance}, Скидка: {discount_percent}% (id={discount_id}), "
+            f"LTE: {lte_gb} GB"
         )
+        if lte_refund_amount > 0:
+            user.balance += lte_refund_amount
+            logger.info(
+                f"Начислен бонус за остаток LTE-трафика "
+                f"({lte_refund_amount:.2f} руб.) пользователю {user.id} перед списанием"
+            )
 
         current_date = date.today()
         additional_days = 0
@@ -748,10 +1051,10 @@ async def pay(tariff_id: int, email: str, device_count: int = 1, user: Users = D
                     f"Неиспользованная часть подписки пользователя {user.id}: "
                     f"{days_remaining}/{old_total_days} дней (стоимость: {unused_value:.2f} руб.)"
                 )
-                if full_price > 0:
+                if discounted_price > 0:
                     # ИСПРАВЛЕННАЯ ЛОГИКА: рассчитываем через пропорцию от общей суммы
-                    # Общая сумма = заплачено пользователем (full_price) + компенсация за старый тариф
-                    total_amount = full_price + unused_value
+                    # Общая сумма = оплата базового тарифа + компенсация за старый тариф
+                    total_amount = float(discounted_price) + unused_value
                     
                     # Рассчитываем новый период подписки (стандартный для тарифа)
                     tariff_months = int(tariff.months)
@@ -760,13 +1063,13 @@ async def pay(tariff_id: int, email: str, device_count: int = 1, user: Users = D
                     
                     # Пропорция: x дней / общая_сумма = полный_период_тарифа / цена_тарифа
                     # x = общая_сумма * полный_период_тарифа / цена_тарифа
-                    calculated_days = int(total_amount * new_total_days / full_price)
+                    calculated_days = int(total_amount * new_total_days / float(discounted_price))
                     
                     logger.info(
                         f"ИСПРАВЛЕННЫЙ расчёт (баланс) для пользователя {user.id}: "
-                        f"Заплачено: {full_price:.2f} руб + Компенсация: {unused_value:.2f} руб = "
+                        f"Заплачено: {float(discounted_price):.2f} руб + Компенсация: {unused_value:.2f} руб = "
                         f"Общая сумма: {total_amount:.2f} руб. "
-                        f"Пропорция: {calculated_days} дней = {total_amount:.2f} * {new_total_days} / {full_price:.2f}"
+                        f"Пропорция: {calculated_days} дней = {total_amount:.2f} * {new_total_days} / {float(discounted_price):.2f}"
                     )
                     
                     # Устанавливаем рассчитанные дни как итоговые
@@ -810,7 +1113,8 @@ async def pay(tariff_id: int, email: str, device_count: int = 1, user: Users = D
         # --- NEW: Создаём/обновляем ActiveTariffs и лимит устройств ---
         # Удаляем предыдущий активный тариф, если есть
         if user.active_tariff_id:
-            old_active_tariff = await ActiveTariffs.get_or_none(id=user.active_tariff_id)
+            if old_active_tariff is None:
+                old_active_tariff = await ActiveTariffs.get_or_none(id=user.active_tariff_id)
             if old_active_tariff:
                 logger.info(f"Удаляем предыдущий активный тариф {user.active_tariff_id} пользователя {user.id}")
                 await old_active_tariff.delete()
@@ -821,6 +1125,12 @@ async def pay(tariff_id: int, email: str, device_count: int = 1, user: Users = D
         # if user.remnawave_uuid:
             # await cleanup_user_hwid_devices(user.id, user.remnawave_uuid)
 
+        msk_today = datetime.now(MSK_TZ).date()
+        usage_snapshot = None
+        if user.remnawave_uuid:
+            usage_snapshot = await _fetch_today_lte_usage_gb(
+                str(user.remnawave_uuid)
+            )
         # Создаём новый активный тариф
         # ВАЖНО: сохраняем в price базовую стоимость тарифа без персональной скидки,
         # чтобы автоплатежи не применяли скидку дважды
@@ -831,10 +1141,16 @@ async def pay(tariff_id: int, email: str, device_count: int = 1, user: Users = D
             months=tariff.months,
             price=base_calculated_price,  # Цена без персональной скидки
             hwid_limit=device_count,  # Используем выбранное количество устройств
+            lte_gb_total=lte_gb,
+            lte_gb_used=0.0,
+            lte_price_per_gb=lte_price_per_gb,
+            lte_usage_last_date=msk_today,
+            lte_usage_last_total_gb=usage_snapshot if usage_snapshot is not None else 0.0,
             progressive_multiplier=tariff.progressive_multiplier,
             residual_day_fraction=0.0
         )
         user.active_tariff_id = active_tariff.id
+        user.lte_gb_total = lte_gb
 
         # Устанавливаем hwid_limit пользователю из выбранного количества устройств
         user.hwid_limit = device_count
@@ -850,6 +1166,7 @@ async def pay(tariff_id: int, email: str, device_count: int = 1, user: Users = D
 
         # Сохраняем ВСЕ изменения пользователя (баланс, дата, is_trial и т.д.)
         await user.save()
+        await NotificationMarks.filter(user_id=user.id, type="lte_usage").delete()
 
         # После оплаты с баланса также обнуляем счётчик уменьшений
         if user.active_tariff_id:
@@ -877,6 +1194,11 @@ async def pay(tariff_id: int, email: str, device_count: int = 1, user: Users = D
                         await remnawave_client.close()
                     except Exception as close_exc:
                         logger.warning(f"Ошибка при закрытии клиента RemnaWave: {close_exc}")
+            try:
+                should_enable_lte = lte_gb > 0
+                await set_lte_squad_status(str(user.remnawave_uuid), enable=should_enable_lte)
+            except Exception as e:
+                logger.error(f"Ошибка обновления LTE-сквада для {user.id}: {e}")
 
         payment_id = f"balance_{user.id}_{int(datetime.now().timestamp())}_{randint(100, 999)}"
 
@@ -935,6 +1257,9 @@ async def pay(tariff_id: int, email: str, device_count: int = 1, user: Users = D
             "discounted_price": discounted_price,
             "discount_percent": discount_percent,
             "discount_id": discount_id,
+            "lte_gb": lte_gb,
+            "lte_price_per_gb": lte_price_per_gb,
+            "lte_cost": lte_cost,
         }
 
         # Обернуть синхронный вызов YooKassa в async с таймаутом
@@ -1054,9 +1379,14 @@ async def create_auto_payment(user: Users, disable_on_fail: bool = True) -> bool
 
         months = int(active_tariff.months)
         base_full_price = int(active_tariff.price)
+        lte_gb_total = int(active_tariff.lte_gb_total or 0)
+        lte_price_per_gb = float(active_tariff.lte_price_per_gb or 0)
+        lte_cost = 0
+        if not bool(getattr(active_tariff, "lte_autopay_free", False)):
+            lte_cost = _round_rub(lte_gb_total * lte_price_per_gb)
         # Применяем персональную скидку (если есть)
         discounted_price, discount_id, discount_percent = await apply_personal_discount(user.id, base_full_price, months)
-        full_price = float(discounted_price)
+        full_price = int(discounted_price) + lte_cost
         user_balance = float(user.balance)
 
         try:
@@ -1076,12 +1406,36 @@ async def create_auto_payment(user: Users, disable_on_fail: bool = True) -> bool
         if user_balance >= full_price:
             logger.info(
                 f"Автопродление тарифа {active_tariff.id} для пользователя {user.id} полностью с баланса. "
-                f"Цена: {full_price}, Баланс: {user_balance}"
+                f"Цена: {full_price}, Баланс: {user_balance}, LTE: {lte_gb_total} GB"
             )
 
             initial_balance = user.balance
             user.balance -= full_price
             await user.extend_subscription(days)
+            active_tariff.lte_gb_used = 0.0
+            update_fields = ["lte_gb_used"]
+            usage_snapshot = None
+            msk_today = datetime.now(MSK_TZ).date()
+            if user.remnawave_uuid:
+                usage_snapshot = await _fetch_today_lte_usage_gb(
+                    str(user.remnawave_uuid)
+                )
+            if usage_snapshot is not None:
+                active_tariff.lte_usage_last_date = msk_today
+                active_tariff.lte_usage_last_total_gb = usage_snapshot
+                update_fields.extend(["lte_usage_last_date", "lte_usage_last_total_gb"])
+            elif active_tariff.lte_usage_last_date != msk_today:
+                active_tariff.lte_usage_last_date = msk_today
+                active_tariff.lte_usage_last_total_gb = 0.0
+                update_fields.extend(["lte_usage_last_date", "lte_usage_last_total_gb"])
+            await active_tariff.save(update_fields=update_fields)
+            await NotificationMarks.filter(user_id=user.id, type="lte_usage").delete()
+            if user.remnawave_uuid:
+                try:
+                    should_enable_lte = lte_gb_total > 0
+                    await set_lte_squad_status(str(user.remnawave_uuid), enable=should_enable_lte)
+                except Exception as e:
+                    logger.error(f"Ошибка обновления LTE-сквада при автопродлении для {user.id}: {e}")
             # Сбрасываем триал, если был (маловероятно для автоплатежа, но на всякий случай)
             if user.is_trial:
                 user.is_trial = False
@@ -1172,6 +1526,9 @@ async def create_auto_payment(user: Users, disable_on_fail: bool = True) -> bool
                 "discounted_price": discounted_price,
                 "discount_percent": discount_percent,
                 "discount_id": discount_id,
+                "lte_gb": lte_gb_total,
+                "lte_price_per_gb": lte_price_per_gb,
+                "lte_cost": lte_cost,
             }
 
             # Создаем автоплатеж Yookassa с таймаутом

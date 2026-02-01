@@ -10,6 +10,8 @@ class Tariffs(models.Model):
     base_price = fields.IntField(description="Базовая цена за 1 устройство")
     progressive_multiplier = fields.FloatField(default=0.9, description="Множитель прогрессивной скидки (0.1-1.0). Чем меньше, тем больше скидка на каждое следующее устройство")
     order = fields.IntField(default=3, description="Порядок отображения тарифа")
+    lte_enabled = fields.BooleanField(default=False, description="Доступ к LTE серверам")
+    lte_price_per_gb = fields.FloatField(default=0.0, description="Цена за 1 GB LTE трафика")
 
     # Метод для расчета итоговой цены тарифа на основе количества устройств с прогрессивной скидкой
     def calculate_price(self, device_count: int = 1) -> int:
@@ -76,8 +78,8 @@ Tariffs_Pydantic = pydantic_model_creator(Tariffs, name="Tariffs")
 
 @register(Tariffs)
 class UsersModelAdmin(TortoiseModelAdmin):
-    list_display = ("order", "name", "months", "base_price", "progressive_multiplier")
-    list_editable = ("order", "progressive_multiplier")
+    list_display = ("order", "name", "months", "base_price", "progressive_multiplier", "lte_enabled", "lte_price_per_gb")
+    list_editable = ("order", "progressive_multiplier", "lte_enabled", "lte_price_per_gb")
     ordering = ("order",)
     verbose_name = "Тарифы"
     verbose_name_plural = "Тарифы"

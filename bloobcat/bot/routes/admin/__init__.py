@@ -17,6 +17,7 @@ from .blocked_users import router as blocked_users_router
 from .statistics_commands import router as statistics_commands_router
 from .prize_wheel import router as prize_wheel_router
 from .migexternal import router as migexternal_router
+from .miglte import router as miglte_router
 
 admin_router = Router()
 
@@ -40,6 +41,7 @@ admin_router.include_router(test_notifications_router)
 admin_router.include_router(blocked_users_router)
 admin_router.include_router(statistics_commands_router)
 admin_router.include_router(migexternal_router)
+admin_router.include_router(miglte_router)
 
 
 # @admin_router.message()

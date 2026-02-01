@@ -192,6 +192,14 @@ class UsersAPI:
         logger.debug(f"Ответ при получении пользователя по UUID: {response}")
         return response
 
+    async def get_user_usage_by_range(self, uuid: str, start: str, end: str) -> Dict[str, Any]:
+        """Получение статистики трафика пользователя по диапазону дат"""
+        return await self._execute_with_retry(
+            self.client._request,
+            "GET",
+            f"/api/users/stats/usage/{uuid}/range?start={start}&end={end}",
+        )
+
     async def update_user(self, uuid: str, **kwargs) -> Dict[str, Any]:
         """Обновление пользователя"""
         logger.debug(f"Обновление пользователя {uuid} с параметрами: {kwargs}")
@@ -321,6 +329,16 @@ class NodesAPI:
 
     async def get_node(self, uuid: str) -> Dict[str, Any]:
         return await self.client._request("GET", f"/api/nodes/{uuid}")
+
+    async def get_nodes_usage_by_range(self, start: str, end: str) -> Dict[str, Any]:
+        return await self.client._request(
+            "GET", f"/api/nodes/usage/range?start={start}&end={end}"
+        )
+
+    async def get_node_user_usage_by_range(self, uuid: str, start: str, end: str) -> Dict[str, Any]:
+        return await self.client._request(
+            "GET", f"/api/nodes/usage/{uuid}/users/range?start={start}&end={end}"
+        )
 
 class InboundsAPI:
     def __init__(self, client: RemnaWaveClient):

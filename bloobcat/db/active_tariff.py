@@ -2,6 +2,8 @@ from fastadmin import TortoiseModelAdmin, register
 from tortoise import fields, models
 import random
 
+
+
 def generate_random_id():
     """
     Generates a random 5-digit string for ActiveTariffs ID.
@@ -22,6 +24,12 @@ class ActiveTariffs(models.Model):
     months = fields.IntField()
     price = fields.IntField()
     hwid_limit = fields.IntField(default=1, description="Лимит количества устройств")
+    lte_gb_total = fields.IntField(default=0, description="LTE трафик (GB), купленный на период")
+    lte_gb_used = fields.FloatField(default=0.0, description="LTE трафик (GB), использованный на период")
+    lte_price_per_gb = fields.FloatField(default=0.0, description="Снапшот цены за 1 GB LTE трафика")
+    lte_autopay_free = fields.BooleanField(default=False, description="Не включать LTE стоимость в автоплатеж")
+    lte_usage_last_date = fields.DateField(null=True, description="Дата последнего учтенного LTE трафика")
+    lte_usage_last_total_gb = fields.FloatField(default=0.0, description="Учтенный LTE трафик за последнюю дату (GB)")
     devices_decrease_count = fields.IntField(
         default=0,
         description="Сколько раз пользователь уменьшал лимит устройств в текущем периоде",
@@ -42,9 +50,16 @@ class ActiveTariffsModelAdmin(TortoiseModelAdmin):
         "months",
         "price",
         "hwid_limit",
+        "lte_gb_total",
+        "lte_gb_used",
+        "lte_price_per_gb",
+        "lte_autopay_free",
         "progressive_multiplier",
         "residual_day_fraction",
         "devices_decrease_count",
+    )
+    list_editable = (
+        "lte_gb_total",
     )
     readonly_fields = (
         "id",
@@ -53,9 +68,63 @@ class ActiveTariffsModelAdmin(TortoiseModelAdmin):
         "months",
         "price",
         "hwid_limit",
+        "lte_gb_used",
+        "lte_price_per_gb",
+        "lte_autopay_free",
+        "lte_usage_last_date",
+        "lte_usage_last_total_gb",
         "progressive_multiplier",
         "residual_day_fraction",
         "devices_decrease_count",
     ) # Make fields read-only in admin
     verbose_name = "Активный Тариф"
-    verbose_name_plural = "Активные Тарифы" 
+    verbose_name_plural = "Активные Тарифы"
+
+    async def save_model(self, pk, form_data=None):
+        from bloobcat.db.notifications import NotificationMarks
+        from bloobcat.logger import get_logger
+        from bloobcat.routes.remnawave.lte_utils import set_lte_squad_status
+
+        logger = get_logger("active_tariff_admin")
+        original_obj = None
+        original_lte_total = None
+        original_lte_used = None
+
+        if pk:
+            original_obj = await ActiveTariffs.get_or_none(id=pk)
+            if original_obj:
+                original_lte_total = original_obj.lte_gb_total
+                original_lte_used = original_obj.lte_gb_used
+
+        result = await super().save_model(pk, form_data)
+
+        obj = await ActiveTariffs.get_or_none(id=pk)
+        if not obj or not obj.user_id:
+            return result
+
+        if original_obj is not None and obj.lte_gb_total != original_lte_total:
+            try:
+                should_enable = float(obj.lte_gb_total or 0) > float(obj.lte_gb_used or 0)
+                user = await obj.user
+                if user and user.remnawave_uuid:
+                    await set_lte_squad_status(str(user.remnawave_uuid), enable=should_enable)
+                await NotificationMarks.filter(user_id=obj.user_id, type="lte_usage").delete()
+                logger.info(
+                    "Admin updated lte_gb_total: tariff=%s user=%s total=%s used=%s",
+                    obj.id,
+                    obj.user_id,
+                    obj.lte_gb_total,
+                    obj.lte_gb_used,
+                )
+            except Exception as e:
+                logger.error(
+                    "Admin LTE update failed: tariff=%s user=%s error=%s",
+                    obj.id,
+                    obj.user_id,
+                    e,
+                )
+
+        if original_obj is not None and obj.lte_gb_used != original_lte_used:
+            await NotificationMarks.filter(user_id=obj.user_id, type="lte_usage").delete()
+
+        return result

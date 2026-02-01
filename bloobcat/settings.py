@@ -34,6 +34,10 @@ class RemnaWaveSettings(BaseSettings):
     # UUID внешнего сквада по умолчанию (для сегментации новых пользователей)
     # Ожидается переменная окружения REMNAWAVE_DEFAULT_EXTERNAL_SQUAD_UUID
     default_external_squad_uuid: str | None = None
+    # UUID LTE-сквада (внутренний), для выдачи доступа к LTE нодам
+    lte_internal_squad_uuid: str | None = None
+    # Маркер LTE-нод в названии (например, CHTF)
+    lte_node_marker: str = "CHTF"
 
 
 class ScriptSettings(BaseSettings):

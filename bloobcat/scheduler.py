@@ -24,6 +24,10 @@ from bloobcat.tasks.cleanup_missed_cancellations import run_cleanup_missed_cance
 from bloobcat.tasks.trial_expiring_catchup import run_trial_expiring_catchup_scheduler
 from bloobcat.tasks.subscription_expiring_catchup import run_subscription_expiring_catchup_scheduler
 from bloobcat.tasks.winback_discounts import run_winback_discounts_scheduler
+from bloobcat.tasks.lte_usage_limiter import (
+    run_lte_usage_limiter_scheduler,
+    run_lte_usage_limiter_quick_scheduler,
+)
 
 logger = get_logger("scheduler")
 
@@ -579,6 +583,9 @@ async def schedule_all_tasks():
     logger.info(f"Tasks scheduled for {len(users)} users")
     # Start periodic RemnaWave updater
     asyncio.create_task(run_remnawave_scheduler())
+    # Start LTE usage limiter
+    asyncio.create_task(run_lte_usage_limiter_scheduler())
+    asyncio.create_task(run_lte_usage_limiter_quick_scheduler())
     # Start periodic blocked users cleanup
     from bloobcat.tasks.blocked_users_cleanup import run_blocked_users_cleanup_scheduler  # noqa: WPS433
     asyncio.create_task(run_blocked_users_cleanup_scheduler())

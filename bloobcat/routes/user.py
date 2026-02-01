@@ -4,7 +4,12 @@ from pydantic import BaseModel, EmailStr
 from typing import Dict, Any
 from datetime import datetime, timedelta, timezone, date
 from decimal import Decimal, ROUND_HALF_UP, getcontext
+from functools import partial
+from random import randint
+import asyncio
 import uuid  # For generating new familyurl
+
+from yookassa import Payment
 
 from bloobcat.db.users import User_Pydantic, Users, normalize_date
 from bloobcat.funcs.validate import validate
@@ -16,6 +21,9 @@ from starlette.background import BackgroundTask
 from bloobcat.routes.remnawave.hwid_utils import cleanup_user_hwid_devices
 from bloobcat.db.active_tariff import ActiveTariffs
 from bloobcat.db.tariff import Tariffs
+from bloobcat.db.notifications import NotificationMarks
+from bloobcat.db.payments import ProcessedPayments
+from bloobcat.bot.bot import get_bot_username
 from bloobcat.bot.notifications.admin import cancel_subscription, notify_active_tariff_change
 from bloobcat.utils.dates import add_months_safe
 
@@ -25,6 +33,14 @@ router = APIRouter(
     prefix="/user",
     tags=["user"],
 )
+
+
+def _round_rub(value: float) -> int:
+    try:
+        dec = Decimal(str(value))
+    except Exception:
+        return 0
+    return int(dec.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
 
 class UserUpdate(BaseModel):
@@ -124,12 +140,25 @@ async def check(user: Users = Depends(validate)) -> Dict[str, Any]:
                     if devices_decrease_limit
                     else None
                 )
+                effective_lte_total = (
+                    user.lte_gb_total
+                    if user.lte_gb_total is not None
+                    else (getattr(tariff, "lte_gb_total", 0) or 0)
+                )
                 active_tariff_data = {
                     "id": tariff.id,
                     "name": tariff.name,
                     "months": tariff.months,
                     "price": tariff.price,
                     "hwid_limit": tariff.hwid_limit,
+                    "lte_gb_total": int(effective_lte_total or 0),
+                    "lte_gb_used": float(getattr(tariff, "lte_gb_used", 0) or 0),
+                    "lte_gb_remaining": max(
+                        0,
+                        float(effective_lte_total or 0)
+                        - float(getattr(tariff, "lte_gb_used", 0) or 0),
+                    ),
+                    "lte_price_per_gb": float(getattr(tariff, "lte_price_per_gb", 0) or 0),
                     "devices_decrease_count": int(tariff.devices_decrease_count or 0),
                     "devices_decrease_limit": devices_decrease_limit or None,
                     "devices_decrease_remaining": remaining_decreases,
@@ -206,6 +235,7 @@ async def reset_devices(user: Users = Depends(validate)):
 
 class ChangeDevicesRequest(BaseModel):
     device_count: int
+    lte_gb: int | None = None
 
 
 @router.patch("/active_tariff")
@@ -219,6 +249,8 @@ async def change_active_tariff_devices(payload: ChangeDevicesRequest, user: User
     logger.debug(f"[change_active_tariff_devices] user_id={user.id}, payload={payload.model_dump()}")
     if payload.device_count is None or payload.device_count < 1:
         raise HTTPException(status_code=400, detail="Некорректное количество устройств")
+    if payload.lte_gb is not None and payload.lte_gb < 0:
+        raise HTTPException(status_code=400, detail="Некорректное значение LTE лимита")
 
     if not user.active_tariff_id:
         raise HTTPException(status_code=400, detail="У пользователя нет активного тарифа")
@@ -267,15 +299,34 @@ async def change_active_tariff_devices(payload: ChangeDevicesRequest, user: User
     old_tariff_price = active_tariff.price
     tariff_name = active_tariff.name
     tariff_months = active_tariff.months
-    if new_device_count == current_hwid_limit and all(value == new_device_count for value in stored_limits):
+    current_lte_gb_total = int(
+        user.lte_gb_total
+        if user.lte_gb_total is not None
+        else (getattr(active_tariff, "lte_gb_total", 0) or 0)
+    )
+    new_lte_gb_total = (
+        int(payload.lte_gb)
+        if payload.lte_gb is not None
+        else current_lte_gb_total
+    )
+
+    device_change_needed = not (
+        new_device_count == current_hwid_limit
+        and all(value == new_device_count for value in stored_limits)
+    )
+    lte_change_needed = new_lte_gb_total != current_lte_gb_total
+
+    if not device_change_needed and not lte_change_needed:
         logger.debug(
-            "[change_active_tariff_devices] device count unchanged (%s), skipping recalculation",
+            "[change_active_tariff_devices] no changes requested (devices=%s, lte_gb=%s)",
             new_device_count,
+            new_lte_gb_total,
         )
         return {
             "status": "ok",
             "new_expired_at": user.expired_at,
             "hwid_limit": current_hwid_limit,
+            "lte_gb_total": current_lte_gb_total,
             "price": active_tariff.price,
         }
 
@@ -294,126 +345,250 @@ async def change_active_tariff_devices(payload: ChangeDevicesRequest, user: User
             ),
         )
 
-    # Полный период текущего тарифа в днях
-    active_months = int(active_tariff.months)
-    target_date_old = add_months_safe(current_date, active_months)
-    total_days_old = (target_date_old - current_date).days
-    logger.debug(f"[change_active_tariff_devices] total_days_old={total_days_old}, target_date_old={target_date_old}")
+    pending_device_update = None
+    if device_change_needed:
+        # Полный период текущего тарифа в днях
+        active_months = int(active_tariff.months)
+        target_date_old = add_months_safe(current_date, active_months)
+        total_days_old = (target_date_old - current_date).days
+        logger.debug(f"[change_active_tariff_devices] total_days_old={total_days_old}, target_date_old={target_date_old}")
 
-    # Денежная стоимость неиспользованной части текущего тарифа
-    # Точная математика: избегаем накопления ошибки за счет Decimal и округления к ближайшему дню
-    getcontext().prec = 28
-    unused_percent = (Decimal(days_remaining) / Decimal(total_days_old)) if total_days_old > 0 else Decimal(0)
-    active_price_dec = Decimal(active_tariff.price)
-    unused_value = (unused_percent * active_price_dec)
-    logger.debug(f"[change_active_tariff_devices] unused_percent={float(unused_percent):.6f}, unused_value={float(unused_value):.6f}, active_price={active_tariff.price}")
+        # Денежная стоимость неиспользованной части текущего тарифа
+        # Точная математика: избегаем накопления ошибки за счет Decimal и округления к ближайшему дню
+        getcontext().prec = 28
+        unused_percent = (Decimal(days_remaining) / Decimal(total_days_old)) if total_days_old > 0 else Decimal(0)
+        active_price_dec = Decimal(active_tariff.price)
+        unused_value = (unused_percent * active_price_dec)
+        logger.debug(f"[change_active_tariff_devices] unused_percent={float(unused_percent):.6f}, unused_value={float(unused_value):.6f}, active_price={active_tariff.price}")
 
-    # Рассчитываем цену тарифа для нового количества устройств
-    if original:
-        # Если нашли базовый тариф — используем его актуальный multiplier
-        base_price = original.base_price
-        multiplier = active_tariff.progressive_multiplier or original.progressive_multiplier
-    else:
-        # Нет в магазине — используем снапшот цены и множитель (если есть) для восстановления base_price
-        multiplier = (active_tariff.progressive_multiplier or 0.9)
-        # Если текущая цена была рассчитана с прогрессивным множителем, восстановим base через сумму геометрической прогрессии
-        # S_n = base * (1 - m^n) / (1 - m) при n>=1
-        n = max(1, active_tariff.hwid_limit)
-        if n == 1:
-            base_price = active_tariff.price
+        # Рассчитываем цену тарифа для нового количества устройств
+        if original:
+            # Если нашли базовый тариф — используем его актуальный multiplier
+            base_price = original.base_price
+            multiplier = active_tariff.progressive_multiplier or original.progressive_multiplier
         else:
-            denom = (1 - multiplier)
-            geom_sum = (1 - (multiplier ** n)) / denom if denom != 0 else n
-            base_price = active_tariff.price / geom_sum if geom_sum > 0 else active_tariff.price
+            # Нет в магазине — используем снапшот цены и множитель (если есть) для восстановления base_price
+            multiplier = (active_tariff.progressive_multiplier or 0.9)
+            # Если текущая цена была рассчитана с прогрессивным множителем, восстановим base через сумму геометрической прогрессии
+            # S_n = base * (1 - m^n) / (1 - m) при n>=1
+            n = max(1, active_tariff.hwid_limit)
+            if n == 1:
+                base_price = active_tariff.price
+            else:
+                denom = (1 - multiplier)
+                geom_sum = (1 - (multiplier ** n)) / denom if denom != 0 else n
+                base_price = active_tariff.price / geom_sum if geom_sum > 0 else active_tariff.price
 
-    def calc_price_dec(base: Decimal, mult: Decimal, devices: int) -> Decimal:
-        if devices <= 1:
-            return base
-        total = base
-        for device_num in range(2, devices + 1):
-            total += base * (mult ** (device_num - 1))
-        return total
+        def calc_price_dec(base: Decimal, mult: Decimal, devices: int) -> Decimal:
+            if devices <= 1:
+                return base
+            total = base
+            for device_num in range(2, devices + 1):
+                total += base * (mult ** (device_num - 1))
+            return total
 
-    mult_dec = Decimal(str(multiplier))
-    base_dec = Decimal(str(base_price))
-    new_calculated_price_dec = calc_price_dec(base_dec, mult_dec, new_device_count)
-    new_calculated_price = int(new_calculated_price_dec.to_integral_value(rounding=ROUND_HALF_UP))
-    logger.debug(f"[change_active_tariff_devices] new_device_count={new_device_count}, new_calculated_price={new_calculated_price}")
+        mult_dec = Decimal(str(multiplier))
+        base_dec = Decimal(str(base_price))
+        new_calculated_price_dec = calc_price_dec(base_dec, mult_dec, new_device_count)
+        new_calculated_price = int(new_calculated_price_dec.to_integral_value(rounding=ROUND_HALF_UP))
+        logger.debug(f"[change_active_tariff_devices] new_device_count={new_device_count}, new_calculated_price={new_calculated_price}")
 
-    # Полный период тарифа (в днях) для перерасчёта по новой цене
-    months_length = int(active_tariff.months)  # сохраняем длительность из снапшота, даже если её нет в магазине
-    target_date_new = add_months_safe(current_date, months_length)
-    total_days_new = (target_date_new - current_date).days
-    logger.debug(f"[change_active_tariff_devices] total_days_new={total_days_new}, target_date_new={target_date_new}")
+        # Полный период тарифа (в днях) для перерасчёта по новой цене
+        months_length = int(active_tariff.months)  # сохраняем длительность из снапшота, даже если её нет в магазине
+        target_date_new = add_months_safe(current_date, months_length)
+        total_days_new = (target_date_new - current_date).days
+        logger.debug(f"[change_active_tariff_devices] total_days_new={total_days_new}, target_date_new={target_date_new}")
 
-    # Конвертируем неиспользованную стоимость в дни по новой цене
-    # Пропорция: x = (unused_value * total_days_new) / new_calculated_price
-    new_days = 0
-    residual = Decimal(str(active_tariff.residual_day_fraction or 0))
-    if new_calculated_price > 0 and total_days_new > 0 and unused_value > 0:
-        new_days_dec = (unused_value * Decimal(total_days_new)) / Decimal(new_calculated_price)
-        # Добавляем накопленную дробную часть
-        new_days_dec_total = new_days_dec + residual
-        # Берем целую часть к добавлению, остаток сохраняем
-        integer_part = int(new_days_dec_total.to_integral_value(rounding=ROUND_HALF_UP))
-        # Чтобы не перепрыгивать, возьмем floor через int(new_days_dec_total)
-        integer_part = int(new_days_dec_total)
-        fractional_part = new_days_dec_total - Decimal(integer_part)
-        # Не допускаем отрицательного количества дней, 0 — корректный результат
-        new_days = max(0, integer_part)
-        residual = fractional_part
-    logger.debug(f"[change_active_tariff_devices] computed new_days={new_days}, residual={float(residual):.6f}")
+        # Конвертируем неиспользованную стоимость в дни по новой цене
+        # Пропорция: x = (unused_value * total_days_new) / new_calculated_price
+        new_days = 0
+        residual = Decimal(str(active_tariff.residual_day_fraction or 0))
+        if new_calculated_price > 0 and total_days_new > 0 and unused_value > 0:
+            new_days_dec = (unused_value * Decimal(total_days_new)) / Decimal(new_calculated_price)
+            # Добавляем накопленную дробную часть
+            new_days_dec_total = new_days_dec + residual
+            # Берем целую часть к добавлению, остаток сохраняем
+            integer_part = int(new_days_dec_total.to_integral_value(rounding=ROUND_HALF_UP))
+            # Чтобы не перепрыгивать, возьмем floor через int(new_days_dec_total)
+            integer_part = int(new_days_dec_total)
+            fractional_part = new_days_dec_total - Decimal(integer_part)
+            # Не допускаем отрицательного количества дней, 0 — корректный результат
+            new_days = max(0, integer_part)
+            residual = fractional_part
+        logger.debug(f"[change_active_tariff_devices] computed new_days={new_days}, residual={float(residual):.6f}")
 
-    # Обновляем пользователя и активный тариф
-    user.expired_at = current_date + timedelta(days=new_days)
-    user.hwid_limit = new_device_count
-    await user.save()
-    logger.debug(f"[change_active_tariff_devices] user updated: expired_at={user.expired_at}, hwid_limit={user.hwid_limit}")
+        new_expired_at = current_date + timedelta(days=new_days)
+        pending_device_update = {
+            "expired_at": new_expired_at,
+            "hwid_limit": new_device_count,
+            "price": new_calculated_price,
+            "progressive_multiplier": multiplier,
+            "residual_day_fraction": float(residual),
+            "devices_decrease_count": (devices_decrease_count + 1) if is_decrease else None,
+        }
 
-    # Обновляем snapshot активного тарифа
-    active_tariff.hwid_limit = new_device_count
-    active_tariff.price = new_calculated_price
-    active_tariff.progressive_multiplier = multiplier
-    active_tariff.residual_day_fraction = float(residual)
-    if is_decrease:
-        active_tariff.devices_decrease_count = devices_decrease_count + 1
-    await active_tariff.save()
-    logger.debug(f"[change_active_tariff_devices] active_tariff updated: id={active_tariff.id}, hwid_limit={active_tariff.hwid_limit}, price={active_tariff.price}, residual={active_tariff.residual_day_fraction}")
+    lte_price_per_gb = None
+    lte_gb_used = None
+    if lte_change_needed:
+        from bloobcat.routes.remnawave.lte_utils import set_lte_squad_status
 
-    # Синхронизируем с RemnaWave
-    if user.remnawave_uuid:
-        try:
-            await remnawave_client.users.update_user(
-                uuid=user.remnawave_uuid,
-                expireAt=user.expired_at,
-                hwidDeviceLimit=new_device_count
+        lte_price_per_gb = float(getattr(active_tariff, "lte_price_per_gb", 0) or 0)
+        if new_lte_gb_total > 0 and lte_price_per_gb <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="LTE недоступен для текущего тарифа",
             )
-            logger.debug(f"[change_active_tariff_devices] RemnaWave updated: uuid={user.remnawave_uuid}, expireAt={user.expired_at}, hwidDeviceLimit={new_device_count}")
-        except Exception as e:
-            logger.error(f"Ошибка обновления RemnaWave при смене устройств: {e}")
-            # Не прерываем из-за ошибки внешнего сервиса
+        lte_gb_used = float(getattr(active_tariff, "lte_gb_used", 0) or 0)
 
-    try:
-        await notify_active_tariff_change(
-            user=user,
-            tariff_name=tariff_name,
-            months=tariff_months,
-            old_limit=old_hwid_limit,
-            new_limit=new_device_count,
-            old_price=old_tariff_price,
-            new_price=new_calculated_price,
-            old_expired_at=old_expired_at,
-            new_expired_at=user.expired_at,
-            auto_renew_enabled=bool(user.renew_id),
-        )
-    except Exception as e:
-        logger.error(f"Ошибка отправки уведомления об изменении активного тарифа: {e}")
+        if new_lte_gb_total < lte_gb_used:
+            raise HTTPException(
+                status_code=400,
+                detail="Нельзя установить LTE лимит ниже уже использованного объема",
+            )
+
+        if new_lte_gb_total > current_lte_gb_total:
+            additional_gb = new_lte_gb_total - current_lte_gb_total
+            extra_cost = _round_rub(additional_gb * lte_price_per_gb)
+
+            if extra_cost > 0 and user.balance < extra_cost:
+                amount_to_pay = max(1, extra_cost - int(user.balance))
+                amount_from_balance = max(0, extra_cost - amount_to_pay)
+                metadata = {
+                    "user_id": user.id,
+                    "lte_topup": True,
+                    "lte_gb_delta": additional_gb,
+                    "lte_price_per_gb": lte_price_per_gb,
+                    "amount_from_balance": amount_from_balance,
+                }
+                if pending_device_update:
+                    metadata.update({
+                        "pending_device_count": pending_device_update["hwid_limit"],
+                        "pending_expired_at": pending_device_update["expired_at"].isoformat(),
+                        "pending_active_tariff_price": pending_device_update["price"],
+                        "pending_progressive_multiplier": pending_device_update["progressive_multiplier"],
+                        "pending_residual_day_fraction": pending_device_update["residual_day_fraction"],
+                    })
+                    if pending_device_update["devices_decrease_count"] is not None:
+                        metadata["pending_devices_decrease_count"] = pending_device_update["devices_decrease_count"]
+                try:
+                    payment_data = {
+                        "amount": {"value": str(amount_to_pay), "currency": "RUB"},
+                        "confirmation": {
+                            "type": "redirect",
+                            "return_url": f"https://t.me/{await get_bot_username()}/",
+                        },
+                        "metadata": metadata,
+                        "capture": True,
+                        "description": f"LTE трафик пользователю {user.id}",
+                    }
+                    idempotence_key = str(randint(100000, 999999999999))
+                    payment = await asyncio.wait_for(
+                        asyncio.to_thread(partial(Payment.create, payment_data, idempotence_key)),
+                        timeout=30.0,
+                    )
+                    return {"status": "payment_required", "redirect_to": payment.confirmation.confirmation_url}
+                except Exception as e:
+                    logger.error(f"Ошибка при создании LTE платежа для {user.id}: {e}")
+                    raise HTTPException(status_code=500, detail="Ошибка при создании платежа")
+
+    if pending_device_update:
+        # Обновляем пользователя и активный тариф
+        user.expired_at = pending_device_update["expired_at"]
+        user.hwid_limit = pending_device_update["hwid_limit"]
+        await user.save()
+        logger.debug(f"[change_active_tariff_devices] user updated: expired_at={user.expired_at}, hwid_limit={user.hwid_limit}")
+
+        # Обновляем snapshot активного тарифа
+        active_tariff.hwid_limit = pending_device_update["hwid_limit"]
+        active_tariff.price = pending_device_update["price"]
+        active_tariff.progressive_multiplier = pending_device_update["progressive_multiplier"]
+        active_tariff.residual_day_fraction = pending_device_update["residual_day_fraction"]
+        if pending_device_update["devices_decrease_count"] is not None:
+            active_tariff.devices_decrease_count = pending_device_update["devices_decrease_count"]
+        await active_tariff.save()
+        logger.debug(f"[change_active_tariff_devices] active_tariff updated: id={active_tariff.id}, hwid_limit={active_tariff.hwid_limit}, price={active_tariff.price}, residual={active_tariff.residual_day_fraction}")
+
+        # Синхронизируем с RemnaWave
+        if user.remnawave_uuid:
+            try:
+                await remnawave_client.users.update_user(
+                    uuid=user.remnawave_uuid,
+                    expireAt=user.expired_at,
+                    hwidDeviceLimit=pending_device_update["hwid_limit"]
+                )
+                logger.debug(f"[change_active_tariff_devices] RemnaWave updated: uuid={user.remnawave_uuid}, expireAt={user.expired_at}, hwidDeviceLimit={pending_device_update['hwid_limit']}")
+            except Exception as e:
+                logger.error(f"Ошибка обновления RemnaWave при смене устройств: {e}")
+                # Не прерываем из-за ошибки внешнего сервиса
+
+        try:
+            await notify_active_tariff_change(
+                user=user,
+                tariff_name=tariff_name,
+                months=tariff_months,
+                old_limit=old_hwid_limit,
+                new_limit=pending_device_update["hwid_limit"],
+                old_price=old_tariff_price,
+                new_price=pending_device_update["price"],
+                old_expired_at=old_expired_at,
+                new_expired_at=user.expired_at,
+                auto_renew_enabled=bool(user.renew_id),
+            )
+        except Exception as e:
+            logger.error(f"Ошибка отправки уведомления об изменении активного тарифа: {e}")
+
+    if lte_change_needed:
+        if new_lte_gb_total < current_lte_gb_total:
+            refundable_gb = max(0, current_lte_gb_total - new_lte_gb_total)
+            refund_amount = _round_rub(refundable_gb * lte_price_per_gb)
+            if refund_amount > 0:
+                user.balance += refund_amount
+                await user.save(update_fields=["balance"])
+            active_tariff.lte_gb_total = new_lte_gb_total
+            await active_tariff.save(update_fields=["lte_gb_total"])
+            user.lte_gb_total = new_lte_gb_total
+            await user.save(update_fields=["lte_gb_total"])
+        elif new_lte_gb_total > current_lte_gb_total:
+            additional_gb = new_lte_gb_total - current_lte_gb_total
+            extra_cost = _round_rub(additional_gb * lte_price_per_gb)
+
+            # Хватает баланса
+            if extra_cost > 0:
+                user.balance -= extra_cost
+                await user.save(update_fields=["balance"])
+                payment_id = f"balance_lte_topup_{user.id}_{int(datetime.now().timestamp())}_{randint(100, 999)}"
+                await ProcessedPayments.create(
+                    payment_id=payment_id,
+                    user_id=user.id,
+                    amount=extra_cost,
+                    amount_external=0,
+                    amount_from_balance=extra_cost,
+                    status="succeeded",
+                )
+            active_tariff.lte_gb_total = new_lte_gb_total
+            await active_tariff.save(update_fields=["lte_gb_total"])
+            user.lte_gb_total = new_lte_gb_total
+            await user.save(update_fields=["lte_gb_total"])
+
+        # Обновляем доступ к LTE скваду
+        if user.remnawave_uuid:
+            should_enable = (active_tariff.lte_gb_total or 0) > (active_tariff.lte_gb_used or 0)
+            try:
+                await set_lte_squad_status(str(user.remnawave_uuid), enable=should_enable)
+            except Exception as e:
+                logger.error(f"Ошибка обновления LTE-сквада для {user.id}: {e}")
+        await NotificationMarks.filter(user_id=user.id, type="lte_usage").delete()
 
     return {
         "status": "ok",
         "new_expired_at": user.expired_at,
         "hwid_limit": new_device_count,
-        "price": new_calculated_price
+        "lte_gb_total": int(
+            user.lte_gb_total
+            if user.lte_gb_total is not None
+            else (getattr(active_tariff, "lte_gb_total", 0) or 0)
+        ),
+        "price": active_tariff.price,
     }
 
 @router.get("/family/{familyurl}")

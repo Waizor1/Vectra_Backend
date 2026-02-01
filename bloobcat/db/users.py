@@ -5,6 +5,7 @@ from aiogram.types import User
 from aiogram.utils.web_app import WebAppUser
 from fastapi import Request
 from fastadmin import TortoiseModelAdmin, register
+from pydantic import BaseModel as FastAdminBaseModel, Field
 from tortoise import fields, models
 from tortoise.contrib.pydantic import pydantic_model_creator
 
@@ -84,6 +85,7 @@ class Users(models.Model):
         "models.ActiveTariffs", related_name="users", null=True, on_delete=fields.SET_NULL, description="ID активного тарифа пользователя"
     )
     hwid_limit = fields.IntField(null=True, description="Личный лимит устройств (переопределяет тариф и настройки панели)")
+    lte_gb_total = fields.IntField(null=True, description="Личный LTE лимит (GB), переопределяет тариф")
     is_blocked = fields.BooleanField(default=False, description="Пользователь заблокировал бота")
     blocked_at = fields.DatetimeField(null=True, description="Дата и время блокировки")
     last_failed_message_at = fields.DatetimeField(null=True, description="Последняя неуспешная попытка отправки")
@@ -133,6 +135,28 @@ class Users(models.Model):
                 # Базовый лимит устройств для триала: сразу сохраняем в БД, если не задано
                 if self.hwid_limit is None:
                     self.hwid_limit = 1
+
+                internal_squads = []
+                if remnawave_settings.default_internal_squad_uuid:
+                    internal_squads.append(remnawave_settings.default_internal_squad_uuid)
+                lte_uuid = remnawave_settings.lte_internal_squad_uuid
+                if lte_uuid:
+                    lte_allowed = False
+                    if self.is_trial:
+                        lte_allowed = True
+                    elif self.active_tariff_id:
+                        active_tariff = await ActiveTariffs.get_or_none(id=self.active_tariff_id)
+                        effective_lte_total = (
+                            self.lte_gb_total
+                            if self.lte_gb_total is not None
+                            else (active_tariff.lte_gb_total or 0 if active_tariff else 0)
+                        )
+                        effective_lte_used = active_tariff.lte_gb_used if active_tariff else 0
+                        if (effective_lte_total or 0) > (effective_lte_used or 0):
+                            lte_allowed = True
+                    if lte_allowed:
+                        internal_squads.append(lte_uuid)
+                active_internal_squads = internal_squads or None
                 
                 # Создаем пользователя в RemnaWave
                 base_username = f"{self.id}_TEST" if test_mode else str(self.id)
@@ -147,11 +171,7 @@ class Users(models.Model):
                             email=self.email,
                             description=f"Telegram: {self.name()}",
                             hwid_device_limit=self.hwid_limit,
-                            active_internal_squads=(
-                                [remnawave_settings.default_internal_squad_uuid]
-                                if remnawave_settings.default_internal_squad_uuid
-                                else None
-                            ),
+                            active_internal_squads=active_internal_squads,
                             external_squad_uuid=remnawave_settings.default_external_squad_uuid,
                         )
                         break  # Успешно создали, выходим из цикла
@@ -203,6 +223,28 @@ class Users(models.Model):
                 # Лимит устройств: используем персональный лимит, если задан, иначе 1
                 hwid_limit = self.hwid_limit if self.hwid_limit is not None else 1
 
+                internal_squads = []
+                if remnawave_settings.default_internal_squad_uuid:
+                    internal_squads.append(remnawave_settings.default_internal_squad_uuid)
+                lte_uuid = remnawave_settings.lte_internal_squad_uuid
+                if lte_uuid:
+                    lte_allowed = False
+                    if self.is_trial:
+                        lte_allowed = True
+                    elif self.active_tariff_id:
+                        active_tariff = await ActiveTariffs.get_or_none(id=self.active_tariff_id)
+                        effective_lte_total = (
+                            self.lte_gb_total
+                            if self.lte_gb_total is not None
+                            else (active_tariff.lte_gb_total or 0 if active_tariff else 0)
+                        )
+                        effective_lte_used = active_tariff.lte_gb_used if active_tariff else 0
+                        if (effective_lte_total or 0) > (effective_lte_used or 0):
+                            lte_allowed = True
+                    if lte_allowed:
+                        internal_squads.append(lte_uuid)
+                active_internal_squads = internal_squads or None
+
                 base_username = f"{self.id}_TEST" if test_mode else str(self.id)
                 username_to_try = base_username
                 counter = 1
@@ -215,11 +257,7 @@ class Users(models.Model):
                             email=self.email,
                             description=f"Telegram: {self.name()}",
                             hwid_device_limit=hwid_limit,
-                            active_internal_squads=(
-                                [remnawave_settings.default_internal_squad_uuid]
-                                if remnawave_settings.default_internal_squad_uuid
-                                else None
-                            ),
+                            active_internal_squads=active_internal_squads,
                             external_squad_uuid=remnawave_settings.default_external_squad_uuid,
                         )
                         break
@@ -572,6 +610,13 @@ class Users(models.Model):
 
 User_Pydantic = pydantic_model_creator(Users, name="User")
 
+
+class UsersUpdateSchema(FastAdminBaseModel):
+    """Схема обновления пользователя через админку (включая LTE лимит)."""
+    lte_gb_total: Optional[int] = Field(
+        None, description="LTE лимит (GB) для активного тарифа"
+    )
+
 @register(Users)
 class UsersModelAdmin(TortoiseModelAdmin):
     search_fields = ("username", "id", "full_name")
@@ -625,6 +670,7 @@ class UsersModelAdmin(TortoiseModelAdmin):
         "remnawave_uuid",
         "familyurl",
         "active_tariff",
+        "lte_gb_total",
         "hwid_limit",
         "is_blocked",
         "blocked_at",
@@ -635,6 +681,7 @@ class UsersModelAdmin(TortoiseModelAdmin):
     search_help_text = "Юзернейм, имя, айди"
     verbose_name = "Пользователи"
     verbose_name_plural = "Пользователи"
+    update_schema = UsersUpdateSchema
 
     async def save_model(self, pk, form_data=None):
         """
@@ -645,6 +692,10 @@ class UsersModelAdmin(TortoiseModelAdmin):
         :param pk: Первичный ключ пользователя (ID)
         :param form_data: Данные формы с изменениями
         """
+        if form_data is None:
+            form_data = {}
+        lte_gb_total = form_data.get("lte_gb_total", None)
+
         original_obj = None
         original_expired_at = None
         original_hwid_limit = None
@@ -658,6 +709,35 @@ class UsersModelAdmin(TortoiseModelAdmin):
         result = await super().save_model(pk, form_data)
         
         obj = await Users.get(id=pk)
+
+        if lte_gb_total is not None:
+            try:
+                lte_gb_total = int(lte_gb_total)
+            except (TypeError, ValueError):
+                lte_gb_total = None
+
+        if lte_gb_total is not None:
+            if lte_gb_total < 0:
+                lte_gb_total = 0
+            active_tariff = None
+            if obj.active_tariff_id:
+                active_tariff = await ActiveTariffs.get_or_none(id=obj.active_tariff_id)
+            if active_tariff:
+                active_tariff.lte_gb_total = lte_gb_total
+                await active_tariff.save(update_fields=["lte_gb_total"])
+                try:
+                    from bloobcat.routes.remnawave.lte_utils import set_lte_squad_status
+                    from bloobcat.db.notifications import NotificationMarks
+                    should_enable = lte_gb_total > float(active_tariff.lte_gb_used or 0)
+                    if obj.remnawave_uuid:
+                        await set_lte_squad_status(str(obj.remnawave_uuid), enable=should_enable)
+                    await NotificationMarks.filter(user_id=obj.id, type="lte_usage").delete()
+                except Exception as e:
+                    logger.error(f"Ошибка обновления LTE лимита для {obj.id}: {e}")
+            else:
+                logger.warning(
+                    f"Пользователь {obj.id} без active_tariff_id — LTE лимит не обновлен"
+                )
         
         logger.debug(f"Пользователь {obj.id} сохранен. Проверяем необходимость обновления в RemnaWave")
         

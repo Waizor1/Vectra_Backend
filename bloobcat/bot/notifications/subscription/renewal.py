@@ -4,6 +4,7 @@ from bloobcat.bot.keyboard import webapp_inline_button
 from bloobcat.logger import get_logger
 from bloobcat.bot.notifications.localization import get_user_locale
 from bloobcat.bot.error_handler import handle_telegram_forbidden_error, handle_telegram_bad_request, reset_user_failed_count
+from bloobcat.db.active_tariff import ActiveTariffs
 
 logger = get_logger("notifications.subscription.renewal")
 
@@ -14,18 +15,26 @@ async def notify_auto_renewal_success_balance(user, days: int, amount: float):
     # Локализация уведомления об успешном автопродлении с баланса
     lang = get_user_locale(user)
     logger.info(f"Отправка уведомления об успешном автопродлении с баланса пользователю {user.id}")
+    lte_line = ""
+    if user.active_tariff_id:
+        active_tariff = await ActiveTariffs.get_or_none(id=user.active_tariff_id)
+        if active_tariff and (active_tariff.lte_gb_total or 0) > 0:
+            if lang == 'ru':
+                lte_line = f"\n\nLTE-лимит обновлен: {int(active_tariff.lte_gb_total)} GB."
+            else:
+                lte_line = f"\n\nLTE limit refreshed: {int(active_tariff.lte_gb_total)} GB."
     if lang == 'ru':
         text = (
             f"🎉 Привет, {user.full_name}! Ваша подписка автоматически продлена на {days} дней! 💪\n"
             f"С вашего бонусного баланса списано {amount:.2f}₽.\n"
-            "Спасибо, что остаетесь с нами! 🌟"
+            f"Спасибо, что остаетесь с нами! 🌟{lte_line}"
         )
         button = await webapp_inline_button("Личный кабинет")
     else:
         text = (
             f"🎉 Hi {user.full_name}! Your subscription was auto-renewed for {days} days! 💪\n"
             f"{amount:.2f} RUB has been deducted from your bonus balance.\n"
-            "Thank you for staying with us! 🌟"
+            f"Thank you for staying with us! 🌟{lte_line}"
         )
         button = await webapp_inline_button("Dashboard")
     try:
@@ -85,13 +94,21 @@ async def notify_renewal_success_yookassa(user, days: int, amount_paid_via_yooka
     # Локализация уведомления об успешном продлении через Yookassa
     lang = get_user_locale(user)
     logger.info(f"Отправка уведомления об успешном продлении (Yookassa) пользователю {user.id}")
+    lte_line = ""
+    if user.active_tariff_id:
+        active_tariff = await ActiveTariffs.get_or_none(id=user.active_tariff_id)
+        if active_tariff and (active_tariff.lte_gb_total or 0) > 0:
+            if lang == 'ru':
+                lte_line = f"\n\nLTE-лимит обновлен: {int(active_tariff.lte_gb_total)} GB."
+            else:
+                lte_line = f"\n\nLTE limit refreshed: {int(active_tariff.lte_gb_total)} GB."
     if lang == 'ru':
         parts = [f"✅ Привет, {user.full_name}! Ваша подписка успешно продлена на {days} дней!"]
         if amount_from_balance > 0:
             parts.append(f"\nС вашего бонусного баланса списано {amount_from_balance:.2f}₽.")
         if amount_paid_via_yookassa > 0:
             parts.append(f"С привязанного способа оплаты списано {amount_paid_via_yookassa:.2f}₽.")
-        text = "\n".join(parts) + "\nСпасибо, что остаетесь с нами! 🌟"
+        text = "\n".join(parts) + f"\nСпасибо, что остаетесь с нами! 🌟{lte_line}"
         button = await webapp_inline_button("Личный кабинет")
     else:
         parts = [f"✅ Hi {user.full_name}! Your subscription has been renewed for {days} days!"]
@@ -99,7 +116,7 @@ async def notify_renewal_success_yookassa(user, days: int, amount_paid_via_yooka
             parts.append(f"\n{amount_from_balance:.2f} RUB has been deducted from your bonus balance.")
         if amount_paid_via_yookassa > 0:
             parts.append(f"{amount_paid_via_yookassa:.2f} RUB has been charged to your saved payment method.")
-        text = "\n".join(parts) + "\nThank you for staying with us! 🌟"
+        text = "\n".join(parts) + f"\nThank you for staying with us! 🌟{lte_line}"
         button = await webapp_inline_button("Dashboard")
     try:
         await bot.send_message(user.id, text, reply_markup=button)
