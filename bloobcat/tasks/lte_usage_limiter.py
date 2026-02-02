@@ -179,6 +179,17 @@ async def lte_usage_limiter_once() -> int:
 
             total_limit = float(tariff.lte_gb_total or 0)
             if total_limit > 0:
+                if new_used >= total_limit:
+                    try:
+                        refreshed = await ActiveTariffs.get_or_none(id=tariff.id)
+                        if refreshed:
+                            total_limit = float(refreshed.lte_gb_total or 0)
+                    except Exception as e:
+                        logger.warning(
+                            "LTE limiter: failed to refresh lte_gb_total for %s: %s",
+                            tariff.id,
+                            e,
+                        )
                 await _notify_lte_thresholds(
                     user=user,
                     used_gb=new_used,
@@ -359,6 +370,17 @@ async def lte_usage_limiter_quick_once(recent_minutes: int = 30) -> int:
                     is_trial=False,
                 )
                 try:
+                    if new_used >= total_limit:
+                        try:
+                            refreshed = await ActiveTariffs.get_or_none(id=tariff.id)
+                            if refreshed:
+                                total_limit = float(refreshed.lte_gb_total or 0)
+                        except Exception as e:
+                            logger.warning(
+                                "LTE limiter quick: failed to refresh lte_gb_total for %s: %s",
+                                tariff.id,
+                                e,
+                            )
                     should_enable = new_used < total_limit
                     await set_lte_squad_status(
                         str(user.remnawave_uuid), enable=should_enable, client=client

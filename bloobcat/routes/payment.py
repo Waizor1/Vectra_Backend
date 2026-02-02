@@ -269,11 +269,30 @@ async def yookassa_webhook(request: Request, secret: str):
                     f"Баланс до: {initial_balance}, после: {user.balance}"
                 )
 
+            update_fields = []
             if lte_gb_delta > 0:
                 active_tariff.lte_gb_total = int(active_tariff.lte_gb_total or 0) + lte_gb_delta
-                await active_tariff.save(update_fields=["lte_gb_total"])
+                update_fields.append("lte_gb_total")
                 user.lte_gb_total = int(active_tariff.lte_gb_total or 0)
                 await user.save(update_fields=["lte_gb_total"])
+
+            msk_today = datetime.now(MSK_TZ).date()
+            usage_snapshot = None
+            if user.remnawave_uuid:
+                usage_snapshot = await _fetch_today_lte_usage_gb(
+                    str(user.remnawave_uuid)
+                )
+            if usage_snapshot is not None:
+                active_tariff.lte_usage_last_date = msk_today
+                active_tariff.lte_usage_last_total_gb = usage_snapshot
+                update_fields.extend(["lte_usage_last_date", "lte_usage_last_total_gb"])
+            elif active_tariff.lte_usage_last_date != msk_today:
+                active_tariff.lte_usage_last_date = msk_today
+                active_tariff.lte_usage_last_total_gb = 0.0
+                update_fields.extend(["lte_usage_last_date", "lte_usage_last_total_gb"])
+
+            if update_fields:
+                await active_tariff.save(update_fields=update_fields)
 
             await NotificationMarks.filter(user_id=user.id, type="lte_usage").delete()
 
