@@ -24,6 +24,7 @@ from bloobcat.tasks.cleanup_missed_cancellations import run_cleanup_missed_cance
 from bloobcat.tasks.trial_expiring_catchup import run_trial_expiring_catchup_scheduler
 from bloobcat.tasks.subscription_expiring_catchup import run_subscription_expiring_catchup_scheduler
 from bloobcat.tasks.winback_discounts import run_winback_discounts_scheduler
+from bloobcat.tasks.trial_active_tariff_fix import run_trial_active_tariff_fix_scheduler
 from bloobcat.tasks.lte_usage_limiter import (
     run_lte_usage_limiter_scheduler,
     run_lte_usage_limiter_quick_scheduler,
@@ -607,6 +608,8 @@ async def schedule_all_tasks():
     asyncio.create_task(run_referral_prompts_scheduler())
     # Start winback discounts scheduler
     asyncio.create_task(run_winback_discounts_scheduler())
+    # Start trial/active_tariff fixer
+    asyncio.create_task(run_trial_active_tariff_fix_scheduler())
     # Start automatic statistics scheduler
     from bloobcat.statistics.scheduler import statistics_scheduler
     asyncio.create_task(statistics_scheduler()) 

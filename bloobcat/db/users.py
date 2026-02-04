@@ -706,6 +706,24 @@ class UsersModelAdmin(TortoiseModelAdmin):
                 original_expired_at = original_obj.expired_at
                 original_hwid_limit = original_obj.hwid_limit
 
+        pending_is_trial = form_data.get(
+            "is_trial", original_obj.is_trial if original_obj else False
+        )
+        if "active_tariff" in form_data:
+            pending_active_tariff = form_data.get("active_tariff")
+            if pending_active_tariff is None:
+                pending_active_tariff_id = None
+            else:
+                pending_active_tariff_id = getattr(
+                    pending_active_tariff, "id", pending_active_tariff
+                )
+        else:
+            pending_active_tariff_id = (
+                original_obj.active_tariff_id if original_obj else None
+            )
+        if pending_is_trial and pending_active_tariff_id:
+            raise ValueError("Нельзя включать is_trial при активном тарифе.")
+
         result = await super().save_model(pk, form_data)
         
         obj = await Users.get(id=pk)
