@@ -268,6 +268,69 @@ async def lte_usage_limiter_once() -> int:
                         except Exception as e:
                             logger.error(f"LTE limiter: ошибка включения LTE для trial {trial_user.id}: {e}")
 
+        non_trial_users = await Users.filter(
+            is_trial=False,
+            is_subscribed=False,
+            active_tariff_id__isnull=True,
+            lte_gb_total__not_isnull=True,
+            lte_gb_total__gt=0,
+            remnawave_uuid__not_isnull=True,
+        )
+        if non_trial_users:
+            end_str = _format_range_end(datetime.now(timezone.utc))
+            marker_upper = (remnawave_settings.lte_node_marker or "").upper()
+            for user in non_trial_users:
+                if user.expired_at and user.expired_at < msk_today:
+                    continue
+                user_uuid = str(user.remnawave_uuid)
+                if user.created_at:
+                    created_at = user.created_at
+                    if getattr(created_at, "tzinfo", None):
+                        start_date = created_at.astimezone(MSK_TZ).date()
+                    else:
+                        created_at_utc = created_at.replace(tzinfo=timezone.utc)
+                        start_date = created_at_utc.astimezone(MSK_TZ).date()
+                else:
+                    start_date = msk_today
+                start_str = _format_range_start(start_date)
+                resp = await client.users.get_user_usage_by_range(
+                    user_uuid, start_str, end_str
+                )
+                items = resp.get("response") or []
+                total_gb = 0.0
+                for item in items:
+                    node_name = str(item.get("nodeName") or "").upper()
+                    if marker_upper and marker_upper not in node_name:
+                        continue
+                    total_bytes = float(item.get("total") or 0)
+                    total_gb += total_bytes / BYTES_IN_GB
+
+                total_limit = float(user.lte_gb_total or 0)
+                await _notify_lte_thresholds(
+                    user=user,
+                    used_gb=total_gb,
+                    total_gb=total_limit,
+                    is_trial=False,
+                )
+
+                if total_gb >= total_limit:
+                    try:
+                        await set_lte_squad_status(user_uuid, enable=False, client=client)
+                    except Exception as e:
+                        logger.error(f"LTE limiter: ошибка отключения LTE для user {user.id}: {e}")
+                else:
+                    full_mark = await NotificationMarks.filter(
+                        user_id=user.id, type="lte_usage", key="full"
+                    ).exists()
+                    if full_mark:
+                        await NotificationMarks.filter(
+                            user_id=user.id, type="lte_usage"
+                        ).delete()
+                        try:
+                            await set_lte_squad_status(user_uuid, enable=True, client=client)
+                        except Exception as e:
+                            logger.error(f"LTE limiter: ошибка включения LTE для user {user.id}: {e}")
+
         return updated
     finally:
         await client.close()
