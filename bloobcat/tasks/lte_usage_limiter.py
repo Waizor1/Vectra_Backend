@@ -177,9 +177,13 @@ async def lte_usage_limiter_once() -> int:
             if update_fields:
                 await tariff.save(update_fields=update_fields)
 
-            total_limit = float(tariff.lte_gb_total or 0)
+            total_limit = float(
+                user.lte_gb_total
+                if user.lte_gb_total is not None
+                else (tariff.lte_gb_total or 0)
+            )
             if total_limit > 0:
-                if new_used >= total_limit:
+                if user.lte_gb_total is None and new_used >= total_limit:
                     try:
                         refreshed = await ActiveTariffs.get_or_none(id=tariff.id)
                         if refreshed:
@@ -424,7 +428,11 @@ async def lte_usage_limiter_quick_once(recent_minutes: int = 30) -> int:
             if update_fields:
                 await tariff.save(update_fields=update_fields)
 
-            total_limit = float(tariff.lte_gb_total or 0)
+            total_limit = float(
+                user.lte_gb_total
+                if user.lte_gb_total is not None
+                else (tariff.lte_gb_total or 0)
+            )
             if total_limit > 0:
                 await _notify_lte_thresholds(
                     user=user,
@@ -433,7 +441,7 @@ async def lte_usage_limiter_quick_once(recent_minutes: int = 30) -> int:
                     is_trial=False,
                 )
                 try:
-                    if new_used >= total_limit:
+                    if user.lte_gb_total is None and new_used >= total_limit:
                         try:
                             refreshed = await ActiveTariffs.get_or_none(id=tariff.id)
                             if refreshed:
