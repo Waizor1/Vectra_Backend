@@ -45,9 +45,42 @@ services:
     depends_on:
       - bloobcat_db
 
+  directus:
+    image: directus/directus:10.10.5
+    container_name: bloobcat_directus
+    restart: always
+    depends_on:
+      - bloobcat_db
+    environment:
+      KEY: ${DIRECTUS_KEY}
+      SECRET: ${DIRECTUS_SECRET}
+      ADMIN_EMAIL: ${DIRECTUS_ADMIN_EMAIL}
+      ADMIN_PASSWORD: ${DIRECTUS_ADMIN_PASSWORD}
+      DB_CLIENT: pg
+      DB_HOST: bloobcat_db
+      DB_PORT: 5432
+      DB_DATABASE: postgres
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      WEBSOCKETS_ENABLED: "true"
+      CORS_ENABLED: "true"
+      CORS_ORIGIN: "true"
+      EXTENSIONS_PATH: /directus/extensions
+      ADMIN_INTEGRATION_URL: ${ADMIN_INTEGRATION_URL}
+      ADMIN_INTEGRATION_TOKEN: ${ADMIN_INTEGRATION_TOKEN}
+      PROMO_HMAC_SECRET: ${PROMO_HMAC_SECRET}
+    ports:
+      - "8055:8055"
+    volumes:
+      - ./directus/extensions:/directus/extensions
+      - directus-uploads:/directus/uploads
+    networks:
+      - bloobcat_network
+
 networks:
   bloobcat_network:
     driver: bridge
 
 volumes:
   bloobcat-db-volume:
+  directus-uploads:

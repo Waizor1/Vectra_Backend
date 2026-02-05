@@ -68,6 +68,12 @@ script_settings = ScriptSettings()
 admin_settings = AdminSettings()
 test_mode = os.getenv("TESTMODE", "false").strip().lower() in ("true", "1", "yes")
 
+
+class AdminIntegrationSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="ADMIN_INTEGRATION_")
+
+    token: SecretStr | None = None
+
 # New settings class for application-specific configurations
 class AppSettings(BaseSettings):
     trial_days: int = 10  # Default to 10 days, will be overridden by TRIAL_DAYS from .env
@@ -94,6 +100,9 @@ class PromoSettings(BaseSettings):
     hmac_secret: SecretStr | None = None
 
 promo_settings = PromoSettings()
+
+
+admin_integration_settings = AdminIntegrationSettings()
 
 
 class CaptainUserLookupSettings(BaseSettings):

@@ -6,6 +6,7 @@ from .promo import router as promo_router
 from .prize_wheel import router as prize_wheel_router
 from .discounts import router as discounts_router
 from .captain_user_lookup import router as captain_lookup_router
+from .admin_integration import router as admin_integration_router
 
 main_router = APIRouter()
 
@@ -15,6 +16,7 @@ main_router.include_router(promo_router)
 main_router.include_router(prize_wheel_router)
 main_router.include_router(discounts_router)
 main_router.include_router(captain_lookup_router)
+main_router.include_router(admin_integration_router)
 
 # Флаг для отслеживания, был ли уже включен маршрутизатор бота
 _bot_router_included = False
