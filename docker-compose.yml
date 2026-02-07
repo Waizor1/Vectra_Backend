@@ -46,7 +46,7 @@ services:
       - bloobcat_db
 
   directus:
-    image: directus/directus:10.10.5
+    image: directus/directus:11.15.0
     container_name: bloobcat_directus
     restart: always
     depends_on:

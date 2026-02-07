@@ -14,3 +14,4 @@
 
 Примечание:
 - Скрипт сам подхватывает `.env` через `python-dotenv`, если модуль установлен.
+- Если графики дашборда пустые для ролей Manager/Viewer, запусти `scripts/directus_insights_permissions.py`.

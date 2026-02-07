@@ -92,15 +92,36 @@ async def lifespan(fastapi_app: FastAPI):
         await command.upgrade(run_in_transaction=True)
         logger.info("Применение миграций завершено")
     except Exception as e:
-        logger.error(f"Ошибка при инициализации базы данных: {str(e)}", exc_info=True)
-        raise
+        error_text = str(e).lower()
+        if ("aerich" in error_text and "does not exist" in error_text) or "relation \"aerich\"" in error_text:
+            logger.warning("Таблица aerich не найдена, пробую init_db для первичной инициализации")
+            try:
+                init_db = getattr(command, "init_db", None)
+                if init_db is None:
+                    raise RuntimeError("В Aerich отсутствует метод init_db")
+                await init_db(safe=True)
+                logger.info("Первичная инициализация БД завершена, повторяю миграции")
+                await command.upgrade(run_in_transaction=True)
+                logger.info("Применение миграций завершено")
+            except Exception as init_db_error:
+                logger.error(
+                    f"Ошибка при первичной инициализации БД: {init_db_error}",
+                    exc_info=True
+                )
+                raise
+        else:
+            logger.error(f"Ошибка при инициализации базы данных: {str(e)}", exc_info=True)
+            raise
 
-    await bot.set_chat_menu_button(
-        menu_button=MenuButtonWebApp(
-            text="Личный кабинет",
-            web_app=WebAppInfo(url=telegram_settings.miniapp_url)
+    try:
+        await bot.set_chat_menu_button(
+            menu_button=MenuButtonWebApp(
+                text="Личный кабинет",
+                web_app=WebAppInfo(url=telegram_settings.miniapp_url)
+            )
         )
-    )
+    except Exception as e:
+        logger.error(f"Не удалось установить кнопку меню Telegram: {e}", exc_info=True)
     await Admin.init()
     logger.info("Инициализация бота завершена")
 

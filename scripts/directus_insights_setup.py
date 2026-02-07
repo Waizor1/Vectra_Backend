@@ -53,7 +53,7 @@ def main() -> None:
     panel_defs = [
         {
             "name": "Всего пользователей",
-            "type": "metrics",
+            "type": "metric",
             "icon": "people",
             "position_x": 1,
             "position_y": 1,
@@ -63,7 +63,7 @@ def main() -> None:
         },
         {
             "name": "Активных тарифов",
-            "type": "metrics",
+            "type": "metric",
             "icon": "subscriptions",
             "position_x": 5,
             "position_y": 1,
@@ -73,7 +73,7 @@ def main() -> None:
         },
         {
             "name": "Промокодов использовано",
-            "type": "metrics",
+            "type": "metric",
             "icon": "confirmation_number",
             "position_x": 9,
             "position_y": 1,

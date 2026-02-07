@@ -7,6 +7,6 @@
     "type": "endpoint",
     "path": "dist/index.js",
     "source": "src/index.js",
-    "host": "^10.10.5"
+    "host": "^11.15.0"
   }
 }

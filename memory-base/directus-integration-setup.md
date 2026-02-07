@@ -3,6 +3,7 @@
 ### Docker
 - В `docker-compose.yml` добавлен сервис `directus` (порт 8055).
 - Монтируются `./directus/extensions` и `directus-uploads`.
+- Текущая версия образа Directus: `11.15.0`.
 
 ### Backend (FastAPI)
 - Endpoint'ы интеграции:
