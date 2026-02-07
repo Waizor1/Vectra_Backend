@@ -72,6 +72,11 @@ def install_stubs() -> None:
     admin_notif.cancel_subscription = cancel_subscription
     admin_notif.on_activated_bot = on_activated_bot
     sys.modules["bloobcat.bot.notifications.admin"] = admin_notif
+    if "bloobcat.bot.notifications.admin" in sys.modules:
+        mod = sys.modules["bloobcat.bot.notifications.admin"]
+        mod.on_payment = on_payment
+        mod.cancel_subscription = cancel_subscription
+        mod.on_activated_bot = on_activated_bot
 
     sub_notif = types.ModuleType("bloobcat.bot.notifications.subscription.renewal")
 
@@ -88,6 +93,11 @@ def install_stubs() -> None:
     sub_notif.notify_auto_renewal_failure = notify_auto_renewal_failure
     sub_notif.notify_renewal_success_yookassa = notify_renewal_success_yookassa
     sys.modules["bloobcat.bot.notifications.subscription.renewal"] = sub_notif
+    if "bloobcat.bot.notifications.subscription.renewal" in sys.modules:
+        mod = sys.modules["bloobcat.bot.notifications.subscription.renewal"]
+        mod.notify_auto_renewal_success_balance = notify_auto_renewal_success_balance
+        mod.notify_auto_renewal_failure = notify_auto_renewal_failure
+        mod.notify_renewal_success_yookassa = notify_renewal_success_yookassa
 
     gen_notif = types.ModuleType("bloobcat.bot.notifications.general.referral")
 
@@ -158,6 +168,15 @@ def install_stubs() -> None:
     scheduler_mod.schedule_user_tasks = schedule_user_tasks
     sys.modules["bloobcat.scheduler"] = scheduler_mod
 
+    # Сбрасываем кэш модулей, чтобы payment импортировался со стабами
+    for mod_name in [
+        "bloobcat.routes.payment",
+        "bloobcat.bot.notifications.admin",
+        "bloobcat.bot.notifications.subscription.renewal",
+    ]:
+        if mod_name in sys.modules:
+            del sys.modules[mod_name]
+
 
 @pytest.fixture(scope="module", autouse=True)
 def _install_stubs_once():
@@ -179,13 +198,36 @@ async def db(_install_stubs_once):
                         "bloobcat.db.active_tariff",
                         "bloobcat.db.payments",
                         "bloobcat.db.discounts",
+                        "bloobcat.db.notifications",
                     ],
                     "default_connection": "default",
                 }
             },
         }
     )
-    await Tortoise.generate_schemas()
+    # В SQLite схема не создаётся из-за циклических FK (Users <-> ActiveTariffs).
+    # Для тестов убираем FK-ссылку Users -> ActiveTariffs из метаданных.
+    from bloobcat.db.users import Users
+
+    Users._meta.fk_fields.discard("active_tariff")
+    users_active_tariff_fk = Users._meta.fields_map.get("active_tariff")
+    if users_active_tariff_fk is not None:
+        users_active_tariff_fk.reference = False
+        users_active_tariff_fk.db_constraint = False
+
+    # Генерируем схему без проверки на циклические ссылки.
+    from tortoise.backends.sqlite.schema_generator import SqliteSchemaGenerator
+
+    client = Tortoise.get_connection("default")
+    generator = SqliteSchemaGenerator(client)
+    models_to_create = []
+    generator._get_models_to_create(models_to_create)
+    tables = [generator._get_table_sql(model, safe=True) for model in models_to_create]
+    creation_sql = "\n".join(
+        [t["table_creation_string"] for t in tables]
+        + [m for t in tables for m in t["m2m_tables"]]
+    )
+    await generator.generate_from_string(creation_sql)
     try:
         yield
     finally:

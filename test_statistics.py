@@ -6,11 +6,18 @@
 import asyncio
 import sys
 import os
+import pytest
 from datetime import date, timedelta
 
 # Добавляем путь к модулю bloobcat
 sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
 
+# Этот тест требует реальной БД и данных, включается вручную.
+if not os.getenv("RUN_STATISTICS_TESTS"):
+    pytest.skip("RUN_STATISTICS_TESTS is not set", allow_module_level=True)
+
+
+@pytest.mark.asyncio
 async def test_statistics():
     """Тестирует систему статистики"""
     try:

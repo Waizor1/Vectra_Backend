@@ -2,13 +2,39 @@
 Модуль для тестирования системы уведомлений
 """
 import asyncio
+import os
 from typing import List, Dict, Any
+import pytest
 from bloobcat.db.users import Users
 from bloobcat.bot.notifications.trial.extended import notify_trial_extended
 from bloobcat.logger import get_logger
 
 logger = get_logger("test_notifications")
 
+if not os.getenv("RUN_NOTIFICATION_TESTS"):
+    pytest.skip("RUN_NOTIFICATION_TESTS is not set", allow_module_level=True)
+
+
+@pytest.fixture
+def user_id() -> int:
+    raw = os.getenv("TEST_NOTIFICATION_USER_ID")
+    if not raw:
+        pytest.skip("TEST_NOTIFICATION_USER_ID is not set")
+    return int(raw)
+
+
+@pytest.fixture
+def user_ids() -> List[int]:
+    raw = os.getenv("TEST_NOTIFICATION_USER_IDS")
+    if not raw:
+        pytest.skip("TEST_NOTIFICATION_USER_IDS is not set")
+    values = [int(x.strip()) for x in raw.split(",") if x.strip()]
+    if not values:
+        pytest.skip("TEST_NOTIFICATION_USER_IDS is empty")
+    return values
+
+
+@pytest.mark.asyncio
 async def test_trial_extension_notification(user_id: int) -> Dict[str, Any]:
     """
     Функция для ручного тестирования отправки уведомления о продлении trial.
@@ -66,6 +92,7 @@ async def test_trial_extension_notification(user_id: int) -> Dict[str, Any]:
     
     return result
 
+@pytest.mark.asyncio
 async def test_multiple_trial_notifications(user_ids: List[int], concurrent: bool = False) -> Dict[str, Any]:
     """
     Тестирует отправку уведомлений нескольким пользователям.
