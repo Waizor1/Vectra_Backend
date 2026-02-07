@@ -357,7 +357,6 @@ async def custom_fastapi_http_exception_handler(request, exc: FastAPIHTTPExcepti
 
 app.middleware("http")(rate_limit_middleware)
 
-app.mount("/admin", admin_app)
 
 # Ограничиваем права на создание/изменение/удаление: только суперюзеры имеют эти права
 from fastadmin import TortoiseModelAdmin
@@ -378,6 +377,9 @@ include_bot_router()
 app.include_router(router)
 app.include_router(main_router)
 app.include_router(app_info.router) # Регистрируем новый роутер
+
+# Монтируем FastAdmin после API-роутеров, чтобы не перекрывать /admin/integration
+app.mount("/admin", admin_app)
 
 
 async def run_server():

@@ -73,20 +73,31 @@ async def sync_user_lte(user_id: int, lte_gb_total: Optional[int]) -> None:
                 remnawave_settings.token.get_secret_value()
             )
             try:
-                resp = await client.users.get_user_usage_by_range(
-                    str(user.remnawave_uuid),
-                    start_str,
-                    end_str,
-                )
-                items = resp.get("response") or []
-                used_gb = 0.0
-                for item in items:
-                    node_name = str(item.get("nodeName") or "").upper()
-                    if marker_upper and marker_upper not in node_name:
-                        continue
-                    total_bytes = float(item.get("total") or 0)
-                    used_gb += total_bytes / BYTES_IN_GB
-                should_enable = float(lte_gb_total_int) > used_gb
+                try:
+                    resp = await client.users.get_user_usage_by_range(
+                        str(user.remnawave_uuid),
+                        start_str,
+                        end_str,
+                    )
+                    items = resp.get("response") or []
+                    used_gb = 0.0
+                    for item in items:
+                        node_name = str(item.get("nodeName") or "").upper()
+                        if marker_upper and marker_upper not in node_name:
+                            continue
+                        total_bytes = float(item.get("total") or 0)
+                        used_gb += total_bytes / BYTES_IN_GB
+                    should_enable = float(lte_gb_total_int) > used_gb
+                except Exception as exc:
+                    if "api/users/stats/usage" in str(exc) and "404" in str(exc):
+                        logger.warning(
+                            "RemnaWave usage endpoint missing, fallback LTE enable: user=%s total=%s",
+                            user.id,
+                            lte_gb_total_int,
+                        )
+                        should_enable = lte_gb_total_int > 0
+                    else:
+                        raise
             finally:
                 await client.close()
 

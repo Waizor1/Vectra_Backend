@@ -114,6 +114,10 @@ class UsersAPI:
             try:
                 return await func(*args, **kwargs)
             except Exception as e:
+                # Не повторяем, если у этой панели нет эндпоинта статистики usage
+                if "api/users/stats/usage" in str(e) and "404" in str(e):
+                    raise
+
                 # Не повторяем в случае валидационной ошибки
                 if 'validation' in str(e).lower():
                     raise

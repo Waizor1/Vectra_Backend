@@ -26,3 +26,13 @@
 
 ### Переменные окружения (см. .env.example)
 - `DIRECTUS_*`, `ADMIN_INTEGRATION_*`, `PROMO_HMAC_SECRET`.
+
+### Локальная настройка RemnaWave
+- `REMNAWAVE_URL` должен указывать на панель RemnaWave.
+- UUID сквадов и LTE-маркер задаются через `REMNAWAVE_*` в `.env`.
+- Токен RemnaWave хранится только в `.env` (не дублировать в документации).
+
+### Важные заметки по интеграции
+- `FastAdmin` монтируется после API-роутов, чтобы не перекрывать `/admin/integration`.
+- В панели RemnaWave может отсутствовать `/api/users/stats/usage/*`: в таком случае LTE-логика
+  делает fallback на `lte_gb_total > 0` без повторных попыток.
