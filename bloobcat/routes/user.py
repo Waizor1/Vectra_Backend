@@ -574,12 +574,36 @@ async def change_active_tariff_devices(payload: ChangeDevicesRequest, user: User
 
         # Обновляем доступ к LTE скваду
         if user.remnawave_uuid:
-            should_enable = (active_tariff.lte_gb_total or 0) > (active_tariff.lte_gb_used or 0)
+            effective_lte_total = (
+                user.lte_gb_total
+                if user.lte_gb_total is not None
+                else (active_tariff.lte_gb_total or 0)
+            )
+            should_enable = effective_lte_total > (active_tariff.lte_gb_used or 0)
             try:
                 await set_lte_squad_status(str(user.remnawave_uuid), enable=should_enable)
             except Exception as e:
                 logger.error(f"Ошибка обновления LTE-сквада для {user.id}: {e}")
         await NotificationMarks.filter(user_id=user.id, type="lte_usage").delete()
+
+        if not pending_device_update:
+            try:
+                await notify_active_tariff_change(
+                    user=user,
+                    tariff_name=tariff_name,
+                    months=tariff_months,
+                    old_limit=old_hwid_limit,
+                    new_limit=old_hwid_limit,
+                    old_lte_gb=current_lte_gb_total,
+                    new_lte_gb=new_lte_gb_total,
+                    old_price=old_tariff_price,
+                    new_price=active_tariff.price,
+                    old_expired_at=old_expired_at,
+                    new_expired_at=user.expired_at,
+                    auto_renew_enabled=bool(user.renew_id),
+                )
+            except Exception as e:
+                logger.error(f"Ошибка отправки уведомления об изменении активного тарифа: {e}")
 
     return {
         "status": "ok",

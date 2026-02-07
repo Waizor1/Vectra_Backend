@@ -104,8 +104,13 @@ class ActiveTariffsModelAdmin(TortoiseModelAdmin):
 
         if original_obj is not None and obj.lte_gb_total != original_lte_total:
             try:
-                should_enable = float(obj.lte_gb_total or 0) > float(obj.lte_gb_used or 0)
                 user = await obj.user
+                effective_lte_total = (
+                    user.lte_gb_total
+                    if user and user.lte_gb_total is not None
+                    else (obj.lte_gb_total or 0)
+                )
+                should_enable = float(effective_lte_total or 0) > float(obj.lte_gb_used or 0)
                 if user and user.remnawave_uuid:
                     await set_lte_squad_status(str(user.remnawave_uuid), enable=should_enable)
                 await NotificationMarks.filter(user_id=obj.user_id, type="lte_usage").delete()

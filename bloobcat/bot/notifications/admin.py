@@ -320,6 +320,12 @@ async def notify_active_tariff_change(
         if not auto_renew_enabled:
             next_charge = f"{next_charge} (ручное продление)" if next_charge != "—" else "—"
 
+        change_note = ""
+        if old_limit == new_limit and old_lte_gb != new_lte_gb:
+            change_note = "\nℹ️ Изменён только LTE лимит."
+        elif old_limit != new_limit and old_lte_gb == new_lte_gb:
+            change_note = "\nℹ️ Изменён только лимит устройств."
+
         text = f"""⚙️ Обновление активного тарифа
 
 👤 Пользователь: {user_name} ({username_display})
@@ -333,6 +339,7 @@ async def notify_active_tariff_change(
 
 🔄 Автосписание: {auto_status}
 ⏭ Следующее списание: {next_charge}
+{change_note}
 
 #тариф #изменение"""
 
