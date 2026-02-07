@@ -381,7 +381,12 @@ async def yookassa_webhook(request: Request, secret: str):
 
             if user.remnawave_uuid:
                 try:
-                    should_enable_lte = (active_tariff.lte_gb_total or 0) > (active_tariff.lte_gb_used or 0)
+                    effective_lte_total = (
+                        user.lte_gb_total
+                        if user.lte_gb_total is not None
+                        else (active_tariff.lte_gb_total or 0)
+                    )
+                    should_enable_lte = effective_lte_total > (active_tariff.lte_gb_used or 0)
                     await set_lte_squad_status(str(user.remnawave_uuid), enable=should_enable_lte)
                 except Exception as e:
                     logger.error(f"LTE пополнение: ошибка обновления LTE-сквада для {user.id}: {e}")
@@ -828,9 +833,12 @@ async def yookassa_webhook(request: Request, secret: str):
                 await NotificationMarks.filter(user_id=user.id, type="lte_usage").delete()
                 if user.remnawave_uuid:
                     try:
-                        should_enable_lte = (active_tariff_current.lte_gb_total or 0) > (
-                            active_tariff_current.lte_gb_used or 0
+                        effective_lte_total = (
+                            user.lte_gb_total
+                            if user.lte_gb_total is not None
+                            else (active_tariff_current.lte_gb_total or 0)
                         )
+                        should_enable_lte = effective_lte_total > (active_tariff_current.lte_gb_used or 0)
                         await set_lte_squad_status(str(user.remnawave_uuid), enable=should_enable_lte)
                     except Exception as e:
                         logger.error(f"Ошибка обновления LTE-сквада после оплаты для {user.id}: {e}")

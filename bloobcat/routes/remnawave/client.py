@@ -193,11 +193,11 @@ class UsersAPI:
         return response
 
     async def get_user_usage_by_range(self, uuid: str, start: str, end: str) -> Dict[str, Any]:
-        """Получение статистики трафика пользователя по диапазону дат"""
+        """Получение статистики трафика пользователя по диапазону дат (legacy)"""
         return await self._execute_with_retry(
             self.client._request,
             "GET",
-            f"/api/users/stats/usage/{uuid}/range?start={start}&end={end}",
+            f"/api/bandwidth-stats/users/{uuid}/legacy?start={start}&end={end}",
         )
 
     async def update_user(self, uuid: str, **kwargs) -> Dict[str, Any]:
@@ -330,14 +330,18 @@ class NodesAPI:
     async def get_node(self, uuid: str) -> Dict[str, Any]:
         return await self.client._request("GET", f"/api/nodes/{uuid}")
 
-    async def get_nodes_usage_by_range(self, start: str, end: str) -> Dict[str, Any]:
+    async def get_nodes_usage_by_range(
+        self, start: str, end: str, top_nodes_limit: int = 100
+    ) -> Dict[str, Any]:
         return await self.client._request(
-            "GET", f"/api/nodes/usage/range?start={start}&end={end}"
+            "GET",
+            f"/api/bandwidth-stats/nodes?start={start}&end={end}&topNodesLimit={top_nodes_limit}",
         )
 
     async def get_node_user_usage_by_range(self, uuid: str, start: str, end: str) -> Dict[str, Any]:
         return await self.client._request(
-            "GET", f"/api/nodes/usage/{uuid}/users/range?start={start}&end={end}"
+            "GET",
+            f"/api/bandwidth-stats/nodes/{uuid}/users/legacy?start={start}&end={end}",
         )
 
 class InboundsAPI:
