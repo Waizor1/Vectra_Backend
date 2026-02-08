@@ -283,6 +283,7 @@ origins = [
     "https://testapp.starmy.store",
     "https://api.starmy.store",
     "https://testapi.starmy.store",
+    "https://v3018884.hosted-by-vdsina.ru",
     "https://*.trycloudflare.com",
     "https://*.cloudflare.com"
 ]
