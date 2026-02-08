@@ -2,16 +2,32 @@ from fastapi import APIRouter
 
 from .payment import router as payment_router
 from .user import router as user_router
+from .devices import router as devices_router
+from .auth import router as auth_router
+from .family import router as family_router
+from .family_invites import router as family_invites_router
 from .promo import router as promo_router
 from .prize_wheel import router as prize_wheel_router
 from .discounts import router as discounts_router
 from .captain_user_lookup import router as captain_lookup_router
 from .admin_integration import router as admin_integration_router
+from .partner import router as partner_router
+from .referrals import router as referrals_router
+from .subscription import router as subscription_router
+from .error_reports import router as error_reports_router
 
 main_router = APIRouter()
 
 main_router.include_router(payment_router)
+main_router.include_router(auth_router)
 main_router.include_router(user_router)
+main_router.include_router(devices_router)
+main_router.include_router(family_router)
+main_router.include_router(family_invites_router)
+main_router.include_router(partner_router)
+main_router.include_router(referrals_router)
+main_router.include_router(subscription_router)
+main_router.include_router(error_reports_router)
 main_router.include_router(promo_router)
 main_router.include_router(prize_wheel_router)
 main_router.include_router(discounts_router)

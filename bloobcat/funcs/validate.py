@@ -1,10 +1,12 @@
 from aiogram.utils.web_app import safe_parse_webapp_init_data
 from fastapi import Depends, HTTPException
 from fastapi.security import APIKeyHeader
+import jwt
 
 from bloobcat.db.users import Users
 from bloobcat.settings import telegram_settings
 from bloobcat.logger import get_logger
+from bloobcat.funcs.auth_tokens import decode_access_token
 
 logger = get_logger("validate")
 
@@ -13,11 +15,38 @@ oauth2_scheme = APIKeyHeader(name="Authorization", auto_error=False)
 
 async def validate(init_data: str = Depends(oauth2_scheme)) -> Users:
     try:
-        logger.debug(f"Получены данные для валидации: {init_data[:50]}...")  # логируем только начало для безопасности
+        preview = (init_data or "")[:50]
+        logger.debug(f"Получены данные для валидации: {preview}...")  # логируем только начало для безопасности
         
         if not init_data:
             logger.error("Отсутствует заголовок Authorization")
             raise HTTPException(status_code=403, detail="Missing Authorization header")
+
+        if init_data.lower().startswith("bearer "):
+            token = init_data.split(" ", 1)[1].strip()
+            if not token:
+                raise HTTPException(status_code=403, detail="Empty bearer token")
+            try:
+                payload = decode_access_token(token)
+            except jwt.ExpiredSignatureError:
+                raise HTTPException(status_code=403, detail="Token expired")
+            except jwt.InvalidTokenError:
+                raise HTTPException(status_code=403, detail="Invalid token")
+
+            user_id = payload.get("sub") or payload.get("user_id")
+            if not user_id:
+                raise HTTPException(status_code=403, detail="Invalid token payload")
+
+            try:
+                user_id_int = int(user_id)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=403, detail="Invalid token subject")
+
+            db_user = await Users.get_or_none(id=user_id_int)
+            if not db_user:
+                raise HTTPException(status_code=403, detail="User not found")
+
+            return db_user
             
         user = safe_parse_webapp_init_data(
             telegram_settings.token.get_secret_value(), init_data
@@ -56,6 +85,8 @@ async def validate(init_data: str = Depends(oauth2_scheme)) -> Users:
                 utm = param
                 logger.debug(f"Найдена UTM: '{utm}' для пользователя {user.user.id}")
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Ошибка валидации: {str(e)}")
         raise HTTPException(status_code=403, detail=str(e))

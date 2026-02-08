@@ -74,6 +74,15 @@ class AdminIntegrationSettings(BaseSettings):
 
     token: SecretStr | None = None
 
+
+class AuthSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="AUTH_")
+
+    jwt_secret: SecretStr = SecretStr("change-me")
+    jwt_algorithm: str = "HS256"
+    access_token_ttl_seconds: int = 86400
+    jwt_leeway_seconds: int = 30
+
 # New settings class for application-specific configurations
 class AppSettings(BaseSettings):
     trial_days: int = 10  # Default to 10 days, will be overridden by TRIAL_DAYS from .env
@@ -89,6 +98,13 @@ class AppSettings(BaseSettings):
     # Колесо призов
     prize_wheel_spin_bonus_price: int = 50  # Стоимость одной крутки при оплате бонусным балансом (₽)
     devices_decrease_limit: int = 1  # Сколько раз можно уменьшить лимит устройств за период
+    # Family alerts and anomaly protection
+    family_alerts_enabled: bool = True
+    family_alerts_webhook_url: str | None = None
+    family_alerts_webhook_timeout_seconds: int = 5
+    family_anomaly_block_threshold: int = 3
+    family_anomaly_block_window_hours: int = 6
+    family_anomaly_block_duration_minutes: int = 60
 
 app_settings = AppSettings()
 
@@ -103,6 +119,7 @@ promo_settings = PromoSettings()
 
 
 admin_integration_settings = AdminIntegrationSettings()
+auth_settings = AuthSettings()
 
 
 class CaptainUserLookupSettings(BaseSettings):

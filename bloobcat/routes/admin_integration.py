@@ -13,6 +13,8 @@ from bloobcat.services.admin_integration import (
     delete_user_via_admin,
 )
 from bloobcat.settings import admin_integration_settings
+from bloobcat.db.users import Users
+from bloobcat.db.family_audit_logs import FamilyAuditLogs
 
 router = APIRouter(prefix="/admin/integration", tags=["admin-integration"])
 
@@ -56,4 +58,19 @@ async def delete_user(user_id: int):
     deleted = await delete_user_via_admin(user_id)
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    return {"ok": True}
+
+
+@router.post("/family/{owner_id}/unblock-invites", dependencies=[Depends(require_admin_integration_token)])
+async def unblock_family_invites(owner_id: int):
+    owner = await Users.get_or_none(id=owner_id)
+    if not owner:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Owner not found")
+    await FamilyAuditLogs.create(
+        owner=owner,
+        actor=owner,
+        action="invite_unblocked",
+        target_id=None,
+        details={"reason": "admin_unblock"},
+    )
     return {"ok": True}
