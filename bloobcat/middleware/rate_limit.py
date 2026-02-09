@@ -45,8 +45,6 @@ class RateLimiter:
         return True, None
 
 # Создаем экземпляры rate limiter для разных эндпоинтов
-user_get_limiter = RateLimiter(requests_per_minute=30, window_seconds=60)  # 30 запросов/мин
-devices_get_limiter = RateLimiter(requests_per_minute=30, window_seconds=60)  # 30 запросов/мин
 reset_devices_limiter = RateLimiter(requests_per_minute=2, window_seconds=60)  # 2 запроса в минуту
 family_revoke_limiter = RateLimiter(requests_per_minute=1, window_seconds=300)  # 1 запрос в 5 минут
 promo_validate_limiter = RateLimiter(requests_per_minute=5, window_seconds=60)  # 5 запросов в минуту
@@ -56,31 +54,7 @@ async def rate_limit_middleware(request: Request, call_next):
     """Middleware для rate limiting"""
     
     # Проверяем только определенные эндпоинты
-    if request.url.path == "/user" and request.method == "GET":
-        user_id = await get_user_id_from_request(request)
-        if user_id:
-            allowed, wait_time = user_get_limiter.is_allowed(str(user_id))
-            if not allowed:
-                logger.warning(f"Rate limit exceeded for /user by user {user_id}, wait {wait_time}s")
-                raise HTTPException(
-                    status_code=429,
-                    detail=f"Слишком много запросов. Попробуйте снова через {wait_time} секунд.",
-                    headers={"Retry-After": str(wait_time)}
-                )
-
-    elif request.url.path == "/devices" and request.method == "GET":
-        user_id = await get_user_id_from_request(request)
-        if user_id:
-            allowed, wait_time = devices_get_limiter.is_allowed(str(user_id))
-            if not allowed:
-                logger.warning(f"Rate limit exceeded for /devices by user {user_id}, wait {wait_time}s")
-                raise HTTPException(
-                    status_code=429,
-                    detail=f"Слишком много запросов. Попробуйте снова через {wait_time} секунд.",
-                    headers={"Retry-After": str(wait_time)}
-                )
-
-    elif request.url.path == "/user/reset_devices" and request.method == "POST":
+    if request.url.path == "/user/reset_devices" and request.method == "POST":
         user_id = await get_user_id_from_request(request)
         if user_id:
             allowed, wait_time = reset_devices_limiter.is_allowed(str(user_id))
@@ -144,18 +118,10 @@ async def get_user_id_from_request(request: Request) -> Optional[int]:
         from bloobcat.funcs.validate import validate
         from bloobcat.settings import telegram_settings
         from aiogram.utils.web_app import safe_parse_webapp_init_data
-        from bloobcat.funcs.auth_tokens import decode_access_token
         
-        # Поддерживаем Bearer JWT
-        if auth_header.lower().startswith("bearer "):
-            token = auth_header.split(" ", 1)[1].strip()
-            payload = decode_access_token(token)
-            user_id = payload.get("sub") or payload.get("user_id")
-            return int(user_id) if user_id is not None else None
-
         # Парсим данные Telegram WebApp
         user = safe_parse_webapp_init_data(
-            telegram_settings.token.get_secret_value(),
+            telegram_settings.token.get_secret_value(), 
             auth_header
         )
         return user.user.id

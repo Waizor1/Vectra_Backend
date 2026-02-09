@@ -1,6 +1,5 @@
 import asyncio
 import time
-import hashlib
 from contextlib import asynccontextmanager
 from datetime import datetime
 
@@ -275,35 +274,6 @@ async def monitor_slow_requests(request: Request, call_next):
             }
         )
 
-    return response
-
-# Cache headers for stable GET endpoints
-PUBLIC_CACHE_PATHS = {"/pay/tariffs", "/app/info", "/subscription/plans"}
-NO_STORE_PREFIXES = ("/user", "/devices", "/family", "/partner", "/subscription/status")
-
-@app.middleware("http")
-async def cache_headers_middleware(request: Request, call_next):
-    response = await call_next(request)
-    if request.method != "GET":
-        return response
-
-    path = request.url.path
-    if path in PUBLIC_CACHE_PATHS:
-        response.headers["Cache-Control"] = "public, max-age=300"
-        try:
-            body = response.body or b""
-            etag = hashlib.md5(body).hexdigest()
-            response.headers["ETag"] = etag
-            if request.headers.get("if-none-match") == etag:
-                response.status_code = 304
-                response.body = b""
-                response.headers.pop("content-length", None)
-        except Exception:
-            pass
-        return response
-
-    if path.startswith(NO_STORE_PREFIXES):
-        response.headers["Cache-Control"] = "no-store"
     return response
 
 origins = [
