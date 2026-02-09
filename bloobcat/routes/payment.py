@@ -24,7 +24,7 @@ from bloobcat.bot.notifications.prize_wheel import notify_spin_awarded
 from bloobcat.db.tariff import Tariffs
 from bloobcat.db.users import Users, normalize_date
 from bloobcat.funcs.validate import validate
-from bloobcat.settings import yookassa_settings, remnawave_settings
+from bloobcat.settings import yookassa_settings, remnawave_settings, telegram_settings
 from bloobcat.db.payments import ProcessedPayments
 from bloobcat.logger import get_payment_logger
 from bloobcat.db.active_tariff import ActiveTariffs
@@ -1316,7 +1316,17 @@ async def pay(
                 },
                 "confirmation": {
                     "type": "redirect",
-                    "return_url": f"https://t.me/{await get_bot_username()}/"
+                    # Return back to the Mini App so it can show a status screen.
+                    # Keep compatibility: if TELEGRAM_MINIAPP_URL is empty, fall back to bot.
+                    "return_url": (
+                        (
+                            (telegram_settings.miniapp_url or "").strip()
+                            + ("&" if "?" in (telegram_settings.miniapp_url or "") else "?")
+                            + "payment=check"
+                        )
+                        if (telegram_settings.miniapp_url or "").strip()
+                        else f"https://t.me/{await get_bot_username()}/"
+                    ),
                 },
                 "metadata": metadata,
                 "capture": True,
