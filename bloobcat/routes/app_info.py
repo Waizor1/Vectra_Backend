@@ -1,5 +1,6 @@
 from fastapi import APIRouter
 from bloobcat.bot.bot import get_bot_username # Предполагаемый путь
+from bloobcat.build_info import get_build_info
 from bloobcat.settings import app_settings  # Импортируем настройки
 from bloobcat.config import referral_percent  # Импортируем конфигурацию реферальных отчислений
 
@@ -24,5 +25,6 @@ async def get_app_info():
     return {
         "bot_username": username,
         "trial_days": app_settings.trial_days,
-        "referral_percent": referral_percent_value
+        "referral_percent": referral_percent_value,
+        **get_build_info(),
     } 

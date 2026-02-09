@@ -18,3 +18,9 @@
 ### Примечания
 - В тестах `tests/test_payments_no_yookassa.py` используется custom генерация схемы SQLite
   без проверки циклических FK.
+
+### Версия и время сборки
+- `GET /health` и `GET /app/info` возвращают поля `version` и `build_time`.
+- В Docker можно зафиксировать "время сборки" через build-arg:
+  - PowerShell пример: `$env:BUILD_TIME = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")`
+  - Затем: `docker compose build --no-cache bloobcat`

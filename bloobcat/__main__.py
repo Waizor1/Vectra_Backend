@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware # type: ignore
 from tortoise.contrib.fastapi import RegisterTortoise # type: ignore
 
 from bloobcat.bot import bot, router, setup_router
+from bloobcat.build_info import get_build_info
 from bloobcat.clients import TORTOISE_ORM
 from bloobcat.db.admins import Admin
 from bloobcat.routes import main_router, include_bot_router
@@ -21,6 +22,13 @@ from bloobcat.logger import get_logger
 
 # Получаем основной логгер приложения
 logger = get_logger("bloobcat")
+
+_build_info = get_build_info()
+logger.info(
+    "Build info: version={} build_time={}",
+    _build_info["version"],
+    _build_info["build_time"],
+)
 
 
 async def setup_webhook_with_retries(webhook_url: str) -> None:
@@ -215,7 +223,8 @@ async def health_check():
     return {
         "status": "ok",
         "timestamp": datetime.now().isoformat(),
-        "service": "bloobcat"
+        "service": "bloobcat",
+        **get_build_info(),
     }
 
 # Middleware для мониторинга долгих запросов

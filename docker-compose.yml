@@ -27,6 +27,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        BUILD_TIME: ${BUILD_TIME}
     volumes:
       - ./logs:/app/logs
     networks:
