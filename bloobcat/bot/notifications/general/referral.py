@@ -8,23 +8,54 @@ from bloobcat.bot.error_handler import handle_telegram_forbidden_error, handle_t
 
 logger = get_logger("notifications.general.referral")
 
-async def on_referral_payment(user: Users, referral: Users, amount: int):
-    to_add = int(amount * user.referral_percent() / 100)
-    user.balance += to_add
-    await user.save()
+async def on_referral_payment(
+    *,
+    user: Users,
+    referral: Users,
+    amount: int,
+    bonus_days: int,
+    friend_bonus_days: int,
+    months: int,
+    device_count: int,
+    applied_to_subscription: bool,
+):
+    """Notify the referrer about the friend's first payment.
+
+    IMPORTANT: In TVPN Mini App the referral program is days-based (not money-based).
+    """
     lang = get_user_locale(user)
     if lang == 'ru':
-        logger.info(f"Реферальный бонус зачислен пользователю {user.id}: {to_add}₽ за оплату реферала {referral.id} на {amount}₽")
+        logger.info(
+            f"Реферальные дни: пользователь {user.id} получил +{bonus_days} дней "
+            f"за оплату реферала {referral.id} (months={months}, devices={device_count}, amount={amount})"
+        )
+        applied_line = (
+            "Бонусные дни начислены в копилку (семейная подписка не продлевается бонусами)."
+            if not applied_to_subscription
+            else "Бонусные дни добавлены к вашей подписке."
+        )
         text = (
-            f"🎉 Привет, {user.full_name}! Ваш реферал {referral.name()} оплатил подписку на {amount}₽.\n"
-            f"Вы получили {to_add}₽ на бонусный баланс. Спасибо за рекомендацию! 🎊"
+            f"🎉 Привет, {user.full_name}! Ваш друг {referral.name()} оплатил подписку.\n"
+            f"Вы получили +{bonus_days} дней (за покупку {months} мес.).\n"
+            f"Друг получил +{friend_bonus_days} дней при первой оплате.\n"
+            f"{applied_line}"
         )
         button = await webapp_inline_button("Личный кабинет")
     else:
-        logger.info(f"Реферальный бонус зачислен пользователю {user.id}: {to_add}₽ за оплату реферала {referral.id} на {amount}₽")
+        logger.info(
+            f"Referral days: user {user.id} got +{bonus_days} days "
+            f"for referral {referral.id} (months={months}, devices={device_count}, amount={amount})"
+        )
+        applied_line = (
+            "Bonus days are stored (family subscription is not extended by bonuses)."
+            if not applied_to_subscription
+            else "Bonus days were added to your subscription."
+        )
         text = (
-            f"🎉 Hi {user.full_name}! Your referral {referral.name()} just paid {amount} RUB.\n"
-            f"You've been credited {to_add} RUB to your bonus balance. Thanks for spreading the word! 🎊"
+            f"🎉 Hi {user.full_name}! Your friend {referral.name()} just paid for a subscription.\n"
+            f"You got +{bonus_days} days (purchase: {months} month(s)).\n"
+            f"Your friend got +{friend_bonus_days} days on the first payment.\n"
+            f"{applied_line}"
         )
         button = await webapp_inline_button("Dashboard")
     try:
@@ -43,17 +74,17 @@ async def on_referral_payment(user: Users, referral: Users, amount: int):
 async def on_referral_registration(user: Users, referral: Users):
     lang = get_user_locale(user)
     if lang == 'ru':
-        logger.info(f"Реферальная регистрация: пользователь {user.id} получил 50₽ за регистрацию реферала {referral.id}")
+        logger.info(f"Реферальная регистрация: у пользователя {user.id} зарегистрировался реферал {referral.id}")
         text = (
             f"🎉 Привет, {user.full_name}! Ваш реферал {referral.name()} только что зарегистрировался.\n"
-            "Вы получили 50₽ на бонусный баланс. Спасибо, что рекомендуете нас! 💸"
+            "Бонусные дни начисляются после первой оплаты друга. Спасибо, что рекомендуете нас! 🎊"
         )
         button = await webapp_inline_button("Реферальная программа", "/ref")
     else:
-        logger.info(f"Реферальная регистрация: пользователь {user.id} получил 50₽ за регистрацию реферала {referral.id}")
+        logger.info(f"Referral registration: user {user.id} got a new referral signup {referral.id}")
         text = (
             f"🎉 Hi {user.full_name}! Your referral {referral.name()} just signed up.\n"
-            "You've been credited 50 RUB to your bonus balance. Thanks for spreading the word! 💸"
+            "Bonus days are credited after your friend's first payment. Thanks for spreading the word! 🎊"
         )
         button = await webapp_inline_button("Реферальная программа", "/ref")
     try:
@@ -72,19 +103,18 @@ async def on_referral_registration(user: Users, referral: Users):
 async def on_referral_prompt(user: Users, days: int):
     """Уведомление для пользователей, чтобы пригласить друга и получить бонусы"""
     lang = get_user_locale(user)
-    referral_percent = user.referral_percent()
     if lang == 'ru':
         text = (
             f"🎉 Привет, {user.full_name}! Уже {days} дней вместе.\n"
-            f"Получайте {referral_percent}% кэшбэка с пополнений каждого приглашённого.\n"
-            "Например, позови 3 друга — и сервис для вас будет по сути бесплатным."
+            "Пригласите друга — и получите бонусные дни к подписке.\n"
+            "Друг тоже получит +7 дней при первой оплате."
         )
         button = await webapp_inline_button("Реферальная программа", "/ref")
     else:
         text = (
             f"🎉 Hi {user.full_name}! You've been with us for {days} days.\n"
-            f"Get {referral_percent}% cashback from each invited user's payments.\n"
-            "For example, invite 3 friends — and the service will be essentially free for you."
+            "Invite a friend and get bonus subscription days.\n"
+            "Your friend also gets +7 days on the first payment."
         )
         button = await webapp_inline_button("Referral Program", "/ref")
     logger.info(f"Отправка реферального напоминания пользователю {user.id} ({days} дней)")

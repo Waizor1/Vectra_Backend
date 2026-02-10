@@ -69,6 +69,11 @@ class Users(models.Model):
     custom_referral_percent = fields.IntField(default=0)
     registration_date = fields.DatetimeField(auto_now_add=True)
     referrals = fields.IntField(default=0)
+    # Total referral bonus (in days) earned by the user.
+    # This is NOT a "money balance" - it exists to match the Mini App referral rules (days-based rewards).
+    referral_bonus_days_total = fields.IntField(default=0)
+    # Guard: referral rewards are applied only for the first successful payment of a referred user.
+    referral_first_payment_rewarded = fields.BooleanField(default=False)
     is_subscribed = fields.BooleanField(default=False)
     utm = fields.CharField(max_length=100, null=True)
     renew_id = fields.CharField(max_length=100, null=True)

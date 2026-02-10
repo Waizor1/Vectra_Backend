@@ -6,12 +6,16 @@ import asyncio
 import random
 from functools import partial
 from urllib.parse import urlparse
+import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Header, Request # type: ignore
 from yookassa import Configuration, Payment, Webhook
 from yookassa.domain.notification import WebhookNotification, WebhookNotificationEventType
 from urllib3.exceptions import ConnectTimeoutError, ReadTimeoutError
 from requests.exceptions import ConnectionError as RequestsConnectionError, Timeout as RequestsTimeout
+from tortoise.expressions import F
+from tortoise.exceptions import IntegrityError
+from tortoise.transactions import in_transaction
 
 from bloobcat.bot.bot import get_bot_username
 from bloobcat.bot.notifications.admin import on_payment, cancel_subscription
@@ -28,6 +32,8 @@ from bloobcat.db.users import Users, normalize_date
 from bloobcat.funcs.validate import validate
 from bloobcat.settings import yookassa_settings, remnawave_settings, telegram_settings
 from bloobcat.db.payments import ProcessedPayments
+from bloobcat.db.partner_earnings import PartnerEarnings
+from bloobcat.db.partner_qr import PartnerQr
 from bloobcat.logger import get_payment_logger
 from bloobcat.db.active_tariff import ActiveTariffs
 from bloobcat.db.notifications import NotificationMarks
@@ -39,6 +45,7 @@ from bloobcat.services.discounts import (
     consume_discount_if_needed,
 )
 from bloobcat.utils.dates import add_months_safe
+from bloobcat.db.referral_rewards import ReferralRewards
 
 # Инициализируем клиент ЮKассы
 Configuration.account_id = yookassa_settings.shop_id
@@ -54,6 +61,143 @@ logger = get_payment_logger()
 
 BYTES_IN_GB = 1024 ** 3
 MSK_TZ = timezone(timedelta(hours=3))
+
+def _calc_referrer_bonus_days(months: int | None, device_count: int | None) -> int:
+    """Referral reward for the referrer, based on what the friend bought.
+
+    Matches the Mini App rules (see ReferralsPage modal):
+    - 1 month -> +7 days
+    - 3 months -> +20 days
+    - 6 months -> +36 days
+    - 12 months -> +60 days
+    - 12 months family (10 devices) -> +120 days
+    """
+    m = int(months or 0)
+    d = int(device_count or 0)
+    if m >= 12 and d >= 10:
+        return 120
+    if m >= 12:
+        return 60
+    if m >= 6:
+        return 36
+    if m >= 3:
+        return 20
+    # Default fallback: treat any "short" purchase as 1 month.
+    return 7
+
+
+async def _is_active_family_subscription(user: Users) -> bool:
+    """Best-effort check: active subscription + effective devices limit == 10."""
+    try:
+        exp = normalize_date(user.expired_at)
+        if not exp or exp <= date.today():
+            return False
+        if not bool(getattr(user, "is_subscribed", False)):
+            # `is_subscribed` is used in some flows; keep it as a weak signal.
+            pass
+
+        if int(getattr(user, "hwid_limit", 0) or 0) == 10:
+            return True
+        tariff_id = getattr(user, "active_tariff_id", None)
+        if tariff_id:
+            tariff = await ActiveTariffs.get_or_none(id=tariff_id)
+            if tariff and int(getattr(tariff, "hwid_limit", 0) or 0) == 10:
+                return True
+    except Exception:
+        return False
+    return False
+
+
+async def _apply_referral_first_payment_reward(
+    *,
+    referred_user_id: int,
+    payment_id: str,
+    amount_rub: int | None,
+    months: int | None,
+    device_count: int,
+) -> dict:
+    """Apply referral rewards in a DB-transaction (ledger + subscription updates).
+
+    Guarantees:
+    - idempotent under webhook retries
+    - safe under concurrent webhook deliveries (unique ledger key)
+    - no money-based rewards for normal users (days-based only)
+    """
+    today = date.today()
+    m = int(months or 0)
+    d = int(device_count or 1)
+
+    async with in_transaction() as conn:
+        # Lock referred user to avoid races with other operations on the same user.
+        referred = await Users.select_for_update().using_db(conn).get(id=referred_user_id)
+        if not int(getattr(referred, "referred_by", 0) or 0):
+            return {"applied": False}
+
+        # Try to insert a ledger row first (unique on (referred_user_id, kind)).
+        # If it already exists -> reward already applied (or in progress previously).
+        try:
+            # We'll fill the rest after computing; keep defaults now.
+            reward = await ReferralRewards.create(
+                referred_user_id=referred.id,
+                referrer_user_id=int(referred.referred_by),
+                kind="first_payment",
+                payment_id=payment_id,
+                months=m,
+                device_count=d,
+                amount_rub=int(amount_rub) if amount_rub is not None else None,
+                using_db=conn,
+            )
+        except IntegrityError:
+            return {"applied": False}
+
+        referrer = await Users.using_db(conn).get(id=int(referred.referred_by))
+
+        friend_bonus_days = 7
+        referrer_bonus_days = _calc_referrer_bonus_days(months=m, device_count=d)
+
+        # Friend subscription extension in DB (no external side effects here).
+        start_friend = max(normalize_date(referred.expired_at) or today, today)
+        new_friend_expired_at = start_friend + timedelta(days=friend_bonus_days)
+        await Users.filter(id=referred.id).using_db(conn).update(
+            expired_at=new_friend_expired_at,
+            referral_first_payment_rewarded=True,
+        )
+
+        # Referrer bonus counter always accumulates (UI uses this).
+        if referrer_bonus_days > 0:
+            await Users.filter(id=referrer.id).using_db(conn).update(
+                referral_bonus_days_total=F("referral_bonus_days_total") + int(referrer_bonus_days)
+            )
+
+        applied_to_subscription = False
+        try:
+            is_family = await _is_active_family_subscription(referrer)
+            if not is_family and referrer_bonus_days > 0:
+                start_ref = max(normalize_date(referrer.expired_at) or today, today)
+                new_ref_expired_at = start_ref + timedelta(days=referrer_bonus_days)
+                await Users.filter(id=referrer.id).using_db(conn).update(expired_at=new_ref_expired_at)
+                applied_to_subscription = True
+        except Exception:
+            # Best-effort: even if family check fails, we still keep the earned days counter.
+            applied_to_subscription = False
+
+        # Update ledger with actual computed values.
+        await ReferralRewards.filter(id=reward.id).using_db(conn).update(
+            friend_bonus_days=friend_bonus_days,
+            referrer_bonus_days=referrer_bonus_days,
+            applied_to_subscription=applied_to_subscription,
+        )
+
+        return {
+            "applied": True,
+            "referrer_id": int(referrer.id),
+            "friend_bonus_days": int(friend_bonus_days),
+            "referrer_bonus_days": int(referrer_bonus_days),
+            "months": int(m),
+            "device_count": int(d),
+            "applied_to_subscription": bool(applied_to_subscription),
+        }
+
 
 async def _upsert_processed_payment(
     *,
@@ -93,6 +237,76 @@ async def _upsert_processed_payment(
         amount_from_balance=float(amount_from_balance),
         status=str(status),
     )
+
+
+async def _award_partner_cashback(
+    *,
+    payment_id: str,
+    referral_user: Users,
+    amount_rub_total: int,
+) -> None:
+    """
+    Money-based partner rewards (cashback % from each purchase of referred users).
+    Idempotent by payment_id via partner_earnings.payment_id unique constraint.
+    """
+    try:
+        referrer_id = int(getattr(referral_user, "referred_by", 0) or 0)
+        if not referrer_id:
+            return
+        referrer = await Users.get_or_none(id=referrer_id)
+        if not referrer or not bool(getattr(referrer, "is_partner", False)):
+            return
+
+        # Partner percent: can be configured per-user or tiered by referrals count.
+        try:
+            percent = int(referrer.referral_percent()) if hasattr(referrer, "referral_percent") else int(getattr(referrer, "custom_referral_percent", 0) or 0)
+        except Exception:
+            percent = int(getattr(referrer, "custom_referral_percent", 0) or 0)
+        percent = max(0, percent)
+        if percent <= 0:
+            return
+
+        # Resolve QR attribution from referral_user.utm if present.
+        source = "referral_link"
+        qr = None
+        try:
+            utm = (getattr(referral_user, "utm", None) or "").strip()
+            if utm.startswith("qr_"):
+                token = utm[3:]
+                source = "qr"
+                try:
+                    qr_uuid = uuid.UUID(token) if len(token) != 32 else uuid.UUID(hex=token)
+                    qr = await PartnerQr.get_or_none(id=qr_uuid)
+                except Exception:
+                    qr = None
+                if not qr:
+                    qr = await PartnerQr.get_or_none(slug=token)
+        except Exception:
+            qr = None
+
+        existing = await PartnerEarnings.get_or_none(payment_id=payment_id)
+        if existing:
+            return
+
+        reward = _round_rub(float(amount_rub_total) * float(percent) / 100.0)
+        if reward <= 0:
+            return
+
+        await PartnerEarnings.create(
+            payment_id=str(payment_id),
+            partner=referrer,
+            referral_id=int(referral_user.id),
+            qr_code=qr,
+            source=source,
+            amount_total_rub=int(amount_rub_total),
+            reward_rub=int(reward),
+            percent=int(percent),
+        )
+
+        # Update partner available balance (atomic).
+        await Users.filter(id=referrer.id).update(balance=F("balance") + int(reward))
+    except Exception as e:
+        logger.warning("Partner cashback award failed for payment %s: %s", payment_id, e)
 
 def _bot_chat_url_from_webapp_url(webapp_url: str | None) -> str | None:
     """
@@ -1264,6 +1478,17 @@ async def yookassa_webhook(request: Request, secret: str):
                 amount_from_balance=amount_from_balance,
                 status="succeeded",
             )
+
+            # Partner program: award cashback to partner referrer (money-based).
+            try:
+                await _award_partner_cashback(
+                    payment_id=str(payment.id),
+                    referral_user=user,
+                    amount_rub_total=int(_round_rub(float(full_tariff_price_for_history))),
+                )
+            except Exception:
+                # best-effort, do not affect payment flow
+                pass
             
             logger.info(
                 f"Успешно продлена подписка для пользователя {user.id} на {days} дней",
@@ -1358,17 +1583,42 @@ async def yookassa_webhook(request: Request, secret: str):
         amount = payment.amount.value
         referrer = None
 
+        # Referral rewards (days-based, not money): apply ONLY once per referred user.
         if user.referred_by:
             try:
-                referrer = await Users.get(id=user.referred_by)
-                await on_referral_payment(
-                    referrer,
-                    user,
-                    amount,
+                device_count = 1
+                if isinstance(data, dict):
+                    try:
+                        device_count = int(data.get("device_count", 1) or 1)
+                    except (TypeError, ValueError):
+                        device_count = 1
+
+                reward_res = await _apply_referral_first_payment_reward(
+                    referred_user_id=user.id,
+                    payment_id=str(payment.id),
+                    amount_rub=int(float(amount)) if amount is not None else None,
+                    months=int(months or 0),
+                    device_count=device_count,
                 )
+
+                if reward_res.get("applied"):
+                    referrer = await Users.get(id=int(reward_res["referrer_id"]))
+                    try:
+                        await on_referral_payment(
+                            user=referrer,
+                            referral=user,
+                            amount=int(float(amount)) if amount is not None else 0,
+                            bonus_days=int(reward_res["referrer_bonus_days"]),
+                            friend_bonus_days=int(reward_res["friend_bonus_days"]),
+                            months=int(reward_res["months"]),
+                            device_count=int(reward_res["device_count"]),
+                            applied_to_subscription=bool(reward_res["applied_to_subscription"]),
+                        )
+                    except Exception as e_notify:
+                        logger.error(f"Ошибка уведомления реферера {referrer.id} о бонусных днях: {e_notify}")
             except Exception as e:
                 logger.error(
-                    f"Ошибка при обработке реферала в webhook'е YooKassa: {e}",
+                    f"Ошибка при обработке реферала (ledger) в webhook'е YooKassa: {e}",
                     extra={'payment_id': payment.id}
                 )
 
@@ -1669,6 +1919,16 @@ async def pay(
             status="succeeded",  # Статус как при обычной успешной оплате
         )
 
+        # Partner program: award cashback on "balance" payments too.
+        try:
+            await _award_partner_cashback(
+                payment_id=str(payment_id),
+                referral_user=user,
+                amount_rub_total=int(_round_rub(float(full_price))),
+            )
+        except Exception:
+            pass
+
         # Списываем одно использование скидки (если не постоянная)
         await consume_discount_if_needed(discount_id)
 
@@ -1946,6 +2206,16 @@ async def create_auto_payment(user: Users, disable_on_fail: bool = True) -> bool
                 amount_from_balance=full_price,
                 status="succeeded",  # Статус как при обычной успешной оплате
             )
+
+            # Partner program: award cashback on balance auto-pay too.
+            try:
+                await _award_partner_cashback(
+                    payment_id=str(payment_id),
+                    referral_user=user,
+                    amount_rub_total=int(_round_rub(float(full_price))),
+                )
+            except Exception:
+                pass
             
             logger.info(
                  f"Автоплатеж для пользователя {user.id} успешно выполнен с баланса. "

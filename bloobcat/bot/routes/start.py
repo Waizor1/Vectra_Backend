@@ -6,6 +6,8 @@ from aiogram.types import CallbackQuery, Message
 from bloobcat.bot.keyboard import webapp_inline_button
 from bloobcat.db.users import Users
 from bloobcat.logger import get_logger
+from bloobcat.settings import telegram_settings
+from urllib.parse import quote
 
 logger = get_logger("bot_start")
 router = Router()
@@ -43,9 +45,20 @@ async def command_start_handler(message: Message, command: CommandObject):
         )
     except TelegramAPIError as e:
         print(f"Error sending sticker: {e}")
+    # Forward /start payload into the Mini App URL as a query param.
+    # Telegram's `start_param` is available only for MiniApp deep links, so we store it in the URL
+    # and let the Mini App bootstrap send it to backend via /auth/telegram.
+    payload = (command.args or "").strip()
+    miniapp_url = telegram_settings.miniapp_url
+    if payload:
+        sep = "&" if "?" in miniapp_url else "?"
+        launch_url = f"{miniapp_url}{sep}start={quote(payload, safe='')}"
+    else:
+        launch_url = miniapp_url
+
     await message.answer(
         response_text,
-        reply_markup=await webapp_inline_button(button_text), # Используем локализованный текст кнопки
+        reply_markup=await webapp_inline_button(button_text, url=launch_url),  # локализованный текст кнопки
     )
     
     # Автоматическая установка админской клавиатуры для админов

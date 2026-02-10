@@ -2,18 +2,21 @@ from fastapi import APIRouter
 from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
 import asyncio
+import uuid
 from typing import Dict, Any, Optional
 
 from bloobcat.bot.notifications.admin import on_activated_key, send_admin_message, write_to
 from bloobcat.db.users import Users, normalize_date
 from bloobcat.db.connections import Connections
 from bloobcat.db.payments import ProcessedPayments
+from bloobcat.db.partner_qr import PartnerQr
 from bloobcat.logger import get_logger
 from bloobcat.db.hwid_local import HwidDeviceLocal
 from .client import RemnaWaveClient
 from bloobcat.settings import remnawave_settings, test_mode
 from bloobcat.bot.notifications.general.referral import on_referral_registration
 from bloobcat.bot.notifications.trial.revoked_hwid import notify_trial_revoked_hwid
+from tortoise.expressions import F
 
 router = APIRouter(prefix="/remnawave", tags=["remnawave"])
 logger = get_logger("remnawave_catcher")
@@ -405,13 +408,34 @@ async def remnawave_updater():
                             registration_changed = True
                             logger.info(f"Первое подключение пользователя {user.id}, отправлено уведомление")
 
-                            if referrer and not referrer.is_partner:
-                                referrer.balance += 50
-                                await referrer.save()
-                                await on_referral_registration(referrer, user)
-                                logger.info(f"Начислено 50₽ рефереру {referrer.id} за регистрацию {user.id}")
-                            elif referrer and referrer.is_partner:
-                                logger.info(f"Реферер {referrer.id} партнер, бонус 50₽ не начисляется за регистрацию {user.id}")
+                            # Partner QR "activation": when a user connects for the first time,
+                            # and their utm/start param points to a QR token, increment QR activations counter.
+                            try:
+                                utm = (user.utm or "").strip() if hasattr(user, "utm") else ""
+                                if utm.startswith("qr_"):
+                                    token = utm[3:]
+                                    qr = None
+                                    try:
+                                        qr_uuid = uuid.UUID(token) if len(token) != 32 else uuid.UUID(hex=token)
+                                        qr = await PartnerQr.get_or_none(id=qr_uuid)
+                                    except Exception:
+                                        qr = None
+                                    if not qr:
+                                        qr = await PartnerQr.get_or_none(slug=token)
+                                    if qr:
+                                        await PartnerQr.filter(id=qr.id).update(activations_count=F("activations_count") + 1)
+                            except Exception as e_qr_act:
+                                logger.warning("Failed to update partner QR activations for user %s: %s", user.id, e_qr_act)
+
+                            # TVPN referral program is days-based (not money-based).
+                            # We do NOT credit any RUB bonus on registration.
+                            # Optional: keep a lightweight "friend registered" notification (no balance changes).
+                            if referrer:
+                                try:
+                                    await on_referral_registration(referrer, user)
+                                    logger.info(f"Реферал зарегистрировался: уведомили реферера {referrer.id} о регистрации {user.id}")
+                                except Exception as e_ref_reg:
+                                    logger.warning("Не удалось отправить уведомление о регистрации реферала %s -> %s: %s", referrer.id, user.id, e_ref_reg)
                         
                         if not old_connected_at or new_connected_at > old_connected_at:
                             user.connected_at = new_connected_at

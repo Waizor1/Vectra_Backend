@@ -35,9 +35,10 @@ def main() -> None:
         {"collection": "grp_main", "label": "Основное", "icon": "dashboard", "sort": 1},
         {"collection": "grp_promo", "label": "Промо", "icon": "confirmation_number", "sort": 2},
         {"collection": "grp_prizes", "label": "Колесо призов", "icon": "casino", "sort": 3},
-        {"collection": "grp_analytics", "label": "Аналитика", "icon": "timeline", "sort": 4},
-        {"collection": "grp_payments", "label": "Платежи", "icon": "payments", "sort": 5},
-        {"collection": "grp_service", "label": "Служебное", "icon": "build", "sort": 6},
+        {"collection": "grp_partners", "label": "Партнерка", "icon": "handshake", "sort": 4},
+        {"collection": "grp_analytics", "label": "Аналитика", "icon": "timeline", "sort": 5},
+        {"collection": "grp_payments", "label": "Платежи", "icon": "payments", "sort": 6},
+        {"collection": "grp_service", "label": "Служебное", "icon": "build", "sort": 7},
     ]
 
     for group in group_defs:
@@ -152,6 +153,27 @@ def main() -> None:
             "note": "Обработанные платежи",
             "sort": 1,
             "translations": [{"language": "ru-RU", "translation": "Платежи"}],
+        },
+        "partner_withdrawals": {
+            "group": "grp_partners",
+            "icon": "payments",
+            "note": "Заявки на вывод средств партнеров",
+            "sort": 1,
+            "translations": [{"language": "ru-RU", "translation": "Заявки на вывод"}],
+        },
+        "partner_qr_codes": {
+            "group": "grp_partners",
+            "icon": "qr_code",
+            "note": "QR-коды партнеров и статистика переходов/активаций",
+            "sort": 2,
+            "translations": [{"language": "ru-RU", "translation": "QR-коды партнеров"}],
+        },
+        "partner_earnings": {
+            "group": "grp_partners",
+            "icon": "bar_chart",
+            "note": "История начислений по партнерской программе (для графиков и разборов)",
+            "sort": 3,
+            "translations": [{"language": "ru-RU", "translation": "Начисления партнеров"}],
         },
         "personal_discounts": {
             "group": "grp_service",

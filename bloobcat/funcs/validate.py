@@ -4,9 +4,12 @@ from fastapi.security import APIKeyHeader
 import jwt
 
 from bloobcat.db.users import Users
+from bloobcat.db.partner_qr import PartnerQr
 from bloobcat.settings import telegram_settings
 from bloobcat.logger import get_logger
 from bloobcat.funcs.auth_tokens import decode_access_token
+from tortoise.expressions import F
+import uuid
 
 logger = get_logger("validate")
 
@@ -81,6 +84,35 @@ async def validate(init_data: str = Depends(oauth2_scheme)) -> Users:
             elif param.isdigit():
                 referred_by = int(param)
                 logger.debug(f"Найден реферал: {referred_by} для пользователя {user.user.id}")
+            elif param.startswith("qr_"):
+                # Partner QR: resolve QR token to partner id (owner_id).
+                # This makes the flow resilient even when the frontend did not call /auth/telegram
+                # (e.g. transient network failures during bootstrap).
+                utm = param
+                token = param[3:]
+                qr = None
+                existing_user = None
+                try:
+                    existing_user = await Users.get_or_none(id=user.user.id)
+                except Exception:
+                    existing_user = None
+                try:
+                    qr_uuid = uuid.UUID(token) if len(token) != 32 else uuid.UUID(hex=token)
+                    qr = await PartnerQr.get_or_none(id=qr_uuid)
+                except Exception:
+                    qr = None
+                if not qr:
+                    qr = await PartnerQr.get_or_none(slug=token)
+                if qr:
+                    referred_by = int(qr.owner_id)
+                    # Avoid inflating views on every API request in initData-mode:
+                    # count a "view" only when the user is first created in DB.
+                    if existing_user is None:
+                        try:
+                            await PartnerQr.filter(id=qr.id).update(views_count=F("views_count") + 1)
+                        except Exception as e_views:
+                            logger.warning(f"Не удалось увеличить views_count для partner QR {qr.id}: {e_views}")
+                logger.debug(f"Найден partner QR: token={token}, referrer={referred_by}")
             else:
                 utm = param
                 logger.debug(f"Найдена UTM: '{utm}' для пользователя {user.user.id}")

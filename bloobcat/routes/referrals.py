@@ -34,7 +34,9 @@ def _calc_level(count: int) -> int:
 async def get_status(user: Users = Depends(validate)) -> ReferralStatusResponse:
     friends_count = int(user.referrals or 0)
     level = _calc_level(friends_count)
-    total_bonus = max(0, friends_count) * 7
+    # Total earned referral bonus days (not money).
+    # This value is accumulated when a referred user makes their first payment.
+    total_bonus = int(getattr(user, "referral_bonus_days_total", 0) or 0)
     try:
         bot_name = await get_bot_username()
     except Exception:

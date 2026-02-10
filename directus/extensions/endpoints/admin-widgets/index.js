@@ -224,4 +224,44 @@ export default function registerEndpoint(router, { database }) {
       period_x_field: period,
     });
   });
+
+  // Partner withdrawals: pending/completed by day (for payout ops dashboard).
+  router.get("/partner-withdrawals", async (req, res) => {
+    const period = ensurePeriod(req.query.period_x_field || "day");
+    const min = toUtcDate(req.query.min_x_field);
+    const max = toUtcDate(req.query.max_x_field);
+    const { actualStart, maxDate } = await normalizeRange(database, "partner_withdrawals", "created_at", min, max);
+    const queryEnd = addSeconds(maxDate, 1);
+
+    const raw = await database.raw(
+      `
+      WITH date_series AS (
+        SELECT generate_series(
+          ?::timestamptz,
+          ?::timestamptz,
+          ('1 ' || ?)::interval
+        ) AS report_timestamp
+      )
+      SELECT
+        to_char(ds.report_timestamp::date, 'DD/MM/YYYY') AS date,
+        COUNT(w.id) FILTER (WHERE w.status IN ('created','processing')) AS pending_count,
+        COUNT(w.id) FILTER (WHERE w.status = 'success') AS success_count,
+        COUNT(w.id) FILTER (WHERE w.status = 'failed') AS failed_count,
+        COUNT(w.id) AS total_count
+      FROM date_series ds
+      LEFT JOIN partner_withdrawals w ON w.created_at >= ds.report_timestamp
+        AND w.created_at < ds.report_timestamp + ('1 ' || ?)::interval
+      GROUP BY ds.report_timestamp
+      ORDER BY ds.report_timestamp;
+      `,
+      [actualStart, queryEnd, period, period]
+    );
+    const results = raw?.rows ?? raw;
+    res.json({
+      results,
+      min_x_field: actualStart.toISOString(),
+      max_x_field: maxDate.toISOString(),
+      period_x_field: period,
+    });
+  });
 };
