@@ -107,7 +107,7 @@ async def notify_renewal_success_yookassa(user, days: int, amount_paid_via_yooka
         if amount_from_balance > 0:
             parts.append(f"\nС вашего бонусного баланса списано {amount_from_balance:.2f}₽.")
         if amount_paid_via_yookassa > 0:
-            parts.append(f"С привязанного способа оплаты списано {amount_paid_via_yookassa:.2f}₽.")
+            parts.append(f"С вашего способа оплаты списано {amount_paid_via_yookassa:.2f}₽.")
         text = "\n".join(parts) + f"\nСпасибо, что остаетесь с нами! 🌟{lte_line}"
         button = await webapp_inline_button("Личный кабинет")
     else:
@@ -115,7 +115,7 @@ async def notify_renewal_success_yookassa(user, days: int, amount_paid_via_yooka
         if amount_from_balance > 0:
             parts.append(f"\n{amount_from_balance:.2f} RUB has been deducted from your bonus balance.")
         if amount_paid_via_yookassa > 0:
-            parts.append(f"{amount_paid_via_yookassa:.2f} RUB has been charged to your saved payment method.")
+            parts.append(f"{amount_paid_via_yookassa:.2f} RUB has been charged to your payment method.")
         text = "\n".join(parts) + f"\nThank you for staying with us! 🌟{lte_line}"
         button = await webapp_inline_button("Dashboard")
     try:
@@ -130,6 +130,40 @@ async def notify_renewal_success_yookassa(user, days: int, amount_paid_via_yooka
         await handle_telegram_bad_request(user.id, e)
     except Exception as e:
         logger.error(f"Ошибка отправки уведомления об успешном продлении (Yookassa) для {user.id}: {e}")
+
+
+async def notify_payment_canceled_yookassa(user, reason: str | None = None):
+    """
+    Уведомляет пользователя об отмене/неуспешном завершении оплаты через YooKassa (ручной платеж).
+    """
+    lang = get_user_locale(user)
+    why = (reason or "").strip()
+    reason_line = f"\n\nПричина: {why}" if (lang == "ru" and why) else (f"\n\nReason: {why}" if why else "")
+    if lang == "ru":
+        text = (
+            f"⚠️ Привет, {user.full_name}! Оплата не была завершена или была отменена."
+            f"{reason_line}\n\n"
+            "Если это ошибка — попробуйте ещё раз в личном кабинете или напишите в поддержку @BloopCat_supbot."
+        )
+        button = await webapp_inline_button("💳 Перейти в личный кабинет")
+    else:
+        text = (
+            f"⚠️ Hi {user.full_name}! The payment was not completed or was canceled."
+            f"{reason_line}\n\n"
+            "If this looks wrong, try again in your dashboard or contact support @BloopCat_supbot."
+        )
+        button = await webapp_inline_button("💳 Open dashboard")
+    try:
+        await bot.send_message(user.id, text, reply_markup=button)
+        await reset_user_failed_count(user.id)
+    except TelegramForbiddenError as e:
+        logger.warning(f"User {user.id} blocked the bot: {e}")
+        await handle_telegram_forbidden_error(user.id, e)
+    except TelegramBadRequest as e:
+        logger.error(f"Bad request error for user {user.id}: {e}")
+        await handle_telegram_bad_request(user.id, e)
+    except Exception as e:
+        logger.error(f"Ошибка отправки уведомления об отмене оплаты (YooKassa) для {user.id}: {e}")
 
 
 async def notify_subscription_cancelled_after_failures(user):

@@ -18,7 +18,8 @@ from bloobcat.bot.notifications.general.referral import on_referral_payment
 from bloobcat.bot.notifications.subscription.renewal import (
     notify_auto_renewal_success_balance,
     notify_auto_renewal_failure,
-    notify_renewal_success_yookassa
+    notify_renewal_success_yookassa,
+    notify_payment_canceled_yookassa,
 )
 from bloobcat.bot.notifications.prize_wheel import notify_spin_awarded
 from bloobcat.db.tariff import Tariffs
@@ -309,6 +310,16 @@ async def yookassa_webhook(request: Request, secret: str):
                     'status': "canceled"
                 }
             )
+            # Ручные платежи: сообщаем пользователю outcome в боте,
+            # чтобы после return_url он видел “успех/ошибка” без UI-поллинга в Mini App.
+            if not data.get("is_auto", False):
+                try:
+                    await notify_payment_canceled_yookassa(user=user)
+                except Exception as notify_exc:
+                    logger.error(
+                        f"Ошибка при отправке уведомления об отмене оплаты (YooKassa) для {user.id}: {notify_exc}",
+                        extra={'payment_id': payment.id, 'user_id': user.id},
+                    )
             if data.get("is_auto", False):
                 disable = data.get("disable_on_fail", False)
                 if disable:
@@ -989,7 +1000,19 @@ async def yookassa_webhook(request: Request, secret: str):
                 except Exception:
                     pass
             
-            # Уведомляем пользователя об успешном продлении, ТОЛЬКО ЕСЛИ это был автоплатеж
+            # IMPORTANT: всегда сообщаем пользователю результат оплаты в боте (и для ручных оплат тоже).
+            try:
+                await notify_renewal_success_yookassa(
+                    user=user,
+                    days=days,
+                    amount_paid_via_yookassa=amount_paid_via_yookassa,
+                    amount_from_balance=amount_from_balance,
+                )
+            except Exception as notify_exc:
+                logger.error(
+                    f"Ошибка при отправке уведомления об успешной оплате (YooKassa) для {user.id}: {notify_exc}"
+                )
+
             if is_auto:
                 # Начисление круток за автосписание: 1 крутка за каждый месяц
                 try:
@@ -1002,18 +1025,13 @@ async def yookassa_webhook(request: Request, secret: str):
                         )
                 except Exception as award_exc:
                     logger.error(f"Не удалось начислить крутки за автосписание для {user.id}: {award_exc}")
-                try:
-                    await notify_renewal_success_yookassa(
-                        user=user,
-                        days=days,
-                        amount_paid_via_yookassa=amount_paid_via_yookassa,
-                        amount_from_balance=amount_from_balance
-                    )
-                except Exception as notify_exc:
-                     logger.error(f"Ошибка при отправке уведомления об успешном АВТОпродлении для {user.id}: {notify_exc}")
                 # Сообщение пользователю о начислении круток
                 try:
-                    await notify_spin_awarded(user=user, added_attempts=int(months), total_attempts=int(user.prize_wheel_attempts or 0))
+                    await notify_spin_awarded(
+                        user=user,
+                        added_attempts=int(months),
+                        total_attempts=int(user.prize_wheel_attempts or 0),
+                    )
                 except Exception as e_notify_spins:
                     logger.error(f"Ошибка уведомления о крутках (вебхук) для {user.id}: {e_notify_spins}")
             
@@ -1392,6 +1410,26 @@ async def pay(
             "lte_cost": lte_cost,
         }
 
+        # Build return_url safely:
+        # - do NOT call Telegram API unless needed (reliability + latency)
+        payment_return_url = (telegram_settings.payment_return_url or "").strip()
+        miniapp_url = (telegram_settings.miniapp_url or "").strip()
+        miniapp_check_url = (
+            miniapp_url + ("&" if "?" in miniapp_url else "?") + "payment=check"
+            if miniapp_url
+            else ""
+        )
+        return_url = payment_return_url
+        if not return_url:
+            bot_chat_url = ""
+            try:
+                bot_username = (await get_bot_username() or "").strip()
+                if bot_username:
+                    bot_chat_url = f"https://t.me/{bot_username}/"
+            except Exception as e:
+                logger.warning(f"Не удалось получить username бота для return_url: {e}")
+            return_url = bot_chat_url or miniapp_check_url or "https://t.me/"
+
         # Обернуть синхронный вызов YooKassa в async с таймаутом
         try:
             payment_data = {
@@ -1410,17 +1448,9 @@ async def pay(
                     #
                     # Priority:
                     # 1) TELEGRAM_PAYMENT_RETURN_URL (explicit override)
-                    # 2) TELEGRAM_MINIAPP_URL + ?payment=check (hosted SPA can show /payment/check)
-                    # 3) fallback to bot username
-                    "return_url": (
-                        (telegram_settings.payment_return_url or "").strip()
-                        or (
-                            (telegram_settings.miniapp_url or "").strip()
-                            + ("&" if "?" in (telegram_settings.miniapp_url or "") else "?")
-                            + "payment=check"
-                        )
-                        or f"https://t.me/{await get_bot_username()}/"
-                    ),
+                    # 2) fallback to bot chat (default UX: return to bot, not to Mini App)
+                    # 3) TELEGRAM_MINIAPP_URL + ?payment=check (legacy fallback)
+                    "return_url": return_url,
                 },
                 "metadata": metadata,
                 "capture": True,
