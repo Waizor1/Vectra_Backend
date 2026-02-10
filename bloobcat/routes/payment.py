@@ -119,6 +119,27 @@ def _bot_chat_url_from_webapp_url(webapp_url: str | None) -> str | None:
         return None
 
 
+def _is_telegram_https_link(url: str) -> bool:
+    """
+    Accept any Telegram universal link (t.me / telegram.me) over HTTPS.
+    We use this as a safe fallback for YooKassa `return_url` so the "back" button is never empty.
+    """
+    raw = (url or "").strip()
+    if not raw:
+        return False
+    try:
+        u = urlparse(raw)
+        if (u.scheme or "").lower() != "https":
+            return False
+        host = (u.netloc or "").lower()
+        if host not in ("t.me", "telegram.me", "www.t.me", "www.telegram.me"):
+            return False
+        parts = [p for p in (u.path or "").split("/") if p]
+        return len(parts) >= 1
+    except Exception:
+        return False
+
+
 def _is_bot_chat_link(url: str) -> bool:
     """
     Accept only "https://t.me/<username>" (optional trailing slash).
@@ -153,19 +174,36 @@ async def _resolve_payment_return_url() -> str:
     if raw and _is_bot_chat_link(raw):
         return raw
     if raw and not _is_bot_chat_link(raw):
-        logger.warning("TELEGRAM_PAYMENT_RETURN_URL ignored: not a bot chat link")
+        # Historically we allowed only a bot chat link here.
+        # In practice, operators often configure a Mini App deep-link like:
+        #   https://t.me/<bot>/<miniapp_short_name>?startapp=...
+        # If we ignore it completely, YooKassa can end up with a useless return_url fallback.
+        if _is_telegram_https_link(raw):
+            logger.info("TELEGRAM_PAYMENT_RETURN_URL is not a bot chat link; using as-is for YooKassa return_url")
+            return raw
+        logger.warning("TELEGRAM_PAYMENT_RETURN_URL ignored: not a Telegram HTTPS link")
 
     parsed = _bot_chat_url_from_webapp_url(getattr(telegram_settings, "webapp_url", None))
     if parsed:
         return parsed
 
     try:
-        bot_username = (await get_bot_username() or "").strip()
+        bot_username = (await get_bot_username() or "").strip().lstrip("@")
         if bot_username:
             return f"https://t.me/{bot_username}/"
     except Exception:
         pass
 
+    # Last resort: return any configured HTTPS page so YooKassa button is still clickable.
+    try:
+        webapp_url = (getattr(telegram_settings, "webapp_url", None) or "").strip()
+        if webapp_url and webapp_url.lower().startswith("https://"):
+            return webapp_url
+        miniapp_url = (getattr(telegram_settings, "miniapp_url", None) or "").strip()
+        if miniapp_url and miniapp_url.lower().startswith("https://"):
+            return miniapp_url
+    except Exception:
+        pass
     return "https://t.me/"
 
 def _round_rub(value: float) -> int:
