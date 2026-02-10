@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from functools import partial
 
 from yookassa import Payment
@@ -30,7 +30,9 @@ async def reconcile_pending_payments(batch_limit: int = 50) -> None:
     - when status is final -> apply subscription (succeeded) or mark canceled
     """
     # Avoid checking too fresh payments: give webhooks a chance first.
-    threshold = datetime.utcnow() - timedelta(seconds=45)
+    # Tortoise + Postgres typically operate with tz-aware datetimes.
+    # Use UTC-aware threshold to avoid "naive vs aware" issues that could break the query.
+    threshold = datetime.now(timezone.utc) - timedelta(seconds=45)
 
     pendings = (
         await ProcessedPayments.filter(status="pending", processed_at__lt=threshold)
@@ -97,7 +99,7 @@ async def reconcile_pending_payments(batch_limit: int = 50) -> None:
             continue
 
 
-async def run_payment_reconcile_scheduler(interval_seconds: int = 300) -> None:
+async def run_payment_reconcile_scheduler(interval_seconds: int = 60) -> None:
     logger.info("Starting payment reconcile scheduler (interval: %ss)", interval_seconds)
     while True:
         try:
