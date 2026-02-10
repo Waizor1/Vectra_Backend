@@ -221,7 +221,8 @@ async def _apply_succeeded_payment_fallback(yk_payment, user: Users, meta: dict)
     if not pid:
         return False
     existing = await ProcessedPayments.get_or_none(payment_id=pid)
-    if existing:
+    if existing and (existing.status or "").strip().lower() != "pending":
+        # Already finalized by webhook / previous reconciliation.
         return True
 
     try:
@@ -428,7 +429,7 @@ async def get_payment_status(
     # Reliability fallback:
     # If YooKassa says the payment is succeeded but our webhook didn't process it,
     # try to apply subscription here (idempotent via ProcessedPayments unique constraint).
-    if status == "succeeded" and not processed:
+    if status == "succeeded" and (not processed or (processed.status or "").strip().lower() == "pending"):
         try:
             meta = getattr(yk_payment, "metadata", None)
             if isinstance(meta, dict) and str(meta.get("user_id", "")).strip():
