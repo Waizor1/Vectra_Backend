@@ -17,6 +17,29 @@ def env(name: str) -> str:
     return value
 
 
+def ensure_permission(session: requests.Session, base_url: str, headers: dict[str, str], *, policy_id: str, collection: str, action: str) -> None:
+    payload = {
+        "policy": policy_id,
+        "collection": collection,
+        "action": action,
+        "fields": ["*"],
+        "permissions": {},
+        "validation": None,
+        "presets": None,
+    }
+    resp = session.post(f"{base_url}/permissions", headers=headers, json=payload, timeout=15)
+    if resp.ok or resp.status_code == 409:
+        return
+    try:
+        errors = resp.json().get("errors") or []
+        msg = " ".join(str(e.get("message") or "") for e in errors).lower()
+    except Exception:  # pragma: no cover
+        msg = ""
+    if "unique" in msg or "already exists" in msg:
+        return
+    resp.raise_for_status()
+
+
 def main() -> None:
     if load_dotenv:
         load_dotenv()
@@ -31,19 +54,13 @@ def main() -> None:
     token = login.json()["data"]["access_token"]
     headers = {"Authorization": f"Bearer {token}"}
 
-    roles = session.get(f"{base_url}/roles", headers=headers, timeout=15)
-    roles.raise_for_status()
-    admin_role = next((r for r in roles.json().get("data", []) if r.get("name") == "Administrator"), None)
-    if not admin_role:
-        raise SystemExit("Administrator role not found")
-    role_id = admin_role["id"]
-
-    permissions = session.get(
-        f"{base_url}/permissions", headers=headers, params={"filter[role][_eq]": role_id}, timeout=15
-    )
-    permissions.raise_for_status()
-    existing = permissions.json().get("data", [])
-    existing_keys = {(p.get("collection"), p.get("action")) for p in existing}
+    # Directus v11 assigns permissions to policies, not roles.
+    policies = session.get(f"{base_url}/policies", headers=headers, params={"fields": "id,name", "limit": 200}, timeout=15)
+    policies.raise_for_status()
+    admin_policy = next((p for p in policies.json().get("data", []) if p.get("name") == "Administrator"), None)
+    if not admin_policy:
+        raise SystemExit("Administrator policy not found")
+    policy_id = admin_policy["id"]
 
     collections = [
         "users",
@@ -68,19 +85,7 @@ def main() -> None:
     created = 0
     for collection in collections:
         for action in actions:
-            if (collection, action) in existing_keys:
-                continue
-            payload = {
-                "role": role_id,
-                "collection": collection,
-                "action": action,
-                "fields": ["*"],
-                "permissions": {},
-                "validation": None,
-                "presets": None,
-            }
-            resp = session.post(f"{base_url}/permissions", headers=headers, json=payload, timeout=15)
-            resp.raise_for_status()
+            ensure_permission(session, base_url, headers, policy_id=policy_id, collection=collection, action=action)
             created += 1
 
     print(f"Permissions ensured. Created: {created}")

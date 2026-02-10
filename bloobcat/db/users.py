@@ -324,16 +324,48 @@ class Users(models.Model):
                 else:
                     logger.debug(f"Пользователь {user.id} уже существует, пропускаем UTM")
             
-            if is_new:
-                # Обработка реферала (только для новых пользователей)
-                referrer = None
-                if referred_by and referred_by != user.id:  # Проверяем что пользователь не пытается стать своим рефералом
-                    referrer = await cls.get_or_none(id=referred_by)
-                    if referrer:
-                        user.referred_by = referred_by
-                        needs_save = True
-                        logger.debug(f"Пользователю {user.id} назначен реферер {referred_by}")
+            # Обработка реферала:
+            # Важно: пользователь мог уже существовать (например, ранее нажал /start без реф-ссылки),
+            # а затем пришёл по реферальной ссылке. В этом случае `referred_by` нужно зафиксировать,
+            # но только один раз и только до полноценной регистрации (is_registered=False), чтобы
+            # исключить возможность "перепривязки" и абуза.
+            referrer = None
+            can_set_referrer = (
+                bool(referred_by)
+                and int(referred_by) != int(user.id)
+                and int(getattr(user, "referred_by", 0) or 0) == 0
+                and not bool(getattr(user, "is_registered", False))
+            )
+            if can_set_referrer:
+                referrer = await cls.get_or_none(id=referred_by)
+                if referrer:
+                    user.referred_by = int(referred_by)
+                    needs_save = True
+                    logger.info(
+                        "Referral bind: user=%s referred_by=%s (is_new=%s)",
+                        user.id,
+                        referred_by,
+                        is_new,
+                    )
+                else:
+                    logger.info(
+                        "Referral bind skipped: referrer not found (user=%s referred_by=%s is_new=%s)",
+                        user.id,
+                        referred_by,
+                        is_new,
+                    )
+            elif referred_by:
+                # Extra visibility for debugging referrals that "didn't stick".
+                logger.debug(
+                    "Referral bind skipped: user=%s provided_referred_by=%s current_referred_by=%s is_registered=%s is_new=%s",
+                    user.id,
+                    referred_by,
+                    int(getattr(user, "referred_by", 0) or 0),
+                    bool(getattr(user, "is_registered", False)),
+                    is_new,
+                )
 
+            if is_new:
                 # Отправляем уведомление о новом пользователе
                 try:
                     await on_activated_bot(
@@ -341,10 +373,12 @@ class Users(models.Model):
                         user.full_name,
                         referrer_id=referrer.id if referrer else None,
                         referrer_name=referrer.full_name if referrer else None,
-                        utm=user.utm
+                        utm=user.utm,
                     )
                 except Exception as e:
-                    logger.error(f"Ошибка отправки уведомления админу о новом пользователе: {str(e)}")
+                    logger.error(
+                        f"Ошибка отправки уведомления админу о новом пользователе: {str(e)}"
+                    )
             
             # Сохраняем пользователя, если были изменения (UTM или реферал)
             if needs_save:

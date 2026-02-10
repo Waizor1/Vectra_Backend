@@ -19,7 +19,16 @@ from tortoise.transactions import in_transaction
 
 from bloobcat.bot.bot import get_bot_username
 from bloobcat.bot.notifications.admin import on_payment, cancel_subscription
-from bloobcat.bot.notifications.general.referral import on_referral_payment
+# Notifications module can be stubbed in tests. Keep imports resilient.
+try:
+    from bloobcat.bot.notifications.general.referral import (
+        on_referral_friend_bonus,
+        on_referral_payment,
+    )
+except ImportError:  # pragma: no cover
+    from bloobcat.bot.notifications.general.referral import on_referral_payment
+
+    on_referral_friend_bonus = None  # type: ignore[assignment]
 from bloobcat.bot.notifications.subscription.renewal import (
     notify_auto_renewal_success_balance,
     notify_auto_renewal_failure,
@@ -1616,6 +1625,23 @@ async def yookassa_webhook(request: Request, secret: str):
                         )
                     except Exception as e_notify:
                         logger.error(f"Ошибка уведомления реферера {referrer.id} о бонусных днях: {e_notify}")
+                    # Also notify the referred user about +7 days (requested UX).
+                    if on_referral_friend_bonus is not None:
+                        try:
+                            await on_referral_friend_bonus(
+                                user=user,
+                                referrer=referrer,
+                                friend_bonus_days=int(reward_res["friend_bonus_days"]),
+                                months=int(reward_res["months"]),
+                                device_count=int(reward_res["device_count"]),
+                            )
+                        except Exception as e_friend_notify:
+                            logger.error(
+                                "Ошибка уведомления реферала %s о +%s днях: %s",
+                                user.id,
+                                reward_res.get("friend_bonus_days"),
+                                e_friend_notify,
+                            )
             except Exception as e:
                 logger.error(
                     f"Ошибка при обработке реферала (ledger) в webhook'е YooKassa: {e}",

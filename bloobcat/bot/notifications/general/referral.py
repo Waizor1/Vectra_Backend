@@ -71,6 +71,46 @@ async def on_referral_payment(
     except Exception as e:
         logger.error(f"Ошибка при отправке уведомления о реферальном бонусе пользователю {user.id}: {e}")
 
+async def on_referral_friend_bonus(
+    *,
+    user: Users,
+    referrer: Users,
+    friend_bonus_days: int,
+    months: int,
+    device_count: int,
+):
+    """Notify the referred user about +days on their first payment via referral."""
+    lang = get_user_locale(user)
+    if lang == "ru":
+        text = (
+            f"🎉 Привет, {user.full_name}! Спасибо за оплату.\n"
+            f"Вам начислено +{friend_bonus_days} бонусных дней за переход по реферальной ссылке.\n"
+            f"Реферер: {referrer.name()}.\n"
+            f"Покупка: {months} мес., устройств: {device_count}."
+        )
+        button = await webapp_inline_button("Личный кабинет")
+    else:
+        text = (
+            f"🎉 Hi {user.full_name}! Thanks for your payment.\n"
+            f"You got +{friend_bonus_days} bonus days for joining via a referral link.\n"
+            f"Referrer: {referrer.name()}.\n"
+            f"Purchase: {months} month(s), devices: {device_count}."
+        )
+        button = await webapp_inline_button("Dashboard")
+
+    try:
+        await bot.send_message(user.id, text, reply_markup=button)
+        logger.info("Friend bonus notification sent to user=%s", user.id)
+        await reset_user_failed_count(user.id)
+    except TelegramForbiddenError as e:
+        logger.warning(f"User {user.id} blocked the bot: {e}")
+        await handle_telegram_forbidden_error(user.id, e)
+    except TelegramBadRequest as e:
+        logger.error(f"Bad request error for user {user.id}: {e}")
+        await handle_telegram_bad_request(user.id, e)
+    except Exception as e:
+        logger.error("Failed to send friend bonus notification to user=%s: %s", user.id, e)
+
 async def on_referral_registration(user: Users, referral: Users):
     lang = get_user_locale(user)
     if lang == 'ru':

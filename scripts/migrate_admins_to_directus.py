@@ -32,6 +32,19 @@ def directus_login(base_url: str, email: str, password: str) -> str:
 
 
 def directus_get_admin_role_id(base_url: str, token: str) -> Optional[str]:
+    # Directus v11: admin access is handled via Policies, but the default role is still named "Administrator".
+    resp = requests.get(
+        f"{base_url}/roles",
+        params={"filter[name][_eq]": "Administrator", "limit": 1},
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    data = resp.json().get("data") or []
+    if data:
+        return data[0]["id"]
+
+    # Backward compatibility (older Directus versions)
     resp = requests.get(
         f"{base_url}/roles",
         params={"filter[admin_access][_eq]": "true", "limit": 1},
