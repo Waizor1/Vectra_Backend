@@ -43,6 +43,11 @@ Configuration.account_id = yookassa_settings.shop_id
 Configuration.secret_key = yookassa_settings.secret_key.get_secret_value()
 
 router = APIRouter(prefix="/pay", tags=["pay"])
+# NOTE: YooKassa webhook URL is sometimes configured without "/pay" prefix.
+# We expose the same handler on both paths:
+# - /pay/webhook/yookassa/{secret}   (default, under /pay)
+# - /webhook/yookassa/{secret}       (alias, no /pay)
+webhook_router = APIRouter(tags=["pay"])
 logger = get_payment_logger()
 
 BYTES_IN_GB = 1024 ** 3
@@ -98,6 +103,7 @@ async def get_tariffs():
 
 
 @router.post("/webhook/yookassa/{secret}")
+@webhook_router.post("/webhook/yookassa/{secret}")
 async def yookassa_webhook(request: Request, secret: str):
     if secret != yookassa_settings.webhook_secret:
         logger.error("Получен webhook с неверным секретным ключом")
