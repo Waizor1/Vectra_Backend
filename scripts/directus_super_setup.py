@@ -847,6 +847,31 @@ def ensure_role_presets(client: DirectusClient) -> None:
         client.post("/presets", json=preset).raise_for_status()
 
 
+def ensure_extension_enabled(client: DirectusClient, extension_name: str) -> None:
+    # Extension enabling is stored in Directus metadata. We enable by extension ID.
+    resp = client.get("/extensions")
+    if resp.status_code in (401, 403):
+        return
+    resp.raise_for_status()
+    exts = resp.json().get("data") or []
+    target = None
+    for ext in exts:
+        schema = ext.get("schema") or {}
+        meta = ext.get("meta") or {}
+        if schema.get("name") == extension_name or meta.get("folder") == extension_name:
+            target = ext
+            break
+    if not target:
+        return
+    meta = target.get("meta") or {}
+    if meta.get("enabled") is True:
+        return
+    ext_id = target.get("id")
+    if not ext_id:
+        return
+    client.patch(f"/extensions/{ext_id}", json={"meta": {"enabled": True}}).raise_for_status()
+
+
 def main() -> None:
     if load_dotenv:
         load_dotenv()
@@ -866,6 +891,8 @@ def main() -> None:
     apply_field_notes_ru(client)
     ensure_insights_dashboard(client)
     ensure_role_presets(client)
+    # Enable optional app extensions if they are present on disk
+    ensure_extension_enabled(client, "tvpn-home")
 
     print("Directus super-setup completed successfully.")
 

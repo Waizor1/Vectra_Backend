@@ -190,6 +190,12 @@ Icon
 .VolumeIcon.icns
 .com.apple.timemachine.donotpresent
 
+# Directus extensions
+directus/extensions/**/node_modules/
+# We commit built extension bundles for production
+!directus/extensions/**/dist/
+!directus/extensions/**/dist/**
+
 # Directories potentially created on remote AFP share
 .AppleDB
 .AppleDesktop

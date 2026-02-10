@@ -54,6 +54,9 @@ services:
     depends_on:
       - bloobcat_db
     environment:
+      # Reduce first-run friction / compliance modal in UI
+      ACCEPT_TERMS: "true"
+      PROJECT_OWNER: ${DIRECTUS_ADMIN_EMAIL}
       KEY: ${DIRECTUS_KEY}
       SECRET: ${DIRECTUS_SECRET}
       ADMIN_EMAIL: ${DIRECTUS_ADMIN_EMAIL}
@@ -68,6 +71,8 @@ services:
       CORS_ENABLED: "true"
       CORS_ORIGIN: "true"
       EXTENSIONS_PATH: /directus/extensions
+      # Open the custom Home module by default (keeps the UX consistent with RemnaWave/FastAdmin)
+      ROOT_REDIRECT: "./admin/tvpn-home"
       ADMIN_INTEGRATION_URL: ${ADMIN_INTEGRATION_URL}
       ADMIN_INTEGRATION_TOKEN: ${ADMIN_INTEGRATION_TOKEN}
       PROMO_HMAC_SECRET: ${PROMO_HMAC_SECRET}
