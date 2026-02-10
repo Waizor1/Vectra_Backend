@@ -2,6 +2,12 @@
 logs from prodatc/
 logs/
 
+# Local environment (NEVER commit secrets)
+.env
+.env.*
+!.env.example
+!.env.captain-user-lookup.example
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

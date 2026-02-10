@@ -13,6 +13,9 @@ class TelegramSettings(BaseSettings):
     webhook_secret: str
     webapp_url: str
     miniapp_url: str 
+    # Optional: where to return the user after YooKassa redirect flow.
+    # Useful when payment is opened in an external browser and we want to jump back to Telegram.
+    payment_return_url: str | None = None
 
 
 class YookassaSettings(BaseSettings):

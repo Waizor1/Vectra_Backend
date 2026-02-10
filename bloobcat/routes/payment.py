@@ -1316,16 +1316,25 @@ async def pay(
                 },
                 "confirmation": {
                     "type": "redirect",
-                    # Return back to the Mini App so it can show a status screen.
-                    # Keep compatibility: if TELEGRAM_MINIAPP_URL is empty, fall back to bot.
+                    # Return URL after the payment is completed in YooKassa.
+                    #
+                    # Why:
+                    # - If the payment is opened in an external browser, returning to the hosted Mini App URL
+                    #   keeps the user in that browser (doesn't bring them back to Telegram).
+                    # - A Telegram deep link (t.me/...) can reopen Telegram from the external browser.
+                    #
+                    # Priority:
+                    # 1) TELEGRAM_PAYMENT_RETURN_URL (explicit override)
+                    # 2) TELEGRAM_MINIAPP_URL + ?payment=check (hosted SPA can show /payment/check)
+                    # 3) fallback to bot username
                     "return_url": (
-                        (
+                        (telegram_settings.payment_return_url or "").strip()
+                        or (
                             (telegram_settings.miniapp_url or "").strip()
                             + ("&" if "?" in (telegram_settings.miniapp_url or "") else "?")
                             + "payment=check"
                         )
-                        if (telegram_settings.miniapp_url or "").strip()
-                        else f"https://t.me/{await get_bot_username()}/"
+                        or f"https://t.me/{await get_bot_username()}/"
                     ),
                 },
                 "metadata": metadata,
