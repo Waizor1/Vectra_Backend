@@ -100,6 +100,85 @@ async def _fetch_today_lte_usage_gb(user_uuid: str) -> float | None:
 async def get_tariffs():
     return await Tariffs.all().order_by("order")
 
+@router.get("/status/{payment_id}")
+async def get_payment_status(
+    payment_id: str,
+    user: Users = Depends(validate),
+):
+    """
+    Point payment status check by YooKassa payment_id.
+
+    Why:
+    - Webhook delivery / subscription activation can lag.
+    - This endpoint allows the client to confirm the payment result (succeeded/canceled/pending)
+      even before `/user` reflects the updated subscription.
+
+    Security:
+    - Requires authenticated user (Telegram initData or Bearer token).
+    - Verifies YooKassa payment metadata user_id when available.
+    - If the payment was already processed by our webhook, we also verify against ProcessedPayments.
+    """
+    if not payment_id or not str(payment_id).strip():
+        raise HTTPException(status_code=400, detail="payment_id is required")
+
+    processed = await ProcessedPayments.get_or_none(payment_id=payment_id)
+    if processed and int(processed.user_id) != int(user.id):
+        # Don't leak existence of foreign payment IDs.
+        raise HTTPException(status_code=404, detail="Payment not found")
+
+    try:
+        yk_payment = await asyncio.wait_for(
+            asyncio.to_thread(partial(Payment.find_one, payment_id)),
+            timeout=15.0,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=503, detail="Payment status service timeout")
+    except Exception as e:
+        logger.error(
+            f"Ошибка при получении статуса платежа YooKassa {payment_id}: {e}",
+            extra={"payment_id": payment_id, "user_id": user.id},
+            exc_info=True,
+        )
+        raise HTTPException(status_code=503, detail="Payment status service unavailable")
+
+    if not yk_payment:
+        raise HTTPException(status_code=404, detail="Payment not found")
+
+    status = str(getattr(yk_payment, "status", "") or "")
+    amount_value: str | None = None
+    currency: str | None = None
+    try:
+        amount_obj = getattr(yk_payment, "amount", None)
+        amount_value = str(getattr(amount_obj, "value", "") or "") or None
+        currency = str(getattr(amount_obj, "currency", "") or "") or None
+    except Exception:
+        amount_value = None
+        currency = None
+
+    meta_user_id: int | None = None
+    try:
+        meta = getattr(yk_payment, "metadata", None)
+        if isinstance(meta, dict):
+            raw = meta.get("user_id")
+            if raw is not None:
+                meta_user_id = int(raw)
+    except Exception:
+        meta_user_id = None
+
+    if meta_user_id is not None and int(meta_user_id) != int(user.id):
+        raise HTTPException(status_code=403, detail="Payment does not belong to user")
+
+    return {
+        "payment_id": payment_id,
+        "yookassa_status": status,
+        "is_final": status in ("succeeded", "canceled"),
+        "is_paid": status == "succeeded",
+        "amount": amount_value,
+        "currency": currency,
+        "processed": bool(processed),
+        "processed_status": (processed.status if processed else None),
+    }
+
 
 
 @router.post("/webhook/yookassa/{secret}")
@@ -1403,7 +1482,7 @@ async def pay(
 
         # Резервации отключены
 
-        return {"redirect_to": payment.confirmation.confirmation_url}
+        return {"redirect_to": payment.confirmation.confirmation_url, "payment_id": payment.id}
 
 async def create_auto_payment(user: Users, disable_on_fail: bool = True) -> bool:
     """

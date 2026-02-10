@@ -7,7 +7,7 @@ from bloobcat.services.prize_wheel import PrizeWheelService
 from bloobcat.db.users import Users
 from bloobcat.funcs.validate import validate
 from bloobcat.bot.bot import bot
-from bloobcat.settings import app_settings
+from bloobcat.settings import app_settings, admin_settings
 
 
 router = APIRouter(prefix="/prize-wheel", tags=["prize-wheel"])
@@ -105,8 +105,10 @@ async def get_prizes_config():
 
 
 @router.post("/initialize")
-async def initialize_prizes():
-    # TODO: ограничить админам
+async def initialize_prizes(user: Users = Depends(get_current_user)):
+    # This endpoint mutates global prize config; keep it admin-only.
+    if not (bool(getattr(user, "is_admin", False)) or int(user.id) == int(admin_settings.telegram_id)):
+        raise HTTPException(status_code=403, detail="Forbidden")
     await PrizeWheelService.initialize_default_prizes()
     return {"message": "Призы инициализированы"}
 

@@ -30,9 +30,31 @@ jobs:
         PROJECT_PATH: ${{ secrets.PROJECT_PATH }}
       run: |
         ssh $SERVER_USER@$SERVER_HOST << EOF
-        cd $PROJECT_PATH
+        set -e
+        if [ -z "$PROJECT_PATH" ]; then
+          echo "PROJECT_PATH is empty"
+          exit 1
+        fi
+        cd "$PROJECT_PATH"
         echo "🚀 Выполняем деплой..."
-        git pull
-        docker compose up -d --build
+
+        if [ -d .git ]; then
+          git pull --ff-only
+        else
+          echo "⚠️  No .git directory in PROJECT_PATH; skipping git pull"
+        fi
+
+        if [ ! -f docker-compose.yml ]; then
+          echo "docker-compose.yml not found in $PROJECT_PATH"
+          exit 1
+        fi
+
+        # Prefer prod override when present (Caddy/TLS, etc.)
+        if [ -f docker-compose.prod.yml ]; then
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+        else
+          docker compose -f docker-compose.yml up -d --build
+        fi
+
         echo "✅ Деплой завершен"
         EOF

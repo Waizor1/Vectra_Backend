@@ -1,0 +1,9 @@
+:80 {
+  redir https://api.waiz-store.ru{uri} permanent
+}
+
+api.waiz-store.ru {
+  encode gzip
+  reverse_proxy bloobcat:33083
+}
+

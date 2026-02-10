@@ -1,0 +1,23 @@
+services:
+  # Terminate TLS and expose the API publicly.
+  # Domain uses nip.io to avoid DNS setup during early dev.
+  caddy:
+    image: caddy:2-alpine
+    container_name: bloobcat_caddy
+    restart: always
+    depends_on:
+      - bloobcat
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      - bloobcat_network
+
+volumes:
+  caddy-data:
+  caddy-config:
+
