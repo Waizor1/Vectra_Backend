@@ -133,6 +133,32 @@
 				</v-card>
 			</div>
 
+			<div class="grid grid--secondary">
+				<v-card class="kpi">
+					<div class="kpi__row">
+						<div class="kpi__icon kpi__icon--green">
+							<v-icon name="wifi" />
+						</div>
+						<div class="kpi__content">
+							<div class="kpi__label">Подключения за 7 дней</div>
+							<div class="kpi__value">{{ fmt(stats.connections7d) }}</div>
+						</div>
+					</div>
+				</v-card>
+
+				<v-card class="kpi">
+					<div class="kpi__row">
+						<div class="kpi__icon kpi__icon--blue">
+							<v-icon name="person_add" />
+						</div>
+						<div class="kpi__content">
+							<div class="kpi__label">Регистрации за 7 дней</div>
+							<div class="kpi__value">{{ fmt(stats.registrations7d) }}</div>
+						</div>
+					</div>
+				</v-card>
+			</div>
+
 			<div class="layout">
 				<v-card class="panel">
 					<div class="panel__title">Быстрые действия</div>
@@ -219,6 +245,8 @@ const stats = ref({
 	activeTariffs: null,
 	blockedUsers: null,
 	processedPayments: null,
+	connections7d: null,
+	registrations7d: null,
 });
 
 const statsOk = computed(() => Object.values(stats.value).some((v) => typeof v === 'number'));
@@ -258,19 +286,36 @@ async function checkWidgets() {
 	}
 }
 
+async function fetchWidgetSumLastN(endpoint, n = 7) {
+	const res = await api.get(`/admin-widgets/${endpoint}`, { params: { period: 'day' } });
+	const results = Array.isArray(res?.data?.results) ? res.data.results : [];
+	const tail = results.slice(Math.max(0, results.length - n));
+	let sum = 0;
+	let any = false;
+	for (const row of tail) {
+		const v = Number(row?.count);
+		if (!Number.isFinite(v)) continue;
+		sum += v;
+		any = true;
+	}
+	return any ? sum : null;
+}
+
 async function refresh() {
 	if (loading.value) return;
 	loading.value = true;
 	error.value = '';
 	try {
-		const [totalUsers, activeTariffs, blockedUsers, processedPayments] = await Promise.all([
+		const [totalUsers, activeTariffs, blockedUsers, processedPayments, connections7d, registrations7d] = await Promise.all([
 			fetchCount('users'),
 			fetchCount('active_tariffs'),
 			fetchCount('users', { 'filter[is_blocked][_eq]': 'true' }),
 			fetchCount('processed_payments'),
+			fetchWidgetSumLastN('connections', 7),
+			fetchWidgetSumLastN('registered-users', 7),
 		]);
 
-		stats.value = { totalUsers, activeTariffs, blockedUsers, processedPayments };
+		stats.value = { totalUsers, activeTariffs, blockedUsers, processedPayments, connections7d, registrations7d };
 		lastUpdated.value = new Date().toISOString();
 		await checkWidgets();
 	} catch (e) {
@@ -329,6 +374,10 @@ onMounted(() => {
 	grid-template-columns: repeat(4, minmax(0, 1fr));
 	gap: 12px;
 	margin-bottom: 12px;
+}
+
+.grid--secondary {
+	grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .kpi {
