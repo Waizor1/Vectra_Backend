@@ -39,6 +39,11 @@ jobs:
         echo "🚀 Выполняем деплой..."
 
         if [ -d .git ]; then
+          # The VPS repo can have local hotfixes / untracked overrides.
+          # If we don't stash them, `git pull --ff-only` can fail and block deploy.
+          # We stash including untracked files to avoid merge overwrites (best-effort).
+          ts="$(date +%F_%H%M%S)"
+          git stash push -u -m "autodeploy-prepull $ts" || true
           git pull --ff-only
         else
           echo "⚠️  No .git directory in PROJECT_PATH; skipping git pull"
