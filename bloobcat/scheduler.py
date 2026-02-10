@@ -29,6 +29,7 @@ from bloobcat.tasks.lte_usage_limiter import (
     run_lte_usage_limiter_scheduler,
     run_lte_usage_limiter_quick_scheduler,
 )
+from bloobcat.tasks.payment_reconcile import run_payment_reconcile_scheduler
 
 logger = get_logger("scheduler")
 
@@ -610,6 +611,8 @@ async def schedule_all_tasks():
     asyncio.create_task(run_winback_discounts_scheduler())
     # Start trial/active_tariff fixer
     asyncio.create_task(run_trial_active_tariff_fix_scheduler())
+    # Reconcile manual payments in case YooKassa webhook delivery fails.
+    asyncio.create_task(run_payment_reconcile_scheduler())
     # Start automatic statistics scheduler
     from bloobcat.statistics.scheduler import statistics_scheduler
     asyncio.create_task(statistics_scheduler()) 

@@ -55,6 +55,45 @@ logger = get_payment_logger()
 BYTES_IN_GB = 1024 ** 3
 MSK_TZ = timezone(timedelta(hours=3))
 
+async def _upsert_processed_payment(
+    *,
+    payment_id: str,
+    user_id: int,
+    amount: float,
+    amount_external: float,
+    amount_from_balance: float,
+    status: str,
+) -> ProcessedPayments:
+    """
+    Idempotent write to `processed_payments`.
+    Webhooks can be retried and we also have a fallback processor, so this must be safe to call multiple times.
+    """
+    existing = await ProcessedPayments.get_or_none(payment_id=payment_id)
+    if existing:
+        existing.user_id = int(user_id)
+        existing.amount = float(amount)
+        existing.amount_external = float(amount_external)
+        existing.amount_from_balance = float(amount_from_balance)
+        existing.status = str(status)
+        await existing.save(
+            update_fields=[
+                "user_id",
+                "amount",
+                "amount_external",
+                "amount_from_balance",
+                "status",
+            ]
+        )
+        return existing
+    return await ProcessedPayments.create(
+        payment_id=payment_id,
+        user_id=int(user_id),
+        amount=float(amount),
+        amount_external=float(amount_external),
+        amount_from_balance=float(amount_from_balance),
+        status=str(status),
+    )
+
 def _bot_chat_url_from_webapp_url(webapp_url: str | None) -> str | None:
     """
     Best-effort parse bot username from TELEGRAM_WEBAPP_URL.
@@ -292,18 +331,14 @@ async def _apply_succeeded_payment_fallback(yk_payment, user: Users, meta: dict)
 
     # Mark processed (idempotent).
     total_amount = float(amount_external) + float(amount_from_balance)
-    try:
-        await ProcessedPayments.create(
-            payment_id=pid,
-            user_id=user.id,
-            amount=total_amount,
-            amount_external=float(amount_external),
-            amount_from_balance=float(amount_from_balance),
-            status="succeeded",
-        )
-    except Exception:
-        # Another request/webhook could win the race.
-        pass
+    await _upsert_processed_payment(
+        payment_id=pid,
+        user_id=user.id,
+        amount=total_amount,
+        amount_external=float(amount_external),
+        amount_from_balance=float(amount_from_balance),
+        status="succeeded",
+    )
 
     # Notify user in bot (so they see the outcome even if webhook failed).
     try:
@@ -487,7 +522,7 @@ async def yookassa_webhook(request: Request, secret: str):
             return {"status": "error", "message": "Missing payment_id"}
 
         processed_payment = await ProcessedPayments.get_or_none(payment_id=payment.id)
-        if processed_payment:
+        if processed_payment and processed_payment.status != "pending":
             logger.info(
                 f"Платеж {payment.id} уже был обработан ранее",
                 extra={
@@ -507,14 +542,14 @@ async def yookassa_webhook(request: Request, secret: str):
             await user.save()
             # Резервации отключены
             
-            # Сохраняем информацию о возврате
-            await ProcessedPayments.create(
+            # Сохраняем информацию о возврате (идемпотентно)
+            await _upsert_processed_payment(
                 payment_id=payment.id,
                 user_id=user.id,
                 amount=float(payment.amount.value),
                 amount_external=float(payment.amount.value),
                 amount_from_balance=0,
-                status="refunded"
+                status="refunded",
             )
             
             logger.info(
@@ -529,14 +564,14 @@ async def yookassa_webhook(request: Request, secret: str):
             return {"status": "ok"}
         
         if event == WebhookNotificationEventType.PAYMENT_CANCELED:
-            # Сохраняем информацию об отмене
-            await ProcessedPayments.create(
+            # Сохраняем информацию об отмене (идемпотентно)
+            await _upsert_processed_payment(
                 payment_id=payment.id,
                 user_id=user.id,
                 amount=float(payment.amount.value),
                 amount_external=float(payment.amount.value),
                 amount_from_balance=0,
-                status="canceled"
+                status="canceled",
             )
             # Резервации отключены
             
@@ -728,13 +763,13 @@ async def yookassa_webhook(request: Request, secret: str):
 
             amount_external = float(payment.amount.value)
             total_amount = amount_external + amount_from_balance
-            await ProcessedPayments.create(
+            await _upsert_processed_payment(
                 payment_id=payment.id,
                 user_id=user.id,
                 amount=total_amount,
                 amount_external=amount_external,
                 amount_from_balance=amount_from_balance,
-                status="succeeded"
+                status="succeeded",
             )
 
             logger.info(
@@ -1181,14 +1216,14 @@ async def yookassa_webhook(request: Request, secret: str):
             amount_paid_via_yookassa = float(payment.amount.value)
             full_tariff_price_for_history = amount_paid_via_yookassa + amount_from_balance
             
-            # Сохраняем информацию об успешном платеже
-            await ProcessedPayments.create(
+            # Сохраняем информацию об успешном платеже (идемпотентно)
+            await _upsert_processed_payment(
                 payment_id=payment.id,
                 user_id=user.id,
-                amount=full_tariff_price_for_history, # Используем полную стоимость тарифа
+                amount=full_tariff_price_for_history,  # Используем полную стоимость тарифа
                 amount_external=amount_paid_via_yookassa,
                 amount_from_balance=amount_from_balance,
-                status="succeeded"
+                status="succeeded",
             )
             
             logger.info(
@@ -1586,13 +1621,13 @@ async def pay(
 
         payment_id = f"balance_{user.id}_{int(datetime.now().timestamp())}_{randint(100, 999)}"
 
-        await ProcessedPayments.create(
+        await _upsert_processed_payment(
             payment_id=payment_id,
             user_id=user.id,
-            amount=full_price, # Итоговая стоимость (с учетом скидки)
+            amount=full_price,  # Итоговая стоимость (с учетом скидки)
             amount_external=0,
             amount_from_balance=full_price,
-            status="succeeded" # Статус как при обычной успешной оплате
+            status="succeeded",  # Статус как при обычной успешной оплате
         )
 
         # Списываем одно использование скидки (если не постоянная)
@@ -1734,6 +1769,24 @@ async def pay(
 
         # Резервации отключены
 
+        # Persist as "pending" so the server can reconcile even if webhook delivery fails
+        # (e.g. user device was offline after payment).
+        try:
+            if payment and payment.id:
+                await _upsert_processed_payment(
+                    payment_id=payment.id,
+                    user_id=user.id,
+                    amount=float(amount_to_pay) + float(amount_from_balance),
+                    amount_external=float(amount_to_pay),
+                    amount_from_balance=float(amount_from_balance),
+                    status="pending",
+                )
+        except Exception as e:
+            logger.warning(
+                f"Не удалось сохранить pending payment {getattr(payment, 'id', None)}: {e}",
+                extra={'user_id': user.id, 'tariff_id': tariff_id},
+            )
+
         return {"redirect_to": payment.confirmation.confirmation_url, "payment_id": payment.id}
 
 async def create_auto_payment(user: Users, disable_on_fail: bool = True) -> bool:
@@ -1846,13 +1899,13 @@ async def create_auto_payment(user: Users, disable_on_fail: bool = True) -> bool
 
             payment_id = f"balance_auto_{user.id}_{int(datetime.now().timestamp())}_{randint(100, 999)}"
 
-            await ProcessedPayments.create(
+            await _upsert_processed_payment(
                 payment_id=payment_id,
                 user_id=user.id,
-                amount=full_price, # Итоговая стоимость с учетом скидки
+                amount=full_price,  # Итоговая стоимость с учетом скидки
                 amount_external=0,
                 amount_from_balance=full_price,
-                status="succeeded" # Статус как при обычной успешной оплате
+                status="succeeded",  # Статус как при обычной успешной оплате
             )
             
             logger.info(
@@ -2024,6 +2077,22 @@ async def create_auto_payment(user: Users, disable_on_fail: bool = True) -> bool
                     'status': payment.status
                 }
             )
+            # Persist as "pending" so the server can reconcile even if webhook delivery fails.
+            try:
+                if payment and payment.id:
+                    await _upsert_processed_payment(
+                        payment_id=payment.id,
+                        user_id=user.id,
+                        amount=float(amount_to_pay) + float(amount_from_balance),
+                        amount_external=float(amount_to_pay),
+                        amount_from_balance=float(amount_from_balance),
+                        status="pending",
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"Не удалось сохранить pending auto payment {getattr(payment, 'id', None)}: {e}",
+                    extra={'user_id': user.id},
+                )
             return True # Автоплатеж создан (результат будет в вебхуке)
 
     except Exception as e:
