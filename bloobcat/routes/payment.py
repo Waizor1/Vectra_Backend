@@ -5,6 +5,7 @@ import json
 import asyncio
 import random
 from functools import partial
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Header, Request # type: ignore
 from yookassa import Configuration, Payment, Webhook
@@ -54,6 +55,80 @@ logger = get_payment_logger()
 BYTES_IN_GB = 1024 ** 3
 MSK_TZ = timezone(timedelta(hours=3))
 
+def _bot_chat_url_from_webapp_url(webapp_url: str | None) -> str | None:
+    """
+    Best-effort parse bot username from TELEGRAM_WEBAPP_URL.
+    Expected: https://t.me/<bot>/<app>/...
+    Returns: https://t.me/<bot>
+    """
+    raw = (webapp_url or "").strip()
+    if not raw:
+        return None
+    try:
+        u = urlparse(raw)
+        host = (u.netloc or "").lower()
+        if host not in ("t.me", "telegram.me", "www.t.me", "www.telegram.me"):
+            return None
+        parts = [p for p in (u.path or "").split("/") if p]
+        if not parts:
+            return None
+        bot = parts[0].lstrip("@").strip()
+        if not bot:
+            return None
+        return f"https://t.me/{bot}"
+    except Exception:
+        return None
+
+
+def _is_bot_chat_link(url: str) -> bool:
+    """
+    Accept only "https://t.me/<username>" (optional trailing slash).
+    We intentionally reject Mini App links (/bot/app) and deep links with query params.
+    """
+    raw = (url or "").strip()
+    if not raw:
+        return False
+    try:
+        u = urlparse(raw)
+        if (u.scheme or "").lower() != "https":
+            return False
+        host = (u.netloc or "").lower()
+        if host not in ("t.me", "telegram.me", "www.t.me", "www.telegram.me"):
+            return False
+        parts = [p for p in (u.path or "").split("/") if p]
+        if len(parts) != 1:
+            return False
+        if u.query or u.fragment:
+            return False
+        return True
+    except Exception:
+        return False
+
+
+async def _resolve_payment_return_url() -> str:
+    """
+    After YooKassa redirect we MUST return the user to the bot chat (not to Mini App),
+    because the payment status is delivered by the bot message.
+    """
+    raw = (telegram_settings.payment_return_url or "").strip()
+    if raw and _is_bot_chat_link(raw):
+        return raw
+    if raw and not _is_bot_chat_link(raw):
+        logger.warning("TELEGRAM_PAYMENT_RETURN_URL ignored: not a bot chat link")
+
+    parsed = _bot_chat_url_from_webapp_url(getattr(telegram_settings, "webapp_url", None))
+    if parsed:
+        return parsed
+
+    try:
+        bot_username = (await get_bot_username() or "").strip()
+        if bot_username:
+            return f"https://t.me/{bot_username}/"
+    except Exception:
+        pass
+
+    return "https://t.me/"
+
 def _round_rub(value: float) -> int:
     try:
         dec = Decimal(str(value))
@@ -96,6 +171,152 @@ async def _fetch_today_lte_usage_gb(user_uuid: str) -> float | None:
         return None
     finally:
         await client.close()
+
+
+async def _apply_succeeded_payment_fallback(yk_payment, user: Users, meta: dict) -> bool:
+    """
+    Fallback processor used by `/pay/status/{payment_id}` when webhook delivery fails.
+    It applies the subscription update and creates ProcessedPayments record (idempotent).
+    """
+    pid = str(getattr(yk_payment, "id", "") or "").strip()
+    if not pid:
+        return False
+    existing = await ProcessedPayments.get_or_none(payment_id=pid)
+    if existing:
+        return True
+
+    try:
+        months = int(meta.get("month"))
+    except Exception:
+        return False
+
+    try:
+        amount_external = float(getattr(getattr(yk_payment, "amount", None), "value", 0) or 0)
+    except Exception:
+        amount_external = 0.0
+
+    amount_from_balance = _round_rub(meta.get("amount_from_balance", 0))
+    if amount_from_balance > 0:
+        user.balance = max(0, int(user.balance or 0) - int(amount_from_balance))
+
+    # Extend subscription days.
+    current_date = date.today()
+    target_date = add_months_safe(current_date, months)
+    days = max(0, (target_date - current_date).days)
+    await user.extend_subscription(days)
+
+    # Persist tariff snapshot + device limit when metadata contains tariff_id.
+    tariff_id = meta.get("tariff_id")
+    device_count = 1
+    try:
+        device_count = int(meta.get("device_count", 1))
+    except Exception:
+        device_count = 1
+    if device_count < 1:
+        device_count = 1
+
+    lte_gb = 0
+    try:
+        lte_gb = int(meta.get("lte_gb") or 0)
+    except Exception:
+        lte_gb = 0
+    if lte_gb < 0:
+        lte_gb = 0
+
+    if tariff_id is not None:
+        original = await Tariffs.get_or_none(id=tariff_id)
+        if original:
+            calculated_price = int(original.calculate_price(device_count))
+            if user.active_tariff_id:
+                old_active = await ActiveTariffs.get_or_none(id=user.active_tariff_id)
+                if old_active:
+                    await old_active.delete()
+
+            if "lte_price_per_gb" in meta:
+                try:
+                    lte_price_snapshot = float(meta.get("lte_price_per_gb") or 0)
+                except Exception:
+                    lte_price_snapshot = float(original.lte_price_per_gb or 0)
+            else:
+                lte_price_snapshot = float(original.lte_price_per_gb or 0)
+
+            msk_today = datetime.now(MSK_TZ).date()
+            usage_snapshot = None
+            if user.remnawave_uuid:
+                usage_snapshot = await _fetch_today_lte_usage_gb(str(user.remnawave_uuid))
+
+            active_tariff = await ActiveTariffs.create(
+                user=user,
+                name=original.name,
+                months=original.months,
+                price=calculated_price,
+                hwid_limit=device_count,
+                lte_gb_total=lte_gb,
+                lte_gb_used=0.0,
+                lte_price_per_gb=lte_price_snapshot,
+                lte_usage_last_date=msk_today,
+                lte_usage_last_total_gb=usage_snapshot if usage_snapshot is not None else 0.0,
+                progressive_multiplier=original.progressive_multiplier,
+                residual_day_fraction=0.0,
+            )
+            user.active_tariff_id = active_tariff.id
+            user.hwid_limit = device_count
+            user.lte_gb_total = lte_gb
+
+    if user.is_trial:
+        user.is_trial = False
+
+    await user.save()
+
+    # Best-effort RemnaWave sync for HWID limit.
+    if user.remnawave_uuid and user.hwid_limit:
+        remnawave_client = None
+        try:
+            remnawave_client = RemnaWaveClient(
+                remnawave_settings.url,
+                remnawave_settings.token.get_secret_value(),
+            )
+            await remnawave_client.users.update_user(
+                uuid=user.remnawave_uuid,
+                expireAt=user.expired_at,
+                hwidDeviceLimit=int(user.hwid_limit),
+            )
+        except Exception:
+            pass
+        finally:
+            if remnawave_client:
+                try:
+                    await remnawave_client.close()
+                except Exception:
+                    pass
+
+    # Mark processed (idempotent).
+    total_amount = float(amount_external) + float(amount_from_balance)
+    try:
+        await ProcessedPayments.create(
+            payment_id=pid,
+            user_id=user.id,
+            amount=total_amount,
+            amount_external=float(amount_external),
+            amount_from_balance=float(amount_from_balance),
+            status="succeeded",
+        )
+    except Exception:
+        # Another request/webhook could win the race.
+        pass
+
+    # Notify user in bot (so they see the outcome even if webhook failed).
+    try:
+        await notify_renewal_success_yookassa(
+            user=user,
+            days=days,
+            amount_paid_via_yookassa=float(amount_external),
+            amount_from_balance=float(amount_from_balance),
+        )
+    except Exception:
+        pass
+
+    return True
 
 @router.get("/tariffs")
 async def get_tariffs():
@@ -168,6 +389,24 @@ async def get_payment_status(
 
     if meta_user_id is not None and int(meta_user_id) != int(user.id):
         raise HTTPException(status_code=403, detail="Payment does not belong to user")
+
+    # Reliability fallback:
+    # If YooKassa says the payment is succeeded but our webhook didn't process it,
+    # try to apply subscription here (idempotent via ProcessedPayments unique constraint).
+    if status == "succeeded" and not processed:
+        try:
+            meta = getattr(yk_payment, "metadata", None)
+            if isinstance(meta, dict) and str(meta.get("user_id", "")).strip():
+                if int(meta.get("user_id")) == int(user.id):
+                    applied = await _apply_succeeded_payment_fallback(yk_payment, user, meta)
+                    if applied:
+                        processed = await ProcessedPayments.get_or_none(payment_id=payment_id)
+        except Exception as e:
+            logger.error(
+                f"Fallback processing failed for succeeded payment {payment_id}: {e}",
+                extra={"payment_id": payment_id, "user_id": user.id},
+                exc_info=True,
+            )
 
     return {
         "payment_id": payment_id,
@@ -1411,24 +1650,8 @@ async def pay(
         }
 
         # Build return_url safely:
-        # - do NOT call Telegram API unless needed (reliability + latency)
-        payment_return_url = (telegram_settings.payment_return_url or "").strip()
-        miniapp_url = (telegram_settings.miniapp_url or "").strip()
-        miniapp_check_url = (
-            miniapp_url + ("&" if "?" in miniapp_url else "?") + "payment=check"
-            if miniapp_url
-            else ""
-        )
-        return_url = payment_return_url
-        if not return_url:
-            bot_chat_url = ""
-            try:
-                bot_username = (await get_bot_username() or "").strip()
-                if bot_username:
-                    bot_chat_url = f"https://t.me/{bot_username}/"
-            except Exception as e:
-                logger.warning(f"Не удалось получить username бота для return_url: {e}")
-            return_url = bot_chat_url or miniapp_check_url or "https://t.me/"
+        # Always return to bot chat (not Mini App). Status is delivered by bot message.
+        return_url = await _resolve_payment_return_url()
 
         # Обернуть синхронный вызов YooKassa в async с таймаутом
         try:
@@ -1447,9 +1670,8 @@ async def pay(
                     # - A Telegram deep link (t.me/...) can reopen Telegram from the external browser.
                     #
                     # Priority:
-                    # 1) TELEGRAM_PAYMENT_RETURN_URL (explicit override)
-                    # 2) fallback to bot chat (default UX: return to bot, not to Mini App)
-                    # 3) TELEGRAM_MINIAPP_URL + ?payment=check (legacy fallback)
+                    # 1) TELEGRAM_PAYMENT_RETURN_URL, but only if it's a bot chat link
+                    # 2) fallback to bot chat derived from TELEGRAM_WEBAPP_URL / bot username
                     "return_url": return_url,
                 },
                 "metadata": metadata,
