@@ -26,6 +26,21 @@
 - выставить `DIRECTUS_URL`, `DIRECTUS_ADMIN_EMAIL`, `DIRECTUS_ADMIN_PASSWORD`
 - `python scripts/directus_super_setup.py`
 
+## Главный экран (Home)
+
+Реализован как модуль-расширение Directus:
+- Папка: `directus/extensions/tvpn-home`
+- URL: `/admin/tvpn-home`
+- По умолчанию root `/` ведет на “Главную” (см. `docker-compose.yml` → `ROOT_REDIRECT`)
+
+Модуль включает:
+- карточки KPI (users / active_tariffs / blocked / payments)
+- динамика за 7 дней (connections / registrations) через `/admin-widgets/*`
+- быстрые действия + навигация, визуально ближе к RemnaWave/FastAdmin
+
+Включение в UI:
+- Скрипт `scripts/directus_super_setup.py` пытается включить extension автоматически (если он уже подхвачен Directus).
+
 ## Troubleshooting: “админка пустая, разделов нет”
 
 Чаще всего причина одна из:
