@@ -1294,7 +1294,7 @@ onMounted(() => {
 .spark__line {
 	fill: none;
 	stroke: rgba(16, 185, 129, 0.9);
-	stroke-width: 2;
+	stroke-width: 3;
 	stroke-linecap: round;
 	stroke-linejoin: round;
 }
