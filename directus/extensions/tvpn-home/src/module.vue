@@ -1096,6 +1096,12 @@ onMounted(() => {
 	justify-items: stretch;
 }
 
+.page__main > * {
+	width: 100%;
+	min-width: 0;
+	justify-self: stretch;
+}
+
 .page__side {
 	display: grid;
 	gap: 12px;
@@ -1105,6 +1111,12 @@ onMounted(() => {
 	min-width: 0;
 	align-items: stretch;
 	justify-items: stretch;
+}
+
+.page__side > * {
+	width: 100%;
+	min-width: 0;
+	justify-self: stretch;
 }
 
 .hero {
