@@ -70,6 +70,10 @@
 Включение в UI:
 - Скрипт `scripts/directus_super_setup.py` пытается включить extension автоматически (если он уже подхвачен Directus).
 
+Если модуль открывается по URL, но иконки “Главная” нет в левом module bar:
+- Проверь `directus_settings.module_bar` — там должен быть путь `/tvpn-home`.
+- Быстрый фикс через API: `PATCH /settings` → `{"module_bar":["/content","/visual","/users","/files","/insights","/deployments","/settings","/tvpn-home"]}`
+
 ## Troubleshooting: “админка пустая, разделов нет”
 
 Чаще всего причина одна из:

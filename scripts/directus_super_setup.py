@@ -1125,6 +1125,44 @@ def ensure_role_presets(client: DirectusClient) -> None:
     existing_resp.raise_for_status()
     existing = existing_resp.json().get("data", []) or []
 
+    def ensure_tabular_fields_include_pk(preset: Dict[str, Any], *, pk_field: str = "id") -> Optional[Dict[str, Any]]:
+        """
+        Directus list UX depends on items having a primary key.
+        If tabular `fields` omit the PK, item navigation on row-click may silently stop working.
+        """
+        layout_query = preset.get("layout_query")
+        if not isinstance(layout_query, dict):
+            return None
+        tabular = layout_query.get("tabular")
+        if not isinstance(tabular, dict):
+            return None
+        fields = tabular.get("fields")
+        if not isinstance(fields, list):
+            return None
+        # Keep existing order and just prepend PK (Directus doesn't support "hidden internal fields").
+        if pk_field in fields:
+            return None
+        new_fields = [pk_field, *fields]
+        new_tabular = {**tabular, "fields": new_fields}
+        new_layout_query = {**layout_query, "tabular": new_tabular}
+        return new_layout_query
+
+    # Auto-heal broken personal presets for `users`.
+    # We normally avoid overwriting user-level presets, but missing PK breaks navigation entirely.
+    for p in list(existing):
+        if p.get("collection") != "users":
+            continue
+        if p.get("layout") != "tabular":
+            continue
+        preset_id = p.get("id")
+        if not preset_id:
+            continue
+        new_layout_query = ensure_tabular_fields_include_pk(p, pk_field="id")
+        if not new_layout_query:
+            continue
+        client.patch(f"/presets/{preset_id}", json={"layout_query": new_layout_query}).raise_for_status()
+        p["layout_query"] = new_layout_query
+
     def upsert_preset(payload: Dict[str, Any]) -> None:
         collection = payload.get("collection")
         if collection and client.get(f"/collections/{collection}").status_code != 200:
