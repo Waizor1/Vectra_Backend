@@ -364,8 +364,8 @@
 			</v-card>
 
 			<v-card class="panel">
-				<div class="panel__title">Большая картина (12 месяцев)</div>
-				<div class="panel__subtitle">Чтобы владельцу было видно “волну” и сезонность на большой дистанции.</div>
+				<div class="panel__title">Тренды (12 месяцев)</div>
+				<div class="panel__subtitle">Годовой срез, чтобы видеть сезонность, рост и “волну” без шума.</div>
 
 				<div class="big">
 					<div class="big__item big__item--blue">
@@ -532,6 +532,62 @@
 							<div v-if="hover.key === 'paymentsSum12' && chartModels.paymentsSum12.points.length" class="spark__tooltip" :style="{ left: `${hover.x}px` }">
 								<div class="spark__tooltip-title">{{ formatLabel(chartModels.paymentsSum12.points[hover.idx].rawLabel, 'month') }}</div>
 								<div class="spark__tooltip-value">{{ fmtMoney(chartModels.paymentsSum12.points[hover.idx].v) }}</div>
+							</div>
+						</div>
+					</div>
+
+					<div class="big__item big__item--cyan">
+						<div class="big__top">
+							<div class="big__label">
+								<v-icon name="person" />
+								<span>Активные пользователи</span>
+							</div>
+							<div class="big__range">12м</div>
+						</div>
+
+						<div class="big__metrics">
+							<div class="big__total">
+								<div class="big__total-label">Сейчас</div>
+								<div class="big__total-value">{{ fmt(Math.round(bigStats.activeUsers12.last)) }}</div>
+							</div>
+							<div class="big__mini">
+								<div class="big__mini-row">
+									<span class="big__mini-k">avg /мес</span>
+									<span class="big__mini-v">{{ fmt(Math.round(bigStats.activeUsers12.avg)) }}</span>
+								</div>
+								<div class="big__mini-row">
+									<span class="big__mini-k">пик</span>
+									<span class="big__mini-v">{{ fmt(Math.round(bigStats.activeUsers12.max)) }}</span>
+								</div>
+							</div>
+						</div>
+
+						<div class="spark-wrap spark-wrap--big" @pointerdown="(e) => onChartDown(e, 'activeUsers12', chartModels.activeUsers12)" @pointermove="(e) => onChartMove(e, 'activeUsers12', chartModels.activeUsers12)" @pointerleave="() => onChartLeave('activeUsers12')">
+							<svg class="spark spark--big premium" :viewBox="`0 0 ${chartModels.activeUsers12.w} ${chartModels.activeUsers12.h}`" preserveAspectRatio="none" aria-hidden="true">
+								<defs>
+									<linearGradient id="grad-activeUsers12" x1="0" y1="0" x2="0" y2="1">
+										<stop offset="0%" stop-color="rgba(34, 211, 238, 0.30)" />
+										<stop offset="100%" stop-color="rgba(34, 211, 238, 0.00)" />
+									</linearGradient>
+									<clipPath id="clip-activeUsers12">
+										<rect :width="chartModels.activeUsers12.w" :height="chartModels.activeUsers12.h" rx="10" ry="10" />
+									</clipPath>
+								</defs>
+								<g clip-path="url(#clip-activeUsers12)">
+									<path class="spark__area" :d="chartModels.activeUsers12.areaD" fill="url(#grad-activeUsers12)" />
+									<path class="spark__glow spark__glow--cyan" :d="chartModels.activeUsers12.lineD" />
+									<path class="spark__path spark__path--cyan" :d="chartModels.activeUsers12.lineD" />
+								</g>
+							</svg>
+							<div v-if="hover.key === 'activeUsers12' && chartModels.activeUsers12.points.length" class="spark__overlay">
+								<div class="spark__vline-overlay" :style="{ left: `${hover.px}px` }" />
+								<div class="spark__dot-overlay spark__dot-overlay--cyan" :style="{ left: `${hover.px}px`, top: `${hover.py}px` }">
+									<div class="spark__dot-overlay-inner" />
+								</div>
+							</div>
+							<div v-if="hover.key === 'activeUsers12' && chartModels.activeUsers12.points.length" class="spark__tooltip" :style="{ left: `${hover.x}px` }">
+								<div class="spark__tooltip-title">{{ formatLabel(chartModels.activeUsers12.points[hover.idx].rawLabel, 'month') }}</div>
+								<div class="spark__tooltip-value">{{ fmt(chartModels.activeUsers12.points[hover.idx].v) }}</div>
 							</div>
 						</div>
 					</div>
@@ -888,6 +944,8 @@ const year = ref({
 	registrations12m_labels: [],
 	connections12m: [],
 	connections12m_labels: [],
+	activeUsers12m: [],
+	activeUsers12m_labels: [],
 	paymentsSum12m: [],
 	paymentsSum12m_labels: [],
 });
@@ -927,14 +985,26 @@ const chartModels = computed(() => {
 
 		registrations12: buildChartModel(year.value.registrations12m, year.value.registrations12m_labels, 'month', 'big'),
 		connections12: buildChartModel(year.value.connections12m, year.value.connections12m_labels, 'month', 'big'),
+		activeUsers12: buildChartModel(year.value.activeUsers12m, year.value.activeUsers12m_labels, 'month', 'big'),
 		paymentsSum12: buildChartModel(year.value.paymentsSum12m, year.value.paymentsSum12m_labels, 'month', 'big'),
 	};
 });
+
+function statsFromSeriesSnapshot(series) {
+	const nums = (Array.isArray(series) ? series : []).map((v) => Number(v)).filter((v) => Number.isFinite(v));
+	if (!nums.length) return { last: 0, avg: 0, max: 0 };
+	const last = nums[nums.length - 1];
+	const sum = nums.reduce((a, b) => a + b, 0);
+	const avg = sum / nums.length;
+	const max = Math.max(...nums);
+	return { last, avg, max };
+}
 
 const bigStats = computed(() => {
 	return {
 		registrations12: statsFromSeries(year.value.registrations12m),
 		connections12: statsFromSeries(year.value.connections12m),
+		activeUsers12: statsFromSeriesSnapshot(year.value.activeUsers12m),
 		paymentsSum12: statsFromSeries(year.value.paymentsSum12m),
 	};
 });
@@ -1387,6 +1457,7 @@ async function refresh() {
 			fetchPaymentsSumSeries(30),
 			fetchWidgetSeries('registered-users', 12, { period_x_field: 'month', min_x_field: isoMonthStartFromNow(11), no_clamp_db_min: '1' }),
 			fetchWidgetSeries('connections', 12, { period_x_field: 'month', min_x_field: isoMonthStartFromNow(11), no_clamp_db_min: '1' }),
+			fetchWidgetSeries('active-users', 12, { period_x_field: 'month', min_x_field: isoMonthStartFromNow(11), no_clamp_db_min: '1' }),
 			fetchPaymentsSumSeries(12, { period_x_field: 'month', min_x_field: isoMonthStartFromNow(11), no_clamp_db_min: '1' }),
 			fetchItems('users', {
 				fields: 'id,username,full_name,registration_date,is_blocked,expired_at',
@@ -1440,6 +1511,7 @@ async function refresh() {
 			payments30,
 			reg12m,
 			conn12m,
+			active12m,
 			pay12m,
 			recentUsers,
 			recentPayments,
@@ -1472,6 +1544,8 @@ async function refresh() {
 			registrations12m_labels: reg12m?.labels || [],
 			connections12m: conn12m?.series || [],
 			connections12m_labels: conn12m?.labels || [],
+			activeUsers12m: active12m?.series || [],
+			activeUsers12m_labels: active12m?.labels || [],
 			paymentsSum12m: pay12m?.series || [],
 			paymentsSum12m_labels: pay12m?.labels || [],
 		};
@@ -1751,6 +1825,10 @@ onMounted(() => {
 	stroke: rgba(139, 92, 246, 0.95);
 }
 
+.spark__path--cyan {
+	stroke: rgba(34, 211, 238, 0.95);
+}
+
 .spark__glow {
 	fill: none;
 	stroke-width: 5;
@@ -1776,6 +1854,10 @@ onMounted(() => {
 
 .spark__glow--purple {
 	stroke: rgba(139, 92, 246, 0.9);
+}
+
+.spark__glow--cyan {
+	stroke: rgba(34, 211, 238, 0.9);
 }
 
 .spark__vline {
@@ -1899,6 +1981,10 @@ onMounted(() => {
 	background: rgba(139, 92, 246, 1);
 }
 
+.spark__dot-overlay--cyan .spark__dot-overlay-inner {
+	background: rgba(34, 211, 238, 1);
+}
+
 .big {
 	display: grid;
 	grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
@@ -1925,6 +2011,10 @@ onMounted(() => {
 
 .big__item--purple {
 	background: linear-gradient(180deg, rgba(139, 92, 246, 0.06), rgba(255, 255, 255, 0.03));
+}
+
+.big__item--cyan {
+	background: linear-gradient(180deg, rgba(34, 211, 238, 0.06), rgba(255, 255, 255, 0.03));
 }
 
 .big__top {
