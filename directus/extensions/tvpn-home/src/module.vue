@@ -1177,6 +1177,13 @@ onMounted(() => {
 	grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
 	gap: 12px;
 	min-width: 0;
+	justify-items: stretch;
+}
+
+.kpi-grid > * {
+	width: 100%;
+	min-width: 0;
+	justify-self: stretch;
 }
 
 @media (min-width: 1600px) {
@@ -1387,6 +1394,9 @@ onMounted(() => {
 	padding: 14px;
 	border-radius: 12px;
 	min-height: 76px;
+	width: 100%;
+	max-width: none !important;
+	justify-self: stretch !important;
 }
 
 .kpi__row {
