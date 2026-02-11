@@ -350,3 +350,95 @@ async def notify_active_tariff_change(
         logger.info(f"Отправлено уведомление об изменении тарифа для пользователя {getattr(user, 'id', '—')}")
     except Exception as e:
         logger.error(f"Ошибка отправки уведомления об изменении тарифа: {str(e)}")
+
+
+async def notify_lte_topup(
+    *,
+    user_id: int,
+    payment_id: str,
+    method: str,
+    lte_gb_delta: int,
+    lte_gb_before: int | None = None,
+    lte_gb_after: int | None = None,
+    price_per_gb: float | None = None,
+    amount_total: int,
+    amount_external: int = 0,
+    amount_from_balance: int = 0,
+    old_hwid_limit: int | None = None,
+    new_hwid_limit: int | None = None,
+    old_expired_at=None,
+    new_expired_at=None,
+):
+    """
+    Лог в админ-канал о доплате за LTE-трафик.
+    Отдельно от on_payment(), т.к. LTE-topup не является покупкой тарифа.
+    """
+    try:
+        from bloobcat.db.users import Users
+
+        user = await Users.get_or_none(id=user_id)
+        user_name = user.full_name if user else f"ID: <code>{user_id}</code>"
+        username = f"@{user.username}" if user and user.username else "Нет юзернейма"
+
+        def format_date(value) -> str:
+            if not value:
+                return "—"
+            try:
+                return value.strftime("%d.%m.%Y")
+            except AttributeError:
+                return str(value)
+
+        before_display = "—"
+        after_display = "—"
+        try:
+            if lte_gb_before is not None:
+                before_display = f"{int(lte_gb_before)} GB"
+        except Exception:
+            before_display = "—"
+        try:
+            if lte_gb_after is not None:
+                after_display = f"{int(lte_gb_after)} GB"
+        except Exception:
+            after_display = "—"
+
+        hwid_change = ""
+        if old_hwid_limit is not None or new_hwid_limit is not None:
+            old_hwid = old_hwid_limit if old_hwid_limit is not None else "—"
+            new_hwid = new_hwid_limit if new_hwid_limit is not None else "—"
+            hwid_change = f"\n📱 Устройств: {old_hwid} → {new_hwid}"
+
+        expired_change = ""
+        if old_expired_at or new_expired_at:
+            expired_change = (
+                f"\n📅 Дата окончания: {format_date(old_expired_at)} → {format_date(new_expired_at)}"
+            )
+
+        price_line = ""
+        if price_per_gb is not None:
+            try:
+                price_line = f"\n💱 Цена за 1 GB: {float(price_per_gb):.2f}₽"
+            except Exception:
+                price_line = ""
+
+        text = f"""📶 Пополнение LTE-трафика
+
+👤 Пользователь: {user_name} ({username})
+🆔 ID пользователя: <code>{user_id}</code>
+
+➕ Добавлено: {int(lte_gb_delta)} GB
+📶 LTE: {before_display} → {after_display}{price_line}{hwid_change}{expired_change}
+
+💸 Сумма: {int(amount_total)}₽
+🏦 С внешней оплаты: {int(amount_external)}₽
+💼 С баланса: {int(amount_from_balance)}₽
+💳 Метод: {method}
+🧾 ID платежа: <code>{payment_id}</code>
+
+#lte #пополнение #оплата"""
+
+        await send_admin_message(
+            text=text,
+            reply_markup=await write_to(user_id),
+        )
+    except Exception as e:
+        logger.error(f"Ошибка отправки уведомления о LTE пополнении: {str(e)}")

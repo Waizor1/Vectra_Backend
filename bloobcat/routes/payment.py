@@ -18,7 +18,7 @@ from tortoise.exceptions import IntegrityError
 from tortoise.transactions import in_transaction
 
 from bloobcat.bot.bot import get_bot_username
-from bloobcat.bot.notifications.admin import on_payment, cancel_subscription
+from bloobcat.bot.notifications.admin import on_payment, cancel_subscription, notify_lte_topup
 # Notifications module can be stubbed in tests. Keep imports resilient.
 try:
     from bloobcat.bot.notifications.general.referral import (
@@ -975,6 +975,10 @@ async def yookassa_webhook(request: Request, secret: str):
                 logger.error(f"LTE пополнение: активный тариф не найден для пользователя {user.id}")
                 return {"status": "error", "message": "Active tariff not found"}
 
+            lte_before = int(active_tariff.lte_gb_total or 0)
+            old_hwid_limit = int(active_tariff.hwid_limit or 0) if getattr(active_tariff, "hwid_limit", None) is not None else None
+            old_expired_at_for_log = user.expired_at
+
             if amount_from_balance > 0:
                 initial_balance = user.balance
                 user.balance = max(0, user.balance - amount_from_balance)
@@ -1120,6 +1124,26 @@ async def yookassa_webhook(request: Request, secret: str):
             logger.info(
                 f"LTE пополнение успешно: user={user.id}, delta={lte_gb_delta}, price={lte_price_per_gb}"
             )
+            try:
+                lte_after = int(active_tariff.lte_gb_total or 0)
+                await notify_lte_topup(
+                    user_id=user.id,
+                    payment_id=payment.id,
+                    method="yookassa_lte_topup",
+                    lte_gb_delta=lte_gb_delta,
+                    lte_gb_before=lte_before,
+                    lte_gb_after=lte_after,
+                    price_per_gb=lte_price_per_gb,
+                    amount_total=_round_rub(total_amount),
+                    amount_external=_round_rub(amount_external),
+                    amount_from_balance=int(amount_from_balance),
+                    old_hwid_limit=old_hwid_limit,
+                    new_hwid_limit=(int(active_tariff.hwid_limit) if getattr(active_tariff, "hwid_limit", None) is not None else None),
+                    old_expired_at=old_expired_at_for_log,
+                    new_expired_at=user.expired_at,
+                )
+            except Exception as notify_exc:
+                logger.error(f"LTE пополнение: не удалось отправить админ-уведомление: {notify_exc}")
             return {"status": "ok"}
         
         try:

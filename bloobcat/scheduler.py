@@ -501,7 +501,7 @@ async def cleanup_blocked_users():
     """
     Очищает пользователей, заблокировавших бота более X дней назад.
     УСЛОВИЯ УДАЛЕНИЯ:
-    1. Триальные: заблокированы > 7 дней назад (ничего не платили)
+    1. Триальные: заблокированы > 7 дней назад и нет активного тарифа
     2. Платные: заблокированы > 7 дней И подписка истекла > 7 дней назад
     Использует существующий метод user.delete() для полной очистки.
     """
@@ -516,11 +516,14 @@ async def cleanup_blocked_users():
     today = date.today()
     subscription_cutoff_date = today - timedelta(days=app_settings.blocked_user_cleanup_days)
     
-    # СЛУЧАЙ 1: Триальные пользователи (заблокированы > 7 дней назад)
+    # СЛУЧАЙ 1: Триальные пользователи.
+    # Бизнес-правило: триал можно удалять по блокировке, но только если у него нет активного тарифа.
+    # Это защита от сценария, когда флаг is_trial ошибочно остался True у платного пользователя.
     blocked_trial_users = await Users.filter(
         is_blocked=True,
         blocked_at__lte=cutoff_date,
-        is_trial=True  # Триальные пользователи (ничего не платили)
+        is_trial=True,
+        active_tariff_id__isnull=True,
     )
     
     # СЛУЧАЙ 2: Платные пользователи (заблокированы > 7 дней И подписка истекла > 7 дней назад)
@@ -547,10 +550,22 @@ async def cleanup_blocked_users():
         expired_at__gt=subscription_cutoff_date  # С активной подпиской (истекла < 7 дней назад)
     ).count()
     
+    # Диагностика: "триальные" с активным тарифом (сигнал возможной рассинхронизации флагов)
+    blocked_trial_with_active_tariff = await Users.filter(
+        is_blocked=True,
+        blocked_at__lte=cutoff_date,
+        is_trial=True,
+        active_tariff_id__not_isnull=True,
+    ).count()
+
     logger.info(f"Found {len(blocked_trial_users)} blocked trial users and {len(blocked_expired_paid_users)} blocked paid users with expired subscriptions for cleanup")
     if blocked_paid_active > 0:
         logger.info(f"Preserving {blocked_paid_active} blocked paid users with active subscriptions")
-    
+    if blocked_trial_with_active_tariff > 0:
+        logger.warning(
+            f"Preserving {blocked_trial_with_active_tariff} blocked 'trial' users with active_tariff_id set (possible is_trial mismatch)"
+        )
+
     for user in blocked_users:
         try:
             user_type = "trial" if user.is_trial else f"paid (expired {user.expired_at})"

@@ -24,7 +24,7 @@ from bloobcat.db.tariff import Tariffs
 from bloobcat.db.notifications import NotificationMarks
 from bloobcat.db.payments import ProcessedPayments
 from bloobcat.bot.bot import get_bot_username
-from bloobcat.bot.notifications.admin import cancel_subscription, notify_active_tariff_change
+from bloobcat.bot.notifications.admin import cancel_subscription, notify_active_tariff_change, notify_lte_topup
 from bloobcat.utils.dates import add_months_safe
 
 logger = get_logger("routes.user")
@@ -567,6 +567,25 @@ async def change_active_tariff_devices(payload: ChangeDevicesRequest, user: User
                     amount_from_balance=extra_cost,
                     status="succeeded",
                 )
+                try:
+                    await notify_lte_topup(
+                        user_id=user.id,
+                        payment_id=payment_id,
+                        method="balance_lte_topup",
+                        lte_gb_delta=int(additional_gb),
+                        lte_gb_before=int(current_lte_gb_total),
+                        lte_gb_after=int(new_lte_gb_total),
+                        price_per_gb=float(lte_price_per_gb) if lte_price_per_gb is not None else None,
+                        amount_total=int(extra_cost),
+                        amount_external=0,
+                        amount_from_balance=int(extra_cost),
+                        old_hwid_limit=int(old_hwid_limit) if old_hwid_limit is not None else None,
+                        new_hwid_limit=int(user.hwid_limit) if getattr(user, "hwid_limit", None) is not None else None,
+                        old_expired_at=old_expired_at,
+                        new_expired_at=user.expired_at,
+                    )
+                except Exception as notify_exc:
+                    logger.error(f"Не удалось отправить админ-уведомление о LTE пополнении (баланс) для {user.id}: {notify_exc}")
             active_tariff.lte_gb_total = new_lte_gb_total
             await active_tariff.save(update_fields=["lte_gb_total"])
             user.lte_gb_total = new_lte_gb_total

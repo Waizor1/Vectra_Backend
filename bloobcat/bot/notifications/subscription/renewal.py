@@ -175,17 +175,17 @@ async def notify_subscription_cancelled_after_failures(user):
     if lang == 'ru':
         text = (
             "❗️ Не удалось продлить вашу подписку.\n\n"
-            "Мы несколько раз пытались списать средства, но не получилось. Ваша подписка отменена.\n\n"
-            "Чтобы возобновить доступ, пожалуйста, выберите и оплатите тариф заново."
+            "Мы несколько раз пытались списать средства, но не получилось. Автопродление отключено.\n\n"
+            "Вы можете продлить текущий тариф вручную в разделе «Подписка»."
         )
-        button = await webapp_inline_button("🛒 Выбрать тариф")
+        button = await webapp_inline_button("💳 Продлить вручную", "/subscription")
     else:
         text = (
             "❗️ We couldn't renew your subscription.\n\n"
-            "We tried to charge your payment method several times without success. Your subscription has been cancelled.\n\n"
-            "To regain access, please choose and pay for a new plan."
+            "We tried to charge your payment method several times without success. Auto-renewal has been disabled.\n\n"
+            "You can manually renew your current plan in the Subscription section."
         )
-        button = await webapp_inline_button("🛒 Choose a plan")
+        button = await webapp_inline_button("💳 Renew manually", "/subscription")
     try:
         await bot.send_message(user.id, text, reply_markup=button)
         logger.info(f"Уведомление об отмене подписки успешно отправлено пользователю {user.id}")
