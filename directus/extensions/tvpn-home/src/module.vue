@@ -200,18 +200,13 @@
 								</defs>
 								<path class="spark__area" :d="chartModels.connections30.areaD" fill="url(#grad-connections30)" />
 								<path class="spark__path spark__path--green" :d="chartModels.connections30.lineD" />
-								<template v-if="hover.key === 'connections30' && chartModels.connections30.points.length">
-									<line
-										class="spark__vline"
-										:x1="chartModels.connections30.points[hover.idx].x"
-										:x2="chartModels.connections30.points[hover.idx].x"
-										:y1="0"
-										:y2="chartModels.connections30.h"
-									/>
-									<circle class="spark__dot-ring" :cx="chartModels.connections30.points[hover.idx].x" :cy="chartModels.connections30.points[hover.idx].y" r="4.2" />
-									<circle class="spark__dot spark__dot--green" :cx="chartModels.connections30.points[hover.idx].x" :cy="chartModels.connections30.points[hover.idx].y" r="2.2" />
-								</template>
 							</svg>
+							<div v-if="hover.key === 'connections30' && chartModels.connections30.points.length" class="spark__overlay">
+								<div class="spark__vline-overlay" :style="{ left: `${hover.px}px` }" />
+								<div class="spark__dot-overlay spark__dot-overlay--green" :style="{ left: `${hover.px}px`, top: `${hover.py}px` }">
+									<div class="spark__dot-overlay-inner" />
+								</div>
+							</div>
 							<div v-if="hover.key === 'connections30' && chartModels.connections30.points.length" class="spark__tooltip" :style="{ left: `${hover.x}px` }">
 								<div class="spark__tooltip-title">{{ formatLabel(chartModels.connections30.points[hover.idx].rawLabel, 'day') }}</div>
 								<div class="spark__tooltip-value">{{ fmt(chartModels.connections30.points[hover.idx].v) }}</div>
@@ -247,12 +242,13 @@
 								</defs>
 								<path class="spark__area" :d="chartModels.registrations30.areaD" fill="url(#grad-registrations30)" />
 								<path class="spark__path spark__path--blue" :d="chartModels.registrations30.lineD" />
-								<template v-if="hover.key === 'registrations30' && chartModels.registrations30.points.length">
-									<line class="spark__vline" :x1="chartModels.registrations30.points[hover.idx].x" :x2="chartModels.registrations30.points[hover.idx].x" :y1="0" :y2="chartModels.registrations30.h" />
-									<circle class="spark__dot-ring" :cx="chartModels.registrations30.points[hover.idx].x" :cy="chartModels.registrations30.points[hover.idx].y" r="4.2" />
-									<circle class="spark__dot spark__dot--blue" :cx="chartModels.registrations30.points[hover.idx].x" :cy="chartModels.registrations30.points[hover.idx].y" r="2.2" />
-								</template>
 							</svg>
+							<div v-if="hover.key === 'registrations30' && chartModels.registrations30.points.length" class="spark__overlay">
+								<div class="spark__vline-overlay" :style="{ left: `${hover.px}px` }" />
+								<div class="spark__dot-overlay spark__dot-overlay--blue" :style="{ left: `${hover.px}px`, top: `${hover.py}px` }">
+									<div class="spark__dot-overlay-inner" />
+								</div>
+							</div>
 							<div v-if="hover.key === 'registrations30' && chartModels.registrations30.points.length" class="spark__tooltip" :style="{ left: `${hover.x}px` }">
 								<div class="spark__tooltip-title">{{ formatLabel(chartModels.registrations30.points[hover.idx].rawLabel, 'day') }}</div>
 								<div class="spark__tooltip-value">{{ fmt(chartModels.registrations30.points[hover.idx].v) }}</div>
@@ -281,12 +277,13 @@
 								</defs>
 								<path class="spark__area" :d="chartModels.activeUsers30.areaD" fill="url(#grad-activeUsers30)" />
 								<path class="spark__path spark__path--green" :d="chartModels.activeUsers30.lineD" />
-								<template v-if="hover.key === 'activeUsers30' && chartModels.activeUsers30.points.length">
-									<line class="spark__vline" :x1="chartModels.activeUsers30.points[hover.idx].x" :x2="chartModels.activeUsers30.points[hover.idx].x" :y1="0" :y2="chartModels.activeUsers30.h" />
-									<circle class="spark__dot-ring" :cx="chartModels.activeUsers30.points[hover.idx].x" :cy="chartModels.activeUsers30.points[hover.idx].y" r="4.2" />
-									<circle class="spark__dot spark__dot--green" :cx="chartModels.activeUsers30.points[hover.idx].x" :cy="chartModels.activeUsers30.points[hover.idx].y" r="2.2" />
-								</template>
 							</svg>
+							<div v-if="hover.key === 'activeUsers30' && chartModels.activeUsers30.points.length" class="spark__overlay">
+								<div class="spark__vline-overlay" :style="{ left: `${hover.px}px` }" />
+								<div class="spark__dot-overlay spark__dot-overlay--green" :style="{ left: `${hover.px}px`, top: `${hover.py}px` }">
+									<div class="spark__dot-overlay-inner" />
+								</div>
+							</div>
 							<div v-if="hover.key === 'activeUsers30' && chartModels.activeUsers30.points.length" class="spark__tooltip" :style="{ left: `${hover.x}px` }">
 								<div class="spark__tooltip-title">{{ formatLabel(chartModels.activeUsers30.points[hover.idx].rawLabel, 'day') }}</div>
 								<div class="spark__tooltip-value">{{ fmt(chartModels.activeUsers30.points[hover.idx].v) }}</div>
@@ -315,12 +312,13 @@
 								</defs>
 								<path class="spark__area" :d="chartModels.totalUsers30.areaD" fill="url(#grad-totalUsers30)" />
 								<path class="spark__path spark__path--purple" :d="chartModels.totalUsers30.lineD" />
-								<template v-if="hover.key === 'totalUsers30' && chartModels.totalUsers30.points.length">
-									<line class="spark__vline" :x1="chartModels.totalUsers30.points[hover.idx].x" :x2="chartModels.totalUsers30.points[hover.idx].x" :y1="0" :y2="chartModels.totalUsers30.h" />
-									<circle class="spark__dot-ring" :cx="chartModels.totalUsers30.points[hover.idx].x" :cy="chartModels.totalUsers30.points[hover.idx].y" r="4.2" />
-									<circle class="spark__dot spark__dot--purple" :cx="chartModels.totalUsers30.points[hover.idx].x" :cy="chartModels.totalUsers30.points[hover.idx].y" r="2.2" />
-								</template>
 							</svg>
+							<div v-if="hover.key === 'totalUsers30' && chartModels.totalUsers30.points.length" class="spark__overlay">
+								<div class="spark__vline-overlay" :style="{ left: `${hover.px}px` }" />
+								<div class="spark__dot-overlay spark__dot-overlay--purple" :style="{ left: `${hover.px}px`, top: `${hover.py}px` }">
+									<div class="spark__dot-overlay-inner" />
+								</div>
+							</div>
 							<div v-if="hover.key === 'totalUsers30' && chartModels.totalUsers30.points.length" class="spark__tooltip" :style="{ left: `${hover.x}px` }">
 								<div class="spark__tooltip-title">{{ formatLabel(chartModels.totalUsers30.points[hover.idx].rawLabel, 'day') }}</div>
 								<div class="spark__tooltip-value">{{ fmt(chartModels.totalUsers30.points[hover.idx].v) }}</div>
@@ -349,12 +347,13 @@
 								</defs>
 								<path class="spark__area" :d="chartModels.paymentsSum30.areaD" fill="url(#grad-paymentsSum30)" />
 								<path class="spark__path spark__path--green" :d="chartModels.paymentsSum30.lineD" />
-								<template v-if="hover.key === 'paymentsSum30' && chartModels.paymentsSum30.points.length">
-									<line class="spark__vline" :x1="chartModels.paymentsSum30.points[hover.idx].x" :x2="chartModels.paymentsSum30.points[hover.idx].x" :y1="0" :y2="chartModels.paymentsSum30.h" />
-									<circle class="spark__dot-ring" :cx="chartModels.paymentsSum30.points[hover.idx].x" :cy="chartModels.paymentsSum30.points[hover.idx].y" r="4.2" />
-									<circle class="spark__dot spark__dot--green" :cx="chartModels.paymentsSum30.points[hover.idx].x" :cy="chartModels.paymentsSum30.points[hover.idx].y" r="2.2" />
-								</template>
 							</svg>
+							<div v-if="hover.key === 'paymentsSum30' && chartModels.paymentsSum30.points.length" class="spark__overlay">
+								<div class="spark__vline-overlay" :style="{ left: `${hover.px}px` }" />
+								<div class="spark__dot-overlay spark__dot-overlay--green" :style="{ left: `${hover.px}px`, top: `${hover.py}px` }">
+									<div class="spark__dot-overlay-inner" />
+								</div>
+							</div>
 							<div v-if="hover.key === 'paymentsSum30' && chartModels.paymentsSum30.points.length" class="spark__tooltip" :style="{ left: `${hover.x}px` }">
 								<div class="spark__tooltip-title">{{ formatLabel(chartModels.paymentsSum30.points[hover.idx].rawLabel, 'day') }}</div>
 								<div class="spark__tooltip-value">{{ fmtMoney(chartModels.paymentsSum30.points[hover.idx].v) }}</div>
@@ -410,13 +409,14 @@
 									<path class="spark__area" :d="chartModels.registrations12.areaD" fill="url(#grad-registrations12)" />
 									<path class="spark__glow spark__glow--blue" :d="chartModels.registrations12.lineD" />
 									<path class="spark__path spark__path--blue" :d="chartModels.registrations12.lineD" />
-									<template v-if="hover.key === 'registrations12' && chartModels.registrations12.points.length">
-										<line class="spark__vline" :x1="chartModels.registrations12.points[hover.idx].x" :x2="chartModels.registrations12.points[hover.idx].x" :y1="0" :y2="chartModels.registrations12.h" />
-										<circle class="spark__dot-ring" :cx="chartModels.registrations12.points[hover.idx].x" :cy="chartModels.registrations12.points[hover.idx].y" r="5.0" />
-										<circle class="spark__dot spark__dot--blue" :cx="chartModels.registrations12.points[hover.idx].x" :cy="chartModels.registrations12.points[hover.idx].y" r="2.7" />
-									</template>
 								</g>
 							</svg>
+							<div v-if="hover.key === 'registrations12' && chartModels.registrations12.points.length" class="spark__overlay">
+								<div class="spark__vline-overlay" :style="{ left: `${hover.px}px` }" />
+								<div class="spark__dot-overlay spark__dot-overlay--blue" :style="{ left: `${hover.px}px`, top: `${hover.py}px` }">
+									<div class="spark__dot-overlay-inner" />
+								</div>
+							</div>
 							<div v-if="hover.key === 'registrations12' && chartModels.registrations12.points.length" class="spark__tooltip" :style="{ left: `${hover.x}px` }">
 								<div class="spark__tooltip-title">{{ formatLabel(chartModels.registrations12.points[hover.idx].rawLabel, 'month') }}</div>
 								<div class="spark__tooltip-value">{{ fmt(chartModels.registrations12.points[hover.idx].v) }}</div>
@@ -465,13 +465,14 @@
 									<path class="spark__area" :d="chartModels.connections12.areaD" fill="url(#grad-connections12)" />
 									<path class="spark__glow spark__glow--green" :d="chartModels.connections12.lineD" />
 									<path class="spark__path spark__path--green" :d="chartModels.connections12.lineD" />
-									<template v-if="hover.key === 'connections12' && chartModels.connections12.points.length">
-										<line class="spark__vline" :x1="chartModels.connections12.points[hover.idx].x" :x2="chartModels.connections12.points[hover.idx].x" :y1="0" :y2="chartModels.connections12.h" />
-										<circle class="spark__dot-ring" :cx="chartModels.connections12.points[hover.idx].x" :cy="chartModels.connections12.points[hover.idx].y" r="5.0" />
-										<circle class="spark__dot spark__dot--green" :cx="chartModels.connections12.points[hover.idx].x" :cy="chartModels.connections12.points[hover.idx].y" r="2.7" />
-									</template>
 								</g>
 							</svg>
+							<div v-if="hover.key === 'connections12' && chartModels.connections12.points.length" class="spark__overlay">
+								<div class="spark__vline-overlay" :style="{ left: `${hover.px}px` }" />
+								<div class="spark__dot-overlay spark__dot-overlay--green" :style="{ left: `${hover.px}px`, top: `${hover.py}px` }">
+									<div class="spark__dot-overlay-inner" />
+								</div>
+							</div>
 							<div v-if="hover.key === 'connections12' && chartModels.connections12.points.length" class="spark__tooltip" :style="{ left: `${hover.x}px` }">
 								<div class="spark__tooltip-title">{{ formatLabel(chartModels.connections12.points[hover.idx].rawLabel, 'month') }}</div>
 								<div class="spark__tooltip-value">{{ fmt(chartModels.connections12.points[hover.idx].v) }}</div>
@@ -520,13 +521,14 @@
 									<path class="spark__area" :d="chartModels.paymentsSum12.areaD" fill="url(#grad-paymentsSum12)" />
 									<path class="spark__glow spark__glow--purple" :d="chartModels.paymentsSum12.lineD" />
 									<path class="spark__path spark__path--purple" :d="chartModels.paymentsSum12.lineD" />
-									<template v-if="hover.key === 'paymentsSum12' && chartModels.paymentsSum12.points.length">
-										<line class="spark__vline" :x1="chartModels.paymentsSum12.points[hover.idx].x" :x2="chartModels.paymentsSum12.points[hover.idx].x" :y1="0" :y2="chartModels.paymentsSum12.h" />
-										<circle class="spark__dot-ring" :cx="chartModels.paymentsSum12.points[hover.idx].x" :cy="chartModels.paymentsSum12.points[hover.idx].y" r="5.0" />
-										<circle class="spark__dot spark__dot--purple" :cx="chartModels.paymentsSum12.points[hover.idx].x" :cy="chartModels.paymentsSum12.points[hover.idx].y" r="2.7" />
-									</template>
 								</g>
 							</svg>
+							<div v-if="hover.key === 'paymentsSum12' && chartModels.paymentsSum12.points.length" class="spark__overlay">
+								<div class="spark__vline-overlay" :style="{ left: `${hover.px}px` }" />
+								<div class="spark__dot-overlay spark__dot-overlay--purple" :style="{ left: `${hover.px}px`, top: `${hover.py}px` }">
+									<div class="spark__dot-overlay-inner" />
+								</div>
+							</div>
 							<div v-if="hover.key === 'paymentsSum12' && chartModels.paymentsSum12.points.length" class="spark__tooltip" :style="{ left: `${hover.x}px` }">
 								<div class="spark__tooltip-title">{{ formatLabel(chartModels.paymentsSum12.points[hover.idx].rawLabel, 'month') }}</div>
 								<div class="spark__tooltip-value">{{ fmtMoney(chartModels.paymentsSum12.points[hover.idx].v) }}</div>
@@ -1193,10 +1195,10 @@ function buildChartModel(series, labels, period, variant = 'compact') {
 	const n = nums.length;
 	// IMPORTANT: match viewBox height to CSS height to avoid stroke "ballooning"
 	// due to SVG scaling. (Big charts were previously scaled 64 -> 120px.)
-	const h = variant === 'big' ? 120 : 48;
+	const h = variant === 'big' ? 120 : 64;
 	const w = 100;
 	const padX = 2;
-	const padY = variant === 'big' ? 8 : 6;
+	const padY = variant === 'big' ? 8 : 8;
 	if (n === 0) {
 		return { w, h, n, points: [], lineD: '', areaD: '' };
 	}
@@ -1219,10 +1221,12 @@ function buildChartModel(series, labels, period, variant = 'compact') {
 	return { w, h, n, points: pts, lineD, areaD };
 }
 
-const hover = ref({ key: null, idx: 0, x: 0 });
+// Hover rendering is done via HTML overlay (not SVG circles) so it stays crisp
+// even when the SVG is non-uniformly scaled (responsive width + fixed height).
+const hover = ref({ key: null, idx: 0, x: 0, px: 0, py: 0 });
 let touchHideTimer = null;
 function onChartLeave(key) {
-	if (hover.value.key === key) hover.value = { key: null, idx: 0, x: 0 };
+	if (hover.value.key === key) hover.value = { key: null, idx: 0, x: 0, px: 0, py: 0 };
 }
 
 function onChartDown(evt, key, model) {
@@ -1244,7 +1248,12 @@ function onChartMove(evt, key, model) {
 	const idx = model.n === 1 ? 0 : Math.round((rawX / rect.width) * (model.n - 1));
 	const tooltipPad = 72;
 	const x = Math.max(tooltipPad, Math.min(rect.width - tooltipPad, rawX));
-	hover.value = { key, idx, x };
+	const p = model.points?.[idx];
+	// Position the indicator exactly at the data point (not at cursor),
+	// otherwise it looks "wobbly" and can drift from the line.
+	const px = model.n === 1 ? rect.width / 2 : (Number(p?.x) / model.w) * rect.width;
+	const py = (Number(p?.y) / model.h) * rect.height;
+	hover.value = { key, idx, x, px, py };
 }
 
 async function fetchCount(collection, params = {}) {
@@ -1684,7 +1693,7 @@ onMounted(() => {
 
 .spark {
 	width: 100%;
-	height: 48px;
+	height: 64px;
 }
 
 .spark--big {
@@ -1824,6 +1833,70 @@ onMounted(() => {
 	margin-top: 2px;
 	font-weight: 800;
 	font-size: 13px;
+}
+
+.spark__overlay {
+	position: absolute;
+	inset: 0;
+	pointer-events: none;
+	z-index: 4;
+}
+
+.spark__vline-overlay {
+	position: absolute;
+	top: 0;
+	bottom: 0;
+	width: 1px;
+	background: rgba(255, 255, 255, 0.14);
+	transform: translateX(-0.5px);
+}
+
+.spark__dot-overlay {
+	position: absolute;
+	border-radius: 999px;
+	transform: translate(-50%, -50%);
+	display: grid;
+	place-items: center;
+	background: rgba(15, 23, 42, 0.72);
+	border: 1px solid rgba(255, 255, 255, 0.20);
+	box-shadow: 0 10px 26px rgba(0, 0, 0, 0.45);
+}
+
+.spark-wrap:not(.spark-wrap--big) .spark__dot-overlay {
+	width: 10px;
+	height: 10px;
+}
+
+.spark-wrap--big .spark__dot-overlay {
+	width: 12px;
+	height: 12px;
+}
+
+.spark__dot-overlay-inner {
+	border-radius: 999px;
+	box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.08);
+}
+
+.spark-wrap:not(.spark-wrap--big) .spark__dot-overlay-inner {
+	width: 5px;
+	height: 5px;
+}
+
+.spark-wrap--big .spark__dot-overlay-inner {
+	width: 6px;
+	height: 6px;
+}
+
+.spark__dot-overlay--green .spark__dot-overlay-inner {
+	background: rgba(16, 185, 129, 1);
+}
+
+.spark__dot-overlay--blue .spark__dot-overlay-inner {
+	background: rgba(59, 130, 246, 1);
+}
+
+.spark__dot-overlay--purple .spark__dot-overlay-inner {
+	background: rgba(139, 92, 246, 1);
 }
 
 .big {
