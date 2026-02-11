@@ -208,12 +208,8 @@
 										:y1="0"
 										:y2="chartModels.connections30.h"
 									/>
-									<circle
-										class="spark__dot spark__dot--green"
-										:cx="chartModels.connections30.points[hover.idx].x"
-										:cy="chartModels.connections30.points[hover.idx].y"
-										r="2.6"
-									/>
+									<circle class="spark__dot-ring" :cx="chartModels.connections30.points[hover.idx].x" :cy="chartModels.connections30.points[hover.idx].y" r="4.2" />
+									<circle class="spark__dot spark__dot--green" :cx="chartModels.connections30.points[hover.idx].x" :cy="chartModels.connections30.points[hover.idx].y" r="2.2" />
 								</template>
 							</svg>
 							<div v-if="hover.key === 'connections30' && chartModels.connections30.points.length" class="spark__tooltip" :style="{ left: `${hover.x}px` }">
@@ -253,7 +249,8 @@
 								<path class="spark__path spark__path--blue" :d="chartModels.registrations30.lineD" />
 								<template v-if="hover.key === 'registrations30' && chartModels.registrations30.points.length">
 									<line class="spark__vline" :x1="chartModels.registrations30.points[hover.idx].x" :x2="chartModels.registrations30.points[hover.idx].x" :y1="0" :y2="chartModels.registrations30.h" />
-									<circle class="spark__dot spark__dot--blue" :cx="chartModels.registrations30.points[hover.idx].x" :cy="chartModels.registrations30.points[hover.idx].y" r="2.6" />
+									<circle class="spark__dot-ring" :cx="chartModels.registrations30.points[hover.idx].x" :cy="chartModels.registrations30.points[hover.idx].y" r="4.2" />
+									<circle class="spark__dot spark__dot--blue" :cx="chartModels.registrations30.points[hover.idx].x" :cy="chartModels.registrations30.points[hover.idx].y" r="2.2" />
 								</template>
 							</svg>
 							<div v-if="hover.key === 'registrations30' && chartModels.registrations30.points.length" class="spark__tooltip" :style="{ left: `${hover.x}px` }">
@@ -286,7 +283,8 @@
 								<path class="spark__path spark__path--green" :d="chartModels.activeUsers30.lineD" />
 								<template v-if="hover.key === 'activeUsers30' && chartModels.activeUsers30.points.length">
 									<line class="spark__vline" :x1="chartModels.activeUsers30.points[hover.idx].x" :x2="chartModels.activeUsers30.points[hover.idx].x" :y1="0" :y2="chartModels.activeUsers30.h" />
-									<circle class="spark__dot spark__dot--green" :cx="chartModels.activeUsers30.points[hover.idx].x" :cy="chartModels.activeUsers30.points[hover.idx].y" r="2.6" />
+									<circle class="spark__dot-ring" :cx="chartModels.activeUsers30.points[hover.idx].x" :cy="chartModels.activeUsers30.points[hover.idx].y" r="4.2" />
+									<circle class="spark__dot spark__dot--green" :cx="chartModels.activeUsers30.points[hover.idx].x" :cy="chartModels.activeUsers30.points[hover.idx].y" r="2.2" />
 								</template>
 							</svg>
 							<div v-if="hover.key === 'activeUsers30' && chartModels.activeUsers30.points.length" class="spark__tooltip" :style="{ left: `${hover.x}px` }">
@@ -319,7 +317,8 @@
 								<path class="spark__path spark__path--purple" :d="chartModels.totalUsers30.lineD" />
 								<template v-if="hover.key === 'totalUsers30' && chartModels.totalUsers30.points.length">
 									<line class="spark__vline" :x1="chartModels.totalUsers30.points[hover.idx].x" :x2="chartModels.totalUsers30.points[hover.idx].x" :y1="0" :y2="chartModels.totalUsers30.h" />
-									<circle class="spark__dot spark__dot--purple" :cx="chartModels.totalUsers30.points[hover.idx].x" :cy="chartModels.totalUsers30.points[hover.idx].y" r="2.6" />
+									<circle class="spark__dot-ring" :cx="chartModels.totalUsers30.points[hover.idx].x" :cy="chartModels.totalUsers30.points[hover.idx].y" r="4.2" />
+									<circle class="spark__dot spark__dot--purple" :cx="chartModels.totalUsers30.points[hover.idx].x" :cy="chartModels.totalUsers30.points[hover.idx].y" r="2.2" />
 								</template>
 							</svg>
 							<div v-if="hover.key === 'totalUsers30' && chartModels.totalUsers30.points.length" class="spark__tooltip" :style="{ left: `${hover.x}px` }">
@@ -352,7 +351,8 @@
 								<path class="spark__path spark__path--green" :d="chartModels.paymentsSum30.lineD" />
 								<template v-if="hover.key === 'paymentsSum30' && chartModels.paymentsSum30.points.length">
 									<line class="spark__vline" :x1="chartModels.paymentsSum30.points[hover.idx].x" :x2="chartModels.paymentsSum30.points[hover.idx].x" :y1="0" :y2="chartModels.paymentsSum30.h" />
-									<circle class="spark__dot spark__dot--green" :cx="chartModels.paymentsSum30.points[hover.idx].x" :cy="chartModels.paymentsSum30.points[hover.idx].y" r="2.6" />
+									<circle class="spark__dot-ring" :cx="chartModels.paymentsSum30.points[hover.idx].x" :cy="chartModels.paymentsSum30.points[hover.idx].y" r="4.2" />
+									<circle class="spark__dot spark__dot--green" :cx="chartModels.paymentsSum30.points[hover.idx].x" :cy="chartModels.paymentsSum30.points[hover.idx].y" r="2.2" />
 								</template>
 							</svg>
 							<div v-if="hover.key === 'paymentsSum30' && chartModels.paymentsSum30.points.length" class="spark__tooltip" :style="{ left: `${hover.x}px` }">
@@ -412,7 +412,8 @@
 									<path class="spark__path spark__path--blue" :d="chartModels.registrations12.lineD" />
 									<template v-if="hover.key === 'registrations12' && chartModels.registrations12.points.length">
 										<line class="spark__vline" :x1="chartModels.registrations12.points[hover.idx].x" :x2="chartModels.registrations12.points[hover.idx].x" :y1="0" :y2="chartModels.registrations12.h" />
-										<circle class="spark__dot spark__dot--blue" :cx="chartModels.registrations12.points[hover.idx].x" :cy="chartModels.registrations12.points[hover.idx].y" r="3.0" />
+										<circle class="spark__dot-ring" :cx="chartModels.registrations12.points[hover.idx].x" :cy="chartModels.registrations12.points[hover.idx].y" r="5.0" />
+										<circle class="spark__dot spark__dot--blue" :cx="chartModels.registrations12.points[hover.idx].x" :cy="chartModels.registrations12.points[hover.idx].y" r="2.7" />
 									</template>
 								</g>
 							</svg>
@@ -466,7 +467,8 @@
 									<path class="spark__path spark__path--green" :d="chartModels.connections12.lineD" />
 									<template v-if="hover.key === 'connections12' && chartModels.connections12.points.length">
 										<line class="spark__vline" :x1="chartModels.connections12.points[hover.idx].x" :x2="chartModels.connections12.points[hover.idx].x" :y1="0" :y2="chartModels.connections12.h" />
-										<circle class="spark__dot spark__dot--green" :cx="chartModels.connections12.points[hover.idx].x" :cy="chartModels.connections12.points[hover.idx].y" r="3.0" />
+										<circle class="spark__dot-ring" :cx="chartModels.connections12.points[hover.idx].x" :cy="chartModels.connections12.points[hover.idx].y" r="5.0" />
+										<circle class="spark__dot spark__dot--green" :cx="chartModels.connections12.points[hover.idx].x" :cy="chartModels.connections12.points[hover.idx].y" r="2.7" />
 									</template>
 								</g>
 							</svg>
@@ -520,7 +522,8 @@
 									<path class="spark__path spark__path--purple" :d="chartModels.paymentsSum12.lineD" />
 									<template v-if="hover.key === 'paymentsSum12' && chartModels.paymentsSum12.points.length">
 										<line class="spark__vline" :x1="chartModels.paymentsSum12.points[hover.idx].x" :x2="chartModels.paymentsSum12.points[hover.idx].x" :y1="0" :y2="chartModels.paymentsSum12.h" />
-										<circle class="spark__dot spark__dot--purple" :cx="chartModels.paymentsSum12.points[hover.idx].x" :cy="chartModels.paymentsSum12.points[hover.idx].y" r="3.0" />
+										<circle class="spark__dot-ring" :cx="chartModels.paymentsSum12.points[hover.idx].x" :cy="chartModels.paymentsSum12.points[hover.idx].y" r="5.0" />
+										<circle class="spark__dot spark__dot--purple" :cx="chartModels.paymentsSum12.points[hover.idx].x" :cy="chartModels.paymentsSum12.points[hover.idx].y" r="2.7" />
 									</template>
 								</g>
 							</svg>
@@ -1128,22 +1131,58 @@ function statsFromSeries(series) {
 	return { sum, avg, max };
 }
 
-function catmullRomPath(points) {
-	// points: [{x,y}] in viewBox coordinates
+function monotoneCubicPath(points) {
+	// D3-like monotone cubic interpolation (no overshoot).
+	// Returns a cubic Bezier path through points (x must be non-decreasing).
 	if (!Array.isArray(points) || points.length < 2) return '';
 	if (points.length === 2) return `M ${points[0].x} ${points[0].y} L ${points[1].x} ${points[1].y}`;
-	const p = points;
-	let d = `M ${p[0].x} ${p[0].y}`;
-	for (let i = 0; i < p.length - 1; i++) {
-		const p0 = p[i - 1] || p[i];
-		const p1 = p[i];
-		const p2 = p[i + 1];
-		const p3 = p[i + 2] || p2;
-		const cp1x = p1.x + (p2.x - p0.x) / 6;
-		const cp1y = p1.y + (p2.y - p0.y) / 6;
-		const cp2x = p2.x - (p3.x - p1.x) / 6;
-		const cp2y = p2.y - (p3.y - p1.y) / 6;
-		d += ` C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${p2.x} ${p2.y}`;
+
+	const n = points.length;
+	const xs = points.map((p) => p.x);
+	const ys = points.map((p) => p.y);
+
+	// Slopes between points.
+	const s = new Array(n - 1);
+	for (let i = 0; i < n - 1; i++) {
+		const dx = xs[i + 1] - xs[i];
+		s[i] = dx ? (ys[i + 1] - ys[i]) / dx : 0;
+	}
+
+	// Initial tangents.
+	const t = new Array(n);
+	t[0] = s[0];
+	t[n - 1] = s[n - 2];
+	for (let i = 1; i < n - 1; i++) t[i] = (s[i - 1] + s[i]) / 2;
+
+	// Fritsch-Carlson monotone adjustment.
+	for (let i = 0; i < n - 1; i++) {
+		if (s[i] === 0) {
+			t[i] = 0;
+			t[i + 1] = 0;
+			continue;
+		}
+		const a = t[i] / s[i];
+		const b = t[i + 1] / s[i];
+		const h = Math.hypot(a, b);
+		if (h > 3) {
+			const scale = 3 / h;
+			t[i] = scale * a * s[i];
+			t[i + 1] = scale * b * s[i];
+		}
+	}
+
+	let d = `M ${xs[0]} ${ys[0]}`;
+	for (let i = 0; i < n - 1; i++) {
+		const x0 = xs[i];
+		const y0 = ys[i];
+		const x1 = xs[i + 1];
+		const y1 = ys[i + 1];
+		const dx = x1 - x0;
+		const cp1x = x0 + dx / 3;
+		const cp1y = y0 + (t[i] * dx) / 3;
+		const cp2x = x1 - dx / 3;
+		const cp2y = y1 - (t[i + 1] * dx) / 3;
+		d += ` C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${x1} ${y1}`;
 	}
 	return d;
 }
@@ -1152,10 +1191,12 @@ function buildChartModel(series, labels, period, variant = 'compact') {
 	const nums = (Array.isArray(series) ? series : []).map((v) => Number(v)).map((v) => (Number.isFinite(v) ? v : 0));
 	const lbs = Array.isArray(labels) ? labels.map((x) => String(x ?? '')) : [];
 	const n = nums.length;
-	const h = variant === 'big' ? 64 : 40;
+	// IMPORTANT: match viewBox height to CSS height to avoid stroke "ballooning"
+	// due to SVG scaling. (Big charts were previously scaled 64 -> 120px.)
+	const h = variant === 'big' ? 120 : 48;
 	const w = 100;
 	const padX = 2;
-	const padY = 4;
+	const padY = variant === 'big' ? 8 : 6;
 	if (n === 0) {
 		return { w, h, n, points: [], lineD: '', areaD: '' };
 	}
@@ -1168,7 +1209,7 @@ function buildChartModel(series, labels, period, variant = 'compact') {
 		const y = padY + (1 - (v - min) / denom) * (h - padY * 2);
 		return { x: Number(x.toFixed(3)), y: Number(y.toFixed(3)), v, rawLabel: lbs[i] || '' };
 	});
-	const lineD = n === 1 ? `M ${padX} ${pts[0].y} L ${w - padX} ${pts[0].y}` : catmullRomPath(pts);
+	const lineD = n === 1 ? `M ${padX} ${pts[0].y} L ${w - padX} ${pts[0].y}` : monotoneCubicPath(pts);
 	const baseY = h - padY;
 	const areaD = `${lineD} L ${w - padX} ${baseY} L ${padX} ${baseY} Z`;
 	return { w, h, n, points: pts, lineD, areaD };
@@ -1663,15 +1704,17 @@ onMounted(() => {
 }
 
 .spark__area {
-	opacity: 0.95;
+	opacity: 0.75;
 }
 
 .spark__path {
 	fill: none;
-	stroke-width: 3;
+	/* Keep it thin; stroke is now 1:1 with CSS thanks to viewBox height fix. */
+	stroke-width: 2.25;
 	stroke-linecap: round;
 	stroke-linejoin: round;
-	filter: drop-shadow(0 6px 10px rgba(0, 0, 0, 0.35));
+	/* Subtle, premium depth instead of heavy blur. */
+	filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.22));
 }
 
 .spark__path--green {
@@ -1688,11 +1731,11 @@ onMounted(() => {
 
 .spark__glow {
 	fill: none;
-	stroke-width: 8;
+	stroke-width: 6;
 	stroke-linecap: round;
 	stroke-linejoin: round;
-	opacity: 0.22;
-	filter: blur(0.2px);
+	opacity: 0.16;
+	filter: blur(0.6px);
 }
 
 .spark__glow--green {
@@ -1712,9 +1755,15 @@ onMounted(() => {
 	stroke-width: 1;
 }
 
-.spark__dot {
-	stroke: rgba(0, 0, 0, 0.35);
+.spark__dot-ring {
+	fill: rgba(15, 23, 42, 0.65);
+	stroke: rgba(255, 255, 255, 0.20);
 	stroke-width: 1;
+}
+
+.spark__dot {
+	stroke: rgba(255, 255, 255, 0.18);
+	stroke-width: 0.8;
 }
 
 .spark__dot--green {
