@@ -102,6 +102,7 @@ function injectTvpnHomeFullWidthLayoutFix() {
 	const MAX_PARENT_HOPS = 10;
 	const DEBUG = new URLSearchParams(window.location.search).has('tvpnDebug');
 	const DEBUG_BADGE_ID = 'tvpn-home-debug-badge';
+	const touchedInline = new Map();
 
 	function isTvpnHomeRoute() {
 		// Support custom subpaths: /something/admin/tvpn-home
@@ -126,6 +127,37 @@ function injectTvpnHomeFullWidthLayoutFix() {
 			}
 		`;
 		document.head.appendChild(style);
+	}
+
+	function rememberInline(el) {
+		// Store only once so we can reliably restore original inline styles.
+		if (!el || touchedInline.has(el)) return;
+		touchedInline.set(el, {
+			maxWidth: el.style.maxWidth,
+			width: el.style.width,
+			marginLeft: el.style.marginLeft,
+			marginRight: el.style.marginRight,
+		});
+	}
+
+	function setInline(el, prop, value) {
+		rememberInline(el);
+		// eslint-disable-next-line no-param-reassign
+		el.style[prop] = value;
+	}
+
+	function restoreInlineBreakout() {
+		// IMPORTANT: Directus is an SPA; the same wrappers are reused across routes.
+		// If we don't revert inline styles, they can break interactions on other pages
+		// (e.g. list view checkbox hitboxes / overlays).
+		for (const [el, prev] of touchedInline.entries()) {
+			if (!el || !el.style) continue;
+			el.style.maxWidth = prev.maxWidth;
+			el.style.width = prev.width;
+			el.style.marginLeft = prev.marginLeft;
+			el.style.marginRight = prev.marginRight;
+		}
+		touchedInline.clear();
 	}
 
 	function applyInlineBreakout() {
@@ -168,12 +200,12 @@ function injectTvpnHomeFullWidthLayoutFix() {
 			const cs = window.getComputedStyle(el);
 
 			// Remove width constraints.
-			if (cs.maxWidth && cs.maxWidth !== 'none') el.style.maxWidth = 'none';
-			el.style.width = '100%';
+			if (cs.maxWidth && cs.maxWidth !== 'none') setInline(el, 'maxWidth', 'none');
+			setInline(el, 'width', '100%');
 
 			// If container is centered via auto margins, uncenter it.
-			if (cs.marginLeft === 'auto') el.style.marginLeft = '0';
-			if (cs.marginRight === 'auto') el.style.marginRight = '0';
+			if (cs.marginLeft === 'auto') setInline(el, 'marginLeft', '0');
+			if (cs.marginRight === 'auto') setInline(el, 'marginRight', '0');
 
 			el = el.parentElement;
 			hops += 1;
@@ -184,8 +216,12 @@ function injectTvpnHomeFullWidthLayoutFix() {
 		const root = document.documentElement;
 		if (!root) return;
 		const active = isTvpnHomeRoute();
-		if (active) root.classList.add(ACTIVE_CLASS);
-		else root.classList.remove(ACTIVE_CLASS);
+		if (active) {
+			root.classList.add(ACTIVE_CLASS);
+		} else {
+			root.classList.remove(ACTIVE_CLASS);
+			restoreInlineBreakout();
+		}
 
 		// Apply breakout after route changes/render.
 		if (active) window.setTimeout(applyInlineBreakout, 0);
