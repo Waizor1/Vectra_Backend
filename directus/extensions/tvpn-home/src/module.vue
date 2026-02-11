@@ -187,6 +187,7 @@
 						</div>
 						<div
 							class="spark-wrap"
+							@pointerdown="(e) => onChartDown(e, 'connections30', chartModels.connections30)"
 							@pointermove="(e) => onChartMove(e, 'connections30', chartModels.connections30)"
 							@pointerleave="() => onChartLeave('connections30')"
 						>
@@ -237,6 +238,7 @@
 						</div>
 						<div
 							class="spark-wrap"
+							@pointerdown="(e) => onChartDown(e, 'registrations30', chartModels.registrations30)"
 							@pointermove="(e) => onChartMove(e, 'registrations30', chartModels.registrations30)"
 							@pointerleave="() => onChartLeave('registrations30')"
 						>
@@ -272,7 +274,7 @@
 								<span class="trend__meta-value">{{ fmt(trends.activeUsersToday) }}</span>
 							</div>
 						</div>
-						<div class="spark-wrap" @pointermove="(e) => onChartMove(e, 'activeUsers30', chartModels.activeUsers30)" @pointerleave="() => onChartLeave('activeUsers30')">
+						<div class="spark-wrap" @pointerdown="(e) => onChartDown(e, 'activeUsers30', chartModels.activeUsers30)" @pointermove="(e) => onChartMove(e, 'activeUsers30', chartModels.activeUsers30)" @pointerleave="() => onChartLeave('activeUsers30')">
 							<svg class="spark premium" :viewBox="`0 0 ${chartModels.activeUsers30.w} ${chartModels.activeUsers30.h}`" preserveAspectRatio="none" aria-hidden="true">
 								<defs>
 									<linearGradient id="grad-activeUsers30" x1="0" y1="0" x2="0" y2="1">
@@ -305,7 +307,7 @@
 								<span class="trend__meta-value">{{ fmt(trends.totalUsersToday) }}</span>
 							</div>
 						</div>
-						<div class="spark-wrap" @pointermove="(e) => onChartMove(e, 'totalUsers30', chartModels.totalUsers30)" @pointerleave="() => onChartLeave('totalUsers30')">
+						<div class="spark-wrap" @pointerdown="(e) => onChartDown(e, 'totalUsers30', chartModels.totalUsers30)" @pointermove="(e) => onChartMove(e, 'totalUsers30', chartModels.totalUsers30)" @pointerleave="() => onChartLeave('totalUsers30')">
 							<svg class="spark premium" :viewBox="`0 0 ${chartModels.totalUsers30.w} ${chartModels.totalUsers30.h}`" preserveAspectRatio="none" aria-hidden="true">
 								<defs>
 									<linearGradient id="grad-totalUsers30" x1="0" y1="0" x2="0" y2="1">
@@ -338,7 +340,7 @@
 								<span class="trend__meta-value">{{ fmtMoney(trends.paymentsSumToday) }}</span>
 							</div>
 						</div>
-						<div class="spark-wrap" @pointermove="(e) => onChartMove(e, 'paymentsSum30', chartModels.paymentsSum30)" @pointerleave="() => onChartLeave('paymentsSum30')">
+						<div class="spark-wrap" @pointerdown="(e) => onChartDown(e, 'paymentsSum30', chartModels.paymentsSum30)" @pointermove="(e) => onChartMove(e, 'paymentsSum30', chartModels.paymentsSum30)" @pointerleave="() => onChartLeave('paymentsSum30')">
 							<svg class="spark premium" :viewBox="`0 0 ${chartModels.paymentsSum30.w} ${chartModels.paymentsSum30.h}`" preserveAspectRatio="none" aria-hidden="true">
 								<defs>
 									<linearGradient id="grad-paymentsSum30" x1="0" y1="0" x2="0" y2="1">
@@ -378,7 +380,7 @@
 								<span>пик {{ fmt(Math.round(statsFromSeries(year.registrations12m).max)) }}</span>
 							</div>
 						</div>
-						<div class="spark-wrap spark-wrap--big" @pointermove="(e) => onChartMove(e, 'registrations12', chartModels.registrations12)" @pointerleave="() => onChartLeave('registrations12')">
+						<div class="spark-wrap spark-wrap--big" @pointerdown="(e) => onChartDown(e, 'registrations12', chartModels.registrations12)" @pointermove="(e) => onChartMove(e, 'registrations12', chartModels.registrations12)" @pointerleave="() => onChartLeave('registrations12')">
 							<svg class="spark spark--big premium" :viewBox="`0 0 ${chartModels.registrations12.w} ${chartModels.registrations12.h}`" preserveAspectRatio="none" aria-hidden="true">
 								<defs>
 									<linearGradient id="grad-registrations12" x1="0" y1="0" x2="0" y2="1">
@@ -411,7 +413,7 @@
 								<span>пик {{ fmt(Math.round(statsFromSeries(year.connections12m).max)) }}</span>
 							</div>
 						</div>
-						<div class="spark-wrap spark-wrap--big" @pointermove="(e) => onChartMove(e, 'connections12', chartModels.connections12)" @pointerleave="() => onChartLeave('connections12')">
+						<div class="spark-wrap spark-wrap--big" @pointerdown="(e) => onChartDown(e, 'connections12', chartModels.connections12)" @pointermove="(e) => onChartMove(e, 'connections12', chartModels.connections12)" @pointerleave="() => onChartLeave('connections12')">
 							<svg class="spark spark--big premium" :viewBox="`0 0 ${chartModels.connections12.w} ${chartModels.connections12.h}`" preserveAspectRatio="none" aria-hidden="true">
 								<defs>
 									<linearGradient id="grad-connections12" x1="0" y1="0" x2="0" y2="1">
@@ -444,7 +446,7 @@
 								<span>пик {{ fmtMoney(statsFromSeries(year.paymentsSum12m).max) }}</span>
 							</div>
 						</div>
-						<div class="spark-wrap spark-wrap--big" @pointermove="(e) => onChartMove(e, 'paymentsSum12', chartModels.paymentsSum12)" @pointerleave="() => onChartLeave('paymentsSum12')">
+						<div class="spark-wrap spark-wrap--big" @pointerdown="(e) => onChartDown(e, 'paymentsSum12', chartModels.paymentsSum12)" @pointermove="(e) => onChartMove(e, 'paymentsSum12', chartModels.paymentsSum12)" @pointerleave="() => onChartLeave('paymentsSum12')">
 							<svg class="spark spark--big premium" :viewBox="`0 0 ${chartModels.paymentsSum12.w} ${chartModels.paymentsSum12.h}`" preserveAspectRatio="none" aria-hidden="true">
 								<defs>
 									<linearGradient id="grad-paymentsSum12" x1="0" y1="0" x2="0" y2="1">
@@ -1102,8 +1104,18 @@ function buildChartModel(series, labels, period, variant = 'compact') {
 }
 
 const hover = ref({ key: null, idx: 0, x: 0 });
+let touchHideTimer = null;
 function onChartLeave(key) {
 	if (hover.value.key === key) hover.value = { key: null, idx: 0, x: 0 };
+}
+
+function onChartDown(evt, key, model) {
+	onChartMove(evt, key, model);
+	// On touch devices, show tooltip on tap and auto-hide.
+	if (evt?.pointerType === 'touch') {
+		if (touchHideTimer) clearTimeout(touchHideTimer);
+		touchHideTimer = setTimeout(() => onChartLeave(key), 1800);
+	}
 }
 
 function onChartMove(evt, key, model) {
