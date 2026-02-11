@@ -905,7 +905,12 @@ def ensure_role_presets(client: DirectusClient) -> None:
                 "role": rid,
                 "collection": "users",
                 "layout": "cards",
-                "layout_query": {"cards": {"sort": "-registration_date"}},
+                "layout_query": {
+                    "cards": {
+                        "sort": "-registration_date",
+                        "fields": ["username", "full_name", "expired_at", "lte_gb_total", "is_blocked", "registration_date"],
+                    }
+                },
                 "layout_options": {
                     "cards": {
                         "title": "{{ username }}",
