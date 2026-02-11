@@ -1652,13 +1652,13 @@ onMounted(() => {
 	background: rgba(59, 130, 246, 0.14);
 }
 
-@media (max-width: 1280px) {
+@media (max-width: 1500px) {
 	.page {
 		grid-template-columns: minmax(0, 1fr) 340px;
 	}
 }
 
-@media (max-width: 1200px) {
+@media (max-width: 1400px) {
 	.page {
 		grid-template-columns: 1fr;
 	}
