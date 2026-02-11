@@ -492,6 +492,7 @@ def apply_field_notes_ru(client: DirectusClient) -> None:
             "hwid_limit": "Лимит устройств (HWID). Изменение синхронизируется с RemnaWave.",
             "balance": "Баланс пользователя в системе.",
             "is_blocked": "Блокировка пользователя.",
+            "registration_date": "Дата регистрации пользователя. Используется в аналитике и алертах.",
         },
         "active_tariffs": {
             "lte_gb_total": "Общий LTE лимит для тарифа.",
@@ -501,9 +502,17 @@ def apply_field_notes_ru(client: DirectusClient) -> None:
             "code_hmac": "Можно указать сырой код — хук преобразует в HMAC.",
             "effects": "JSON с эффектами промокода.",
         },
+        "promo_usages": {
+            "used_at": "Когда промокод был применен.",
+        },
         "prize_wheel_config": {
             "probability": "Вероятность от 0 до 1. Сумма активных призов ≤ 1.",
             "prize_value": "Для subscription указывать число дней.",
+        },
+        "processed_payments": {
+            "amount": "Сумма платежа. Используется в витрине и для поиска аномалий.",
+            "status": "Статус обработки/зачисления платежа.",
+            "processed_at": "Когда платеж был обработан и попал в систему.",
         },
     }
     field_translations = {
@@ -515,6 +524,7 @@ def apply_field_notes_ru(client: DirectusClient) -> None:
             "lte_gb_total": "Лимит LTE (ГБ)",
             "balance": "Баланс",
             "is_blocked": "Заблокирован",
+            "registration_date": "Дата регистрации",
         },
         "active_tariffs": {
             "months": "Месяцев",
@@ -528,6 +538,11 @@ def apply_field_notes_ru(client: DirectusClient) -> None:
             "disabled": "Отключен",
             "batch_id": "Партия",
         },
+        "promo_usages": {
+            "used_at": "Дата использования",
+            "user_id": "Пользователь",
+            "promo_code_id": "Промокод",
+        },
         "prize_wheel_config": {
             "prize_type": "Тип приза",
             "prize_name": "Название",
@@ -535,6 +550,13 @@ def apply_field_notes_ru(client: DirectusClient) -> None:
             "probability": "Вероятность",
         },
         "connections": {"at": "Дата подключения"},
+        "processed_payments": {
+            "amount": "Сумма",
+            "status": "Статус",
+            "processed_at": "Дата обработки",
+            "payment_id": "ID платежа",
+            "user_id": "Пользователь",
+        },
     }
 
     for collection, fields in field_notes.items():
@@ -900,6 +922,34 @@ def ensure_role_presets(client: DirectusClient) -> None:
         )
         upsert_preset(
             {
+                "bookmark": "Пользователи: истекает скоро",
+                "user": None,
+                "role": rid,
+                "collection": "users",
+                "layout": "tabular",
+                "layout_query": {"tabular": {"fields": users_tabular_fields, "sort": "expired_at"}},
+                "layout_options": {"tabular": {"widths": users_widths}},
+                "filter": {"expired_at": {"_nnull": True}},
+                "icon": "bookmark",
+                "color": "#F59E0B",
+            }
+        )
+        upsert_preset(
+            {
+                "bookmark": "Пользователи: топ по балансу",
+                "user": None,
+                "role": rid,
+                "collection": "users",
+                "layout": "tabular",
+                "layout_query": {"tabular": {"fields": users_tabular_fields, "sort": "-balance"}},
+                "layout_options": {"tabular": {"widths": users_widths}},
+                "filter": None,
+                "icon": "bookmark",
+                "color": "#10B981",
+            }
+        )
+        upsert_preset(
+            {
                 "bookmark": "Пользователи: карточки",
                 "user": None,
                 "role": rid,
@@ -960,6 +1010,25 @@ def ensure_role_presets(client: DirectusClient) -> None:
                 "filter": None,
                 "icon": "bookmark",
                 "color": "#8B5CF6",
+            }
+        )
+        upsert_preset(
+            {
+                "bookmark": "Платежи: крупные",
+                "user": None,
+                "role": rid,
+                "collection": "processed_payments",
+                "layout": "tabular",
+                "layout_query": {
+                    "tabular": {
+                        "fields": ["payment_id", "user_id", "amount", "status", "processed_at"],
+                        "sort": "-amount",
+                    }
+                },
+                "layout_options": {"tabular": {"widths": {"payment_id": 220, "user_id": 160, "amount": 120, "status": 140, "processed_at": 180}}},
+                "filter": {"amount": {"_gt": 0}},
+                "icon": "bookmark",
+                "color": "#10B981",
             }
         )
 

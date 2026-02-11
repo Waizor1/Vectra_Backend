@@ -37,6 +37,7 @@
 - карточки KPI (users / active_tariffs / blocked / payments)
 - динамика за 7 дней (connections / registrations) через `/admin-widgets/*`
 - быстрые действия + навигация, визуально ближе к RemnaWave/FastAdmin
+- адаптивная раскладка: на широких экранах правый сайдбар (sticky) с быстрыми действиями/здоровьем/подсказками, чтобы не “пустовало” место справа
 
 Включение в UI:
 - Скрипт `scripts/directus_super_setup.py` пытается включить extension автоматически (если он уже подхвачен Directus).

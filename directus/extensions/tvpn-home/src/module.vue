@@ -384,6 +384,34 @@
 						</div>
 					</div>
 				</v-card>
+
+				<v-card class="panel">
+					<div class="panel__title">Что где находится</div>
+					<div class="panel__subtitle">Короткие пояснения по разделам и параметрам.</div>
+
+					<div class="help">
+						<div class="help__row">
+							<div class="help__k">Пользователи</div>
+							<div class="help__v">Подписка/лимиты/баланс/блокировки, быстрый поиск и карточка.</div>
+						</div>
+						<div class="help__row">
+							<div class="help__k">Активные тарифы</div>
+							<div class="help__v">Ограничения, usage, мультипликатор, связанные статусы.</div>
+						</div>
+						<div class="help__row">
+							<div class="help__k">Промо</div>
+							<div class="help__v">Коды и использования; HMAC генерируется автоматически.</div>
+						</div>
+						<div class="help__row">
+							<div class="help__k">Колесо призов</div>
+							<div class="help__v">Конфиг и история; сумма вероятностей валидируется.</div>
+						</div>
+						<div class="help__row">
+							<div class="help__k">Платежи</div>
+							<div class="help__v">Processed payments + статусы, чтобы ловить аномалии.</div>
+						</div>
+					</div>
+				</v-card>
 			</div>
 		</div>
 	</private-view>
@@ -658,8 +686,24 @@ onMounted(() => {
 
 <style scoped>
 .page {
-	padding: 16px;
-	max-width: 1400px;
+	padding: 16px 20px;
+	max-width: 100%;
+	display: grid;
+	grid-template-columns: minmax(520px, 1fr) 380px;
+	gap: 12px;
+	align-items: start;
+}
+
+.page > * {
+	grid-column: 1;
+}
+
+.page > .layout {
+	grid-column: 2;
+	grid-row: 1 / span 50;
+	position: sticky;
+	top: 12px;
+	align-self: start;
 }
 
 .hero {
@@ -671,7 +715,7 @@ onMounted(() => {
 	border-radius: 12px;
 	background: linear-gradient(135deg, rgba(59, 130, 246, 0.12), rgba(16, 185, 129, 0.06));
 	border: 1px solid rgba(255, 255, 255, 0.06);
-	margin-bottom: 16px;
+	margin-bottom: 0;
 }
 
 .hero__title {
@@ -698,9 +742,15 @@ onMounted(() => {
 
 .grid {
 	display: grid;
-	grid-template-columns: repeat(4, minmax(0, 1fr));
+	grid-template-columns: repeat(3, minmax(0, 1fr));
 	gap: 12px;
-	margin-bottom: 12px;
+	margin-bottom: 0;
+}
+
+@media (min-width: 1600px) {
+	.grid {
+		grid-template-columns: repeat(4, minmax(0, 1fr));
+	}
 }
 
 .grid--secondary {
@@ -708,7 +758,7 @@ onMounted(() => {
 }
 
 .panel--spaced {
-	margin-bottom: 12px;
+	margin-bottom: 0;
 }
 
 .alerts {
@@ -910,7 +960,7 @@ onMounted(() => {
 
 .layout {
 	display: grid;
-	grid-template-columns: 2fr 1fr;
+	grid-template-columns: 1fr;
 	gap: 12px;
 }
 
@@ -932,8 +982,29 @@ onMounted(() => {
 
 .actions {
 	display: grid;
-	grid-template-columns: repeat(2, minmax(0, 1fr));
+	grid-template-columns: 1fr;
 	gap: 10px;
+}
+
+.help__row {
+	display: grid;
+	grid-template-columns: 120px 1fr;
+	gap: 10px;
+	padding: 8px 0;
+	border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.help__row:last-child {
+	border-bottom: none;
+}
+
+.help__k {
+	font-weight: 650;
+}
+
+.help__v {
+	opacity: 0.75;
+	font-size: 12px;
 }
 
 .action {
@@ -1026,6 +1097,17 @@ onMounted(() => {
 }
 
 @media (max-width: 1200px) {
+	.page {
+		grid-template-columns: 1fr;
+	}
+
+	.page > .layout {
+		grid-column: 1;
+		grid-row: auto;
+		position: static;
+		top: auto;
+	}
+
 	.grid {
 		grid-template-columns: repeat(2, minmax(0, 1fr));
 	}
@@ -1039,6 +1121,45 @@ onMounted(() => {
 	}
 
 	.layout {
+		grid-template-columns: 1fr;
+	}
+}
+
+@media (max-width: 720px) {
+	.page {
+		padding: 12px;
+	}
+
+	.hero {
+		flex-direction: column;
+	}
+
+	.hero__subtitle {
+		max-width: none;
+	}
+
+	.grid {
+		grid-template-columns: 1fr;
+	}
+
+	.grid--secondary {
+		grid-template-columns: 1fr;
+	}
+
+	.trend__head {
+		flex-direction: column;
+		align-items: flex-start;
+	}
+
+	.event {
+		flex-direction: column;
+	}
+
+	.event__time {
+		white-space: normal;
+	}
+
+	.help__row {
 		grid-template-columns: 1fr;
 	}
 }
