@@ -94,15 +94,16 @@ function injectGlobalHomeButton() {
 // above our module (e.g. `.private-view__main` / `.private-view__content`).
 // Scoped CSS inside `module.vue` cannot override ancestor styles (CSS can't target parents),
 // so we apply a small global override and enable it ONLY when we're on `/admin/tvpn-home`.
+//
+// IMPORTANT:
+// We intentionally avoid mutating inline styles of shared layout wrappers.
+// Directus is an SPA and those wrappers are reused across routes; inline tweaks can
+// desync hitboxes/overlays on other pages (e.g. the users list "card" not opening).
 function injectTvpnHomeFullWidthLayoutFix() {
 	if (typeof window === 'undefined' || typeof document === 'undefined') return;
 
 	const STYLE_ID = 'tvpn-home-fullwidth-layout-style';
 	const ACTIVE_CLASS = 'tvpn-home-route-active';
-	const MAX_PARENT_HOPS = 10;
-	const DEBUG = new URLSearchParams(window.location.search).has('tvpnDebug');
-	const DEBUG_BADGE_ID = 'tvpn-home-debug-badge';
-	const touchedInline = new Map();
 
 	function isTvpnHomeRoute() {
 		// Support custom subpaths: /something/admin/tvpn-home
@@ -116,6 +117,7 @@ function injectTvpnHomeFullWidthLayoutFix() {
 		style.textContent = `
 			html.${ACTIVE_CLASS} .private-view__main,
 			html.${ACTIVE_CLASS} .private-view__content,
+			html.${ACTIVE_CLASS} .private-view__main > *,
 			html.${ACTIVE_CLASS} .private-view__content > * {
 				max-width: none !important;
 				width: 100% !important;
@@ -129,89 +131,6 @@ function injectTvpnHomeFullWidthLayoutFix() {
 		document.head.appendChild(style);
 	}
 
-	function rememberInline(el) {
-		// Store only once so we can reliably restore original inline styles.
-		if (!el || touchedInline.has(el)) return;
-		touchedInline.set(el, {
-			maxWidth: el.style.maxWidth,
-			width: el.style.width,
-			marginLeft: el.style.marginLeft,
-			marginRight: el.style.marginRight,
-		});
-	}
-
-	function setInline(el, prop, value) {
-		rememberInline(el);
-		// eslint-disable-next-line no-param-reassign
-		el.style[prop] = value;
-	}
-
-	function restoreInlineBreakout() {
-		// IMPORTANT: Directus is an SPA; the same wrappers are reused across routes.
-		// If we don't revert inline styles, they can break interactions on other pages
-		// (e.g. list view checkbox hitboxes / overlays).
-		for (const [el, prev] of touchedInline.entries()) {
-			if (!el || !el.style) continue;
-			el.style.maxWidth = prev.maxWidth;
-			el.style.width = prev.width;
-			el.style.marginLeft = prev.marginLeft;
-			el.style.marginRight = prev.marginRight;
-		}
-		touchedInline.clear();
-	}
-
-	function applyInlineBreakout() {
-		// Some Directus versions wrap module content in centered, max-width containers.
-		// We can't "select parents" in CSS, so remove constraints by walking up from `.page`.
-		const page = document.querySelector('.page');
-		if (DEBUG) {
-			let badge = document.getElementById(DEBUG_BADGE_ID);
-			if (!badge) {
-				badge = document.createElement('div');
-				badge.id = DEBUG_BADGE_ID;
-				badge.style.position = 'fixed';
-				badge.style.right = '12px';
-				badge.style.bottom = '12px';
-				badge.style.zIndex = '999999';
-				badge.style.padding = '6px 10px';
-				badge.style.borderRadius = '10px';
-				badge.style.background = 'rgba(0,0,0,0.65)';
-				badge.style.border = '1px solid rgba(255,255,255,0.12)';
-				badge.style.color = 'white';
-				badge.style.fontSize = '12px';
-				badge.style.fontFamily = 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace';
-				document.body.appendChild(badge);
-			}
-			const pageW = page?.getBoundingClientRect?.().width;
-			const panel = document.querySelector('.panel');
-			const panelW = panel?.getBoundingClientRect?.().width;
-			const trends = document.querySelector('.trends');
-			const trendsW = trends?.getBoundingClientRect?.().width;
-			badge.textContent =
-				`tvpnDebug: page=${page ? 'yes' : 'no'} innerWidth=${window.innerWidth}` +
-				` pageW=${pageW ? Math.round(pageW) : '-'} panelW=${panelW ? Math.round(panelW) : '-'}` +
-				` trendsW=${trendsW ? Math.round(trendsW) : '-'}`;
-		}
-		if (!page) return;
-
-		let el = page.parentElement;
-		let hops = 0;
-		while (el && hops < MAX_PARENT_HOPS && el !== document.body && el !== document.documentElement) {
-			const cs = window.getComputedStyle(el);
-
-			// Remove width constraints.
-			if (cs.maxWidth && cs.maxWidth !== 'none') setInline(el, 'maxWidth', 'none');
-			setInline(el, 'width', '100%');
-
-			// If container is centered via auto margins, uncenter it.
-			if (cs.marginLeft === 'auto') setInline(el, 'marginLeft', '0');
-			if (cs.marginRight === 'auto') setInline(el, 'marginRight', '0');
-
-			el = el.parentElement;
-			hops += 1;
-		}
-	}
-
 	function updateActiveFlag() {
 		const root = document.documentElement;
 		if (!root) return;
@@ -220,28 +139,35 @@ function injectTvpnHomeFullWidthLayoutFix() {
 			root.classList.add(ACTIVE_CLASS);
 		} else {
 			root.classList.remove(ACTIVE_CLASS);
-			restoreInlineBreakout();
 		}
-
-		// Apply breakout after route changes/render.
-		if (active) window.setTimeout(applyInlineBreakout, 0);
 	}
 
 	ensureStyle();
 	updateActiveFlag();
 
-	// Directus is an SPA; watch route changes cheaply.
-	let lastPath = window.location.pathname;
-	window.setInterval(() => {
-		const current = window.location.pathname;
-		if (current !== lastPath) {
-			lastPath = current;
+	// Directus is an SPA; react to route changes immediately.
+	const origPushState = window.history.pushState;
+	const origReplaceState = window.history.replaceState;
+
+	// eslint-disable-next-line no-underscore-dangle
+	if (!window.__tvpnHomeHistoryPatched) {
+		// eslint-disable-next-line no-underscore-dangle, no-param-reassign
+		window.__tvpnHomeHistoryPatched = true;
+
+		window.history.pushState = function pushStatePatched(...args) {
+			// @ts-ignore - DOM lib typing mismatch in some builds
+			const out = origPushState.apply(this, args);
 			updateActiveFlag();
-			return;
-		}
-		// Also re-apply breakout in case Directus re-rendered wrappers.
-		if (document.documentElement?.classList?.contains(ACTIVE_CLASS)) applyInlineBreakout();
-	}, 250);
+			return out;
+		};
+		window.history.replaceState = function replaceStatePatched(...args) {
+			// @ts-ignore - DOM lib typing mismatch in some builds
+			const out = origReplaceState.apply(this, args);
+			updateActiveFlag();
+			return out;
+		};
+		window.addEventListener('popstate', updateActiveFlag);
+	}
 }
 
 injectGlobalHomeButton();
