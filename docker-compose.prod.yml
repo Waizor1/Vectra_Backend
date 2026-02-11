@@ -17,6 +17,11 @@ services:
     networks:
       - bloobcat_network
 
+  # In prod we prefer not to expose Directus on a raw host port.
+  # It is still reachable via Caddy on https://admin.waiz-store.ru
+  directus:
+    ports: []
+
 volumes:
   caddy-data:
   caddy-config:
