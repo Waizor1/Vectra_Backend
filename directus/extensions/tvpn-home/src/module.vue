@@ -1173,6 +1173,13 @@ onMounted(() => {
 	gap: 12px;
 	width: 100%;
 	min-width: 0;
+	/* Helps when the last row has only 1 card */
+	grid-auto-flow: row dense;
+}
+
+/* If the last row has a single widget, stretch it full-width */
+.trends > .trend:last-child {
+	grid-column: 1 / -1;
 }
 
 .trend {
