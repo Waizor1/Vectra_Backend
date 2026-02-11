@@ -64,10 +64,26 @@ jobs:
           # Directus doesn't always reload app extensions on volume changes.
           # Restart ensures new /directus/extensions/* dist bundles are picked up.
           docker compose -f docker-compose.yml -f docker-compose.prod.yml restart directus || true
+          COMPOSE_ARGS="-f docker-compose.yml -f docker-compose.prod.yml"
         else
           docker compose -f docker-compose.yml up -d --build
           docker compose -f docker-compose.yml restart directus || true
+          COMPOSE_ARGS="-f docker-compose.yml"
         fi
+
+        echo "🩺 Ждем готовности Directus..."
+        for i in $(seq 1 45); do
+          if command -v curl >/dev/null 2>&1; then
+            curl -sf "http://localhost:8055/server/health" >/dev/null && break
+          else
+            wget -qO- "http://localhost:8055/server/health" >/dev/null && break
+          fi
+          sleep 2
+        done
+
+        echo "🛠️  Применяем Directus super-setup (UI/UX метаданные, права, presets)..."
+        # Run inside the app container where Python deps exist, and point DIRECTUS_URL to the internal service.
+        docker compose $COMPOSE_ARGS exec -T bloobcat sh -lc 'export DIRECTUS_URL="http://directus:8055"; (python scripts/directus_super_setup.py || python3 scripts/directus_super_setup.py)'
 
         echo "✅ Деплой завершен"
         EOF
