@@ -187,8 +187,8 @@
 						</div>
 						<div
 							class="spark-wrap"
-							@mousemove="(e) => onChartMove(e, 'connections30', chartModels.connections30)"
-							@mouseleave="() => onChartLeave('connections30')"
+							@pointermove="(e) => onChartMove(e, 'connections30', chartModels.connections30)"
+							@pointerleave="() => onChartLeave('connections30')"
 						>
 							<svg class="spark premium" :viewBox="`0 0 ${chartModels.connections30.w} ${chartModels.connections30.h}`" preserveAspectRatio="none" aria-hidden="true">
 								<defs>
@@ -237,8 +237,8 @@
 						</div>
 						<div
 							class="spark-wrap"
-							@mousemove="(e) => onChartMove(e, 'registrations30', chartModels.registrations30)"
-							@mouseleave="() => onChartLeave('registrations30')"
+							@pointermove="(e) => onChartMove(e, 'registrations30', chartModels.registrations30)"
+							@pointerleave="() => onChartLeave('registrations30')"
 						>
 							<svg class="spark premium" :viewBox="`0 0 ${chartModels.registrations30.w} ${chartModels.registrations30.h}`" preserveAspectRatio="none" aria-hidden="true">
 								<defs>
@@ -272,7 +272,7 @@
 								<span class="trend__meta-value">{{ fmt(trends.activeUsersToday) }}</span>
 							</div>
 						</div>
-						<div class="spark-wrap" @mousemove="(e) => onChartMove(e, 'activeUsers30', chartModels.activeUsers30)" @mouseleave="() => onChartLeave('activeUsers30')">
+						<div class="spark-wrap" @pointermove="(e) => onChartMove(e, 'activeUsers30', chartModels.activeUsers30)" @pointerleave="() => onChartLeave('activeUsers30')">
 							<svg class="spark premium" :viewBox="`0 0 ${chartModels.activeUsers30.w} ${chartModels.activeUsers30.h}`" preserveAspectRatio="none" aria-hidden="true">
 								<defs>
 									<linearGradient id="grad-activeUsers30" x1="0" y1="0" x2="0" y2="1">
@@ -305,7 +305,7 @@
 								<span class="trend__meta-value">{{ fmt(trends.totalUsersToday) }}</span>
 							</div>
 						</div>
-						<div class="spark-wrap" @mousemove="(e) => onChartMove(e, 'totalUsers30', chartModels.totalUsers30)" @mouseleave="() => onChartLeave('totalUsers30')">
+						<div class="spark-wrap" @pointermove="(e) => onChartMove(e, 'totalUsers30', chartModels.totalUsers30)" @pointerleave="() => onChartLeave('totalUsers30')">
 							<svg class="spark premium" :viewBox="`0 0 ${chartModels.totalUsers30.w} ${chartModels.totalUsers30.h}`" preserveAspectRatio="none" aria-hidden="true">
 								<defs>
 									<linearGradient id="grad-totalUsers30" x1="0" y1="0" x2="0" y2="1">
@@ -338,7 +338,7 @@
 								<span class="trend__meta-value">{{ fmtMoney(trends.paymentsSumToday) }}</span>
 							</div>
 						</div>
-						<div class="spark-wrap" @mousemove="(e) => onChartMove(e, 'paymentsSum30', chartModels.paymentsSum30)" @mouseleave="() => onChartLeave('paymentsSum30')">
+						<div class="spark-wrap" @pointermove="(e) => onChartMove(e, 'paymentsSum30', chartModels.paymentsSum30)" @pointerleave="() => onChartLeave('paymentsSum30')">
 							<svg class="spark premium" :viewBox="`0 0 ${chartModels.paymentsSum30.w} ${chartModels.paymentsSum30.h}`" preserveAspectRatio="none" aria-hidden="true">
 								<defs>
 									<linearGradient id="grad-paymentsSum30" x1="0" y1="0" x2="0" y2="1">
@@ -378,7 +378,7 @@
 								<span>пик {{ fmt(Math.round(statsFromSeries(year.registrations12m).max)) }}</span>
 							</div>
 						</div>
-						<div class="spark-wrap spark-wrap--big" @mousemove="(e) => onChartMove(e, 'registrations12', chartModels.registrations12)" @mouseleave="() => onChartLeave('registrations12')">
+						<div class="spark-wrap spark-wrap--big" @pointermove="(e) => onChartMove(e, 'registrations12', chartModels.registrations12)" @pointerleave="() => onChartLeave('registrations12')">
 							<svg class="spark spark--big premium" :viewBox="`0 0 ${chartModels.registrations12.w} ${chartModels.registrations12.h}`" preserveAspectRatio="none" aria-hidden="true">
 								<defs>
 									<linearGradient id="grad-registrations12" x1="0" y1="0" x2="0" y2="1">
@@ -411,7 +411,7 @@
 								<span>пик {{ fmt(Math.round(statsFromSeries(year.connections12m).max)) }}</span>
 							</div>
 						</div>
-						<div class="spark-wrap spark-wrap--big" @mousemove="(e) => onChartMove(e, 'connections12', chartModels.connections12)" @mouseleave="() => onChartLeave('connections12')">
+						<div class="spark-wrap spark-wrap--big" @pointermove="(e) => onChartMove(e, 'connections12', chartModels.connections12)" @pointerleave="() => onChartLeave('connections12')">
 							<svg class="spark spark--big premium" :viewBox="`0 0 ${chartModels.connections12.w} ${chartModels.connections12.h}`" preserveAspectRatio="none" aria-hidden="true">
 								<defs>
 									<linearGradient id="grad-connections12" x1="0" y1="0" x2="0" y2="1">
@@ -444,7 +444,7 @@
 								<span>пик {{ fmtMoney(statsFromSeries(year.paymentsSum12m).max) }}</span>
 							</div>
 						</div>
-						<div class="spark-wrap spark-wrap--big" @mousemove="(e) => onChartMove(e, 'paymentsSum12', chartModels.paymentsSum12)" @mouseleave="() => onChartLeave('paymentsSum12')">
+						<div class="spark-wrap spark-wrap--big" @pointermove="(e) => onChartMove(e, 'paymentsSum12', chartModels.paymentsSum12)" @pointerleave="() => onChartLeave('paymentsSum12')">
 							<svg class="spark spark--big premium" :viewBox="`0 0 ${chartModels.paymentsSum12.w} ${chartModels.paymentsSum12.h}`" preserveAspectRatio="none" aria-hidden="true">
 								<defs>
 									<linearGradient id="grad-paymentsSum12" x1="0" y1="0" x2="0" y2="1">
@@ -1110,8 +1110,12 @@ function onChartMove(evt, key, model) {
 	if (!model || !model.n) return;
 	const el = evt.currentTarget;
 	const rect = el.getBoundingClientRect();
-	const x = Math.max(0, Math.min(rect.width, evt.clientX - rect.left));
-	const idx = model.n === 1 ? 0 : Math.round((x / rect.width) * (model.n - 1));
+	const clientX = evt?.clientX;
+	if (typeof clientX !== 'number') return;
+	const rawX = Math.max(0, Math.min(rect.width, clientX - rect.left));
+	const idx = model.n === 1 ? 0 : Math.round((rawX / rect.width) * (model.n - 1));
+	const tooltipPad = 72;
+	const x = Math.max(tooltipPad, Math.min(rect.width - tooltipPad, rawX));
 	hover.value = { key, idx, x };
 }
 
@@ -1562,6 +1566,8 @@ onMounted(() => {
 .spark-wrap {
 	position: relative;
 	width: 100%;
+	/* Allow vertical scroll on touch while still receiving pointer events */
+	touch-action: pan-y;
 }
 
 .spark-wrap--big {
