@@ -100,6 +100,8 @@ function injectTvpnHomeFullWidthLayoutFix() {
 	const STYLE_ID = 'tvpn-home-fullwidth-layout-style';
 	const ACTIVE_CLASS = 'tvpn-home-route-active';
 	const MAX_PARENT_HOPS = 10;
+	const DEBUG = new URLSearchParams(window.location.search).has('tvpnDebug');
+	const DEBUG_BADGE_ID = 'tvpn-home-debug-badge';
 
 	function isTvpnHomeRoute() {
 		// Support custom subpaths: /something/admin/tvpn-home
@@ -130,6 +132,26 @@ function injectTvpnHomeFullWidthLayoutFix() {
 		// Some Directus versions wrap module content in centered, max-width containers.
 		// We can't "select parents" in CSS, so remove constraints by walking up from `.page`.
 		const page = document.querySelector('.page');
+		if (DEBUG) {
+			let badge = document.getElementById(DEBUG_BADGE_ID);
+			if (!badge) {
+				badge = document.createElement('div');
+				badge.id = DEBUG_BADGE_ID;
+				badge.style.position = 'fixed';
+				badge.style.right = '12px';
+				badge.style.bottom = '12px';
+				badge.style.zIndex = '999999';
+				badge.style.padding = '6px 10px';
+				badge.style.borderRadius = '10px';
+				badge.style.background = 'rgba(0,0,0,0.65)';
+				badge.style.border = '1px solid rgba(255,255,255,0.12)';
+				badge.style.color = 'white';
+				badge.style.fontSize = '12px';
+				badge.style.fontFamily = 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace';
+				document.body.appendChild(badge);
+			}
+			badge.textContent = `tvpnDebug: page=${page ? 'yes' : 'no'} innerWidth=${window.innerWidth}`;
+		}
 		if (!page) return;
 
 		let el = page.parentElement;
