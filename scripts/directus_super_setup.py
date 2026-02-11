@@ -798,6 +798,68 @@ def apply_users_form_ux(client: DirectusClient) -> None:
         patch_field_meta(client, "users", field, meta)
 
 
+def ensure_users_presentation_dividers(client: DirectusClient) -> None:
+    """
+    Add visual separators to the `users` item form using Directus built-in
+    `presentation-divider` interface. This turns the detail view from a long
+    "wall of fields" into readable sections.
+    """
+
+    collection = "users"
+    if client.get(f"/collections/{collection}").status_code != 200:
+        return
+
+    def ensure_divider(field: str, title: str, icon: str, sort: int) -> None:
+        meta = {
+            "interface": "presentation-divider",
+            "options": {"title": title, "icon": icon},
+            "special": ["alias", "no-data"],
+            "width": "full",
+            "sort": sort,
+        }
+        # Try patch first (fast path if it exists).
+        resp = client.patch(f"/fields/{collection}/{field}", json={"meta": meta})
+        if resp.status_code == 404:
+            created = client.post(
+                f"/fields/{collection}",
+                json={
+                    "field": field,
+                    "type": "alias",
+                    "schema": None,
+                    "meta": meta,
+                },
+            )
+            if created.status_code in (401, 403):
+                return
+            # Ignore duplicates / races.
+            if created.status_code == 409:
+                return
+            created.raise_for_status()
+            return
+        if resp.status_code in (401, 403):
+            return
+        resp.raise_for_status()
+
+    # Keep divider sort values between field blocks we already sorted in apply_users_form_ux().
+    ensure_divider("ui_divider_overview", "Основное", "person", 1)
+    ensure_divider("ui_divider_subscription", "Подписка", "event", 19)
+    ensure_divider("ui_divider_limits", "Лимиты", "tune", 29)
+    ensure_divider("ui_divider_status", "Статус", "shield", 39)
+    ensure_divider("ui_divider_partner", "Партнерка", "groups", 49)
+    ensure_divider("ui_divider_ops", "Операции", "handyman", 59)
+    ensure_divider("ui_divider_tech", "Техника", "settings", 69)
+
+    # Improve interfaces for key fields (best-effort).
+    # If a field doesn't exist in the current instance, patch_field_meta will safely skip.
+    patch_field_meta(client, "users", "is_blocked", {"interface": "toggle", "options": {"label": "Заблокирован"}})
+    patch_field_meta(client, "users", "is_partner", {"interface": "toggle", "options": {"label": "Партнер"}})
+    patch_field_meta(client, "users", "expired_at", {"interface": "datetime", "options": {"use24": True, "includeSeconds": False}})
+    patch_field_meta(client, "users", "registration_date", {"interface": "datetime", "options": {"use24": True, "includeSeconds": False}})
+    patch_field_meta(client, "users", "activation_date", {"interface": "datetime", "options": {"use24": True, "includeSeconds": False}})
+    patch_field_meta(client, "users", "blocked_at", {"interface": "datetime", "options": {"use24": True, "includeSeconds": False}})
+    patch_field_meta(client, "users", "custom_referral_percent", {"interface": "slider", "options": {"min": 0, "max": 100, "step": 1, "alwaysShowValue": True}})
+
+
 def set_language_ru(client: DirectusClient) -> None:
     # Make the whole instance default to Russian and set the current user language too.
     client.patch("/settings", json={"default_language": "ru-RU"}).raise_for_status()
@@ -1350,6 +1412,7 @@ def main() -> None:
     apply_collection_ux(client)
     apply_field_notes_ru(client)
     apply_users_form_ux(client)
+    ensure_users_presentation_dividers(client)
     ensure_admin_settings(client)
     ensure_insights_dashboard(client)
     ensure_role_presets(client)
