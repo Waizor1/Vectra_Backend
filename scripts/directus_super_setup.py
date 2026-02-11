@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Optional
 
@@ -507,11 +508,22 @@ def apply_collection_ux(client: DirectusClient) -> None:
 
 
 def patch_field_meta(client: DirectusClient, collection: str, field: str, meta: Dict[str, Any]) -> None:
-    resp = client.patch(f"/fields/{collection}/{field}", json={"meta": meta})
-    # In mixed deployments, some columns might not exist; skip safely.
-    if resp.status_code in (403, 404):
-        return
-    resp.raise_for_status()
+    # Transient upstream/proxy errors may happen on production (502/503/504).
+    # Retry a few times to keep setup idempotent and resilient.
+    last_resp: Optional[requests.Response] = None
+    for attempt in range(3):
+        resp = client.patch(f"/fields/{collection}/{field}", json={"meta": meta})
+        last_resp = resp
+        # In mixed deployments, some columns might not exist; skip safely.
+        if resp.status_code in (403, 404):
+            return
+        if resp.status_code not in (502, 503, 504):
+            resp.raise_for_status()
+            return
+        # Exponential-ish backoff: 0.5s, 1.0s, 1.5s
+        time.sleep(0.5 * (attempt + 1))
+    if last_resp is not None:
+        last_resp.raise_for_status()
 
 
 def apply_field_notes_ru(client: DirectusClient) -> None:
@@ -764,6 +776,7 @@ def apply_users_form_ux(client: DirectusClient) -> None:
 
     # Widths: keep the form compact and scannable on wide displays.
     widths = {
+        "is_admin": "quarter",
         "id": "quarter",
         "username": "half",
         "full_name": "half",
@@ -867,6 +880,7 @@ def apply_users_form_ux(client: DirectusClient) -> None:
 
     # Sort order (best-effort): smaller number = higher on the form.
     sort = {
+        "is_admin": 9,
         "id": 10,
         "username": 11,
         "full_name": 12,
@@ -880,7 +894,7 @@ def apply_users_form_ux(client: DirectusClient) -> None:
         "renew_id": 20,
         "expired_at": 30,
         "active_tariff": 31,
-        "active_tariff_id": 66,
+        "active_tariff_id": 67,
         "is_registered": 32,
         "is_subscribed": 33,
         "is_trial": 34,
@@ -899,21 +913,23 @@ def apply_users_form_ux(client: DirectusClient) -> None:
         "referrals": 63,
         "referral_bonus_days_total": 64,
         "referral_first_payment_rewarded": 65,
-        "referred_users_list": 66,
-        "active_tariffs_list": 67,
-        "promo_usages_list": 68,
-        "notification_marks_list": 69,
-        "family_devices_list": 70,
-        "partner_withdrawals_list": 71,
-        "partner_earnings_list": 72,
-        "family_audit_logs_owner": 73,
+        "referred_users_list": 68,
+        "active_tariffs_list": 69,
+        "promo_usages_list": 70,
+        "notification_marks_list": 71,
+        "family_devices_list": 72,
+        "partner_withdrawals_list": 73,
+        "partner_earnings_list": 74,
+        "family_audit_logs_owner": 75,
         "remnawave_uuid": 80,
         "last_hwid_reset": 81,
         "familyurl": 82,
     }
 
     for field, width in widths.items():
-        meta: Dict[str, Any] = {"width": width}
+        # Force field visibility in item form: legacy configs could leave business
+        # fields hidden, which makes section dividers look "empty".
+        meta: Dict[str, Any] = {"width": width, "hidden": False}
         if field in readonly_fields:
             meta["readonly"] = True
         if field in sort:
@@ -981,6 +997,34 @@ def ensure_users_presentation_dividers(client: DirectusClient) -> None:
 
     # Improve interfaces for key fields (best-effort).
     # If a field doesn't exist in the current instance, patch_field_meta will safely skip.
+    # IMPORTANT: Explicit interfaces are required in some Directus setups; fields with
+    # interface=None can disappear from item form even if not hidden.
+    explicit_interfaces: Dict[str, Dict[str, Any]] = {
+        # Overview
+        "id": {"interface": "input"},
+        "username": {"interface": "input"},
+        "full_name": {"interface": "input"},
+        "email": {"interface": "input"},
+        "language_code": {"interface": "input"},
+        "utm": {"interface": "input"},
+        "renew_id": {"interface": "input"},
+        # Limits / numeric
+        "balance": {"interface": "input"},
+        "lte_gb_total": {"interface": "input"},
+        "hwid_limit": {"interface": "input"},
+        "prize_wheel_attempts": {"interface": "input"},
+        "failed_message_count": {"interface": "input"},
+        "referrals": {"interface": "input"},
+        "referral_bonus_days_total": {"interface": "input"},
+        # Tech
+        "remnawave_uuid": {"interface": "input"},
+        "familyurl": {"interface": "input"},
+        # Booleans
+        "referral_first_payment_rewarded": {"interface": "toggle", "options": {"label": "Награда за первый платеж"}},
+    }
+    for field, meta_patch in explicit_interfaces.items():
+        patch_field_meta(client, "users", field, meta_patch)
+
     patch_field_meta(client, "users", "is_blocked", {"interface": "toggle", "options": {"label": "Заблокирован"}})
     patch_field_meta(client, "users", "is_registered", {"interface": "toggle", "options": {"label": "Зарегистрирован"}})
     patch_field_meta(client, "users", "is_subscribed", {"interface": "toggle", "options": {"label": "Подписан"}})
@@ -1016,7 +1060,20 @@ def ensure_users_presentation_dividers(client: DirectusClient) -> None:
             "interface": "id-link-editor",
             "options": {"collection": "active_tariffs", "openInNewTab": False},
             "group": "ui_divider_ops",
-            "sort": 66,
+            "sort": 67,
+        },
+    )
+    patch_field_meta(
+        client,
+        "users",
+        "is_admin",
+        {
+            "interface": "toggle",
+            "options": {"label": "Администратор"},
+            "group": "ui_divider_overview",
+            "width": "quarter",
+            "sort": 9,
+            "hidden": False,
         },
     )
     patch_field_meta(client, "users", "expired_at", {"interface": "datetime", "options": {"use24": True, "includeSeconds": False}})
@@ -1123,7 +1180,7 @@ def ensure_users_relations_ux(client: DirectusClient) -> None:
         }
         resp = client.patch(
             "/fields/users/" + alias_field,
-            json={"special": ["o2m"], "meta": meta},
+            json={"meta": meta},
         )
         if resp.status_code == 404:
             created = client.post(
@@ -1132,7 +1189,6 @@ def ensure_users_relations_ux(client: DirectusClient) -> None:
                     "field": alias_field,
                     "type": "alias",
                     "schema": None,
-                    "special": ["o2m"],
                     "meta": meta,
                 },
             )
@@ -1140,13 +1196,25 @@ def ensure_users_relations_ux(client: DirectusClient) -> None:
                 return
             if created.status_code == 409:
                 return
+            # Some Directus versions return 400 "already exists" for race conditions.
+            if created.status_code == 400:
+                try:
+                    body = created.json()
+                except Exception:  # pragma: no cover
+                    body = {}
+                msg = str(body).lower()
+                if "already exists" in msg:
+                    return
             created.raise_for_status()
             return
         if resp.status_code in (401, 403):
             return
         resp.raise_for_status()
 
-    # Self-reference for "Чей реферал": make it clickable m2o in the form.
+    # Self-reference for "Чей реферал": keep reverse o2m list visible and clickable.
+    # Create alias first, then patch relation metadata. Some Directus instances reject
+    # one_field updates when the target alias isn't created yet.
+    ensure_alias_o2m_field("referred_users_list", "Рефералы пользователя", 68, "{{id}} — {{username}} — {{full_name}}")
     referred_rel_ok = ensure_relation(
         many_collection="users",
         many_field="referred_by",
@@ -1169,21 +1237,23 @@ def ensure_users_relations_ux(client: DirectusClient) -> None:
                 "sort": 62,
             },
         )
-        ensure_alias_o2m_field("referred_users_list", "Рефералы пользователя", 66, "{{id}} — {{username}} — {{full_name}}")
+        ensure_alias_o2m_field("referred_users_list", "Рефералы пользователя", 68, "{{id}} — {{username}} — {{full_name}}")
     elif client.get("/fields/users/referred_users_list").status_code == 200:
-        ensure_alias_o2m_field("referred_users_list", "Рефералы пользователя", 66, "{{id}} — {{username}} — {{full_name}}")
+        ensure_alias_o2m_field("referred_users_list", "Рефералы пользователя", 68, "{{id}} — {{username}} — {{full_name}}")
 
     # Existing business relations -> embedded logs/history inside user card.
     relation_specs = [
-        ("active_tariffs", "user_id", "active_tariffs_list", "История активных тарифов", 67, "{{id}} — {{name}} — LTE {{lte_gb_used}}/{{lte_gb_total}}"),
-        ("promo_usages", "user_id", "promo_usages_list", "Использование промокодов", 68, "{{id}} — {{used_at}}"),
-        ("notification_marks", "user_id", "notification_marks_list", "Логи уведомлений", 69, "{{id}} — {{type}} — {{sent_at}}"),
-        ("family_devices", "user_id", "family_devices_list", "Устройства семьи", 70, "{{id}} — {{device_name}}"),
-        ("partner_withdrawals", "owner_id", "partner_withdrawals_list", "Выводы партнера", 71, "{{id}} — {{status}} — {{amount}}"),
-        ("partner_earnings", "partner_id", "partner_earnings_list", "Начисления партнера", 72, "{{id}} — {{amount}} — {{created_at}}"),
-        ("family_audit_logs", "owner_id", "family_audit_logs_owner", "Аудит семьи", 73, "{{id}} — {{action}} — {{created_at}}"),
+        ("active_tariffs", "user_id", "active_tariffs_list", "История активных тарифов", 69, "{{id}} — {{name}} — LTE {{lte_gb_used}}/{{lte_gb_total}}"),
+        ("promo_usages", "user_id", "promo_usages_list", "Использование промокодов", 70, "{{id}} — {{used_at}}"),
+        ("notification_marks", "user_id", "notification_marks_list", "Логи уведомлений", 71, "{{id}} — {{type}} — {{sent_at}}"),
+        ("family_devices", "user_id", "family_devices_list", "Устройства семьи", 72, "{{id}} — {{device_name}}"),
+        ("partner_withdrawals", "owner_id", "partner_withdrawals_list", "Выводы партнера", 73, "{{id}} — {{status}} — {{amount}}"),
+        ("partner_earnings", "partner_id", "partner_earnings_list", "Начисления партнера", 74, "{{id}} — {{amount}} — {{created_at}}"),
+        ("family_audit_logs", "owner_id", "family_audit_logs_owner", "Аудит семьи", 75, "{{id}} — {{action}} — {{created_at}}"),
     ]
     for many_collection, many_field, one_field, title, sort, template in relation_specs:
+        # Make the o2m block visible first; relation metadata can be patched after.
+        ensure_alias_o2m_field(one_field, title, sort, template)
         rel_ok = ensure_relation(
             many_collection=many_collection,
             many_field=many_field,
@@ -1501,13 +1571,14 @@ def ensure_role_presets(client: DirectusClient) -> None:
         """
         layout_query = preset.get("layout_query")
         if not isinstance(layout_query, dict):
-            return None
+            return {"tabular": {"fields": [pk_field]}}
         tabular = layout_query.get("tabular")
         if not isinstance(tabular, dict):
-            return None
+            return {"tabular": {"fields": [pk_field]}}
         fields = tabular.get("fields")
         if not isinstance(fields, list):
-            return None
+            new_tabular = {**tabular, "fields": [pk_field]}
+            return {**layout_query, "tabular": new_tabular}
         # Keep existing order and just prepend PK (Directus doesn't support "hidden internal fields").
         if pk_field in fields:
             return None
@@ -1528,13 +1599,13 @@ def ensure_role_presets(client: DirectusClient) -> None:
         """
         layout_query = preset.get("layout_query")
         if not isinstance(layout_query, dict):
-            return None
+            layout_query = {}
         cards = layout_query.get("cards")
         if not isinstance(cards, dict):
-            return None
+            cards = {}
         fields = cards.get("fields")
         if not isinstance(fields, list):
-            return None
+            fields = []
 
         # If the preset somehow got saved with an empty fields list, cards will look "blank".
         # Rehydrate it with a minimal set.
