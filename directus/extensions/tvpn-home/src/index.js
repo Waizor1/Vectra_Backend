@@ -90,7 +90,62 @@ function injectGlobalHomeButton() {
 	mo.observe(document.documentElement, { childList: true, subtree: true });
 }
 
+// On some Directus builds the main content area is constrained by max-width containers
+// above our module (e.g. `.private-view__main` / `.private-view__content`).
+// Scoped CSS inside `module.vue` cannot override ancestor styles (CSS can't target parents),
+// so we apply a small global override and enable it ONLY when we're on `/admin/tvpn-home`.
+function injectTvpnHomeFullWidthLayoutFix() {
+	if (typeof window === 'undefined' || typeof document === 'undefined') return;
+
+	const STYLE_ID = 'tvpn-home-fullwidth-layout-style';
+	const ACTIVE_CLASS = 'tvpn-home-route-active';
+
+	function isTvpnHomeRoute() {
+		// Support custom subpaths: /something/admin/tvpn-home
+		return window.location.pathname.includes('/admin/tvpn-home');
+	}
+
+	function ensureStyle() {
+		if (document.getElementById(STYLE_ID)) return;
+		const style = document.createElement('style');
+		style.id = STYLE_ID;
+		style.textContent = `
+			html.${ACTIVE_CLASS} .private-view__main,
+			html.${ACTIVE_CLASS} .private-view__content,
+			html.${ACTIVE_CLASS} .private-view__content > * {
+				max-width: none !important;
+				width: 100% !important;
+			}
+			html.${ACTIVE_CLASS} .private-view__content {
+				justify-content: stretch !important;
+				justify-items: stretch !important;
+				align-items: stretch !important;
+			}
+		`;
+		document.head.appendChild(style);
+	}
+
+	function updateActiveFlag() {
+		const root = document.documentElement;
+		if (!root) return;
+		if (isTvpnHomeRoute()) root.classList.add(ACTIVE_CLASS);
+		else root.classList.remove(ACTIVE_CLASS);
+	}
+
+	ensureStyle();
+	updateActiveFlag();
+
+	// Directus is an SPA; watch route changes cheaply.
+	let lastPath = window.location.pathname;
+	window.setInterval(() => {
+		if (window.location.pathname === lastPath) return;
+		lastPath = window.location.pathname;
+		updateActiveFlag();
+	}, 250);
+}
+
 injectGlobalHomeButton();
+injectTvpnHomeFullWidthLayoutFix();
 
 export default defineModule({
   id: 'tvpn-home',
