@@ -240,6 +240,65 @@
 							<polyline class="spark__line spark__line--purple" :points="sparkPoints(trends.totalUsers30d)" />
 						</svg>
 					</div>
+
+					<div class="trend">
+						<div class="trend__head">
+							<div class="trend__label">
+								<v-icon name="payments" />
+								<span>Платежи (сумма)</span>
+							</div>
+							<div class="trend__meta">
+								<span class="trend__meta-label">Сегодня:</span>
+								<span class="trend__meta-value">{{ fmtMoney(trends.paymentsSumToday) }}</span>
+							</div>
+						</div>
+						<svg class="spark" viewBox="0 0 100 30" preserveAspectRatio="none" aria-hidden="true">
+							<polyline class="spark__line spark__line--green" :points="sparkPoints(trends.paymentsSum30d)" />
+						</svg>
+					</div>
+				</div>
+			</v-card>
+
+			<v-card class="panel panel--spaced">
+				<div class="panel__title">Большая картина (12 месяцев)</div>
+				<div class="panel__subtitle">Чтобы владельцу было видно “волну” и сезонность на большой дистанции.</div>
+
+				<div class="big">
+					<div class="big__item">
+						<div class="big__head">
+							<div class="big__label">
+								<v-icon name="person_add" />
+								<span>Регистрации</span>
+							</div>
+						</div>
+						<svg class="spark spark--big" viewBox="0 0 100 30" preserveAspectRatio="none" aria-hidden="true">
+							<polyline class="spark__line spark__line--blue" :points="sparkPoints(year.registrations12m)" />
+						</svg>
+					</div>
+
+					<div class="big__item">
+						<div class="big__head">
+							<div class="big__label">
+								<v-icon name="wifi" />
+								<span>Подключения</span>
+							</div>
+						</div>
+						<svg class="spark spark--big" viewBox="0 0 100 30" preserveAspectRatio="none" aria-hidden="true">
+							<polyline class="spark__line" :points="sparkPoints(year.connections12m)" />
+						</svg>
+					</div>
+
+					<div class="big__item">
+						<div class="big__head">
+							<div class="big__label">
+								<v-icon name="payments" />
+								<span>Платежи (сумма)</span>
+							</div>
+						</div>
+						<svg class="spark spark--big" viewBox="0 0 100 30" preserveAspectRatio="none" aria-hidden="true">
+							<polyline class="spark__line spark__line--purple" :points="sparkPoints(year.paymentsSum12m)" />
+						</svg>
+					</div>
 				</div>
 			</v-card>
 
@@ -320,6 +379,73 @@
 
 			<div class="layout">
 				<v-card class="panel">
+					<div class="panel__title">Быстрые виджеты</div>
+					<div class="panel__subtitle">Оперативные списки без лишней навигации.</div>
+
+					<div class="widgets">
+						<div class="widgets__block">
+							<div class="widgets__title">
+								<v-icon name="event" />
+								<span>Истекает в {{ settings.expiring_days }} дн.</span>
+							</div>
+							<div v-if="quick.expiring.length" class="widgets__list">
+								<router-link
+									v-for="u in quick.expiring"
+									:key="u.id"
+									class="widgets__row"
+									:to="{ path: `/content/users/${u.id}` }"
+								>
+									<span class="widgets__name">{{ u.username || u.full_name || u.id }}</span>
+									<span class="widgets__meta">{{ shortDate(u.expired_at) }}</span>
+								</router-link>
+							</div>
+							<div v-else class="widgets__empty">Нет данных</div>
+						</div>
+
+						<div class="widgets__block">
+							<div class="widgets__title">
+								<v-icon name="leaderboard" />
+								<span>Топ по балансу</span>
+							</div>
+							<div v-if="quick.topBalance.length" class="widgets__list">
+								<router-link
+									v-for="u in quick.topBalance"
+									:key="u.id"
+									class="widgets__row"
+									:to="{ path: `/content/users/${u.id}` }"
+								>
+									<span class="widgets__name">{{ u.username || u.full_name || u.id }}</span>
+									<span class="widgets__meta">{{ fmtMoney(u.balance) }}</span>
+								</router-link>
+							</div>
+							<div v-else class="widgets__empty">Нет данных</div>
+						</div>
+
+						<div class="widgets__block">
+							<div class="widgets__title">
+								<v-icon name="report" />
+								<span>Подозрительные блокировки</span>
+							</div>
+							<div v-if="quick.blockedRecent.length" class="widgets__list">
+								<router-link
+									v-for="u in quick.blockedRecent"
+									:key="u.id"
+									class="widgets__row"
+									:to="{ path: `/content/users/${u.id}` }"
+								>
+									<span class="widgets__name">{{ u.username || u.full_name || u.id }}</span>
+									<span class="widgets__meta">{{ fromNow(u.blocked_at || u.registration_date) }}</span>
+								</router-link>
+							</div>
+							<div v-else class="widgets__empty">Нет данных</div>
+							<div class="widgets__hint">
+								Показываем блокировки за последние {{ settings.suspicious_block_days }} дня.
+							</div>
+						</div>
+					</div>
+				</v-card>
+
+				<v-card class="panel">
 					<div class="panel__title">Быстрые действия</div>
 					<div class="panel__subtitle">Частые операции, чтобы не “копать” меню.</div>
 
@@ -386,6 +512,66 @@
 				</v-card>
 
 				<v-card class="panel">
+					<div class="panel__title">Пороги алертов</div>
+					<div class="panel__subtitle">Настраивается через `tvpn_admin_settings` (сохраняется в базе).</div>
+
+					<v-notice v-if="settingsSaveError" type="danger">
+						{{ settingsSaveError }}
+					</v-notice>
+
+					<div class="settings">
+						<label class="settings__row">
+							<span>Алерты включены</span>
+							<input v-model="settings.alerts_enabled" class="settings__input" type="checkbox" />
+						</label>
+
+						<label class="settings__row">
+							<span>Всплеск регистраций (x)</span>
+							<input v-model.number="settings.reg_spike_factor" class="settings__input settings__input--num" type="number" step="0.1" min="1" />
+						</label>
+
+						<label class="settings__row">
+							<span>Мин. регистраций</span>
+							<input v-model.number="settings.reg_spike_min" class="settings__input settings__input--num" type="number" step="1" min="0" />
+						</label>
+
+						<label class="settings__row">
+							<span>Падение подключений (≤ %)</span>
+							<input v-model.number="settings.conn_drop_factor" class="settings__input settings__input--num" type="number" step="0.05" min="0" max="1" />
+						</label>
+
+						<label class="settings__row">
+							<span>Мин. среднее (7д)</span>
+							<input v-model.number="settings.conn_drop_min_avg" class="settings__input settings__input--num" type="number" step="1" min="0" />
+						</label>
+
+						<label class="settings__row">
+							<span>Аномалия платежей (x)</span>
+							<input v-model.number="settings.pay_spike_factor" class="settings__input settings__input--num" type="number" step="0.1" min="1" />
+						</label>
+
+						<label class="settings__row">
+							<span>Мин. сумма (день)</span>
+							<input v-model.number="settings.pay_spike_min_sum" class="settings__input settings__input--num" type="number" step="100" min="0" />
+						</label>
+
+						<label class="settings__row">
+							<span>Истекает (дни)</span>
+							<input v-model.number="settings.expiring_days" class="settings__input settings__input--num" type="number" step="1" min="1" max="90" />
+						</label>
+
+						<label class="settings__row">
+							<span>Блокировки (дни)</span>
+							<input v-model.number="settings.suspicious_block_days" class="settings__input settings__input--num" type="number" step="1" min="1" max="30" />
+						</label>
+
+						<v-button small :loading="settingsSaving" :disabled="!settingsId" @click="saveSettings">
+							Сохранить
+						</v-button>
+					</div>
+				</v-card>
+
+				<v-card class="panel">
 					<div class="panel__title">Что где находится</div>
 					<div class="panel__subtitle">Короткие пояснения по разделам и параметрам.</div>
 
@@ -427,21 +613,50 @@ const loading = ref(false);
 const error = ref('');
 const lastUpdated = ref(null);
 
+const settingsId = ref(null);
+const settings = ref({
+	alerts_enabled: true,
+	reg_spike_factor: 3.0,
+	reg_spike_min: 10,
+	conn_drop_factor: 0.4,
+	conn_drop_min_avg: 20,
+	pay_spike_factor: 2.5,
+	pay_spike_min_sum: 5000,
+	expiring_days: 7,
+	suspicious_block_days: 3,
+});
+const settingsSaving = ref(false);
+const settingsSaveError = ref('');
+
 const trends = ref({
 	connections30d: [],
 	registrations30d: [],
 	activeUsers30d: [],
 	totalUsers30d: [],
+	paymentsSum30d: [],
+	paymentsSumToday: null,
 	connectionsToday: null,
 	registrationsToday: null,
 	activeUsersToday: null,
 	totalUsersToday: null,
 });
 
+const year = ref({
+	registrations12m: [],
+	connections12m: [],
+	paymentsSum12m: [],
+});
+
 const events = ref({
 	users: [],
 	payments: [],
 	promo: [],
+});
+
+const quick = ref({
+	expiring: [],
+	topBalance: [],
+	blockedRecent: [],
 });
 
 const stats = ref({
@@ -467,6 +682,8 @@ const alerts = computed(() => {
 		});
 	}
 
+	if (!settings.value.alerts_enabled) return out;
+
 	const c = trends.value.connections30d || [];
 	if (c.length >= 2 && Number(c[c.length - 1]) === 0 && Number(c[c.length - 2]) === 0) {
 		out.push({
@@ -481,11 +698,44 @@ const alerts = computed(() => {
 		const today = Number(reg[reg.length - 1]);
 		const prev7 = reg.slice(reg.length - 8, reg.length - 1).map((x) => Number(x)).filter((x) => Number.isFinite(x));
 		const avg = prev7.length ? prev7.reduce((a, b) => a + b, 0) / prev7.length : 0;
-		if (Number.isFinite(today) && avg > 0 && today >= avg * 3) {
+		const factor = Number(settings.value.reg_spike_factor) || 3;
+		const minToday = Number(settings.value.reg_spike_min) || 0;
+		if (Number.isFinite(today) && avg > 0 && today >= avg * factor && today >= minToday) {
 			out.push({
 				key: 'registrations-spike',
 				icon: 'trending_up',
-				text: `Всплеск регистраций: сегодня ${today}, среднее за прошлые 7 дней ${avg.toFixed(1)}.`,
+				text: `Всплеск регистраций: сегодня ${today}, среднее за 7 дней ${avg.toFixed(1)} (x${factor}).`,
+			});
+		}
+	}
+
+	if (c.length >= 8) {
+		const today = Number(c[c.length - 1]);
+		const prev7 = c.slice(c.length - 8, c.length - 1).map((x) => Number(x)).filter((x) => Number.isFinite(x));
+		const avg = prev7.length ? prev7.reduce((a, b) => a + b, 0) / prev7.length : 0;
+		const factor = Number(settings.value.conn_drop_factor) || 0.4;
+		const minAvg = Number(settings.value.conn_drop_min_avg) || 0;
+		if (Number.isFinite(today) && avg >= minAvg && today <= avg * factor) {
+			out.push({
+				key: 'connections-drop',
+				icon: 'trending_down',
+				text: `Падение подключений: сегодня ${today}, среднее за 7 дней ${avg.toFixed(1)} (≤ ${Math.round(factor * 100)}%).`,
+			});
+		}
+	}
+
+	const pay = trends.value.paymentsSum30d || [];
+	if (pay.length >= 8) {
+		const today = Number(pay[pay.length - 1]);
+		const prev7 = pay.slice(pay.length - 8, pay.length - 1).map((x) => Number(x)).filter((x) => Number.isFinite(x));
+		const avg = prev7.length ? prev7.reduce((a, b) => a + b, 0) / prev7.length : 0;
+		const factor = Number(settings.value.pay_spike_factor) || 2.5;
+		const minSum = Number(settings.value.pay_spike_min_sum) || 0;
+		if (Number.isFinite(today) && avg > 0 && today >= avg * factor && today >= minSum) {
+			out.push({
+				key: 'payments-anomaly',
+				icon: 'payments',
+				text: `Аномалия платежей: сегодня ${fmtMoney(today)}, среднее за 7 дней ${fmtMoney(avg)} (x${factor}).`,
 			});
 		}
 	}
@@ -561,6 +811,11 @@ function sparkPoints(values) {
 	return points.join(' ');
 }
 
+function isoFromNow(days) {
+	const d = new Date(Date.now() + Number(days) * 24 * 60 * 60 * 1000);
+	return d.toISOString();
+}
+
 async function fetchCount(collection, params = {}) {
 	const res = await api.get(`/items/${collection}`, {
 		params: { 'aggregate[count]': 'id', ...params },
@@ -573,15 +828,20 @@ async function fetchCount(collection, params = {}) {
 
 async function checkWidgets() {
 	try {
-		await api.get('/admin-widgets/total-users', { params: { period: 'day' } });
+		await api.get('/admin-widgets/total-users', { params: { period_x_field: 'day' } });
+		await api.get('/admin-widgets/payments', { params: { period_x_field: 'day' } });
 		widgetsOk.value = true;
 	} catch {
 		widgetsOk.value = false;
 	}
 }
 
-async function fetchWidgetSeries(endpoint, n = 30) {
-	const res = await api.get(`/admin-widgets/${endpoint}`, { params: { period: 'day' } });
+async function fetchWidgetSeries(endpoint, n = 30, opts = {}) {
+	const period = opts.period_x_field || 'day';
+	const params = { period_x_field: period };
+	if (opts.min_x_field) params.min_x_field = opts.min_x_field;
+	if (opts.max_x_field) params.max_x_field = opts.max_x_field;
+	const res = await api.get(`/admin-widgets/${endpoint}`, { params });
 	const results = Array.isArray(res?.data?.results) ? res.data.results : [];
 	const tail = results.slice(Math.max(0, results.length - n));
 	const series = tail.map((row) => {
@@ -593,7 +853,7 @@ async function fetchWidgetSeries(endpoint, n = 30) {
 }
 
 async function fetchWidgetSumLastN(endpoint, n = 7) {
-	const res = await api.get(`/admin-widgets/${endpoint}`, { params: { period: 'day' } });
+	const res = await api.get(`/admin-widgets/${endpoint}`, { params: { period_x_field: 'day' } });
 	const results = Array.isArray(res?.data?.results) ? res.data.results : [];
 	const tail = results.slice(Math.max(0, results.length - n));
 	let sum = 0;
@@ -607,9 +867,54 @@ async function fetchWidgetSumLastN(endpoint, n = 7) {
 	return any ? sum : null;
 }
 
+async function fetchPaymentsSumSeries(n = 30, opts = {}) {
+	const period = opts.period_x_field || 'day';
+	const params = { period_x_field: period };
+	if (opts.min_x_field) params.min_x_field = opts.min_x_field;
+	if (opts.max_x_field) params.max_x_field = opts.max_x_field;
+	const res = await api.get('/admin-widgets/payments', { params });
+	const results = Array.isArray(res?.data?.results) ? res.data.results : [];
+	const tail = results.slice(Math.max(0, results.length - n));
+	const series = tail.map((row) => {
+		const v = Number(row?.total_amount);
+		return Number.isFinite(v) ? v : 0;
+	});
+	const today = series.length ? series[series.length - 1] : null;
+	return { series, today };
+}
+
 async function fetchItems(collection, params = {}) {
 	const res = await api.get(`/items/${collection}`, { params });
 	return Array.isArray(res?.data?.data) ? res.data.data : [];
+}
+
+async function loadSettings() {
+	settingsSaveError.value = '';
+	try {
+		const res = await api.get('/items/tvpn_admin_settings', {
+			params: { limit: 1 },
+		});
+		const rows = Array.isArray(res?.data?.data) ? res.data.data : [];
+		const row = rows[0];
+		if (!row) return;
+		settingsId.value = row.id ?? null;
+		settings.value = { ...settings.value, ...row };
+	} catch {
+		// It's optional; admins may choose to keep defaults.
+	}
+}
+
+async function saveSettings() {
+	if (!settingsId.value) return;
+	if (settingsSaving.value) return;
+	settingsSaving.value = true;
+	settingsSaveError.value = '';
+	try {
+		await api.patch(`/items/tvpn_admin_settings/${settingsId.value}`, settings.value);
+	} catch {
+		settingsSaveError.value = 'Не удалось сохранить настройки (нет прав или коллекция не создана).';
+	}
+	settingsSaving.value = false;
 }
 
 async function refresh() {
@@ -617,6 +922,8 @@ async function refresh() {
 	loading.value = true;
 	error.value = '';
 	try {
+		await loadSettings();
+
 		const [
 			totalUsers,
 			activeTariffs,
@@ -628,9 +935,16 @@ async function refresh() {
 			registrations30,
 			activeUsers30,
 			totalUsers30,
+			payments30,
+			reg12m,
+			conn12m,
+			pay12m,
 			recentUsers,
 			recentPayments,
 			recentPromo,
+			expiring,
+			topBalance,
+			blockedRecent,
 		] = await Promise.all([
 			fetchCount('users'),
 			fetchCount('active_tariffs'),
@@ -642,6 +956,10 @@ async function refresh() {
 			fetchWidgetSeries('registered-users', 30),
 			fetchWidgetSeries('active-users', 30),
 			fetchWidgetSeries('total-users', 30),
+			fetchPaymentsSumSeries(30),
+			fetchWidgetSeries('registered-users', 12, { period_x_field: 'month', min_x_field: isoFromNow(-365) }),
+			fetchWidgetSeries('connections', 12, { period_x_field: 'month', min_x_field: isoFromNow(-365) }),
+			fetchPaymentsSumSeries(12, { period_x_field: 'month', min_x_field: isoFromNow(-365) }),
 			fetchItems('users', {
 				fields: 'id,username,full_name,registration_date,is_blocked,expired_at',
 				sort: '-registration_date',
@@ -657,6 +975,26 @@ async function refresh() {
 				sort: '-used_at',
 				limit: 8,
 			}),
+			fetchItems('users', {
+				fields: 'id,username,full_name,expired_at,balance,is_blocked',
+				sort: 'expired_at',
+				limit: 6,
+				'filter[expired_at][_gte]': new Date().toISOString(),
+				'filter[expired_at][_lte]': isoFromNow(Number(settings.value.expiring_days || 7)),
+			}),
+			fetchItems('users', {
+				fields: 'id,username,full_name,balance,expired_at,is_blocked',
+				sort: '-balance',
+				limit: 6,
+				'filter[balance][_gt]': '0',
+			}),
+			fetchItems('users', {
+				fields: 'id,username,full_name,balance,blocked_at,registration_date',
+				sort: '-blocked_at',
+				limit: 6,
+				'filter[is_blocked][_eq]': 'true',
+				'filter[blocked_at][_gte]': isoFromNow(-Number(settings.value.suspicious_block_days || 3)),
+			}),
 		]);
 
 		stats.value = { totalUsers, activeTariffs, blockedUsers, processedPayments, connections7d, registrations7d };
@@ -665,12 +1003,20 @@ async function refresh() {
 			registrations30d: registrations30.series,
 			activeUsers30d: activeUsers30.series,
 			totalUsers30d: totalUsers30.series,
+			paymentsSum30d: payments30.series,
+			paymentsSumToday: payments30.today,
 			connectionsToday: connections30.today,
 			registrationsToday: registrations30.today,
 			activeUsersToday: activeUsers30.today,
 			totalUsersToday: totalUsers30.today,
 		};
+		year.value = {
+			registrations12m: reg12m.series,
+			connections12m: conn12m.series,
+			paymentsSum12m: pay12m.series,
+		};
 		events.value = { users: recentUsers, payments: recentPayments, promo: recentPromo };
+		quick.value = { expiring, topBalance, blockedRecent };
 		lastUpdated.value = new Date().toISOString();
 		await checkWidgets();
 	} catch (e) {
@@ -819,6 +1165,37 @@ onMounted(() => {
 .spark {
 	width: 100%;
 	height: 34px;
+}
+
+.spark--big {
+	height: 76px;
+}
+
+.big {
+	display: grid;
+	grid-template-columns: repeat(3, minmax(0, 1fr));
+	gap: 12px;
+}
+
+.big__item {
+	padding: 10px;
+	border-radius: 12px;
+	border: 1px solid rgba(255, 255, 255, 0.06);
+	background: rgba(255, 255, 255, 0.03);
+}
+
+.big__head {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	margin-bottom: 8px;
+}
+
+.big__label {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-weight: 650;
 }
 
 .spark__line {
@@ -986,6 +1363,96 @@ onMounted(() => {
 	gap: 10px;
 }
 
+.widgets {
+	display: grid;
+	gap: 12px;
+}
+
+.widgets__block {
+	padding: 10px;
+	border-radius: 12px;
+	border: 1px solid rgba(255, 255, 255, 0.06);
+	background: rgba(255, 255, 255, 0.03);
+}
+
+.widgets__title {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-weight: 650;
+	margin-bottom: 8px;
+}
+
+.widgets__list {
+	display: grid;
+	gap: 6px;
+}
+
+.widgets__row {
+	display: flex;
+	justify-content: space-between;
+	gap: 10px;
+	padding: 8px 10px;
+	border-radius: 10px;
+	text-decoration: none;
+	border: 1px solid rgba(255, 255, 255, 0.06);
+	background: rgba(255, 255, 255, 0.02);
+}
+
+.widgets__row:hover {
+	background: rgba(255, 255, 255, 0.04);
+}
+
+.widgets__name {
+	font-weight: 600;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.widgets__meta {
+	font-size: 12px;
+	opacity: 0.75;
+	white-space: nowrap;
+}
+
+.widgets__empty {
+	opacity: 0.7;
+	font-size: 12px;
+}
+
+.widgets__hint {
+	margin-top: 8px;
+	opacity: 0.75;
+	font-size: 12px;
+}
+
+.settings {
+	display: grid;
+	gap: 10px;
+}
+
+.settings__row {
+	display: grid;
+	grid-template-columns: 1fr 120px;
+	gap: 10px;
+	align-items: center;
+	font-size: 12px;
+	opacity: 0.9;
+}
+
+.settings__input {
+	width: 100%;
+}
+
+.settings__input--num {
+	padding: 6px 8px;
+	border-radius: 10px;
+	border: 1px solid rgba(255, 255, 255, 0.10);
+	background: rgba(255, 255, 255, 0.03);
+	color: inherit;
+}
+
 .help__row {
 	display: grid;
 	grid-template-columns: 120px 1fr;
@@ -1123,6 +1590,10 @@ onMounted(() => {
 	.layout {
 		grid-template-columns: 1fr;
 	}
+
+	.big {
+		grid-template-columns: 1fr;
+	}
 }
 
 @media (max-width: 720px) {
@@ -1160,6 +1631,10 @@ onMounted(() => {
 	}
 
 	.help__row {
+		grid-template-columns: 1fr;
+	}
+
+	.settings__row {
 		grid-template-columns: 1fr;
 	}
 }

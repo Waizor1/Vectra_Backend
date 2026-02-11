@@ -568,6 +568,212 @@ def apply_field_notes_ru(client: DirectusClient) -> None:
             patch_field_meta(client, collection, field, meta_payload)
 
 
+def ensure_admin_settings(client: DirectusClient) -> None:
+    """
+    Create a singleton collection to store adjustable thresholds for dashboard alerts/widgets.
+    Idempotent and safe to run multiple times.
+    """
+
+    collection = "tvpn_admin_settings"
+
+    if client.get(f"/collections/{collection}").status_code != 200:
+        created = client.post(
+            "/collections",
+            json={
+                "collection": collection,
+                "meta": {
+                    "icon": "tune",
+                    "note": "Настройки алертов/виджетов для Главной (tvpn-home)",
+                    "group": "grp_service",
+                    "singleton": True,
+                    "hidden": True,
+                },
+                "schema": {},
+            },
+        )
+        # Mixed permission environments: if we can't create it, just skip gracefully.
+        if created.status_code in (401, 403):
+            return
+        created.raise_for_status()
+
+    # Ensure fields exist (best-effort; Directus will reject duplicates).
+    def ensure_field(field: str, type_: str, schema_extra: Dict[str, Any], meta_extra: Dict[str, Any]) -> None:
+        resp = client.get(f"/fields/{collection}/{field}")
+        if resp.status_code == 200:
+            # Keep it simple: don't overwrite if already exists.
+            return
+        if resp.status_code not in (404,):
+            return
+        created = client.post(
+            f"/fields/{collection}",
+            json={
+                "field": field,
+                "type": type_,
+                "schema": schema_extra,
+                "meta": meta_extra,
+            },
+        )
+        if created.status_code in (401, 403):
+            return
+        # 409 duplicates are fine (race/parallel runs).
+        if created.status_code == 409:
+            return
+        created.raise_for_status()
+
+    ensure_field(
+        "alerts_enabled",
+        "boolean",
+        {"default_value": True},
+        {"interface": "boolean", "note": "Включать алерты на Главной"},
+    )
+    ensure_field(
+        "reg_spike_factor",
+        "float",
+        {"default_value": 3.0},
+        {"interface": "input", "note": "Всплеск регистраций: сегодня >= avg(7д) * factor"},
+    )
+    ensure_field(
+        "reg_spike_min",
+        "integer",
+        {"default_value": 10},
+        {"interface": "input", "note": "Минимум регистраций сегодня для алерта (шум-фильтр)"},
+    )
+    ensure_field(
+        "conn_drop_factor",
+        "float",
+        {"default_value": 0.4},
+        {"interface": "input", "note": "Падение подключений: сегодня <= avg(7д) * factor"},
+    )
+    ensure_field(
+        "conn_drop_min_avg",
+        "integer",
+        {"default_value": 20},
+        {"interface": "input", "note": "Минимум avg(7д) подключений, чтобы алерт считался значимым"},
+    )
+    ensure_field(
+        "pay_spike_factor",
+        "float",
+        {"default_value": 2.5},
+        {"interface": "input", "note": "Аномалия платежей: сумма сегодня >= avg(7д) * factor"},
+    )
+    ensure_field(
+        "pay_spike_min_sum",
+        "float",
+        {"default_value": 5000.0},
+        {"interface": "input", "note": "Минимальная сумма за день для алерта по платежам"},
+    )
+    ensure_field(
+        "expiring_days",
+        "integer",
+        {"default_value": 7},
+        {"interface": "input", "note": "Сколько дней вперед показывать “истекает подписка”"},
+    )
+    ensure_field(
+        "suspicious_block_days",
+        "integer",
+        {"default_value": 3},
+        {"interface": "input", "note": "Окно (дней) для виджета “подозрительные блокировки”"},
+    )
+
+    # Ensure singleton row exists.
+    defaults = {
+        "alerts_enabled": True,
+        "reg_spike_factor": 3.0,
+        "reg_spike_min": 10,
+        "conn_drop_factor": 0.4,
+        "conn_drop_min_avg": 20,
+        "pay_spike_factor": 2.5,
+        "pay_spike_min_sum": 5000.0,
+        "expiring_days": 7,
+        "suspicious_block_days": 3,
+    }
+    items = client.get(f"/items/{collection}", params={"limit": 1, "fields": "id"}).json().get("data") or []
+    if not items:
+        created = client.post(f"/items/{collection}", json=defaults)
+        if created.status_code in (401, 403):
+            return
+        created.raise_for_status()
+
+    # Ensure permissions for Manager/Viewer policies (post-create, so order doesn't matter).
+    manager_policy_id = get_policy_id_by_name(client, "Manager")
+    viewer_policy_id = get_policy_id_by_name(client, "Viewer")
+    if manager_policy_id:
+        ensure_permission(client, manager_policy_id, collection, "read")
+        ensure_permission(client, manager_policy_id, collection, "update")
+    if viewer_policy_id:
+        ensure_permission(client, viewer_policy_id, collection, "read")
+
+
+def apply_users_form_ux(client: DirectusClient) -> None:
+    """
+    Improve the default item (detail) form for `users`:
+    - better widths (more "app-like" editing)
+    - readonly fields aligned with legacy FastAdmin behavior
+    - predictable ordering for key ops fields
+    """
+
+    # Readonly by legacy admin (FastAdmin): keep id + core identity immutable.
+    readonly_fields = {
+        "id",
+        "registration_date",
+        "activation_date",
+        "referrals",
+        "username",
+        "full_name",
+    }
+
+    # Widths: help the item form become "dashboard-like" and less vertical.
+    widths = {
+        "id": "half",
+        "username": "half",
+        "full_name": "half",
+        "email": "half",
+        "registration_date": "half",
+        "activation_date": "half",
+        "expired_at": "half",
+        "balance": "quarter",
+        "lte_gb_total": "quarter",
+        "hwid_limit": "quarter",
+        "is_blocked": "quarter",
+        "blocked_at": "half",
+        "is_partner": "quarter",
+        "custom_referral_percent": "quarter",
+        "prize_wheel_attempts": "quarter",
+        "is_registered": "quarter",
+        "remnawave_uuid": "half",
+        "active_tariff": "half",
+    }
+
+    # Sort order (best-effort): smaller number = higher on the form.
+    sort = {
+        "username": 10,
+        "full_name": 11,
+        "email": 12,
+        "registration_date": 20,
+        "activation_date": 21,
+        "expired_at": 22,
+        "balance": 30,
+        "lte_gb_total": 31,
+        "hwid_limit": 32,
+        "active_tariff": 33,
+        "is_registered": 40,
+        "is_blocked": 41,
+        "blocked_at": 42,
+        "is_partner": 50,
+        "custom_referral_percent": 51,
+        "prize_wheel_attempts": 60,
+        "remnawave_uuid": 70,
+    }
+
+    for field, width in widths.items():
+        meta: Dict[str, Any] = {"width": width}
+        if field in readonly_fields:
+            meta["readonly"] = True
+        if field in sort:
+            meta["sort"] = sort[field]
+        patch_field_meta(client, "users", field, meta)
+
+
 def set_language_ru(client: DirectusClient) -> None:
     # Make the whole instance default to Russian and set the current user language too.
     client.patch("/settings", json={"default_language": "ru-RU"}).raise_for_status()
@@ -665,6 +871,12 @@ def ensure_permissions_baseline(client: DirectusClient) -> None:
 
     for collection in sorted(viewer_ro):
         ensure_permission(client, viewer_policy_id, collection, "read")
+
+    # Dashboard settings (singleton): allow Manager to read/update, Viewer read-only.
+    if client.get("/collections/tvpn_admin_settings").status_code == 200:
+        ensure_permission(client, manager_policy_id, "tvpn_admin_settings", "read")
+        ensure_permission(client, manager_policy_id, "tvpn_admin_settings", "update")
+        ensure_permission(client, viewer_policy_id, "tvpn_admin_settings", "read")
 
 
 def ensure_insights_dashboard(client: DirectusClient) -> None:
@@ -1113,6 +1325,8 @@ def main() -> None:
     ensure_nav_group_permissions(client)
     apply_collection_ux(client)
     apply_field_notes_ru(client)
+    apply_users_form_ux(client)
+    ensure_admin_settings(client)
     ensure_insights_dashboard(client)
     ensure_role_presets(client)
     # Enable optional app extensions if they are present on disk
