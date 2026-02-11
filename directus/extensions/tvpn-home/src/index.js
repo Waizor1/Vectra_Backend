@@ -150,7 +150,15 @@ function injectTvpnHomeFullWidthLayoutFix() {
 				badge.style.fontFamily = 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace';
 				document.body.appendChild(badge);
 			}
-			badge.textContent = `tvpnDebug: page=${page ? 'yes' : 'no'} innerWidth=${window.innerWidth}`;
+			const pageW = page?.getBoundingClientRect?.().width;
+			const panel = document.querySelector('.panel');
+			const panelW = panel?.getBoundingClientRect?.().width;
+			const trends = document.querySelector('.trends');
+			const trendsW = trends?.getBoundingClientRect?.().width;
+			badge.textContent =
+				`tvpnDebug: page=${page ? 'yes' : 'no'} innerWidth=${window.innerWidth}` +
+				` pageW=${pageW ? Math.round(pageW) : '-'} panelW=${panelW ? Math.round(panelW) : '-'}` +
+				` trendsW=${trendsW ? Math.round(trendsW) : '-'}`;
 		}
 		if (!page) return;
 
