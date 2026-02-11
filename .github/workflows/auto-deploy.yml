@@ -61,8 +61,12 @@ jobs:
         # Prefer prod override when present (Caddy/TLS, etc.)
         if [ -f docker-compose.prod.yml ]; then
           docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+          # Directus doesn't always reload app extensions on volume changes.
+          # Restart ensures new /directus/extensions/* dist bundles are picked up.
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml restart directus || true
         else
           docker compose -f docker-compose.yml up -d --build
+          docker compose -f docker-compose.yml restart directus || true
         fi
 
         echo "✅ Деплой завершен"
