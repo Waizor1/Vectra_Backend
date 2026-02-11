@@ -185,9 +185,41 @@
 								<span class="trend__meta-value">{{ fmt(trends.connectionsToday) }}</span>
 							</div>
 						</div>
-						<svg class="spark" viewBox="0 0 100 30" preserveAspectRatio="none" aria-hidden="true">
-							<polyline class="spark__line" :points="sparkPoints(trends.connections30d)" />
-						</svg>
+						<div
+							class="spark-wrap"
+							@mousemove="(e) => onChartMove(e, 'connections30', chartModels.connections30)"
+							@mouseleave="() => onChartLeave('connections30')"
+						>
+							<svg class="spark premium" :viewBox="`0 0 ${chartModels.connections30.w} ${chartModels.connections30.h}`" preserveAspectRatio="none" aria-hidden="true">
+								<defs>
+									<linearGradient id="grad-connections30" x1="0" y1="0" x2="0" y2="1">
+										<stop offset="0%" stop-color="rgba(16, 185, 129, 0.35)" />
+										<stop offset="100%" stop-color="rgba(16, 185, 129, 0.00)" />
+									</linearGradient>
+								</defs>
+								<path class="spark__area" :d="chartModels.connections30.areaD" fill="url(#grad-connections30)" />
+								<path class="spark__path spark__path--green" :d="chartModels.connections30.lineD" />
+								<template v-if="hover.key === 'connections30' && chartModels.connections30.points.length">
+									<line
+										class="spark__vline"
+										:x1="chartModels.connections30.points[hover.idx].x"
+										:x2="chartModels.connections30.points[hover.idx].x"
+										:y1="0"
+										:y2="chartModels.connections30.h"
+									/>
+									<circle
+										class="spark__dot spark__dot--green"
+										:cx="chartModels.connections30.points[hover.idx].x"
+										:cy="chartModels.connections30.points[hover.idx].y"
+										r="2.6"
+									/>
+								</template>
+							</svg>
+							<div v-if="hover.key === 'connections30' && chartModels.connections30.points.length" class="spark__tooltip" :style="{ left: `${hover.x}px` }">
+								<div class="spark__tooltip-title">{{ formatLabel(chartModels.connections30.points[hover.idx].rawLabel, 'day') }}</div>
+								<div class="spark__tooltip-value">{{ fmt(chartModels.connections30.points[hover.idx].v) }}</div>
+							</div>
+						</div>
 					</div>
 
 					<div class="trend">
@@ -203,9 +235,30 @@
 								<span class="trend__meta-value">{{ fmt(trends.registrationsToday) }}</span>
 							</div>
 						</div>
-						<svg class="spark" viewBox="0 0 100 30" preserveAspectRatio="none" aria-hidden="true">
-							<polyline class="spark__line spark__line--blue" :points="sparkPoints(trends.registrations30d)" />
-						</svg>
+						<div
+							class="spark-wrap"
+							@mousemove="(e) => onChartMove(e, 'registrations30', chartModels.registrations30)"
+							@mouseleave="() => onChartLeave('registrations30')"
+						>
+							<svg class="spark premium" :viewBox="`0 0 ${chartModels.registrations30.w} ${chartModels.registrations30.h}`" preserveAspectRatio="none" aria-hidden="true">
+								<defs>
+									<linearGradient id="grad-registrations30" x1="0" y1="0" x2="0" y2="1">
+										<stop offset="0%" stop-color="rgba(59, 130, 246, 0.35)" />
+										<stop offset="100%" stop-color="rgba(59, 130, 246, 0.00)" />
+									</linearGradient>
+								</defs>
+								<path class="spark__area" :d="chartModels.registrations30.areaD" fill="url(#grad-registrations30)" />
+								<path class="spark__path spark__path--blue" :d="chartModels.registrations30.lineD" />
+								<template v-if="hover.key === 'registrations30' && chartModels.registrations30.points.length">
+									<line class="spark__vline" :x1="chartModels.registrations30.points[hover.idx].x" :x2="chartModels.registrations30.points[hover.idx].x" :y1="0" :y2="chartModels.registrations30.h" />
+									<circle class="spark__dot spark__dot--blue" :cx="chartModels.registrations30.points[hover.idx].x" :cy="chartModels.registrations30.points[hover.idx].y" r="2.6" />
+								</template>
+							</svg>
+							<div v-if="hover.key === 'registrations30' && chartModels.registrations30.points.length" class="spark__tooltip" :style="{ left: `${hover.x}px` }">
+								<div class="spark__tooltip-title">{{ formatLabel(chartModels.registrations30.points[hover.idx].rawLabel, 'day') }}</div>
+								<div class="spark__tooltip-value">{{ fmt(chartModels.registrations30.points[hover.idx].v) }}</div>
+							</div>
+						</div>
 					</div>
 
 					<div class="trend">
@@ -219,9 +272,26 @@
 								<span class="trend__meta-value">{{ fmt(trends.activeUsersToday) }}</span>
 							</div>
 						</div>
-						<svg class="spark" viewBox="0 0 100 30" preserveAspectRatio="none" aria-hidden="true">
-							<polyline class="spark__line spark__line--green" :points="sparkPoints(trends.activeUsers30d)" />
-						</svg>
+						<div class="spark-wrap" @mousemove="(e) => onChartMove(e, 'activeUsers30', chartModels.activeUsers30)" @mouseleave="() => onChartLeave('activeUsers30')">
+							<svg class="spark premium" :viewBox="`0 0 ${chartModels.activeUsers30.w} ${chartModels.activeUsers30.h}`" preserveAspectRatio="none" aria-hidden="true">
+								<defs>
+									<linearGradient id="grad-activeUsers30" x1="0" y1="0" x2="0" y2="1">
+										<stop offset="0%" stop-color="rgba(16, 185, 129, 0.35)" />
+										<stop offset="100%" stop-color="rgba(16, 185, 129, 0.00)" />
+									</linearGradient>
+								</defs>
+								<path class="spark__area" :d="chartModels.activeUsers30.areaD" fill="url(#grad-activeUsers30)" />
+								<path class="spark__path spark__path--green" :d="chartModels.activeUsers30.lineD" />
+								<template v-if="hover.key === 'activeUsers30' && chartModels.activeUsers30.points.length">
+									<line class="spark__vline" :x1="chartModels.activeUsers30.points[hover.idx].x" :x2="chartModels.activeUsers30.points[hover.idx].x" :y1="0" :y2="chartModels.activeUsers30.h" />
+									<circle class="spark__dot spark__dot--green" :cx="chartModels.activeUsers30.points[hover.idx].x" :cy="chartModels.activeUsers30.points[hover.idx].y" r="2.6" />
+								</template>
+							</svg>
+							<div v-if="hover.key === 'activeUsers30' && chartModels.activeUsers30.points.length" class="spark__tooltip" :style="{ left: `${hover.x}px` }">
+								<div class="spark__tooltip-title">{{ formatLabel(chartModels.activeUsers30.points[hover.idx].rawLabel, 'day') }}</div>
+								<div class="spark__tooltip-value">{{ fmt(chartModels.activeUsers30.points[hover.idx].v) }}</div>
+							</div>
+						</div>
 					</div>
 
 					<div class="trend">
@@ -235,9 +305,26 @@
 								<span class="trend__meta-value">{{ fmt(trends.totalUsersToday) }}</span>
 							</div>
 						</div>
-						<svg class="spark" viewBox="0 0 100 30" preserveAspectRatio="none" aria-hidden="true">
-							<polyline class="spark__line spark__line--purple" :points="sparkPoints(trends.totalUsers30d)" />
-						</svg>
+						<div class="spark-wrap" @mousemove="(e) => onChartMove(e, 'totalUsers30', chartModels.totalUsers30)" @mouseleave="() => onChartLeave('totalUsers30')">
+							<svg class="spark premium" :viewBox="`0 0 ${chartModels.totalUsers30.w} ${chartModels.totalUsers30.h}`" preserveAspectRatio="none" aria-hidden="true">
+								<defs>
+									<linearGradient id="grad-totalUsers30" x1="0" y1="0" x2="0" y2="1">
+										<stop offset="0%" stop-color="rgba(139, 92, 246, 0.35)" />
+										<stop offset="100%" stop-color="rgba(139, 92, 246, 0.00)" />
+									</linearGradient>
+								</defs>
+								<path class="spark__area" :d="chartModels.totalUsers30.areaD" fill="url(#grad-totalUsers30)" />
+								<path class="spark__path spark__path--purple" :d="chartModels.totalUsers30.lineD" />
+								<template v-if="hover.key === 'totalUsers30' && chartModels.totalUsers30.points.length">
+									<line class="spark__vline" :x1="chartModels.totalUsers30.points[hover.idx].x" :x2="chartModels.totalUsers30.points[hover.idx].x" :y1="0" :y2="chartModels.totalUsers30.h" />
+									<circle class="spark__dot spark__dot--purple" :cx="chartModels.totalUsers30.points[hover.idx].x" :cy="chartModels.totalUsers30.points[hover.idx].y" r="2.6" />
+								</template>
+							</svg>
+							<div v-if="hover.key === 'totalUsers30' && chartModels.totalUsers30.points.length" class="spark__tooltip" :style="{ left: `${hover.x}px` }">
+								<div class="spark__tooltip-title">{{ formatLabel(chartModels.totalUsers30.points[hover.idx].rawLabel, 'day') }}</div>
+								<div class="spark__tooltip-value">{{ fmt(chartModels.totalUsers30.points[hover.idx].v) }}</div>
+							</div>
+						</div>
 					</div>
 
 					<div class="trend">
@@ -251,9 +338,26 @@
 								<span class="trend__meta-value">{{ fmtMoney(trends.paymentsSumToday) }}</span>
 							</div>
 						</div>
-						<svg class="spark" viewBox="0 0 100 30" preserveAspectRatio="none" aria-hidden="true">
-							<polyline class="spark__line spark__line--green" :points="sparkPoints(trends.paymentsSum30d)" />
-						</svg>
+						<div class="spark-wrap" @mousemove="(e) => onChartMove(e, 'paymentsSum30', chartModels.paymentsSum30)" @mouseleave="() => onChartLeave('paymentsSum30')">
+							<svg class="spark premium" :viewBox="`0 0 ${chartModels.paymentsSum30.w} ${chartModels.paymentsSum30.h}`" preserveAspectRatio="none" aria-hidden="true">
+								<defs>
+									<linearGradient id="grad-paymentsSum30" x1="0" y1="0" x2="0" y2="1">
+										<stop offset="0%" stop-color="rgba(16, 185, 129, 0.35)" />
+										<stop offset="100%" stop-color="rgba(16, 185, 129, 0.00)" />
+									</linearGradient>
+								</defs>
+								<path class="spark__area" :d="chartModels.paymentsSum30.areaD" fill="url(#grad-paymentsSum30)" />
+								<path class="spark__path spark__path--green" :d="chartModels.paymentsSum30.lineD" />
+								<template v-if="hover.key === 'paymentsSum30' && chartModels.paymentsSum30.points.length">
+									<line class="spark__vline" :x1="chartModels.paymentsSum30.points[hover.idx].x" :x2="chartModels.paymentsSum30.points[hover.idx].x" :y1="0" :y2="chartModels.paymentsSum30.h" />
+									<circle class="spark__dot spark__dot--green" :cx="chartModels.paymentsSum30.points[hover.idx].x" :cy="chartModels.paymentsSum30.points[hover.idx].y" r="2.6" />
+								</template>
+							</svg>
+							<div v-if="hover.key === 'paymentsSum30' && chartModels.paymentsSum30.points.length" class="spark__tooltip" :style="{ left: `${hover.x}px` }">
+								<div class="spark__tooltip-title">{{ formatLabel(chartModels.paymentsSum30.points[hover.idx].rawLabel, 'day') }}</div>
+								<div class="spark__tooltip-value">{{ fmtMoney(chartModels.paymentsSum30.points[hover.idx].v) }}</div>
+							</div>
+						</div>
 					</div>
 				</div>
 			</v-card>
@@ -269,10 +373,31 @@
 								<v-icon name="person_add" />
 								<span>Регистрации</span>
 							</div>
+							<div class="big__meta">
+								<span>avg {{ fmt(Math.round(statsFromSeries(year.registrations12m).avg)) }}/мес</span>
+								<span>пик {{ fmt(Math.round(statsFromSeries(year.registrations12m).max)) }}</span>
+							</div>
 						</div>
-						<svg class="spark spark--big" viewBox="0 0 100 30" preserveAspectRatio="none" aria-hidden="true">
-							<polyline class="spark__line spark__line--blue" :points="sparkPoints(year.registrations12m)" />
-						</svg>
+						<div class="spark-wrap spark-wrap--big" @mousemove="(e) => onChartMove(e, 'registrations12', chartModels.registrations12)" @mouseleave="() => onChartLeave('registrations12')">
+							<svg class="spark spark--big premium" :viewBox="`0 0 ${chartModels.registrations12.w} ${chartModels.registrations12.h}`" preserveAspectRatio="none" aria-hidden="true">
+								<defs>
+									<linearGradient id="grad-registrations12" x1="0" y1="0" x2="0" y2="1">
+										<stop offset="0%" stop-color="rgba(59, 130, 246, 0.32)" />
+										<stop offset="100%" stop-color="rgba(59, 130, 246, 0.00)" />
+									</linearGradient>
+								</defs>
+								<path class="spark__area" :d="chartModels.registrations12.areaD" fill="url(#grad-registrations12)" />
+								<path class="spark__path spark__path--blue" :d="chartModels.registrations12.lineD" />
+								<template v-if="hover.key === 'registrations12' && chartModels.registrations12.points.length">
+									<line class="spark__vline" :x1="chartModels.registrations12.points[hover.idx].x" :x2="chartModels.registrations12.points[hover.idx].x" :y1="0" :y2="chartModels.registrations12.h" />
+									<circle class="spark__dot spark__dot--blue" :cx="chartModels.registrations12.points[hover.idx].x" :cy="chartModels.registrations12.points[hover.idx].y" r="3.0" />
+								</template>
+							</svg>
+							<div v-if="hover.key === 'registrations12' && chartModels.registrations12.points.length" class="spark__tooltip" :style="{ left: `${hover.x}px` }">
+								<div class="spark__tooltip-title">{{ formatLabel(chartModels.registrations12.points[hover.idx].rawLabel, 'month') }}</div>
+								<div class="spark__tooltip-value">{{ fmt(chartModels.registrations12.points[hover.idx].v) }}</div>
+							</div>
+						</div>
 					</div>
 
 					<div class="big__item">
@@ -281,10 +406,31 @@
 								<v-icon name="wifi" />
 								<span>Подключения</span>
 							</div>
+							<div class="big__meta">
+								<span>avg {{ fmt(Math.round(statsFromSeries(year.connections12m).avg)) }}/мес</span>
+								<span>пик {{ fmt(Math.round(statsFromSeries(year.connections12m).max)) }}</span>
+							</div>
 						</div>
-						<svg class="spark spark--big" viewBox="0 0 100 30" preserveAspectRatio="none" aria-hidden="true">
-							<polyline class="spark__line" :points="sparkPoints(year.connections12m)" />
-						</svg>
+						<div class="spark-wrap spark-wrap--big" @mousemove="(e) => onChartMove(e, 'connections12', chartModels.connections12)" @mouseleave="() => onChartLeave('connections12')">
+							<svg class="spark spark--big premium" :viewBox="`0 0 ${chartModels.connections12.w} ${chartModels.connections12.h}`" preserveAspectRatio="none" aria-hidden="true">
+								<defs>
+									<linearGradient id="grad-connections12" x1="0" y1="0" x2="0" y2="1">
+										<stop offset="0%" stop-color="rgba(16, 185, 129, 0.32)" />
+										<stop offset="100%" stop-color="rgba(16, 185, 129, 0.00)" />
+									</linearGradient>
+								</defs>
+								<path class="spark__area" :d="chartModels.connections12.areaD" fill="url(#grad-connections12)" />
+								<path class="spark__path spark__path--green" :d="chartModels.connections12.lineD" />
+								<template v-if="hover.key === 'connections12' && chartModels.connections12.points.length">
+									<line class="spark__vline" :x1="chartModels.connections12.points[hover.idx].x" :x2="chartModels.connections12.points[hover.idx].x" :y1="0" :y2="chartModels.connections12.h" />
+									<circle class="spark__dot spark__dot--green" :cx="chartModels.connections12.points[hover.idx].x" :cy="chartModels.connections12.points[hover.idx].y" r="3.0" />
+								</template>
+							</svg>
+							<div v-if="hover.key === 'connections12' && chartModels.connections12.points.length" class="spark__tooltip" :style="{ left: `${hover.x}px` }">
+								<div class="spark__tooltip-title">{{ formatLabel(chartModels.connections12.points[hover.idx].rawLabel, 'month') }}</div>
+								<div class="spark__tooltip-value">{{ fmt(chartModels.connections12.points[hover.idx].v) }}</div>
+							</div>
+						</div>
 					</div>
 
 					<div class="big__item">
@@ -293,10 +439,31 @@
 								<v-icon name="payments" />
 								<span>Платежи (сумма)</span>
 							</div>
+							<div class="big__meta">
+								<span>avg {{ fmtMoney(statsFromSeries(year.paymentsSum12m).avg) }}/мес</span>
+								<span>пик {{ fmtMoney(statsFromSeries(year.paymentsSum12m).max) }}</span>
+							</div>
 						</div>
-						<svg class="spark spark--big" viewBox="0 0 100 30" preserveAspectRatio="none" aria-hidden="true">
-							<polyline class="spark__line spark__line--purple" :points="sparkPoints(year.paymentsSum12m)" />
-						</svg>
+						<div class="spark-wrap spark-wrap--big" @mousemove="(e) => onChartMove(e, 'paymentsSum12', chartModels.paymentsSum12)" @mouseleave="() => onChartLeave('paymentsSum12')">
+							<svg class="spark spark--big premium" :viewBox="`0 0 ${chartModels.paymentsSum12.w} ${chartModels.paymentsSum12.h}`" preserveAspectRatio="none" aria-hidden="true">
+								<defs>
+									<linearGradient id="grad-paymentsSum12" x1="0" y1="0" x2="0" y2="1">
+										<stop offset="0%" stop-color="rgba(139, 92, 246, 0.32)" />
+										<stop offset="100%" stop-color="rgba(139, 92, 246, 0.00)" />
+									</linearGradient>
+								</defs>
+								<path class="spark__area" :d="chartModels.paymentsSum12.areaD" fill="url(#grad-paymentsSum12)" />
+								<path class="spark__path spark__path--purple" :d="chartModels.paymentsSum12.lineD" />
+								<template v-if="hover.key === 'paymentsSum12' && chartModels.paymentsSum12.points.length">
+									<line class="spark__vline" :x1="chartModels.paymentsSum12.points[hover.idx].x" :x2="chartModels.paymentsSum12.points[hover.idx].x" :y1="0" :y2="chartModels.paymentsSum12.h" />
+									<circle class="spark__dot spark__dot--purple" :cx="chartModels.paymentsSum12.points[hover.idx].x" :cy="chartModels.paymentsSum12.points[hover.idx].y" r="3.0" />
+								</template>
+							</svg>
+							<div v-if="hover.key === 'paymentsSum12' && chartModels.paymentsSum12.points.length" class="spark__tooltip" :style="{ left: `${hover.x}px` }">
+								<div class="spark__tooltip-title">{{ formatLabel(chartModels.paymentsSum12.points[hover.idx].rawLabel, 'month') }}</div>
+								<div class="spark__tooltip-value">{{ fmtMoney(chartModels.paymentsSum12.points[hover.idx].v) }}</div>
+							</div>
+						</div>
 					</div>
 				</div>
 			</v-card>
@@ -630,10 +797,15 @@ const settingsSaveError = ref('');
 
 const trends = ref({
 	connections30d: [],
+	connections30d_labels: [],
 	registrations30d: [],
+	registrations30d_labels: [],
 	activeUsers30d: [],
+	activeUsers30d_labels: [],
 	totalUsers30d: [],
+	totalUsers30d_labels: [],
 	paymentsSum30d: [],
+	paymentsSum30d_labels: [],
 	paymentsSumToday: null,
 	connectionsToday: null,
 	registrationsToday: null,
@@ -643,8 +815,11 @@ const trends = ref({
 
 const year = ref({
 	registrations12m: [],
+	registrations12m_labels: [],
 	connections12m: [],
+	connections12m_labels: [],
 	paymentsSum12m: [],
+	paymentsSum12m_labels: [],
 });
 
 const events = ref({
@@ -670,6 +845,21 @@ const stats = ref({
 
 const statsOk = computed(() => Object.values(stats.value).some((v) => typeof v === 'number'));
 const widgetsOk = ref(false);
+
+const chartModels = computed(() => {
+	// Build once per render so hover logic stays consistent.
+	return {
+		connections30: buildChartModel(trends.value.connections30d, trends.value.connections30d_labels, 'day', 'compact'),
+		registrations30: buildChartModel(trends.value.registrations30d, trends.value.registrations30d_labels, 'day', 'compact'),
+		activeUsers30: buildChartModel(trends.value.activeUsers30d, trends.value.activeUsers30d_labels, 'day', 'compact'),
+		totalUsers30: buildChartModel(trends.value.totalUsers30d, trends.value.totalUsers30d_labels, 'day', 'compact'),
+		paymentsSum30: buildChartModel(trends.value.paymentsSum30d, trends.value.paymentsSum30d_labels, 'day', 'compact'),
+
+		registrations12: buildChartModel(year.value.registrations12m, year.value.registrations12m_labels, 'month', 'big'),
+		connections12: buildChartModel(year.value.connections12m, year.value.connections12m_labels, 'month', 'big'),
+		paymentsSum12: buildChartModel(year.value.paymentsSum12m, year.value.paymentsSum12m_labels, 'month', 'big'),
+	};
+});
 
 const alerts = computed(() => {
 	const out = [];
@@ -836,6 +1026,95 @@ function isoMonthStartFromNow(monthsBack = 11) {
 	return d.toISOString();
 }
 
+function parseDdMmYyyy(value) {
+	// Admin-widgets returns DD/MM/YYYY as a string.
+	const s = String(value || '');
+	const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(s);
+	if (!m) return null;
+	const dd = Number(m[1]);
+	const mm = Number(m[2]);
+	const yyyy = Number(m[3]);
+	if (!Number.isFinite(dd) || !Number.isFinite(mm) || !Number.isFinite(yyyy)) return null;
+	const d = new Date(Date.UTC(yyyy, mm - 1, dd, 0, 0, 0));
+	return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function formatLabel(label, period) {
+	const d = parseDdMmYyyy(label);
+	if (!d) return String(label || '—');
+	if (period === 'month') return d.toLocaleDateString('ru-RU', { month: 'short', year: 'numeric' });
+	return d.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' });
+}
+
+function statsFromSeries(series) {
+	const nums = (Array.isArray(series) ? series : []).map((v) => Number(v)).filter((v) => Number.isFinite(v));
+	if (!nums.length) return { sum: 0, avg: 0, max: 0 };
+	const sum = nums.reduce((a, b) => a + b, 0);
+	const avg = sum / nums.length;
+	const max = Math.max(...nums);
+	return { sum, avg, max };
+}
+
+function catmullRomPath(points) {
+	// points: [{x,y}] in viewBox coordinates
+	if (!Array.isArray(points) || points.length < 2) return '';
+	if (points.length === 2) return `M ${points[0].x} ${points[0].y} L ${points[1].x} ${points[1].y}`;
+	const p = points;
+	let d = `M ${p[0].x} ${p[0].y}`;
+	for (let i = 0; i < p.length - 1; i++) {
+		const p0 = p[i - 1] || p[i];
+		const p1 = p[i];
+		const p2 = p[i + 1];
+		const p3 = p[i + 2] || p2;
+		const cp1x = p1.x + (p2.x - p0.x) / 6;
+		const cp1y = p1.y + (p2.y - p0.y) / 6;
+		const cp2x = p2.x - (p3.x - p1.x) / 6;
+		const cp2y = p2.y - (p3.y - p1.y) / 6;
+		d += ` C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${p2.x} ${p2.y}`;
+	}
+	return d;
+}
+
+function buildChartModel(series, labels, period, variant = 'compact') {
+	const nums = (Array.isArray(series) ? series : []).map((v) => Number(v)).map((v) => (Number.isFinite(v) ? v : 0));
+	const lbs = Array.isArray(labels) ? labels.map((x) => String(x ?? '')) : [];
+	const n = nums.length;
+	const h = variant === 'big' ? 64 : 40;
+	const w = 100;
+	const padX = 2;
+	const padY = 4;
+	if (n === 0) {
+		return { w, h, n, points: [], lineD: '', areaD: '' };
+	}
+	const min = Math.min(...nums);
+	const max = Math.max(...nums);
+	const denom = max - min || 1;
+	const dx = n === 1 ? 0 : (w - padX * 2) / (n - 1);
+	const pts = nums.map((v, i) => {
+		const x = padX + i * dx;
+		const y = padY + (1 - (v - min) / denom) * (h - padY * 2);
+		return { x: Number(x.toFixed(3)), y: Number(y.toFixed(3)), v, rawLabel: lbs[i] || '' };
+	});
+	const lineD = n === 1 ? `M ${padX} ${pts[0].y} L ${w - padX} ${pts[0].y}` : catmullRomPath(pts);
+	const baseY = h - padY;
+	const areaD = `${lineD} L ${w - padX} ${baseY} L ${padX} ${baseY} Z`;
+	return { w, h, n, points: pts, lineD, areaD };
+}
+
+const hover = ref({ key: null, idx: 0, x: 0 });
+function onChartLeave(key) {
+	if (hover.value.key === key) hover.value = { key: null, idx: 0, x: 0 };
+}
+
+function onChartMove(evt, key, model) {
+	if (!model || !model.n) return;
+	const el = evt.currentTarget;
+	const rect = el.getBoundingClientRect();
+	const x = Math.max(0, Math.min(rect.width, evt.clientX - rect.left));
+	const idx = model.n === 1 ? 0 : Math.round((x / rect.width) * (model.n - 1));
+	hover.value = { key, idx, x };
+}
+
 async function fetchCount(collection, params = {}) {
 	const res = await api.get(`/items/${collection}`, {
 		params: { 'aggregate[count]': 'id', ...params },
@@ -869,8 +1148,9 @@ async function fetchWidgetSeries(endpoint, n = 30, opts = {}) {
 		const v = Number(row?.count);
 		return Number.isFinite(v) ? v : 0;
 	});
+	const labels = tail.map((row) => String(row?.date ?? ''));
 	const today = series.length ? series[series.length - 1] : null;
-	return { series, today };
+	return { series, labels, today, period };
 }
 
 async function fetchWidgetSumLastN(endpoint, n = 7) {
@@ -901,8 +1181,9 @@ async function fetchPaymentsSumSeries(n = 30, opts = {}) {
 		const v = Number(row?.total_amount);
 		return Number.isFinite(v) ? v : 0;
 	});
+	const labels = tail.map((row) => String(row?.date ?? ''));
 	const today = series.length ? series[series.length - 1] : null;
-	return { series, today };
+	return { series, labels, today, period };
 }
 
 async function fetchItems(collection, params = {}) {
@@ -1030,10 +1311,15 @@ async function refresh() {
 		stats.value = { totalUsers, activeTariffs, blockedUsers, processedPayments, connections7d, registrations7d };
 		trends.value = {
 			connections30d: connections30?.series || [],
+			connections30d_labels: connections30?.labels || [],
 			registrations30d: registrations30?.series || [],
+			registrations30d_labels: registrations30?.labels || [],
 			activeUsers30d: activeUsers30?.series || [],
+			activeUsers30d_labels: activeUsers30?.labels || [],
 			totalUsers30d: totalUsers30?.series || [],
+			totalUsers30d_labels: totalUsers30?.labels || [],
 			paymentsSum30d: payments30?.series || [],
+			paymentsSum30d_labels: payments30?.labels || [],
 			paymentsSumToday: payments30?.today ?? null,
 			connectionsToday: connections30?.today ?? null,
 			registrationsToday: registrations30?.today ?? null,
@@ -1042,8 +1328,11 @@ async function refresh() {
 		};
 		year.value = {
 			registrations12m: reg12m?.series || [],
+			registrations12m_labels: reg12m?.labels || [],
 			connections12m: conn12m?.series || [],
+			connections12m_labels: conn12m?.labels || [],
 			paymentsSum12m: pay12m?.series || [],
+			paymentsSum12m_labels: pay12m?.labels || [],
 		};
 		events.value = { users: Array.isArray(recentUsers) ? recentUsers : [], payments: Array.isArray(recentPayments) ? recentPayments : [], promo: Array.isArray(recentPromo) ? recentPromo : [] };
 		quick.value = {
@@ -1270,6 +1559,92 @@ onMounted(() => {
 	height: 120px;
 }
 
+.spark-wrap {
+	position: relative;
+	width: 100%;
+}
+
+.spark-wrap--big {
+	margin-top: 6px;
+}
+
+.spark.premium {
+	display: block;
+	border-radius: 10px;
+}
+
+.spark__area {
+	opacity: 0.95;
+}
+
+.spark__path {
+	fill: none;
+	stroke-width: 3;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+	filter: drop-shadow(0 6px 10px rgba(0, 0, 0, 0.35));
+}
+
+.spark__path--green {
+	stroke: rgba(16, 185, 129, 0.95);
+}
+
+.spark__path--blue {
+	stroke: rgba(59, 130, 246, 0.95);
+}
+
+.spark__path--purple {
+	stroke: rgba(139, 92, 246, 0.95);
+}
+
+.spark__vline {
+	stroke: rgba(255, 255, 255, 0.14);
+	stroke-width: 1;
+}
+
+.spark__dot {
+	stroke: rgba(0, 0, 0, 0.35);
+	stroke-width: 1;
+}
+
+.spark__dot--green {
+	fill: rgba(16, 185, 129, 1);
+}
+
+.spark__dot--blue {
+	fill: rgba(59, 130, 246, 1);
+}
+
+.spark__dot--purple {
+	fill: rgba(139, 92, 246, 1);
+}
+
+.spark__tooltip {
+	position: absolute;
+	top: -6px;
+	transform: translate(-50%, -100%);
+	padding: 8px 10px;
+	border-radius: 12px;
+	border: 1px solid rgba(255, 255, 255, 0.10);
+	background: rgba(15, 23, 42, 0.92);
+	backdrop-filter: blur(10px);
+	box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
+	pointer-events: none;
+	white-space: nowrap;
+	z-index: 5;
+}
+
+.spark__tooltip-title {
+	font-size: 11px;
+	opacity: 0.85;
+}
+
+.spark__tooltip-value {
+	margin-top: 2px;
+	font-weight: 800;
+	font-size: 13px;
+}
+
 .big {
 	display: grid;
 	grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
@@ -1288,6 +1663,7 @@ onMounted(() => {
 	justify-content: space-between;
 	align-items: center;
 	margin-bottom: 8px;
+	gap: 12px;
 }
 
 .big__label {
@@ -1296,6 +1672,16 @@ onMounted(() => {
 	gap: 8px;
 	font-weight: 650;
 	flex-wrap: wrap;
+}
+
+.big__meta {
+	display: flex;
+	gap: 10px;
+	align-items: baseline;
+	font-size: 12px;
+	opacity: 0.85;
+	flex-wrap: wrap;
+	justify-content: flex-end;
 }
 
 .spark__line {
