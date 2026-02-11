@@ -793,58 +793,179 @@ def ensure_nav_group_permissions(client: DirectusClient) -> None:
 
 
 def ensure_role_presets(client: DirectusClient) -> None:
-    # Bookmarks are optional but make UX significantly better for managers.
+    # Presets/bookmarks define the UX of listing pages (fields, widths, filters, sorts).
     role_map = get_role_map(client)
     manager = role_map.get("Manager")
     viewer = role_map.get("Viewer")
     if not manager and not viewer:
         return
 
-    # We'll create a couple of practical bookmarks with minimal structure (avoid layout brittleness).
-    bookmarks = []
-    if manager:
-        bookmarks += [
-            {
-                "bookmark": "Пользователи: заблокированные",
-                "role": manager["id"],
-                "collection": "users",
-                "layout": "tabular",
-                "filters": [{"key": "1", "field": "is_blocked", "operator": "eq", "value": True}],
-            },
-            {
-                "bookmark": "Промо: отключенные",
-                "role": manager["id"],
-                "collection": "promo_codes",
-                "layout": "tabular",
-                "filters": [{"key": "1", "field": "disabled", "operator": "eq", "value": True}],
-            },
-        ]
-    if viewer:
-        bookmarks += [
-            {
-                "bookmark": "Пользователи: последние",
-                "role": viewer["id"],
-                "collection": "users",
-                "layout": "tabular",
-                "layout_query": {"tabular": {"sort": "-registration_date"}},
-                "filters": [],
-            }
-        ]
-
-    # Keep idempotency: create only if missing.
     existing_resp = client.get("/presets", params={"limit": 1000})
     existing_resp.raise_for_status()
-    existing = {(p.get("role"), p.get("collection"), p.get("bookmark")) for p in existing_resp.json().get("data", [])}
+    existing = existing_resp.json().get("data", []) or []
 
-    for preset in bookmarks:
-        key = (preset.get("role"), preset.get("collection"), preset.get("bookmark"))
-        if key in existing:
-            continue
-        # Skip if collection doesn't exist (eg partner module not yet installed)
-        collection = preset.get("collection")
+    def upsert_preset(payload: Dict[str, Any]) -> None:
+        collection = payload.get("collection")
         if collection and client.get(f"/collections/{collection}").status_code != 200:
-            continue
-        client.post("/presets", json=preset).raise_for_status()
+            return
+
+        key = (
+            payload.get("role"),
+            payload.get("user"),
+            payload.get("collection"),
+            payload.get("bookmark"),
+        )
+        found = next(
+            (
+                p
+                for p in existing
+                if (
+                    p.get("role"),
+                    p.get("user"),
+                    p.get("collection"),
+                    p.get("bookmark"),
+                )
+                == key
+            ),
+            None,
+        )
+        if found:
+            client.patch(f"/presets/{found['id']}", json=payload).raise_for_status()
+            return
+        created = client.post("/presets", json=payload)
+        created.raise_for_status()
+        existing.append(created.json().get("data"))
+
+    users_tabular_fields = [
+        "username",
+        "full_name",
+        "balance",
+        "expired_at",
+        "hwid_limit",
+        "lte_gb_total",
+        "is_blocked",
+        "registration_date",
+    ]
+    users_widths = {
+        "username": 160,
+        "full_name": 220,
+        "balance": 110,
+        "expired_at": 160,
+        "hwid_limit": 150,
+        "lte_gb_total": 150,
+        "is_blocked": 130,
+        "registration_date": 170,
+    }
+
+    if manager:
+        rid = manager["id"]
+        # Default list view for users (role-level)
+        upsert_preset(
+            {
+                "bookmark": None,
+                "user": None,
+                "role": rid,
+                "collection": "users",
+                "layout": "tabular",
+                "layout_query": {"tabular": {"fields": users_tabular_fields, "sort": "-registration_date"}},
+                "layout_options": {"tabular": {"widths": users_widths}},
+                "search": None,
+                "filter": None,
+                "icon": "bookmark",
+                "color": None,
+            }
+        )
+        # Bookmarks: blocked users, cards view, disabled promo, latest payments.
+        upsert_preset(
+            {
+                "bookmark": "Пользователи: заблокированные",
+                "user": None,
+                "role": rid,
+                "collection": "users",
+                "layout": "tabular",
+                "layout_query": {"tabular": {"fields": users_tabular_fields, "sort": "-registration_date"}},
+                "layout_options": {"tabular": {"widths": users_widths}},
+                "filter": {"is_blocked": {"_eq": True}},
+                "icon": "bookmark",
+                "color": "#EF4444",
+            }
+        )
+        upsert_preset(
+            {
+                "bookmark": "Пользователи: карточки",
+                "user": None,
+                "role": rid,
+                "collection": "users",
+                "layout": "cards",
+                "layout_query": {"cards": {"sort": "-registration_date"}},
+                "layout_options": {
+                    "cards": {
+                        "title": "{{ username }}",
+                        "subtitle": "{{ full_name }}",
+                        "icon": "person",
+                        "size": 2,
+                    }
+                },
+                "filter": None,
+                "icon": "bookmark",
+                "color": "#3B82F6",
+            }
+        )
+        upsert_preset(
+            {
+                "bookmark": "Промо: отключенные",
+                "user": None,
+                "role": rid,
+                "collection": "promo_codes",
+                "layout": "tabular",
+                "layout_query": {
+                    "tabular": {
+                        "fields": ["name", "code_hmac", "disabled", "expires_at", "max_activations", "per_user_limit", "created_at"],
+                        "sort": "-created_at",
+                    }
+                },
+                "layout_options": {"tabular": {"widths": {"name": 180, "code_hmac": 260, "disabled": 120, "expires_at": 160}}},
+                "filter": {"disabled": {"_eq": True}},
+                "icon": "bookmark",
+                "color": "#F59E0B",
+            }
+        )
+        upsert_preset(
+            {
+                "bookmark": "Платежи: последние",
+                "user": None,
+                "role": rid,
+                "collection": "processed_payments",
+                "layout": "tabular",
+                "layout_query": {
+                    "tabular": {
+                        "fields": ["payment_id", "user_id", "amount", "status", "processed_at"],
+                        "sort": "-processed_at",
+                    }
+                },
+                "layout_options": {"tabular": {"widths": {"payment_id": 220, "user_id": 160, "amount": 120, "status": 140, "processed_at": 180}}},
+                "filter": None,
+                "icon": "bookmark",
+                "color": "#8B5CF6",
+            }
+        )
+
+    if viewer:
+        rid = viewer["id"]
+        upsert_preset(
+            {
+                "bookmark": None,
+                "user": None,
+                "role": rid,
+                "collection": "users",
+                "layout": "tabular",
+                "layout_query": {"tabular": {"fields": ["username", "full_name", "registration_date", "expired_at", "is_blocked"], "sort": "-registration_date"}},
+                "layout_options": {"tabular": {"widths": {"username": 180, "full_name": 240, "registration_date": 180, "expired_at": 160, "is_blocked": 130}}},
+                "filter": None,
+                "icon": "bookmark",
+                "color": None,
+            }
+        )
 
 
 def ensure_extension_enabled(client: DirectusClient, extension_name: str) -> None:
