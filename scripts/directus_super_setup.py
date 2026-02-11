@@ -795,9 +795,10 @@ def ensure_nav_group_permissions(client: DirectusClient) -> None:
 def ensure_role_presets(client: DirectusClient) -> None:
     # Presets/bookmarks define the UX of listing pages (fields, widths, filters, sorts).
     role_map = get_role_map(client)
+    admin_role = role_map.get("Administrator")
     manager = role_map.get("Manager")
     viewer = role_map.get("Viewer")
-    if not manager and not viewer:
+    if not admin_role and not manager and not viewer:
         return
 
     existing_resp = client.get("/presets", params={"limit": 1000})
@@ -857,8 +858,15 @@ def ensure_role_presets(client: DirectusClient) -> None:
         "registration_date": 170,
     }
 
+    # Prefer making presets available for Administrator too, because most real ops are done as admin.
+    target_roles: list[Dict[str, Any]] = []
+    if admin_role:
+        target_roles.append(admin_role)
     if manager:
-        rid = manager["id"]
+        target_roles.append(manager)
+
+    for role in target_roles:
+        rid = role["id"]
         # Default list view for users (role-level)
         upsert_preset(
             {
@@ -961,6 +969,27 @@ def ensure_role_presets(client: DirectusClient) -> None:
                 "layout": "tabular",
                 "layout_query": {"tabular": {"fields": ["username", "full_name", "registration_date", "expired_at", "is_blocked"], "sort": "-registration_date"}},
                 "layout_options": {"tabular": {"widths": {"username": 180, "full_name": 240, "registration_date": 180, "expired_at": 160, "is_blocked": 130}}},
+                "filter": None,
+                "icon": "bookmark",
+                "color": None,
+            }
+        )
+
+    # Also patch a default user-level preset for the current admin user
+    # to avoid conflicts with any existing personal presets.
+    me = client.get("/users/me", params={"fields": "id"}).json().get("data") or {}
+    me_id = me.get("id")
+    if me_id:
+        upsert_preset(
+            {
+                "bookmark": None,
+                "user": me_id,
+                "role": None,
+                "collection": "users",
+                "layout": "tabular",
+                "layout_query": {"tabular": {"fields": users_tabular_fields, "sort": "-registration_date"}},
+                "layout_options": {"tabular": {"widths": users_widths}},
+                "search": None,
                 "filter": None,
                 "icon": "bookmark",
                 "color": None,
