@@ -1147,17 +1147,69 @@ def ensure_role_presets(client: DirectusClient) -> None:
         new_layout_query = {**layout_query, "tabular": new_tabular}
         return new_layout_query
 
+    def ensure_cards_fields_include_pk(
+        preset: Dict[str, Any],
+        *,
+        pk_field: str = "id",
+        required_fields: Optional[list[str]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Same idea as tabular: cards list also needs a PK included in the fetched fields.
+        Without it, click-to-open item view can break and cards can render inconsistently.
+        """
+        layout_query = preset.get("layout_query")
+        if not isinstance(layout_query, dict):
+            return None
+        cards = layout_query.get("cards")
+        if not isinstance(cards, dict):
+            return None
+        fields = cards.get("fields")
+        if not isinstance(fields, list):
+            return None
+
+        # If the preset somehow got saved with an empty fields list, cards will look "blank".
+        # Rehydrate it with a minimal set.
+        if not fields:
+            fields = []
+
+        want: list[str] = []
+        if required_fields:
+            want.extend([f for f in required_fields if isinstance(f, str) and f])
+        want.append(pk_field)
+
+        changed = False
+        new_fields = list(fields)
+        for f in reversed(want):
+            if f not in new_fields:
+                new_fields.insert(0, f)
+                changed = True
+
+        if not changed:
+            return None
+
+        new_cards = {**cards, "fields": new_fields}
+        new_layout_query = {**layout_query, "cards": new_cards}
+        return new_layout_query
+
     # Auto-heal broken personal presets for `users`.
     # We normally avoid overwriting user-level presets, but missing PK breaks navigation entirely.
     for p in list(existing):
         if p.get("collection") != "users":
             continue
-        if p.get("layout") != "tabular":
-            continue
         preset_id = p.get("id")
         if not preset_id:
             continue
-        new_layout_query = ensure_tabular_fields_include_pk(p, pk_field="id")
+        layout = p.get("layout")
+        if layout == "tabular":
+            new_layout_query = ensure_tabular_fields_include_pk(p, pk_field="id")
+        elif layout == "cards":
+            new_layout_query = ensure_cards_fields_include_pk(
+                p,
+                pk_field="id",
+                required_fields=["username", "full_name"],
+            )
+        else:
+            continue
         if not new_layout_query:
             continue
         client.patch(f"/presets/{preset_id}", json={"layout_query": new_layout_query}).raise_for_status()
@@ -1299,7 +1351,8 @@ def ensure_role_presets(client: DirectusClient) -> None:
                 "layout_query": {
                     "cards": {
                         "sort": "-registration_date",
-                        "fields": ["username", "full_name", "expired_at", "lte_gb_total", "is_blocked", "registration_date"],
+                        # IMPORTANT: include PK; without it cards navigation can break.
+                        "fields": ["id", "username", "full_name", "expired_at", "lte_gb_total", "is_blocked", "registration_date"],
                     }
                 },
                 "layout_options": {
