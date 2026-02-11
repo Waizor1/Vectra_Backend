@@ -1200,8 +1200,12 @@ function buildChartModel(series, labels, period, variant = 'compact') {
 	if (n === 0) {
 		return { w, h, n, points: [], lineD: '', areaD: '' };
 	}
-	const min = Math.min(...nums);
-	const max = Math.max(...nums);
+	// For our metrics (counts / sums) negative values don't make sense; keeping a 0 baseline
+	// makes charts more readable and prevents "floating" areas when all values are > 0.
+	const min = 0;
+	const rawMax = Math.max(...nums, 0);
+	// Add a bit of headroom so peaks don't stick to the top and look like a thick bar.
+	const max = rawMax === 0 ? 1 : rawMax * 1.12;
 	const denom = max - min || 1;
 	const dx = n === 1 ? 0 : (w - padX * 2) / (n - 1);
 	const pts = nums.map((v, i) => {
@@ -1701,6 +1705,9 @@ onMounted(() => {
 .spark.premium {
 	display: block;
 	border-radius: 10px;
+	/* A subtle chart "window" (as in premium dashboards). */
+	background: linear-gradient(180deg, rgba(2, 6, 23, 0.28), rgba(2, 6, 23, 0.08));
+	border: 1px solid rgba(255, 255, 255, 0.06);
 }
 
 .spark__area {
@@ -1710,11 +1717,17 @@ onMounted(() => {
 .spark__path {
 	fill: none;
 	/* Keep it thin; stroke is now 1:1 with CSS thanks to viewBox height fix. */
-	stroke-width: 2.25;
+	stroke-width: 2;
 	stroke-linecap: round;
 	stroke-linejoin: round;
 	/* Subtle, premium depth instead of heavy blur. */
 	filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.22));
+	/* Prevent stroke from scaling if SVG ever gets resized. */
+	vector-effect: non-scaling-stroke;
+}
+
+.spark--big .spark__path {
+	stroke-width: 1.9;
 }
 
 .spark__path--green {
@@ -1731,11 +1744,17 @@ onMounted(() => {
 
 .spark__glow {
 	fill: none;
-	stroke-width: 6;
+	stroke-width: 5;
 	stroke-linecap: round;
 	stroke-linejoin: round;
-	opacity: 0.16;
+	opacity: 0.14;
 	filter: blur(0.6px);
+	vector-effect: non-scaling-stroke;
+}
+
+.spark--big .spark__glow {
+	stroke-width: 4.5;
+	opacity: 0.12;
 }
 
 .spark__glow--green {
@@ -1753,17 +1772,20 @@ onMounted(() => {
 .spark__vline {
 	stroke: rgba(255, 255, 255, 0.14);
 	stroke-width: 1;
+	vector-effect: non-scaling-stroke;
 }
 
 .spark__dot-ring {
 	fill: rgba(15, 23, 42, 0.65);
 	stroke: rgba(255, 255, 255, 0.20);
 	stroke-width: 1;
+	vector-effect: non-scaling-stroke;
 }
 
 .spark__dot {
 	stroke: rgba(255, 255, 255, 0.18);
 	stroke-width: 0.8;
+	vector-effect: non-scaling-stroke;
 }
 
 .spark__dot--green {
