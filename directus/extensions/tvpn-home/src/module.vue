@@ -1065,24 +1065,31 @@ onMounted(() => {
 :deep(.private-view__content) {
 	max-width: none !important;
 	width: 100% !important;
+	/* На некоторых брейкпоинтах Directus центрирует контент и не растягивает children */
+	justify-content: stretch !important;
+	justify-items: stretch !important;
+	align-items: stretch !important;
 }
 
 :deep(.private-view__content > *) {
 	max-width: none !important;
+	width: 100% !important;
 }
 
 .page {
 	padding: 16px 20px;
 	max-width: 100%;
 	display: grid;
-	grid-template-columns: minmax(520px, 1fr) 380px;
+	grid-template-columns: minmax(0, 1fr) 380px;
 	gap: 12px;
 	align-items: start;
 	width: 100%;
+	min-width: 0;
 }
 
 .page > * {
 	grid-column: 1;
+	min-width: 0;
 }
 
 .page > .layout {
@@ -1091,6 +1098,7 @@ onMounted(() => {
 	position: sticky;
 	top: 12px;
 	align-self: start;
+	min-width: 0;
 }
 
 .hero {
@@ -1612,7 +1620,13 @@ onMounted(() => {
 	background: rgba(59, 130, 246, 0.14);
 }
 
-@media (max-width: 980px) {
+@media (max-width: 1280px) {
+	.page {
+		grid-template-columns: minmax(0, 1fr) 340px;
+	}
+}
+
+@media (max-width: 1024px) {
 	.page {
 		grid-template-columns: 1fr;
 	}
