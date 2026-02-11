@@ -1091,6 +1091,7 @@ onMounted(() => {
 	display: grid;
 	gap: 12px;
 	min-width: 0;
+	align-items: stretch;
 }
 
 .page__side {
@@ -1100,6 +1101,7 @@ onMounted(() => {
 	top: 12px;
 	align-self: start;
 	min-width: 0;
+	align-items: stretch;
 }
 
 .hero {
@@ -1164,8 +1166,10 @@ onMounted(() => {
 
 .trends {
 	display: grid;
-	grid-template-columns: repeat(2, minmax(0, 1fr));
+	grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
 	gap: 12px;
+	width: 100%;
+	min-width: 0;
 }
 
 .trend {
@@ -1173,6 +1177,8 @@ onMounted(() => {
 	border-radius: 12px;
 	border: 1px solid rgba(255, 255, 255, 0.06);
 	background: rgba(255, 255, 255, 0.03);
+	width: 100%;
+	min-width: 0;
 }
 
 .trend__head {
@@ -1196,6 +1202,8 @@ onMounted(() => {
 	align-items: baseline;
 	font-size: 12px;
 	opacity: 0.85;
+	flex-wrap: wrap;
+	min-width: 0;
 }
 
 .trend__meta-label {
@@ -1391,6 +1399,9 @@ onMounted(() => {
 	padding: 14px;
 	border-radius: 12px;
 	overflow: hidden;
+	width: 100%;
+	box-sizing: border-box;
+	justify-self: stretch;
 }
 
 .panel__title {
