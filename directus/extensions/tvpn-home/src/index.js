@@ -99,6 +99,7 @@ function injectTvpnHomeFullWidthLayoutFix() {
 
 	const STYLE_ID = 'tvpn-home-fullwidth-layout-style';
 	const ACTIVE_CLASS = 'tvpn-home-route-active';
+	const MAX_PARENT_HOPS = 10;
 
 	function isTvpnHomeRoute() {
 		// Support custom subpaths: /something/admin/tvpn-home
@@ -125,11 +126,39 @@ function injectTvpnHomeFullWidthLayoutFix() {
 		document.head.appendChild(style);
 	}
 
+	function applyInlineBreakout() {
+		// Some Directus versions wrap module content in centered, max-width containers.
+		// We can't "select parents" in CSS, so remove constraints by walking up from `.page`.
+		const page = document.querySelector('.page');
+		if (!page) return;
+
+		let el = page.parentElement;
+		let hops = 0;
+		while (el && hops < MAX_PARENT_HOPS && el !== document.body && el !== document.documentElement) {
+			const cs = window.getComputedStyle(el);
+
+			// Remove width constraints.
+			if (cs.maxWidth && cs.maxWidth !== 'none') el.style.maxWidth = 'none';
+			el.style.width = '100%';
+
+			// If container is centered via auto margins, uncenter it.
+			if (cs.marginLeft === 'auto') el.style.marginLeft = '0';
+			if (cs.marginRight === 'auto') el.style.marginRight = '0';
+
+			el = el.parentElement;
+			hops += 1;
+		}
+	}
+
 	function updateActiveFlag() {
 		const root = document.documentElement;
 		if (!root) return;
-		if (isTvpnHomeRoute()) root.classList.add(ACTIVE_CLASS);
+		const active = isTvpnHomeRoute();
+		if (active) root.classList.add(ACTIVE_CLASS);
 		else root.classList.remove(ACTIVE_CLASS);
+
+		// Apply breakout after route changes/render.
+		if (active) window.setTimeout(applyInlineBreakout, 0);
 	}
 
 	ensureStyle();
@@ -138,9 +167,14 @@ function injectTvpnHomeFullWidthLayoutFix() {
 	// Directus is an SPA; watch route changes cheaply.
 	let lastPath = window.location.pathname;
 	window.setInterval(() => {
-		if (window.location.pathname === lastPath) return;
-		lastPath = window.location.pathname;
-		updateActiveFlag();
+		const current = window.location.pathname;
+		if (current !== lastPath) {
+			lastPath = current;
+			updateActiveFlag();
+			return;
+		}
+		// Also re-apply breakout in case Directus re-rendered wrappers.
+		if (document.documentElement?.classList?.contains(ACTIVE_CLASS)) applyInlineBreakout();
 	}, 250);
 }
 
