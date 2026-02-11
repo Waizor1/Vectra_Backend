@@ -712,79 +712,167 @@ def apply_users_form_ux(client: DirectusClient) -> None:
     - predictable ordering for key ops fields
     """
 
-    # Readonly by legacy admin (FastAdmin): keep id + core identity immutable.
+    # Readonly by legacy admin (FastAdmin): keep identity/audit immutable.
     readonly_fields = {
         "id",
         "registration_date",
+        "created_at",
         "activation_date",
         "referrals",
+        "referral_bonus_days_total",
+        "referral_first_payment_rewarded",
         "username",
         "full_name",
+        "used_trial",
+        "remnawave_uuid",
+        "connected_at",
+        "last_hwid_reset",
+        "last_failed_message_at",
+        "failed_message_count",
+        "familyurl",
     }
 
-    # Widths: help the item form become "dashboard-like" and less vertical.
+    # Widths: keep the form compact and scannable on wide displays.
     widths = {
-        "id": "half",
+        "id": "quarter",
         "username": "half",
         "full_name": "half",
         "email": "half",
+        "language_code": "quarter",
+        "utm": "half",
+        "renew_id": "half",
+        "created_at": "half",
         "registration_date": "half",
         "activation_date": "half",
+        "connected_at": "half",
         "expired_at": "half",
         "balance": "quarter",
         "lte_gb_total": "quarter",
         "hwid_limit": "quarter",
+        "prize_wheel_attempts": "quarter",
+        "active_tariff": "half",
+        "is_registered": "quarter",
+        "is_subscribed": "quarter",
+        "is_trial": "quarter",
+        "used_trial": "quarter",
         "is_blocked": "quarter",
         "blocked_at": "half",
+        "last_failed_message_at": "half",
+        "failed_message_count": "quarter",
         "is_partner": "quarter",
         "custom_referral_percent": "quarter",
-        "prize_wheel_attempts": "quarter",
-        "is_registered": "quarter",
+        "referred_by": "quarter",
+        "referrals": "quarter",
+        "referral_bonus_days_total": "quarter",
+        "referral_first_payment_rewarded": "quarter",
+        "referred_users_list": "full",
+        "active_tariffs_list": "full",
+        "promo_usages_list": "full",
+        "notification_marks_list": "full",
+        "family_devices_list": "full",
+        "partner_withdrawals_list": "full",
+        "partner_earnings_list": "full",
+        "family_audit_logs_owner": "full",
         "remnawave_uuid": "half",
-        "active_tariff": "half",
+        "last_hwid_reset": "half",
+        "familyurl": "half",
     }
 
     groups = {
-        # "App-like" sections for faster scanning/editing.
-        "id": "Основное",
-        "username": "Основное",
-        "full_name": "Основное",
-        "email": "Основное",
-        "registration_date": "Основное",
-        "activation_date": "Основное",
+        # Profile / identity
+        "id": "Профиль",
+        "username": "Профиль",
+        "full_name": "Профиль",
+        "email": "Профиль",
+        "language_code": "Профиль",
+        "created_at": "Профиль",
+        "registration_date": "Профиль",
+        "activation_date": "Профиль",
+        "connected_at": "Профиль",
+        "utm": "Профиль",
+        "renew_id": "Профиль",
+        # Subscription / access
         "expired_at": "Подписка",
         "is_registered": "Подписка",
+        "is_subscribed": "Подписка",
+        "is_trial": "Подписка",
+        "used_trial": "Подписка",
         "active_tariff": "Подписка",
+        # Money / limits
         "balance": "Финансы",
         "lte_gb_total": "Лимиты",
         "hwid_limit": "Лимиты",
+        "prize_wheel_attempts": "Лимиты",
+        # Communication / status
         "is_blocked": "Статус",
         "blocked_at": "Статус",
-        "prize_wheel_attempts": "Операции",
+        "last_failed_message_at": "Статус",
+        "failed_message_count": "Статус",
+        # Referral
         "is_partner": "Партнерка",
         "custom_referral_percent": "Партнерка",
+        "referred_by": "Партнерка",
+        "referrals": "Партнерка",
+        "referral_bonus_days_total": "Партнерка",
+        "referral_first_payment_rewarded": "Партнерка",
+        "referred_users_list": "Связи и логи",
+        "active_tariffs_list": "Связи и логи",
+        "promo_usages_list": "Связи и логи",
+        "notification_marks_list": "Связи и логи",
+        "family_devices_list": "Связи и логи",
+        "partner_withdrawals_list": "Связи и логи",
+        "partner_earnings_list": "Связи и логи",
+        "family_audit_logs_owner": "Связи и логи",
+        # Technical / integration
         "remnawave_uuid": "Техника",
+        "last_hwid_reset": "Техника",
+        "familyurl": "Техника",
     }
 
     # Sort order (best-effort): smaller number = higher on the form.
     sort = {
-        "username": 10,
-        "full_name": 11,
-        "email": 12,
-        "registration_date": 20,
-        "activation_date": 21,
-        "expired_at": 22,
-        "balance": 30,
-        "lte_gb_total": 31,
-        "hwid_limit": 32,
-        "active_tariff": 33,
-        "is_registered": 40,
-        "is_blocked": 41,
-        "blocked_at": 42,
-        "is_partner": 50,
-        "custom_referral_percent": 51,
-        "prize_wheel_attempts": 60,
-        "remnawave_uuid": 70,
+        "id": 10,
+        "username": 11,
+        "full_name": 12,
+        "email": 13,
+        "language_code": 14,
+        "created_at": 15,
+        "registration_date": 16,
+        "activation_date": 17,
+        "connected_at": 18,
+        "utm": 19,
+        "renew_id": 20,
+        "expired_at": 30,
+        "active_tariff": 31,
+        "is_registered": 32,
+        "is_subscribed": 33,
+        "is_trial": 34,
+        "used_trial": 35,
+        "balance": 40,
+        "lte_gb_total": 41,
+        "hwid_limit": 42,
+        "prize_wheel_attempts": 43,
+        "is_blocked": 50,
+        "blocked_at": 51,
+        "last_failed_message_at": 52,
+        "failed_message_count": 53,
+        "is_partner": 60,
+        "custom_referral_percent": 61,
+        "referred_by": 62,
+        "referrals": 63,
+        "referral_bonus_days_total": 64,
+        "referral_first_payment_rewarded": 65,
+        "referred_users_list": 66,
+        "active_tariffs_list": 67,
+        "promo_usages_list": 68,
+        "notification_marks_list": 69,
+        "family_devices_list": 70,
+        "partner_withdrawals_list": 71,
+        "partner_earnings_list": 72,
+        "family_audit_logs_owner": 73,
+        "remnawave_uuid": 80,
+        "last_hwid_reset": 81,
+        "familyurl": 82,
     }
 
     for field, width in widths.items():
@@ -840,24 +928,231 @@ def ensure_users_presentation_dividers(client: DirectusClient) -> None:
             return
         resp.raise_for_status()
 
-    # Keep divider sort values between field blocks we already sorted in apply_users_form_ux().
-    ensure_divider("ui_divider_overview", "Основное", "person", 1)
-    ensure_divider("ui_divider_subscription", "Подписка", "event", 19)
-    ensure_divider("ui_divider_limits", "Лимиты", "tune", 29)
-    ensure_divider("ui_divider_status", "Статус", "shield", 39)
-    ensure_divider("ui_divider_partner", "Партнерка", "groups", 49)
-    ensure_divider("ui_divider_ops", "Операции", "handyman", 59)
+    # Keep divider sort values between field blocks sorted in apply_users_form_ux().
+    ensure_divider("ui_divider_profile", "Профиль", "person", 1)
+    ensure_divider("ui_divider_subscription", "Подписка", "event", 29)
+    ensure_divider("ui_divider_finance", "Финансы и лимиты", "payments", 39)
+    ensure_divider("ui_divider_status", "Статусы и доставка", "shield", 49)
+    ensure_divider("ui_divider_partner", "Партнерка", "groups", 59)
+    ensure_divider("ui_divider_relations", "Связи и логи", "timeline", 66)
     ensure_divider("ui_divider_tech", "Техника", "settings", 69)
 
     # Improve interfaces for key fields (best-effort).
     # If a field doesn't exist in the current instance, patch_field_meta will safely skip.
     patch_field_meta(client, "users", "is_blocked", {"interface": "toggle", "options": {"label": "Заблокирован"}})
+    patch_field_meta(client, "users", "is_registered", {"interface": "toggle", "options": {"label": "Зарегистрирован"}})
+    patch_field_meta(client, "users", "is_subscribed", {"interface": "toggle", "options": {"label": "Подписан"}})
+    patch_field_meta(client, "users", "is_trial", {"interface": "toggle", "options": {"label": "Триал"}})
+    patch_field_meta(client, "users", "used_trial", {"interface": "toggle", "options": {"label": "Триал использован"}})
     patch_field_meta(client, "users", "is_partner", {"interface": "toggle", "options": {"label": "Партнер"}})
+    patch_field_meta(
+        client,
+        "users",
+        "referred_by",
+        {
+            "interface": "id-link-editor",
+            "options": {"collection": "users", "openInNewTab": False},
+            "group": "Партнерка",
+            "sort": 62,
+            "note": "Чей реферал: можно быстро перейти к карточке связанного пользователя.",
+        },
+    )
+    patch_field_meta(
+        client,
+        "users",
+        "active_tariff",
+        {
+            "interface": "id-link-editor",
+            "options": {"collection": "active_tariffs", "openInNewTab": False},
+        },
+    )
+    patch_field_meta(
+        client,
+        "users",
+        "active_tariff_id",
+        {
+            "interface": "id-link-editor",
+            "options": {"collection": "active_tariffs", "openInNewTab": False},
+        },
+    )
     patch_field_meta(client, "users", "expired_at", {"interface": "datetime", "options": {"use24": True, "includeSeconds": False}})
+    patch_field_meta(client, "users", "created_at", {"interface": "datetime", "options": {"use24": True, "includeSeconds": False}})
     patch_field_meta(client, "users", "registration_date", {"interface": "datetime", "options": {"use24": True, "includeSeconds": False}})
     patch_field_meta(client, "users", "activation_date", {"interface": "datetime", "options": {"use24": True, "includeSeconds": False}})
+    patch_field_meta(client, "users", "connected_at", {"interface": "datetime", "options": {"use24": True, "includeSeconds": False}})
     patch_field_meta(client, "users", "blocked_at", {"interface": "datetime", "options": {"use24": True, "includeSeconds": False}})
+    patch_field_meta(client, "users", "last_hwid_reset", {"interface": "datetime", "options": {"use24": True, "includeSeconds": False}})
+    patch_field_meta(client, "users", "last_failed_message_at", {"interface": "datetime", "options": {"use24": True, "includeSeconds": False}})
     patch_field_meta(client, "users", "custom_referral_percent", {"interface": "slider", "options": {"min": 0, "max": 100, "step": 1, "alwaysShowValue": True}})
+
+
+def ensure_users_relations_ux(client: DirectusClient) -> None:
+    """
+    Turn users card into a true "workspace":
+    - clickable m2o for referred_by
+    - embedded o2m blocks for key activity/log collections
+    """
+
+    if client.get("/collections/users").status_code != 200:
+        return
+
+    def get_relation_item(many_collection: str, many_field: str) -> Optional[Dict[str, Any]]:
+        resp = client.get(
+            "/items/directus_relations",
+            params={
+                "filter[many_collection][_eq]": many_collection,
+                "filter[many_field][_eq]": many_field,
+                "limit": 1,
+            },
+        )
+        if resp.status_code in (401, 403):
+            return None
+        resp.raise_for_status()
+        rows = resp.json().get("data") or []
+        if not rows:
+            return None
+        row = rows[0]
+        if not isinstance(row, dict):
+            return None
+        return row
+
+    def ensure_relation(
+        *,
+        many_collection: str,
+        many_field: str,
+        one_collection: str,
+        one_field: str,
+        one_deselect_action: str = "nullify",
+        create_if_missing: bool = False,
+    ) -> bool:
+        relation = get_relation_item(many_collection, many_field)
+        if relation:
+            relation_id = relation.get("id")
+            if relation_id is None:
+                return False
+            resp = client.patch(
+                f"/items/directus_relations/{relation_id}",
+                json={
+                    "one_collection": one_collection,
+                    "one_field": one_field,
+                    "one_deselect_action": one_deselect_action,
+                },
+            )
+            if resp.status_code in (400, 401, 403, 404):
+                return False
+            if not resp.ok:
+                return False
+            return True
+
+        if not create_if_missing:
+            return False
+
+        created = client.post(
+            "/items/directus_relations",
+            json={
+                "many_collection": many_collection,
+                "many_field": many_field,
+                "one_collection": one_collection,
+                "one_field": one_field,
+                "one_deselect_action": one_deselect_action,
+            },
+        )
+        if created.status_code in (400, 401, 403, 404):
+            return False
+        # 409 => already exists / race, consider it success.
+        if created.status_code == 409:
+            return True
+        if not created.ok:
+            return False
+        return True
+
+    def ensure_alias_o2m_field(alias_field: str, title: str, sort: int, template: str = "{{id}}") -> None:
+        meta = {
+            "interface": "list-o2m",
+            "options": {"template": template},
+            "display": "related-values",
+            "width": "full",
+            "sort": sort,
+            "group": "Связи и логи",
+            "note": title,
+            "translations": [{"language": "ru-RU", "translation": title}],
+        }
+        resp = client.patch(
+            "/fields/users/" + alias_field,
+            json={"special": ["o2m"], "meta": meta},
+        )
+        if resp.status_code == 404:
+            created = client.post(
+                "/fields/users",
+                json={
+                    "field": alias_field,
+                    "type": "alias",
+                    "schema": None,
+                    "special": ["o2m"],
+                    "meta": meta,
+                },
+            )
+            if created.status_code in (401, 403):
+                return
+            if created.status_code == 409:
+                return
+            created.raise_for_status()
+            return
+        if resp.status_code in (401, 403):
+            return
+        resp.raise_for_status()
+
+    # Self-reference for "Чей реферал": make it clickable m2o in the form.
+    referred_rel_ok = ensure_relation(
+        many_collection="users",
+        many_field="referred_by",
+        one_collection="users",
+        one_field="referred_users_list",
+        one_deselect_action="nullify",
+        create_if_missing=True,
+    )
+    if referred_rel_ok:
+        patch_field_meta(
+            client,
+            "users",
+            "referred_by",
+            {
+                "interface": "select-dropdown-m2o",
+                "display": "related-values",
+                "note": "Чей реферал: можно открыть и сразу перейти в карточку родителя.",
+                "readonly": False,
+                "group": "Партнерка",
+                "sort": 62,
+            },
+        )
+        ensure_alias_o2m_field("referred_users_list", "Рефералы пользователя", 66, "{{id}} — {{username}} — {{full_name}}")
+    elif client.get("/fields/users/referred_users_list").status_code == 200:
+        ensure_alias_o2m_field("referred_users_list", "Рефералы пользователя", 66, "{{id}} — {{username}} — {{full_name}}")
+
+    # Existing business relations -> embedded logs/history inside user card.
+    relation_specs = [
+        ("active_tariffs", "user_id", "active_tariffs_list", "История активных тарифов", 67, "{{id}} — {{name}} — LTE {{lte_gb_used}}/{{lte_gb_total}}"),
+        ("promo_usages", "user_id", "promo_usages_list", "Использование промокодов", 68, "{{id}} — {{used_at}}"),
+        ("notification_marks", "user_id", "notification_marks_list", "Логи уведомлений", 69, "{{id}} — {{type}} — {{sent_at}}"),
+        ("family_devices", "user_id", "family_devices_list", "Устройства семьи", 70, "{{id}} — {{device_name}}"),
+        ("partner_withdrawals", "owner_id", "partner_withdrawals_list", "Выводы партнера", 71, "{{id}} — {{status}} — {{amount}}"),
+        ("partner_earnings", "partner_id", "partner_earnings_list", "Начисления партнера", 72, "{{id}} — {{amount}} — {{created_at}}"),
+        ("family_audit_logs", "owner_id", "family_audit_logs_owner", "Аудит семьи", 73, "{{id}} — {{action}} — {{created_at}}"),
+    ]
+    for many_collection, many_field, one_field, title, sort, template in relation_specs:
+        rel_ok = ensure_relation(
+            many_collection=many_collection,
+            many_field=many_field,
+            one_collection="users",
+            one_field=one_field,
+            one_deselect_action="nullify",
+            create_if_missing=False,
+        )
+        # If relation metadata update is blocked in this environment but alias field
+        # already exists, still enforce o2m interface for better in-form UX.
+        alias_exists = client.get(f"/fields/users/{one_field}").status_code == 200
+        if rel_ok or alias_exists:
+            ensure_alias_o2m_field(one_field, title, sort, template)
 
 
 def set_language_ru(client: DirectusClient) -> None:
@@ -877,7 +1172,14 @@ def ensure_permissions_baseline(client: DirectusClient) -> None:
     # explicitly has system permissions. We grant them to the Administrator policy.
     admin_policy_id = get_policy_id_by_name(client, "Administrator")
     if admin_policy_id:
-        for collection in ("directus_policies", "directus_roles", "directus_permissions", "directus_access"):
+        for collection in (
+            "directus_policies",
+            "directus_roles",
+            "directus_permissions",
+            "directus_access",
+            "directus_relations",
+            "directus_fields",
+        ):
             for action in ("read", "create", "update", "delete"):
                 ensure_permission(client, admin_policy_id, collection, action)
 
@@ -914,9 +1216,10 @@ def ensure_permissions_baseline(client: DirectusClient) -> None:
         app_access=True,
     )
 
-    # Administrator typically has admin_access via its policy; don't spam-create permissions.
-    # Still, we keep the role around as a sanity check.
-    _ = admin_role_id
+    # Some Directus setups can still fail item view navigation without explicit
+    # read permission rows on business collections (even for admin-like roles).
+    # Keep this explicit to avoid "list works, card doesn't open" regressions.
+    admin_policy_id = get_policy_id_by_name(client, "Administrator") or get_primary_policy_id_for_role(client, admin_role_id)
 
     existing_collections = set(list_collections(client))
 
@@ -943,11 +1246,33 @@ def ensure_permissions_baseline(client: DirectusClient) -> None:
         "connections",
         "processed_payments",
     }
+    admin_rw = {
+        "users",
+        "active_tariffs",
+        "tariffs",
+        "promo_batches",
+        "promo_codes",
+        "promo_usages",
+        "prize_wheel_config",
+        "prize_wheel_history",
+        "connections",
+        "processed_payments",
+        # Partners (optional)
+        "partner_withdrawals",
+        "partner_qr_codes",
+        "partner_earnings",
+    }
 
     # Narrow to collections that actually exist in the current instance.
     manager_rw = {c for c in manager_rw if c in existing_collections}
     manager_ro = {c for c in manager_ro if c in existing_collections}
     viewer_ro = {c for c in viewer_ro if c in existing_collections}
+    admin_rw = {c for c in admin_rw if c in existing_collections}
+
+    if admin_policy_id:
+        for collection in sorted(admin_rw):
+            for action in ("read", "create", "update", "delete"):
+                ensure_permission(client, admin_policy_id, collection, action)
 
     for collection in sorted(manager_rw):
         for action in ("read", "create", "update", "delete"):
@@ -1490,6 +1815,33 @@ def ensure_extension_enabled(client: DirectusClient, extension_name: str) -> Non
     client.patch(f"/extensions/{ext_id}", json={"meta": {"enabled": True}}).raise_for_status()
 
 
+def verify_users_item_access(client: DirectusClient) -> None:
+    """
+    Diagnostic guard:
+    list view can work while item view is forbidden due policy mismatch.
+    """
+    sample_resp = client.get("/items/users", params={"limit": 1, "fields": "id"})
+    if sample_resp.status_code in (401, 403):
+        print("WARN: users list access is forbidden for the current auth context.")
+        return
+    sample_resp.raise_for_status()
+    rows = sample_resp.json().get("data") or []
+    if not rows:
+        return
+    sample_id = rows[0].get("id")
+    if sample_id is None:
+        print("WARN: users list returned rows without id.")
+        return
+    item_resp = client.get(f"/items/users/{sample_id}", params={"fields": "id"})
+    if item_resp.status_code in (401, 403):
+        print(
+            "WARN: users item view is forbidden while list is available. "
+            "Check role/policy links in Directus Access."
+        )
+        return
+    item_resp.raise_for_status()
+
+
 def main() -> None:
     if load_dotenv:
         load_dotenv()
@@ -1508,12 +1860,15 @@ def main() -> None:
     apply_collection_ux(client)
     apply_field_notes_ru(client)
     apply_users_form_ux(client)
+    ensure_users_relations_ux(client)
     ensure_users_presentation_dividers(client)
     ensure_admin_settings(client)
     ensure_insights_dashboard(client)
     ensure_role_presets(client)
+    verify_users_item_access(client)
     # Enable optional app extensions if they are present on disk
     ensure_extension_enabled(client, "tvpn-home")
+    ensure_extension_enabled(client, "id-link-editor")
 
     print("Directus super-setup completed successfully.")
 
