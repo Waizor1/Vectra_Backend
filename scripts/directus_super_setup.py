@@ -1157,7 +1157,11 @@ def ensure_role_presets(client: DirectusClient) -> None:
         created.raise_for_status()
         existing.append(created.json().get("data"))
 
+    # IMPORTANT: always include the primary key in tabular fields.
+    # If `id` is missing, Directus list rows come back without PK and
+    # selection checkboxes can behave as "select all" (all rows share undefined PK).
     users_tabular_fields = [
+        "id",
         "username",
         "full_name",
         "balance",
@@ -1168,6 +1172,7 @@ def ensure_role_presets(client: DirectusClient) -> None:
         "registration_date",
     ]
     users_widths = {
+        "id": 140,
         "username": 160,
         "full_name": 220,
         "balance": 110,
@@ -1339,8 +1344,8 @@ def ensure_role_presets(client: DirectusClient) -> None:
                 "role": rid,
                 "collection": "users",
                 "layout": "tabular",
-                "layout_query": {"tabular": {"fields": ["username", "full_name", "registration_date", "expired_at", "is_blocked"], "sort": "-registration_date"}},
-                "layout_options": {"tabular": {"widths": {"username": 180, "full_name": 240, "registration_date": 180, "expired_at": 160, "is_blocked": 130}}},
+                "layout_query": {"tabular": {"fields": ["id", "username", "full_name", "registration_date", "expired_at", "is_blocked"], "sort": "-registration_date"}},
+                "layout_options": {"tabular": {"widths": {"id": 140, "username": 180, "full_name": 240, "registration_date": 180, "expired_at": 160, "is_blocked": 130}}},
                 "filter": None,
                 "icon": "bookmark",
                 "color": None,

@@ -29,6 +29,12 @@ except ImportError:  # pragma: no cover
     from bloobcat.bot.notifications.general.referral import on_referral_payment
 
     on_referral_friend_bonus = None  # type: ignore[assignment]
+
+# Partner cashback notifications are optional (safe to stub in tests).
+try:
+    from bloobcat.bot.notifications.partner.earning import notify_partner_earning
+except ImportError:  # pragma: no cover
+    notify_partner_earning = None  # type: ignore[assignment]
 from bloobcat.bot.notifications.subscription.renewal import (
     notify_auto_renewal_success_balance,
     notify_auto_renewal_failure,
@@ -314,6 +320,25 @@ async def _award_partner_cashback(
 
         # Update partner available balance (atomic).
         await Users.filter(id=referrer.id).update(balance=F("balance") + int(reward))
+
+        # Notify partner in bot (best-effort; do not fail payment processing).
+        if notify_partner_earning is not None:
+            try:
+                await notify_partner_earning(
+                    partner=referrer,
+                    referral=referral_user,
+                    amount_total_rub=int(amount_rub_total),
+                    reward_rub=int(reward),
+                    percent=int(percent),
+                    source=str(source),
+                    qr_title=(getattr(qr, "title", None) if qr else None),
+                )
+            except Exception as e_notify_partner:
+                logger.warning(
+                    "Partner cashback notification failed for payment %s: %s",
+                    payment_id,
+                    e_notify_partner,
+                )
     except Exception as e:
         logger.warning("Partner cashback award failed for payment %s: %s", payment_id, e)
 
@@ -601,6 +626,64 @@ async def _apply_succeeded_payment_fallback(yk_payment, user: Users, meta: dict)
         amount_from_balance=float(amount_from_balance),
         status="succeeded",
     )
+
+    # Apply referral rewards / partner cashback that normally happen in webhook.
+    # This is critical for the "webhook didn't arrive" scenario: otherwise partners won't see earnings,
+    # and neither side gets referral bonus notifications.
+    try:
+        amount_total_rub = int(_round_rub(total_amount))
+    except Exception:
+        amount_total_rub = int(total_amount) if total_amount else 0
+
+    # Partner cashback (RUB) for partners.
+    try:
+        await _award_partner_cashback(
+            payment_id=str(pid),
+            referral_user=user,
+            amount_rub_total=int(amount_total_rub),
+        )
+    except Exception:
+        # Keep fallback resilient: this must not block subscription activation.
+        pass
+
+    # Referral rewards (days-based) for standard referral program.
+    if getattr(user, "referred_by", 0):
+        try:
+            reward_res = await _apply_referral_first_payment_reward(
+                referred_user_id=user.id,
+                payment_id=str(pid),
+                amount_rub=int(amount_total_rub) if amount_total_rub else None,
+                months=int(months or 0),
+                device_count=int(device_count or 1),
+            )
+            if reward_res.get("applied"):
+                referrer = await Users.get(id=int(reward_res["referrer_id"]))
+                try:
+                    await on_referral_payment(
+                        user=referrer,
+                        referral=user,
+                        amount=int(amount_total_rub) if amount_total_rub else 0,
+                        bonus_days=int(reward_res["referrer_bonus_days"]),
+                        friend_bonus_days=int(reward_res["friend_bonus_days"]),
+                        months=int(reward_res["months"]),
+                        device_count=int(reward_res["device_count"]),
+                        applied_to_subscription=bool(reward_res["applied_to_subscription"]),
+                    )
+                except Exception:
+                    pass
+                if on_referral_friend_bonus is not None:
+                    try:
+                        await on_referral_friend_bonus(
+                            user=user,
+                            referrer=referrer,
+                            friend_bonus_days=int(reward_res["friend_bonus_days"]),
+                            months=int(reward_res["months"]),
+                            device_count=int(reward_res["device_count"]),
+                        )
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
     # Notify user in bot (so they see the outcome even if webhook failed).
     try:
