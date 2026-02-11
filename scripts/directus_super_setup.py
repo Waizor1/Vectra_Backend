@@ -744,6 +744,28 @@ def apply_users_form_ux(client: DirectusClient) -> None:
         "active_tariff": "half",
     }
 
+    groups = {
+        # "App-like" sections for faster scanning/editing.
+        "id": "Основное",
+        "username": "Основное",
+        "full_name": "Основное",
+        "email": "Основное",
+        "registration_date": "Основное",
+        "activation_date": "Основное",
+        "expired_at": "Подписка",
+        "is_registered": "Подписка",
+        "active_tariff": "Подписка",
+        "balance": "Финансы",
+        "lte_gb_total": "Лимиты",
+        "hwid_limit": "Лимиты",
+        "is_blocked": "Статус",
+        "blocked_at": "Статус",
+        "prize_wheel_attempts": "Операции",
+        "is_partner": "Партнерка",
+        "custom_referral_percent": "Партнерка",
+        "remnawave_uuid": "Техника",
+    }
+
     # Sort order (best-effort): smaller number = higher on the form.
     sort = {
         "username": 10,
@@ -771,6 +793,8 @@ def apply_users_form_ux(client: DirectusClient) -> None:
             meta["readonly"] = True
         if field in sort:
             meta["sort"] = sort[field]
+        if field in groups:
+            meta["group"] = groups[field]
         patch_field_meta(client, "users", field, meta)
 
 

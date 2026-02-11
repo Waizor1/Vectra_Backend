@@ -3,6 +3,12 @@
   "version": "1.0.0",
   "type": "module",
   "keywords": ["directus-extension"],
+  "scripts": {
+    "build": "directus-extension build"
+  },
+  "devDependencies": {
+    "@directus/extensions-sdk": "^11.0.0"
+  },
   "directus:extension": {
     "type": "endpoint",
     "path": "dist/index.js",

@@ -224,4 +224,43 @@ export default function registerEndpoint(router, { database }) {
       period_x_field: period,
     });
   });
+
+  // Processed payments: count + sum(amount) per period.
+  // Used for dashboard "big picture" and payment anomaly alerts.
+  router.get("/payments", async (req, res) => {
+    const period = ensurePeriod(req.query.period_x_field || "day");
+    const min = toUtcDate(req.query.min_x_field);
+    const max = toUtcDate(req.query.max_x_field);
+    const { actualStart, maxDate } = await normalizeRange(database, "processed_payments", "processed_at", min, max);
+    const queryEnd = addSeconds(maxDate, 1);
+
+    const raw = await database.raw(
+      `
+      WITH date_series AS (
+        SELECT generate_series(
+          ?::timestamptz,
+          ?::timestamptz,
+          ('1 ' || ?)::interval
+        ) AS report_timestamp
+      )
+      SELECT
+        to_char(ds.report_timestamp::date, 'DD/MM/YYYY') AS date,
+        COUNT(p.id) AS count,
+        COALESCE(SUM(p.amount), 0) AS total_amount
+      FROM date_series ds
+      LEFT JOIN processed_payments p ON p.processed_at >= ds.report_timestamp
+        AND p.processed_at < ds.report_timestamp + ('1 ' || ?)::interval
+      GROUP BY ds.report_timestamp
+      ORDER BY ds.report_timestamp;
+      `,
+      [actualStart, queryEnd, period, period]
+    );
+    const results = raw?.rows ?? raw;
+    res.json({
+      results,
+      min_x_field: actualStart.toISOString(),
+      max_x_field: maxDate.toISOString(),
+      period_x_field: period,
+    });
+  });
 }

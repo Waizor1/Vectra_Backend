@@ -924,28 +924,7 @@ async function refresh() {
 	try {
 		await loadSettings();
 
-		const [
-			totalUsers,
-			activeTariffs,
-			blockedUsers,
-			processedPayments,
-			connections7d,
-			registrations7d,
-			connections30,
-			registrations30,
-			activeUsers30,
-			totalUsers30,
-			payments30,
-			reg12m,
-			conn12m,
-			pay12m,
-			recentUsers,
-			recentPayments,
-			recentPromo,
-			expiring,
-			topBalance,
-			blockedRecent,
-		] = await Promise.all([
+		const settled = await Promise.allSettled([
 			fetchCount('users'),
 			fetchCount('active_tariffs'),
 			fetchCount('users', { 'filter[is_blocked][_eq]': 'true' }),
@@ -997,28 +976,61 @@ async function refresh() {
 			}),
 		]);
 
+		const values = settled.map((r) => (r.status === 'fulfilled' ? r.value : null));
+		const [
+			totalUsers,
+			activeTariffs,
+			blockedUsers,
+			processedPayments,
+			connections7d,
+			registrations7d,
+			connections30,
+			registrations30,
+			activeUsers30,
+			totalUsers30,
+			payments30,
+			reg12m,
+			conn12m,
+			pay12m,
+			recentUsers,
+			recentPayments,
+			recentPromo,
+			expiring,
+			topBalance,
+			blockedRecent,
+		] = values;
+
 		stats.value = { totalUsers, activeTariffs, blockedUsers, processedPayments, connections7d, registrations7d };
 		trends.value = {
-			connections30d: connections30.series,
-			registrations30d: registrations30.series,
-			activeUsers30d: activeUsers30.series,
-			totalUsers30d: totalUsers30.series,
-			paymentsSum30d: payments30.series,
-			paymentsSumToday: payments30.today,
-			connectionsToday: connections30.today,
-			registrationsToday: registrations30.today,
-			activeUsersToday: activeUsers30.today,
-			totalUsersToday: totalUsers30.today,
+			connections30d: connections30?.series || [],
+			registrations30d: registrations30?.series || [],
+			activeUsers30d: activeUsers30?.series || [],
+			totalUsers30d: totalUsers30?.series || [],
+			paymentsSum30d: payments30?.series || [],
+			paymentsSumToday: payments30?.today ?? null,
+			connectionsToday: connections30?.today ?? null,
+			registrationsToday: registrations30?.today ?? null,
+			activeUsersToday: activeUsers30?.today ?? null,
+			totalUsersToday: totalUsers30?.today ?? null,
 		};
 		year.value = {
-			registrations12m: reg12m.series,
-			connections12m: conn12m.series,
-			paymentsSum12m: pay12m.series,
+			registrations12m: reg12m?.series || [],
+			connections12m: conn12m?.series || [],
+			paymentsSum12m: pay12m?.series || [],
 		};
-		events.value = { users: recentUsers, payments: recentPayments, promo: recentPromo };
-		quick.value = { expiring, topBalance, blockedRecent };
+		events.value = { users: Array.isArray(recentUsers) ? recentUsers : [], payments: Array.isArray(recentPayments) ? recentPayments : [], promo: Array.isArray(recentPromo) ? recentPromo : [] };
+		quick.value = {
+			expiring: Array.isArray(expiring) ? expiring : [],
+			topBalance: Array.isArray(topBalance) ? topBalance : [],
+			blockedRecent: Array.isArray(blockedRecent) ? blockedRecent : [],
+		};
 		lastUpdated.value = new Date().toISOString();
 		await checkWidgets();
+
+		const anyCore = [totalUsers, activeTariffs, blockedUsers, processedPayments].some((v) => typeof v === 'number');
+		if (!anyCore) {
+			error.value = 'Часть данных недоступна. Проверь права роли и доступ к коллекциям/эндпоинтам.';
+		}
 	} catch (e) {
 		error.value = 'Не удалось загрузить данные. Проверь права роли и доступ к коллекциям.';
 	}
