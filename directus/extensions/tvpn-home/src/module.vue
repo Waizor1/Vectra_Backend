@@ -83,6 +83,15 @@
 				{{ error }}
 			</v-notice>
 
+			<v-notice v-if="alerts.length" type="warning">
+				<div class="alerts">
+					<div v-for="a in alerts" :key="a.key" class="alerts__item">
+						<v-icon :name="a.icon" />
+						<span>{{ a.text }}</span>
+					</div>
+				</div>
+			</v-notice>
+
 			<div class="grid">
 				<v-card class="kpi">
 					<div class="kpi__row">
@@ -158,6 +167,156 @@
 					</div>
 				</v-card>
 			</div>
+
+			<v-card class="panel panel--spaced">
+				<div class="panel__title">Динамика (30 дней)</div>
+				<div class="panel__subtitle">Спарклайны и быстрые суммы по ключевым событиям.</div>
+
+				<div class="trends">
+					<div class="trend">
+						<div class="trend__head">
+							<div class="trend__label">
+								<v-icon name="wifi" />
+								<span>Подключения</span>
+							</div>
+							<div class="trend__meta">
+								<span class="trend__meta-label">7д:</span>
+								<span class="trend__meta-value">{{ fmt(stats.connections7d) }}</span>
+								<span class="trend__meta-label">Сегодня:</span>
+								<span class="trend__meta-value">{{ fmt(trends.connectionsToday) }}</span>
+							</div>
+						</div>
+						<svg class="spark" viewBox="0 0 100 30" preserveAspectRatio="none" aria-hidden="true">
+							<polyline class="spark__line" :points="sparkPoints(trends.connections30d)" />
+						</svg>
+					</div>
+
+					<div class="trend">
+						<div class="trend__head">
+							<div class="trend__label">
+								<v-icon name="person_add" />
+								<span>Регистрации</span>
+							</div>
+							<div class="trend__meta">
+								<span class="trend__meta-label">7д:</span>
+								<span class="trend__meta-value">{{ fmt(stats.registrations7d) }}</span>
+								<span class="trend__meta-label">Сегодня:</span>
+								<span class="trend__meta-value">{{ fmt(trends.registrationsToday) }}</span>
+							</div>
+						</div>
+						<svg class="spark" viewBox="0 0 100 30" preserveAspectRatio="none" aria-hidden="true">
+							<polyline class="spark__line spark__line--blue" :points="sparkPoints(trends.registrations30d)" />
+						</svg>
+					</div>
+
+					<div class="trend">
+						<div class="trend__head">
+							<div class="trend__label">
+								<v-icon name="person" />
+								<span>Активные пользователи</span>
+							</div>
+							<div class="trend__meta">
+								<span class="trend__meta-label">Сегодня:</span>
+								<span class="trend__meta-value">{{ fmt(trends.activeUsersToday) }}</span>
+							</div>
+						</div>
+						<svg class="spark" viewBox="0 0 100 30" preserveAspectRatio="none" aria-hidden="true">
+							<polyline class="spark__line spark__line--green" :points="sparkPoints(trends.activeUsers30d)" />
+						</svg>
+					</div>
+
+					<div class="trend">
+						<div class="trend__head">
+							<div class="trend__label">
+								<v-icon name="group" />
+								<span>Всего пользователей</span>
+							</div>
+							<div class="trend__meta">
+								<span class="trend__meta-label">Сегодня:</span>
+								<span class="trend__meta-value">{{ fmt(trends.totalUsersToday) }}</span>
+							</div>
+						</div>
+						<svg class="spark" viewBox="0 0 100 30" preserveAspectRatio="none" aria-hidden="true">
+							<polyline class="spark__line spark__line--purple" :points="sparkPoints(trends.totalUsers30d)" />
+						</svg>
+					</div>
+				</div>
+			</v-card>
+
+			<v-card class="panel panel--spaced">
+				<div class="panel__title">События</div>
+				<div class="panel__subtitle">Последние изменения, чтобы видеть жизнь проекта.</div>
+
+				<div class="events">
+					<div class="events__col">
+						<div class="events__title">
+							<v-icon name="people" />
+							<span>Новые пользователи</span>
+							<router-link class="events__all" :to="{ path: '/content/users' }">все</router-link>
+						</div>
+						<div v-if="events.users.length" class="events__list">
+							<router-link v-for="u in events.users" :key="u.id" class="event" :to="{ path: `/content/users/${u.id}` }">
+								<div class="event__main">
+									<div class="event__title">{{ u.username || u.full_name || u.id }}</div>
+									<div class="event__meta">
+										<span v-if="u.is_blocked" class="pill pill--bad">blocked</span>
+										<span v-if="u.expired_at" class="pill">exp {{ shortDate(u.expired_at) }}</span>
+									</div>
+								</div>
+								<div class="event__time">{{ fromNow(u.registration_date) }}</div>
+							</router-link>
+						</div>
+						<div v-else class="events__empty">Нет данных</div>
+					</div>
+
+					<div class="events__col">
+						<div class="events__title">
+							<v-icon name="payments" />
+							<span>Платежи</span>
+							<router-link class="events__all" :to="{ path: '/content/processed_payments' }">все</router-link>
+						</div>
+						<div v-if="events.payments.length" class="events__list">
+							<router-link
+								v-for="p in events.payments"
+								:key="p.id"
+								class="event"
+								:to="{ path: `/content/processed_payments/${p.id}` }"
+							>
+								<div class="event__main">
+									<div class="event__title">#{{ p.payment_id || p.id }}</div>
+									<div class="event__meta">
+										<span class="pill">{{ fmtMoney(p.amount) }}</span>
+										<span v-if="p.status" class="pill">{{ String(p.status) }}</span>
+									</div>
+								</div>
+								<div class="event__time">{{ fromNow(p.processed_at) }}</div>
+							</router-link>
+						</div>
+						<div v-else class="events__empty">Нет данных</div>
+					</div>
+
+					<div class="events__col">
+						<div class="events__title">
+							<v-icon name="confirmation_number" />
+							<span>Промо-активность</span>
+							<router-link class="events__all" :to="{ path: '/content/promo_usages' }">все</router-link>
+						</div>
+						<div v-if="events.promo.length" class="events__list">
+							<router-link v-for="p in events.promo" :key="p.id" class="event" :to="{ path: `/content/promo_usages/${p.id}` }">
+								<div class="event__main">
+									<div class="event__title">Promo usage</div>
+									<div class="event__meta">
+										<span v-if="p.user_id" class="pill">user {{ p.user_id }}</span>
+										<span v-if="p.promo_code_id" class="pill">code {{ p.promo_code_id }}</span>
+									</div>
+								</div>
+								<div class="event__time">{{ fromNow(p.used_at) }}</div>
+							</router-link>
+						</div>
+						<div v-else class="events__empty">Нет данных</div>
+					</div>
+				</div>
+			</v-card>
 
 			<div class="layout">
 				<v-card class="panel">
@@ -240,6 +399,23 @@ const loading = ref(false);
 const error = ref('');
 const lastUpdated = ref(null);
 
+const trends = ref({
+	connections30d: [],
+	registrations30d: [],
+	activeUsers30d: [],
+	totalUsers30d: [],
+	connectionsToday: null,
+	registrationsToday: null,
+	activeUsersToday: null,
+	totalUsersToday: null,
+});
+
+const events = ref({
+	users: [],
+	payments: [],
+	promo: [],
+});
+
 const stats = ref({
 	totalUsers: null,
 	activeTariffs: null,
@@ -251,6 +427,43 @@ const stats = ref({
 
 const statsOk = computed(() => Object.values(stats.value).some((v) => typeof v === 'number'));
 const widgetsOk = ref(false);
+
+const alerts = computed(() => {
+	const out = [];
+
+	if (!widgetsOk.value) {
+		out.push({
+			key: 'widgets',
+			icon: 'warning',
+			text: 'Виджеты /admin-widgets не отдают данные. Проверь extensions и права.',
+		});
+	}
+
+	const c = trends.value.connections30d || [];
+	if (c.length >= 2 && Number(c[c.length - 1]) === 0 && Number(c[c.length - 2]) === 0) {
+		out.push({
+			key: 'connections-zero',
+			icon: 'wifi_off',
+			text: 'Подключений нет 2 дня подряд (возможно, данные не пишутся или упал сбор статистики).',
+		});
+	}
+
+	const reg = trends.value.registrations30d || [];
+	if (reg.length >= 8) {
+		const today = Number(reg[reg.length - 1]);
+		const prev7 = reg.slice(reg.length - 8, reg.length - 1).map((x) => Number(x)).filter((x) => Number.isFinite(x));
+		const avg = prev7.length ? prev7.reduce((a, b) => a + b, 0) / prev7.length : 0;
+		if (Number.isFinite(today) && avg > 0 && today >= avg * 3) {
+			out.push({
+				key: 'registrations-spike',
+				icon: 'trending_up',
+				text: `Всплеск регистраций: сегодня ${today}, среднее за прошлые 7 дней ${avg.toFixed(1)}.`,
+			});
+		}
+	}
+
+	return out;
+});
 
 const lastUpdatedLabel = computed(() => {
 	if (!lastUpdated.value) return '—';
@@ -265,6 +478,59 @@ function fmt(value) {
 	if (value === null || value === undefined) return '—';
 	if (typeof value !== 'number') return '—';
 	return value.toLocaleString('ru-RU');
+}
+
+function fmtMoney(value) {
+	const n = Number(value);
+	if (!Number.isFinite(n)) return '—';
+	// Currency may differ by provider; keep it generic.
+	return `${n.toLocaleString('ru-RU')} ₽`;
+}
+
+function shortDate(value) {
+	if (!value) return '';
+	try {
+		const d = new Date(value);
+		return d.toLocaleDateString('ru-RU');
+	} catch {
+		return String(value);
+	}
+}
+
+function fromNow(value) {
+	if (!value) return '—';
+	let d;
+	try {
+		d = new Date(value);
+	} catch {
+		return '—';
+	}
+	const diff = Date.now() - d.getTime();
+	if (!Number.isFinite(diff)) return '—';
+	const sec = Math.floor(diff / 1000);
+	if (sec < 60) return `${sec}s`;
+	const min = Math.floor(sec / 60);
+	if (min < 60) return `${min}m`;
+	const hr = Math.floor(min / 60);
+	if (hr < 48) return `${hr}h`;
+	const day = Math.floor(hr / 24);
+	return `${day}d`;
+}
+
+function sparkPoints(values) {
+	if (!Array.isArray(values) || values.length < 2) return '';
+	const nums = values.map((v) => Number(v)).filter((v) => Number.isFinite(v));
+	if (nums.length < 2) return '';
+	const min = Math.min(...nums);
+	const max = Math.max(...nums);
+	const dx = 100 / (nums.length - 1);
+	const denom = max - min || 1;
+	const points = nums.map((v, i) => {
+		const x = i * dx;
+		const y = 28 - ((v - min) / denom) * 26;
+		return `${x.toFixed(2)},${y.toFixed(2)}`;
+	});
+	return points.join(' ');
 }
 
 async function fetchCount(collection, params = {}) {
@@ -286,6 +552,18 @@ async function checkWidgets() {
 	}
 }
 
+async function fetchWidgetSeries(endpoint, n = 30) {
+	const res = await api.get(`/admin-widgets/${endpoint}`, { params: { period: 'day' } });
+	const results = Array.isArray(res?.data?.results) ? res.data.results : [];
+	const tail = results.slice(Math.max(0, results.length - n));
+	const series = tail.map((row) => {
+		const v = Number(row?.count);
+		return Number.isFinite(v) ? v : 0;
+	});
+	const today = series.length ? series[series.length - 1] : null;
+	return { series, today };
+}
+
 async function fetchWidgetSumLastN(endpoint, n = 7) {
 	const res = await api.get(`/admin-widgets/${endpoint}`, { params: { period: 'day' } });
 	const results = Array.isArray(res?.data?.results) ? res.data.results : [];
@@ -301,21 +579,70 @@ async function fetchWidgetSumLastN(endpoint, n = 7) {
 	return any ? sum : null;
 }
 
+async function fetchItems(collection, params = {}) {
+	const res = await api.get(`/items/${collection}`, { params });
+	return Array.isArray(res?.data?.data) ? res.data.data : [];
+}
+
 async function refresh() {
 	if (loading.value) return;
 	loading.value = true;
 	error.value = '';
 	try {
-		const [totalUsers, activeTariffs, blockedUsers, processedPayments, connections7d, registrations7d] = await Promise.all([
+		const [
+			totalUsers,
+			activeTariffs,
+			blockedUsers,
+			processedPayments,
+			connections7d,
+			registrations7d,
+			connections30,
+			registrations30,
+			activeUsers30,
+			totalUsers30,
+			recentUsers,
+			recentPayments,
+			recentPromo,
+		] = await Promise.all([
 			fetchCount('users'),
 			fetchCount('active_tariffs'),
 			fetchCount('users', { 'filter[is_blocked][_eq]': 'true' }),
 			fetchCount('processed_payments'),
 			fetchWidgetSumLastN('connections', 7),
 			fetchWidgetSumLastN('registered-users', 7),
+			fetchWidgetSeries('connections', 30),
+			fetchWidgetSeries('registered-users', 30),
+			fetchWidgetSeries('active-users', 30),
+			fetchWidgetSeries('total-users', 30),
+			fetchItems('users', {
+				fields: 'id,username,full_name,registration_date,is_blocked,expired_at',
+				sort: '-registration_date',
+				limit: 8,
+			}),
+			fetchItems('processed_payments', {
+				fields: 'id,payment_id,user_id,processed_at,amount,status',
+				sort: '-processed_at',
+				limit: 8,
+			}),
+			fetchItems('promo_usages', {
+				fields: 'id,promo_code_id,user_id,used_at,context',
+				sort: '-used_at',
+				limit: 8,
+			}),
 		]);
 
 		stats.value = { totalUsers, activeTariffs, blockedUsers, processedPayments, connections7d, registrations7d };
+		trends.value = {
+			connections30d: connections30.series,
+			registrations30d: registrations30.series,
+			activeUsers30d: activeUsers30.series,
+			totalUsers30d: totalUsers30.series,
+			connectionsToday: connections30.today,
+			registrationsToday: registrations30.today,
+			activeUsersToday: activeUsers30.today,
+			totalUsersToday: totalUsers30.today,
+		};
+		events.value = { users: recentUsers, payments: recentPayments, promo: recentPromo };
 		lastUpdated.value = new Date().toISOString();
 		await checkWidgets();
 	} catch (e) {
@@ -378,6 +705,161 @@ onMounted(() => {
 
 .grid--secondary {
 	grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.panel--spaced {
+	margin-bottom: 12px;
+}
+
+.alerts {
+	display: grid;
+	gap: 8px;
+}
+
+.alerts__item {
+	display: flex;
+	gap: 8px;
+	align-items: center;
+}
+
+.trends {
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: 12px;
+}
+
+.trend {
+	padding: 10px;
+	border-radius: 12px;
+	border: 1px solid rgba(255, 255, 255, 0.06);
+	background: rgba(255, 255, 255, 0.03);
+}
+
+.trend__head {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	gap: 12px;
+	margin-bottom: 8px;
+}
+
+.trend__label {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-weight: 650;
+}
+
+.trend__meta {
+	display: flex;
+	gap: 8px;
+	align-items: baseline;
+	font-size: 12px;
+	opacity: 0.85;
+}
+
+.trend__meta-label {
+	opacity: 0.7;
+}
+
+.trend__meta-value {
+	font-weight: 700;
+}
+
+.spark {
+	width: 100%;
+	height: 34px;
+}
+
+.spark__line {
+	fill: none;
+	stroke: rgba(16, 185, 129, 0.9);
+	stroke-width: 2;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+}
+
+.spark__line--blue {
+	stroke: rgba(59, 130, 246, 0.9);
+}
+
+.spark__line--purple {
+	stroke: rgba(139, 92, 246, 0.9);
+}
+
+.events {
+	display: grid;
+	grid-template-columns: repeat(3, minmax(0, 1fr));
+	gap: 12px;
+}
+
+.events__title {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-weight: 700;
+	margin-bottom: 10px;
+}
+
+.events__all {
+	margin-left: auto;
+	font-size: 12px;
+	opacity: 0.8;
+	text-decoration: none;
+}
+
+.events__list {
+	display: grid;
+	gap: 8px;
+}
+
+.events__empty {
+	opacity: 0.7;
+	font-size: 12px;
+}
+
+.event {
+	display: flex;
+	justify-content: space-between;
+	gap: 12px;
+	padding: 10px;
+	border-radius: 12px;
+	text-decoration: none;
+	border: 1px solid rgba(255, 255, 255, 0.06);
+	background: rgba(255, 255, 255, 0.03);
+}
+
+.event:hover {
+	background: rgba(255, 255, 255, 0.05);
+}
+
+.event__title {
+	font-weight: 650;
+}
+
+.event__meta {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+	margin-top: 4px;
+}
+
+.event__time {
+	font-size: 12px;
+	opacity: 0.75;
+	white-space: nowrap;
+}
+
+.pill {
+	font-size: 11px;
+	padding: 2px 6px;
+	border-radius: 999px;
+	border: 1px solid rgba(255, 255, 255, 0.08);
+	opacity: 0.9;
+}
+
+.pill--bad {
+	background: rgba(239, 68, 68, 0.16);
 }
 
 .kpi {
@@ -546,6 +1028,14 @@ onMounted(() => {
 @media (max-width: 1200px) {
 	.grid {
 		grid-template-columns: repeat(2, minmax(0, 1fr));
+	}
+
+	.trends {
+		grid-template-columns: 1fr;
+	}
+
+	.events {
+		grid-template-columns: 1fr;
 	}
 
 	.layout {
