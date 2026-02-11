@@ -64,111 +64,110 @@
 		</template>
 
 		<div class="page">
-			<div class="hero">
-				<div class="hero__left">
-					<div class="hero__title">TVPN Admin</div>
-					<div class="hero__subtitle">
-						Быстрый обзор состояния проекта, метрики и быстрые переходы по ключевым разделам.
+			<div class="page__main">
+				<div class="hero">
+					<div class="hero__left">
+						<div class="hero__title">TVPN Admin</div>
+						<div class="hero__subtitle">
+							Быстрый обзор состояния проекта, метрики и быстрые переходы по ключевым разделам.
+						</div>
+					</div>
+					<div class="hero__right">
+						<div class="hero__meta">
+							<div class="hero__meta-label">Последнее обновление</div>
+							<div class="hero__meta-value">{{ lastUpdatedLabel }}</div>
+						</div>
 					</div>
 				</div>
-				<div class="hero__right">
-					<div class="hero__meta">
-						<div class="hero__meta-label">Последнее обновление</div>
-						<div class="hero__meta-value">{{ lastUpdatedLabel }}</div>
+
+				<v-notice v-if="error" type="danger">
+					{{ error }}
+				</v-notice>
+
+				<v-notice v-if="alerts.length" type="warning">
+					<div class="alerts">
+						<div v-for="a in alerts" :key="a.key" class="alerts__item">
+							<v-icon :name="a.icon" />
+							<span>{{ a.text }}</span>
+						</div>
 					</div>
+				</v-notice>
+
+				<div class="kpi-grid">
+					<v-card class="kpi">
+						<div class="kpi__row">
+							<div class="kpi__icon kpi__icon--blue">
+								<v-icon name="people" />
+							</div>
+							<div class="kpi__content">
+								<div class="kpi__label">Всего пользователей</div>
+								<div class="kpi__value">{{ fmt(stats.totalUsers) }}</div>
+							</div>
+						</div>
+					</v-card>
+
+					<v-card class="kpi">
+						<div class="kpi__row">
+							<div class="kpi__icon kpi__icon--green">
+								<v-icon name="subscriptions" />
+							</div>
+							<div class="kpi__content">
+								<div class="kpi__label">Активных тарифов</div>
+								<div class="kpi__value">{{ fmt(stats.activeTariffs) }}</div>
+							</div>
+						</div>
+					</v-card>
+
+					<v-card class="kpi">
+						<div class="kpi__row">
+							<div class="kpi__icon kpi__icon--amber">
+								<v-icon name="block" />
+							</div>
+							<div class="kpi__content">
+								<div class="kpi__label">Заблокировано</div>
+								<div class="kpi__value">{{ fmt(stats.blockedUsers) }}</div>
+							</div>
+						</div>
+					</v-card>
+
+					<v-card class="kpi">
+						<div class="kpi__row">
+							<div class="kpi__icon kpi__icon--purple">
+								<v-icon name="payments" />
+							</div>
+							<div class="kpi__content">
+								<div class="kpi__label">Платежей (всего)</div>
+								<div class="kpi__value">{{ fmt(stats.processedPayments) }}</div>
+							</div>
+						</div>
+					</v-card>
+
+					<v-card class="kpi">
+						<div class="kpi__row">
+							<div class="kpi__icon kpi__icon--green">
+								<v-icon name="wifi" />
+							</div>
+							<div class="kpi__content">
+								<div class="kpi__label">Подключения за 7 дней</div>
+								<div class="kpi__value">{{ fmt(stats.connections7d) }}</div>
+							</div>
+						</div>
+					</v-card>
+
+					<v-card class="kpi">
+						<div class="kpi__row">
+							<div class="kpi__icon kpi__icon--blue">
+								<v-icon name="person_add" />
+							</div>
+							<div class="kpi__content">
+								<div class="kpi__label">Регистрации за 7 дней</div>
+								<div class="kpi__value">{{ fmt(stats.registrations7d) }}</div>
+							</div>
+						</div>
+					</v-card>
 				</div>
-			</div>
 
-			<v-notice v-if="error" type="danger">
-				{{ error }}
-			</v-notice>
-
-			<v-notice v-if="alerts.length" type="warning">
-				<div class="alerts">
-					<div v-for="a in alerts" :key="a.key" class="alerts__item">
-						<v-icon :name="a.icon" />
-						<span>{{ a.text }}</span>
-					</div>
-				</div>
-			</v-notice>
-
-			<div class="grid">
-				<v-card class="kpi">
-					<div class="kpi__row">
-						<div class="kpi__icon kpi__icon--blue">
-							<v-icon name="people" />
-						</div>
-						<div class="kpi__content">
-							<div class="kpi__label">Всего пользователей</div>
-							<div class="kpi__value">{{ fmt(stats.totalUsers) }}</div>
-						</div>
-					</div>
-				</v-card>
-
-				<v-card class="kpi">
-					<div class="kpi__row">
-						<div class="kpi__icon kpi__icon--green">
-							<v-icon name="subscriptions" />
-						</div>
-						<div class="kpi__content">
-							<div class="kpi__label">Активных тарифов</div>
-							<div class="kpi__value">{{ fmt(stats.activeTariffs) }}</div>
-						</div>
-					</div>
-				</v-card>
-
-				<v-card class="kpi">
-					<div class="kpi__row">
-						<div class="kpi__icon kpi__icon--amber">
-							<v-icon name="block" />
-						</div>
-						<div class="kpi__content">
-							<div class="kpi__label">Заблокировано</div>
-							<div class="kpi__value">{{ fmt(stats.blockedUsers) }}</div>
-						</div>
-					</div>
-				</v-card>
-
-				<v-card class="kpi">
-					<div class="kpi__row">
-						<div class="kpi__icon kpi__icon--purple">
-							<v-icon name="payments" />
-						</div>
-						<div class="kpi__content">
-							<div class="kpi__label">Платежей (всего)</div>
-							<div class="kpi__value">{{ fmt(stats.processedPayments) }}</div>
-						</div>
-					</div>
-				</v-card>
-			</div>
-
-			<div class="grid grid--secondary">
-				<v-card class="kpi">
-					<div class="kpi__row">
-						<div class="kpi__icon kpi__icon--green">
-							<v-icon name="wifi" />
-						</div>
-						<div class="kpi__content">
-							<div class="kpi__label">Подключения за 7 дней</div>
-							<div class="kpi__value">{{ fmt(stats.connections7d) }}</div>
-						</div>
-					</div>
-				</v-card>
-
-				<v-card class="kpi">
-					<div class="kpi__row">
-						<div class="kpi__icon kpi__icon--blue">
-							<v-icon name="person_add" />
-						</div>
-						<div class="kpi__content">
-							<div class="kpi__label">Регистрации за 7 дней</div>
-							<div class="kpi__value">{{ fmt(stats.registrations7d) }}</div>
-						</div>
-					</div>
-				</v-card>
-			</div>
-
-			<v-card class="panel panel--spaced">
+				<v-card class="panel">
 				<div class="panel__title">Динамика (30 дней)</div>
 				<div class="panel__subtitle">Спарклайны и быстрые суммы по ключевым событиям.</div>
 
@@ -259,7 +258,7 @@
 				</div>
 			</v-card>
 
-			<v-card class="panel panel--spaced">
+			<v-card class="panel">
 				<div class="panel__title">Большая картина (12 месяцев)</div>
 				<div class="panel__subtitle">Чтобы владельцу было видно “волну” и сезонность на большой дистанции.</div>
 
@@ -302,7 +301,7 @@
 				</div>
 			</v-card>
 
-			<v-card class="panel panel--spaced">
+			<v-card class="panel">
 				<div class="panel__title">События</div>
 				<div class="panel__subtitle">Последние изменения, чтобы видеть жизнь проекта.</div>
 
@@ -376,8 +375,9 @@
 					</div>
 				</div>
 			</v-card>
+			</div>
 
-			<div class="layout">
+			<div class="page__side">
 				<v-card class="panel">
 					<div class="panel__title">Быстрые виджеты</div>
 					<div class="panel__subtitle">Оперативные списки без лишней навигации.</div>
@@ -1087,14 +1087,15 @@ onMounted(() => {
 	min-width: 0;
 }
 
-.page > * {
-	grid-column: 1;
+.page__main {
+	display: grid;
+	gap: 12px;
 	min-width: 0;
 }
 
-.page > .layout {
-	grid-column: 2;
-	grid-row: 1 / span 50;
+.page__side {
+	display: grid;
+	gap: 12px;
 	position: sticky;
 	top: 12px;
 	align-self: start;
@@ -1136,25 +1137,17 @@ onMounted(() => {
 	font-weight: 600;
 }
 
-.grid {
+.kpi-grid {
 	display: grid;
-	grid-template-columns: repeat(3, minmax(0, 1fr));
+	grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
 	gap: 12px;
-	margin-bottom: 0;
+	min-width: 0;
 }
 
 @media (min-width: 1600px) {
-	.grid {
-		grid-template-columns: repeat(4, minmax(0, 1fr));
+	.kpi-grid {
+		grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
 	}
-}
-
-.grid--secondary {
-	grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
-.panel--spaced {
-	margin-bottom: 0;
 }
 
 .alerts {
@@ -1392,15 +1385,10 @@ onMounted(() => {
 	margin-top: 2px;
 }
 
-.layout {
-	display: grid;
-	grid-template-columns: 1fr;
-	gap: 12px;
-}
-
 .panel {
 	padding: 14px;
 	border-radius: 12px;
+	overflow: hidden;
 }
 
 .panel__title {
@@ -1631,15 +1619,9 @@ onMounted(() => {
 		grid-template-columns: 1fr;
 	}
 
-	.page > .layout {
-		grid-column: 1;
-		grid-row: auto;
+	.page__side {
 		position: static;
 		top: auto;
-	}
-
-	.grid {
-		grid-template-columns: repeat(2, minmax(0, 1fr));
 	}
 
 	.trends {
@@ -1647,10 +1629,6 @@ onMounted(() => {
 	}
 
 	.events {
-		grid-template-columns: 1fr;
-	}
-
-	.layout {
 		grid-template-columns: 1fr;
 	}
 
@@ -1672,11 +1650,7 @@ onMounted(() => {
 		max-width: none;
 	}
 
-	.grid {
-		grid-template-columns: 1fr;
-	}
-
-	.grid--secondary {
+	.kpi-grid {
 		grid-template-columns: 1fr;
 	}
 
