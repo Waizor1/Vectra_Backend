@@ -1031,6 +1031,12 @@ onMounted(() => {
 </script>
 
 <style scoped>
+:deep(.private-view__content) {
+	/* Directus иногда ограничивает ширину контента и визуально "пустит" справа. */
+	max-width: none !important;
+	width: 100%;
+}
+
 .page {
 	padding: 16px 20px;
 	max-width: 100%;
@@ -1038,6 +1044,7 @@ onMounted(() => {
 	grid-template-columns: minmax(520px, 1fr) 380px;
 	gap: 12px;
 	align-items: start;
+	width: 100%;
 }
 
 .page > * {
@@ -1065,7 +1072,7 @@ onMounted(() => {
 }
 
 .hero__title {
-	font-size: 18px;
+	font-size: 20px;
 	font-weight: 700;
 	line-height: 1.2;
 }
@@ -1074,6 +1081,7 @@ onMounted(() => {
 	margin-top: 6px;
 	opacity: 0.8;
 	max-width: 720px;
+	font-size: 13px;
 }
 
 .hero__meta-label {
@@ -1116,6 +1124,7 @@ onMounted(() => {
 	display: flex;
 	gap: 8px;
 	align-items: center;
+	line-height: 1.25;
 }
 
 .trends {
@@ -1292,6 +1301,7 @@ onMounted(() => {
 .kpi {
 	padding: 14px;
 	border-radius: 12px;
+	min-height: 76px;
 }
 
 .kpi__row {
@@ -1306,6 +1316,11 @@ onMounted(() => {
 	border-radius: 10px;
 	display: grid;
 	place-items: center;
+}
+
+.kpi__icon :deep(i) {
+	/* Чуть выразительнее на тёмной теме */
+	transform: translateY(-0.5px);
 }
 
 .kpi__icon--blue {
