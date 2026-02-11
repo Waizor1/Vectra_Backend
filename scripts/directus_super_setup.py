@@ -240,12 +240,42 @@ def ensure_permission(
     validation: Any = None,
     presets: Any = None,
 ) -> bool:
+    target_fields = fields or ["*"]
+    target_permissions = permissions or {}
+
+    # Upsert behavior: if permission row already exists, normalize it to requested shape.
+    existing = client.get(
+        "/permissions",
+        params={
+            "filter[policy][_eq]": policy_id,
+            "filter[collection][_eq]": collection,
+            "filter[action][_eq]": action,
+            "fields": "id,fields,permissions,validation,presets",
+            "limit": 1,
+        },
+    )
+    if existing.status_code == 200:
+        rows = existing.json().get("data") or []
+        if rows:
+            perm_id = rows[0].get("id")
+            if perm_id is not None:
+                patch_payload = {
+                    "fields": target_fields,
+                    "permissions": target_permissions,
+                    "validation": validation,
+                    "presets": presets,
+                }
+                patched = client.patch(f"/permissions/{perm_id}", json=patch_payload)
+                if patched.ok:
+                    return False
+                # If patch is rejected in this instance, continue with create path below.
+
     payload: Dict[str, Any] = {
         "policy": policy_id,
         "collection": collection,
         "action": action,
-        "fields": fields or ["*"],
-        "permissions": permissions or {},
+        "fields": target_fields,
+        "permissions": target_permissions,
         "validation": validation,
         "presets": presets,
     }
@@ -751,6 +781,7 @@ def apply_users_form_ux(client: DirectusClient) -> None:
         "hwid_limit": "quarter",
         "prize_wheel_attempts": "quarter",
         "active_tariff": "half",
+        "active_tariff_id": "half",
         "is_registered": "quarter",
         "is_subscribed": "quarter",
         "is_trial": "quarter",
@@ -778,55 +809,60 @@ def apply_users_form_ux(client: DirectusClient) -> None:
         "familyurl": "half",
     }
 
+    # IMPORTANT:
+    # In Directus, field.meta.group should point to divider FIELD keys, not titles.
+    # If we store human labels here, UI may render empty sections.
     groups = {
         # Profile / identity
-        "id": "Профиль",
-        "username": "Профиль",
-        "full_name": "Профиль",
-        "email": "Профиль",
-        "language_code": "Профиль",
-        "created_at": "Профиль",
-        "registration_date": "Профиль",
-        "activation_date": "Профиль",
-        "connected_at": "Профиль",
-        "utm": "Профиль",
-        "renew_id": "Профиль",
+        "id": "ui_divider_overview",
+        "username": "ui_divider_overview",
+        "full_name": "ui_divider_overview",
+        "email": "ui_divider_overview",
+        "language_code": "ui_divider_overview",
+        "created_at": "ui_divider_overview",
+        "registration_date": "ui_divider_overview",
+        "activation_date": "ui_divider_overview",
+        "connected_at": "ui_divider_overview",
+        "utm": "ui_divider_overview",
+        "renew_id": "ui_divider_overview",
         # Subscription / access
-        "expired_at": "Подписка",
-        "is_registered": "Подписка",
-        "is_subscribed": "Подписка",
-        "is_trial": "Подписка",
-        "used_trial": "Подписка",
-        "active_tariff": "Подписка",
+        "expired_at": "ui_divider_subscription",
+        "is_registered": "ui_divider_subscription",
+        "is_subscribed": "ui_divider_subscription",
+        "is_trial": "ui_divider_subscription",
+        "used_trial": "ui_divider_subscription",
+        "active_tariff": "ui_divider_subscription",
+        "active_tariff_id": "ui_divider_ops",
         # Money / limits
-        "balance": "Финансы",
-        "lte_gb_total": "Лимиты",
-        "hwid_limit": "Лимиты",
-        "prize_wheel_attempts": "Лимиты",
+        "balance": "ui_divider_limits",
+        "lte_gb_total": "ui_divider_limits",
+        "hwid_limit": "ui_divider_limits",
+        "prize_wheel_attempts": "ui_divider_limits",
         # Communication / status
-        "is_blocked": "Статус",
-        "blocked_at": "Статус",
-        "last_failed_message_at": "Статус",
-        "failed_message_count": "Статус",
+        "is_blocked": "ui_divider_status",
+        "blocked_at": "ui_divider_status",
+        "last_failed_message_at": "ui_divider_status",
+        "failed_message_count": "ui_divider_status",
         # Referral
-        "is_partner": "Партнерка",
-        "custom_referral_percent": "Партнерка",
-        "referred_by": "Партнерка",
-        "referrals": "Партнерка",
-        "referral_bonus_days_total": "Партнерка",
-        "referral_first_payment_rewarded": "Партнерка",
-        "referred_users_list": "Связи и логи",
-        "active_tariffs_list": "Связи и логи",
-        "promo_usages_list": "Связи и логи",
-        "notification_marks_list": "Связи и логи",
-        "family_devices_list": "Связи и логи",
-        "partner_withdrawals_list": "Связи и логи",
-        "partner_earnings_list": "Связи и логи",
-        "family_audit_logs_owner": "Связи и логи",
+        "is_partner": "ui_divider_partner",
+        "custom_referral_percent": "ui_divider_partner",
+        "referred_by": "ui_divider_partner",
+        "referrals": "ui_divider_partner",
+        "referral_bonus_days_total": "ui_divider_partner",
+        "referral_first_payment_rewarded": "ui_divider_partner",
+        "referred_users_list": "ui_divider_ops",
+        "active_tariffs_list": "ui_divider_ops",
+        "promo_usages_list": "ui_divider_ops",
+        "notification_marks_list": "ui_divider_ops",
+        "family_devices_list": "ui_divider_ops",
+        "partner_withdrawals_list": "ui_divider_ops",
+        "partner_earnings_list": "ui_divider_ops",
+        "family_audit_logs_owner": "ui_divider_ops",
         # Technical / integration
-        "remnawave_uuid": "Техника",
-        "last_hwid_reset": "Техника",
-        "familyurl": "Техника",
+        "remnawave_uuid": "ui_divider_tech",
+        "last_hwid_reset": "ui_divider_tech",
+        "familyurl": "ui_divider_tech",
+        "is_admin": "ui_divider_overview",
     }
 
     # Sort order (best-effort): smaller number = higher on the form.
@@ -844,6 +880,7 @@ def apply_users_form_ux(client: DirectusClient) -> None:
         "renew_id": 20,
         "expired_at": 30,
         "active_tariff": 31,
+        "active_tariff_id": 66,
         "is_registered": 32,
         "is_subscribed": 33,
         "is_trial": 34,
@@ -929,13 +966,18 @@ def ensure_users_presentation_dividers(client: DirectusClient) -> None:
         resp.raise_for_status()
 
     # Keep divider sort values between field blocks sorted in apply_users_form_ux().
-    ensure_divider("ui_divider_profile", "Профиль", "person", 1)
+    # Legacy set is used intentionally: users already know these section names.
+    ensure_divider("ui_divider_overview", "Основное", "person", 1)
     ensure_divider("ui_divider_subscription", "Подписка", "event", 29)
-    ensure_divider("ui_divider_finance", "Финансы и лимиты", "payments", 39)
-    ensure_divider("ui_divider_status", "Статусы и доставка", "shield", 49)
+    ensure_divider("ui_divider_limits", "Лимиты", "tune", 39)
+    ensure_divider("ui_divider_status", "Статус", "shield", 49)
     ensure_divider("ui_divider_partner", "Партнерка", "groups", 59)
-    ensure_divider("ui_divider_relations", "Связи и логи", "timeline", 66)
-    ensure_divider("ui_divider_tech", "Техника", "settings", 69)
+    ensure_divider("ui_divider_ops", "Операции", "build", 66)
+    ensure_divider("ui_divider_tech", "Техника", "settings", 79)
+
+    # Hide deprecated divider variants to avoid duplicate/empty sections.
+    for legacy_divider in ("ui_divider_profile", "ui_divider_finance", "ui_divider_relations"):
+        patch_field_meta(client, "users", legacy_divider, {"hidden": True, "sort": 9990})
 
     # Improve interfaces for key fields (best-effort).
     # If a field doesn't exist in the current instance, patch_field_meta will safely skip.
@@ -952,7 +994,7 @@ def ensure_users_presentation_dividers(client: DirectusClient) -> None:
         {
             "interface": "id-link-editor",
             "options": {"collection": "users", "openInNewTab": False},
-            "group": "Партнерка",
+            "group": "ui_divider_partner",
             "sort": 62,
             "note": "Чей реферал: можно быстро перейти к карточке связанного пользователя.",
         },
@@ -973,6 +1015,8 @@ def ensure_users_presentation_dividers(client: DirectusClient) -> None:
         {
             "interface": "id-link-editor",
             "options": {"collection": "active_tariffs", "openInNewTab": False},
+            "group": "ui_divider_ops",
+            "sort": 66,
         },
     )
     patch_field_meta(client, "users", "expired_at", {"interface": "datetime", "options": {"use24": True, "includeSeconds": False}})
@@ -1073,7 +1117,7 @@ def ensure_users_relations_ux(client: DirectusClient) -> None:
             "display": "related-values",
             "width": "full",
             "sort": sort,
-            "group": "Связи и логи",
+            "group": "ui_divider_ops",
             "note": title,
             "translations": [{"language": "ru-RU", "translation": title}],
         }
@@ -1121,7 +1165,7 @@ def ensure_users_relations_ux(client: DirectusClient) -> None:
                 "display": "related-values",
                 "note": "Чей реферал: можно открыть и сразу перейти в карточку родителя.",
                 "readonly": False,
-                "group": "Партнерка",
+                "group": "ui_divider_partner",
                 "sort": 62,
             },
         )
@@ -1146,7 +1190,7 @@ def ensure_users_relations_ux(client: DirectusClient) -> None:
             one_collection="users",
             one_field=one_field,
             one_deselect_action="nullify",
-            create_if_missing=False,
+            create_if_missing=True,
         )
         # If relation metadata update is blocked in this environment but alias field
         # already exists, still enforce o2m interface for better in-form UX.
