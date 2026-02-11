@@ -796,9 +796,14 @@ function fromNow(value) {
 }
 
 function sparkPoints(values) {
-	if (!Array.isArray(values) || values.length < 2) return '';
+	if (!Array.isArray(values) || values.length < 1) return '';
 	const nums = values.map((v) => Number(v)).filter((v) => Number.isFinite(v));
-	if (nums.length < 2) return '';
+	if (nums.length < 1) return '';
+	// If we only have a single value (e.g. brand-new project), draw a flat line.
+	if (nums.length === 1) {
+		const y = 15;
+		return `0.00,${y.toFixed(2)} 100.00,${y.toFixed(2)}`;
+	}
 	const min = Math.min(...nums);
 	const max = Math.max(...nums);
 	const dx = 100 / (nums.length - 1);
@@ -816,6 +821,17 @@ function isoFromNow(days, fallbackDays = 0) {
 	const safe = Number.isFinite(n) ? n : Number(fallbackDays);
 	const d = new Date(Date.now() + safe * 24 * 60 * 60 * 1000);
 	// Invalid Date would throw on toISOString(); guard hard.
+	if (Number.isNaN(d.getTime())) return new Date().toISOString();
+	return d.toISOString();
+}
+
+function isoMonthStartFromNow(monthsBack = 11) {
+	const n = Number(monthsBack);
+	const safe = Number.isFinite(n) ? n : 11;
+	const d = new Date();
+	d.setUTCDate(1);
+	d.setUTCHours(0, 0, 0, 0);
+	d.setUTCMonth(d.getUTCMonth() - safe);
 	if (Number.isNaN(d.getTime())) return new Date().toISOString();
 	return d.toISOString();
 }
@@ -845,6 +861,7 @@ async function fetchWidgetSeries(endpoint, n = 30, opts = {}) {
 	const params = { period_x_field: period };
 	if (opts.min_x_field) params.min_x_field = opts.min_x_field;
 	if (opts.max_x_field) params.max_x_field = opts.max_x_field;
+	if (opts.no_clamp_db_min) params.no_clamp_db_min = String(opts.no_clamp_db_min);
 	const res = await api.get(`/admin-widgets/${endpoint}`, { params });
 	const results = Array.isArray(res?.data?.results) ? res.data.results : [];
 	const tail = results.slice(Math.max(0, results.length - n));
@@ -876,6 +893,7 @@ async function fetchPaymentsSumSeries(n = 30, opts = {}) {
 	const params = { period_x_field: period };
 	if (opts.min_x_field) params.min_x_field = opts.min_x_field;
 	if (opts.max_x_field) params.max_x_field = opts.max_x_field;
+	if (opts.no_clamp_db_min) params.no_clamp_db_min = String(opts.no_clamp_db_min);
 	const res = await api.get('/admin-widgets/payments', { params });
 	const results = Array.isArray(res?.data?.results) ? res.data.results : [];
 	const tail = results.slice(Math.max(0, results.length - n));
@@ -945,9 +963,9 @@ async function refresh() {
 			fetchWidgetSeries('active-users', 30),
 			fetchWidgetSeries('total-users', 30),
 			fetchPaymentsSumSeries(30),
-			fetchWidgetSeries('registered-users', 12, { period_x_field: 'month', min_x_field: isoFromNow(-365) }),
-			fetchWidgetSeries('connections', 12, { period_x_field: 'month', min_x_field: isoFromNow(-365) }),
-			fetchPaymentsSumSeries(12, { period_x_field: 'month', min_x_field: isoFromNow(-365) }),
+			fetchWidgetSeries('registered-users', 12, { period_x_field: 'month', min_x_field: isoMonthStartFromNow(11), no_clamp_db_min: '1' }),
+			fetchWidgetSeries('connections', 12, { period_x_field: 'month', min_x_field: isoMonthStartFromNow(11), no_clamp_db_min: '1' }),
+			fetchPaymentsSumSeries(12, { period_x_field: 'month', min_x_field: isoMonthStartFromNow(11), no_clamp_db_min: '1' }),
 			fetchItems('users', {
 				fields: 'id,username,full_name,registration_date,is_blocked,expired_at',
 				sort: '-registration_date',
@@ -1238,11 +1256,11 @@ onMounted(() => {
 
 .spark {
 	width: 100%;
-	height: 34px;
+	height: 48px;
 }
 
 .spark--big {
-	height: 76px;
+	height: 120px;
 }
 
 .big {
