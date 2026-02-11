@@ -1794,23 +1794,24 @@ onMounted(() => {
 }
 
 .spark__area {
-	opacity: 0.75;
+	/* Softer fill so it doesn't visually desync with the line. */
+	opacity: 0.48;
 }
 
 .spark__path {
 	fill: none;
-	/* Keep it thin; stroke is now 1:1 with CSS thanks to viewBox height fix. */
-	stroke-width: 2;
+	/* Keep it thin; avoid "fat" look on dark UI. */
+	stroke-width: 1.85;
 	stroke-linecap: round;
 	stroke-linejoin: round;
-	/* Subtle, premium depth instead of heavy blur. */
-	filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.22));
+	/* Drop-shadow makes the line look thicker than it is; glow path is enough. */
+	filter: none;
 	/* Prevent stroke from scaling if SVG ever gets resized. */
 	vector-effect: non-scaling-stroke;
 }
 
 .spark--big .spark__path {
-	stroke-width: 1.9;
+	stroke-width: 1.8;
 }
 
 .spark__path--green {
@@ -1834,8 +1835,8 @@ onMounted(() => {
 	stroke-width: 5;
 	stroke-linecap: round;
 	stroke-linejoin: round;
-	opacity: 0.14;
-	filter: blur(0.6px);
+	opacity: 0.11;
+	filter: blur(0.8px);
 	vector-effect: non-scaling-stroke;
 }
 
@@ -1929,7 +1930,7 @@ onMounted(() => {
 	top: 0;
 	bottom: 0;
 	width: 1px;
-	background: rgba(255, 255, 255, 0.14);
+	background: rgba(255, 255, 255, 0.10);
 	transform: translateX(-0.5px);
 }
 
@@ -1939,34 +1940,57 @@ onMounted(() => {
 	transform: translate(-50%, -50%);
 	display: grid;
 	place-items: center;
-	background: rgba(15, 23, 42, 0.72);
-	border: 1px solid rgba(255, 255, 255, 0.20);
-	box-shadow: 0 10px 26px rgba(0, 0, 0, 0.45);
+	background: transparent;
+	border: 1.25px solid rgba(255, 255, 255, 0.18);
+	/* Keep marker crisp; avoid "bloated" blob on dark cards. */
+	box-shadow: none;
+	filter: drop-shadow(0 8px 16px rgba(0, 0, 0, 0.25));
 }
 
 .spark-wrap:not(.spark-wrap--big) .spark__dot-overlay {
+	width: 8px;
+	height: 8px;
+}
+
+.spark-wrap--big .spark__dot-overlay {
 	width: 10px;
 	height: 10px;
 }
 
-.spark-wrap--big .spark__dot-overlay {
-	width: 12px;
-	height: 12px;
-}
-
 .spark__dot-overlay-inner {
 	border-radius: 999px;
-	box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.08);
+	/* Clean inner dot with dark outline (reads better than white halo). */
+	box-shadow: 0 0 0 1.25px rgba(2, 6, 23, 0.9);
 }
 
 .spark-wrap:not(.spark-wrap--big) .spark__dot-overlay-inner {
+	width: 4px;
+	height: 4px;
+}
+
+.spark-wrap--big .spark__dot-overlay-inner {
 	width: 5px;
 	height: 5px;
 }
 
-.spark-wrap--big .spark__dot-overlay-inner {
-	width: 6px;
-	height: 6px;
+.spark__dot-overlay--green {
+	border-color: rgba(16, 185, 129, 0.55);
+	box-shadow: 0 0 16px rgba(16, 185, 129, 0.18);
+}
+
+.spark__dot-overlay--blue {
+	border-color: rgba(59, 130, 246, 0.55);
+	box-shadow: 0 0 16px rgba(59, 130, 246, 0.18);
+}
+
+.spark__dot-overlay--purple {
+	border-color: rgba(139, 92, 246, 0.55);
+	box-shadow: 0 0 16px rgba(139, 92, 246, 0.18);
+}
+
+.spark__dot-overlay--cyan {
+	border-color: rgba(34, 211, 238, 0.55);
+	box-shadow: 0 0 16px rgba(34, 211, 238, 0.18);
 }
 
 .spark__dot-overlay--green .spark__dot-overlay-inner {
