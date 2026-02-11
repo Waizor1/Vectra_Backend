@@ -811,8 +811,12 @@ function sparkPoints(values) {
 	return points.join(' ');
 }
 
-function isoFromNow(days) {
-	const d = new Date(Date.now() + Number(days) * 24 * 60 * 60 * 1000);
+function isoFromNow(days, fallbackDays = 0) {
+	const n = Number(days);
+	const safe = Number.isFinite(n) ? n : Number(fallbackDays);
+	const d = new Date(Date.now() + safe * 24 * 60 * 60 * 1000);
+	// Invalid Date would throw on toISOString(); guard hard.
+	if (Number.isNaN(d.getTime())) return new Date().toISOString();
 	return d.toISOString();
 }
 
@@ -924,6 +928,11 @@ async function refresh() {
 	try {
 		await loadSettings();
 
+		const expDays = Number(settings.value.expiring_days);
+		const expDaysSafe = Number.isFinite(expDays) ? expDays : 7;
+		const blockDays = Number(settings.value.suspicious_block_days);
+		const blockDaysSafe = Number.isFinite(blockDays) ? blockDays : 3;
+
 		const settled = await Promise.allSettled([
 			fetchCount('users'),
 			fetchCount('active_tariffs'),
@@ -959,7 +968,7 @@ async function refresh() {
 				sort: 'expired_at',
 				limit: 6,
 				'filter[expired_at][_gte]': new Date().toISOString(),
-				'filter[expired_at][_lte]': isoFromNow(Number(settings.value.expiring_days || 7)),
+				'filter[expired_at][_lte]': isoFromNow(expDaysSafe, 7),
 			}),
 			fetchItems('users', {
 				fields: 'id,username,full_name,balance,expired_at,is_blocked',
@@ -972,7 +981,7 @@ async function refresh() {
 				sort: '-blocked_at',
 				limit: 6,
 				'filter[is_blocked][_eq]': 'true',
-				'filter[blocked_at][_gte]': isoFromNow(-Number(settings.value.suspicious_block_days || 3)),
+				'filter[blocked_at][_gte]': isoFromNow(-blockDaysSafe, -3),
 			}),
 		]);
 
