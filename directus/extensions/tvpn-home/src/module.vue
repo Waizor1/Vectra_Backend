@@ -1424,8 +1424,9 @@ onMounted(() => {
 	border-radius: 12px;
 	overflow: hidden;
 	width: 100%;
+	max-width: none !important;
 	box-sizing: border-box;
-	justify-self: stretch;
+	justify-self: stretch !important;
 }
 
 .panel > * {
