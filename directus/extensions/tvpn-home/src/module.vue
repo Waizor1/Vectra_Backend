@@ -1083,6 +1083,7 @@ onMounted(() => {
 	grid-template-columns: minmax(0, 1fr) minmax(320px, 380px);
 	gap: 12px;
 	align-items: start;
+	justify-items: stretch;
 	width: 100%;
 	min-width: 0;
 }
@@ -1092,6 +1093,7 @@ onMounted(() => {
 	gap: 12px;
 	min-width: 0;
 	align-items: stretch;
+	justify-items: stretch;
 }
 
 .page__side {
@@ -1102,6 +1104,7 @@ onMounted(() => {
 	align-self: start;
 	min-width: 0;
 	align-items: stretch;
+	justify-items: stretch;
 }
 
 .hero {
@@ -1396,6 +1399,7 @@ onMounted(() => {
 }
 
 .panel {
+	display: block;
 	padding: 14px;
 	border-radius: 12px;
 	overflow: hidden;
