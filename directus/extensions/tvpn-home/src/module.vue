@@ -1418,12 +1418,19 @@ onMounted(() => {
 }
 
 .panel {
-	display: block;
+	display: grid;
+	grid-template-columns: 1fr;
 	padding: 14px;
 	border-radius: 12px;
 	overflow: hidden;
 	width: 100%;
 	box-sizing: border-box;
+	justify-self: stretch;
+}
+
+.panel > * {
+	width: 100%;
+	min-width: 0;
 	justify-self: stretch;
 }
 
