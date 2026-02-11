@@ -1052,10 +1052,23 @@ onMounted(() => {
 </script>
 
 <style scoped>
-:deep(.private-view__content) {
+:deep(.private-view) {
+	width: 100%;
+}
+
+:deep(.private-view__main) {
 	/* Directus иногда ограничивает ширину контента и визуально "пустит" справа. */
 	max-width: none !important;
-	width: 100%;
+	width: 100% !important;
+}
+
+:deep(.private-view__content) {
+	max-width: none !important;
+	width: 100% !important;
+}
+
+:deep(.private-view__content > *) {
+	max-width: none !important;
 }
 
 .page {
@@ -1599,7 +1612,7 @@ onMounted(() => {
 	background: rgba(59, 130, 246, 0.14);
 }
 
-@media (max-width: 1200px) {
+@media (max-width: 980px) {
 	.page {
 		grid-template-columns: 1fr;
 	}
