@@ -342,6 +342,7 @@ async def create_invite(payload: InviteCreateRequest, user: Users = Depends(vali
         invite.expires_at,
     )
     return {
+        "id": str(invite.id),
         "token": token,
         "expires_at": invite.expires_at,
     }
@@ -559,7 +560,7 @@ async def delete_member(member_id: str, user: Users = Depends(validate)) -> Dict
 async def list_invites(user: Users = Depends(validate)) -> List[Dict[str, Any]]:
     if (user.hwid_limit or 0) < _family_limit():
         raise HTTPException(status_code=403, detail="Family subscription required")
-    invites = await FamilyInvites.filter(owner_id=user.id).order_by("-created_at")
+    invites = await FamilyInvites.filter(owner_id=user.id, revoked_at=None).order_by("-created_at")
     return [
         {
             "id": str(item.id),

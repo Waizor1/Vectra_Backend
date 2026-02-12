@@ -441,6 +441,14 @@ def apply_collection_ux(client: DirectusClient) -> None:
             "hidden": False,
             "translations": [{"language": "ru-RU", "translation": "Подключения"}],
         },
+        "error_reports": {
+            "group": "grp_service",
+            "icon": "bug_report",
+            "note": "Логи frontend ошибок и статус обработки баг-репортов",
+            "sort": 1,
+            "hidden": False,
+            "translations": [{"language": "ru-RU", "translation": "Логи ошибок"}],
+        },
         "notification_marks": {
             "group": "grp_analytics",
             "icon": "notifications",
@@ -617,6 +625,23 @@ def apply_field_notes_ru(client: DirectusClient) -> None:
             "status": "Статус обработки/зачисления платежа.",
             "processed_at": "Когда платеж был обработан и попал в систему.",
         },
+        "error_reports": {
+            "event_id": "Технический идентификатор события на клиенте.",
+            "code": "Человекочитаемый код ошибки для поддержки.",
+            "type": "Классификация ошибки (render/runtime/network/service).",
+            "message": "Текст ошибки из клиентского приложения.",
+            "route": "Маршрут приложения на момент сбоя.",
+            "href": "Полный URL страницы в момент сбоя.",
+            "user_id": "ID пользователя (если удалось определить).",
+            "triage_severity": "Критичность бага (SLA): low / medium / high / critical.",
+            "triage_status": "Статус обработки баг-репорта: new / in_progress / resolved.",
+            "triage_owner": "Кто обрабатывает (ник/имя/ответственный).",
+            "triage_note": "Комментарий по разбору и фиксу.",
+            "triage_due_at": "SLA-дедлайн: если до этого времени не взят в работу, репорт просрочен.",
+            "triage_updated_at": "Когда в последний раз меняли triage-статус/комментарий.",
+            "created_at": "Когда запись лога была создана в БД.",
+            "reported_at": "Время ошибки на клиенте (по часам пользователя).",
+        },
     }
     field_translations = {
         "users": {
@@ -701,6 +726,23 @@ def apply_field_notes_ru(client: DirectusClient) -> None:
             "payment_id": "ID платежа",
             "user_id": "Пользователь",
         },
+        "error_reports": {
+            "event_id": "Event ID",
+            "code": "Код ошибки",
+            "type": "Тип ошибки",
+            "message": "Сообщение",
+            "route": "Маршрут",
+            "href": "URL",
+            "user_id": "Пользователь",
+            "triage_severity": "Критичность",
+            "triage_status": "Статус обработки",
+            "triage_owner": "Ответственный",
+            "triage_note": "Комментарий",
+            "triage_due_at": "SLA дедлайн",
+            "triage_updated_at": "Обновлен",
+            "created_at": "Создан",
+            "reported_at": "Время на клиенте",
+        },
     }
 
     for collection, fields in field_notes.items():
@@ -710,6 +752,44 @@ def apply_field_notes_ru(client: DirectusClient) -> None:
             if translation:
                 meta_payload["translations"] = [{"language": "ru-RU", "translation": translation}]
             patch_field_meta(client, collection, field, meta_payload)
+
+    # Error reports triage controls
+    patch_field_meta(
+        client,
+        "error_reports",
+        "triage_status",
+        {
+            "interface": "select-dropdown",
+            "options": {
+                "choices": [
+                    {"text": "Новый", "value": "new"},
+                    {"text": "В работе", "value": "in_progress"},
+                    {"text": "Исправлен", "value": "resolved"},
+                ]
+            },
+        },
+    )
+    patch_field_meta(
+        client,
+        "error_reports",
+        "triage_severity",
+        {
+            "interface": "select-dropdown",
+            "options": {
+                "choices": [
+                    {"text": "Низкая", "value": "low"},
+                    {"text": "Средняя", "value": "medium"},
+                    {"text": "Высокая", "value": "high"},
+                    {"text": "Критичная", "value": "critical"},
+                ]
+            },
+        },
+    )
+    patch_field_meta(client, "error_reports", "triage_note", {"interface": "input-multiline"})
+    patch_field_meta(client, "error_reports", "triage_due_at", {"interface": "datetime"})
+    patch_field_meta(client, "error_reports", "triage_updated_at", {"interface": "datetime", "readonly": True})
+    patch_field_meta(client, "error_reports", "created_at", {"interface": "datetime", "readonly": True})
+    patch_field_meta(client, "error_reports", "reported_at", {"interface": "datetime"})
 
 
 def ensure_admin_settings(client: DirectusClient) -> None:
@@ -818,6 +898,18 @@ def ensure_admin_settings(client: DirectusClient) -> None:
         {"default_value": 3},
         {"interface": "input", "note": "Окно (дней) для виджета “подозрительные блокировки”"},
     )
+    ensure_field(
+        "maintenance_mode",
+        "boolean",
+        {"default_value": False},
+        {"interface": "boolean", "note": "Включить режим технических работ для клиентского приложения"},
+    )
+    ensure_field(
+        "maintenance_message",
+        "string",
+        {"default_value": ""},
+        {"interface": "input-multiline", "note": "Кастомный текст техработ (что происходит, сроки и т.д.)"},
+    )
 
     # Ensure singleton row exists.
     defaults = {
@@ -830,6 +922,8 @@ def ensure_admin_settings(client: DirectusClient) -> None:
         "pay_spike_min_sum": 5000.0,
         "expiring_days": 7,
         "suspicious_block_days": 3,
+        "maintenance_mode": False,
+        "maintenance_message": "",
     }
     items = client.get(f"/items/{collection}", params={"limit": 1, "fields": "id"}).json().get("data") or []
     if not items:
@@ -846,6 +940,53 @@ def ensure_admin_settings(client: DirectusClient) -> None:
         ensure_permission(client, manager_policy_id, collection, "update")
     if viewer_policy_id:
         ensure_permission(client, viewer_policy_id, collection, "read")
+
+
+def apply_error_reports_form_ux(client: DirectusClient) -> None:
+    """
+    Make error reports list/form practical for triage workflow.
+    """
+    if client.get("/collections/error_reports").status_code != 200:
+        return
+
+    widths = {
+        "id": "quarter",
+        "created_at": "half",
+        "reported_at": "half",
+        "triage_severity": "quarter",
+        "triage_status": "quarter",
+        "triage_due_at": "half",
+        "triage_owner": "quarter",
+        "type": "quarter",
+        "code": "half",
+        "user_id": "quarter",
+        "route": "half",
+        "message": "full",
+        "triage_note": "full",
+    }
+    sort = {
+        "created_at": 1,
+        "reported_at": 2,
+        "triage_severity": 3,
+        "triage_status": 4,
+        "triage_due_at": 5,
+        "triage_owner": 6,
+        "type": 7,
+        "code": 8,
+        "user_id": 9,
+        "route": 10,
+        "message": 11,
+        "triage_note": 12,
+    }
+
+    for field, width in widths.items():
+        meta: Dict[str, Any] = {"width": width, "hidden": False}
+        if field in sort:
+            meta["sort"] = sort[field]
+        patch_field_meta(client, "error_reports", field, meta)
+
+    patch_field_meta(client, "error_reports", "message", {"interface": "input-multiline"})
+    patch_field_meta(client, "error_reports", "triage_note", {"interface": "input-multiline"})
 
 
 def apply_users_form_ux(client: DirectusClient) -> None:
@@ -1823,8 +1964,12 @@ def ensure_permissions_baseline(client: DirectusClient) -> None:
         # Partners (optional)
         "partner_withdrawals",
     }
+    manager_update_only = {
+        "error_reports",
+    }
     manager_ro = {
         "connections",
+        "error_reports",
     }
     viewer_ro = {
         "users",
@@ -1832,6 +1977,7 @@ def ensure_permissions_baseline(client: DirectusClient) -> None:
         "tariffs",
         "connections",
         "processed_payments",
+        "error_reports",
     }
     admin_rw = {
         "users",
@@ -1848,10 +1994,12 @@ def ensure_permissions_baseline(client: DirectusClient) -> None:
         "partner_withdrawals",
         "partner_qr_codes",
         "partner_earnings",
+        "error_reports",
     }
 
     # Narrow to collections that actually exist in the current instance.
     manager_rw = {c for c in manager_rw if c in existing_collections}
+    manager_update_only = {c for c in manager_update_only if c in existing_collections}
     manager_ro = {c for c in manager_ro if c in existing_collections}
     viewer_ro = {c for c in viewer_ro if c in existing_collections}
     admin_rw = {c for c in admin_rw if c in existing_collections}
@@ -1866,6 +2014,8 @@ def ensure_permissions_baseline(client: DirectusClient) -> None:
             ensure_permission(client, manager_policy_id, collection, action)
     for collection in sorted(manager_ro):
         ensure_permission(client, manager_policy_id, collection, "read")
+    for collection in sorted(manager_update_only):
+        ensure_permission(client, manager_policy_id, collection, "update")
 
     for collection in sorted(viewer_ro):
         ensure_permission(client, viewer_policy_id, collection, "read")
@@ -2441,6 +2591,122 @@ def ensure_role_presets(client: DirectusClient) -> None:
                 "color": "#10B981",
             }
         )
+        upsert_preset(
+            {
+                "bookmark": "Баг-репорты: все",
+                "user": None,
+                "role": rid,
+                "collection": "error_reports",
+                "layout": "tabular",
+                "layout_query": {
+                    "tabular": {
+                        "fields": ["id", "created_at", "triage_severity", "triage_status", "type", "code", "user_id", "route", "message", "triage_owner"],
+                        "sort": "-created_at",
+                    }
+                },
+                "layout_options": {
+                    "tabular": {
+                        "widths": {
+                            "id": 200,
+                            "created_at": 180,
+                            "triage_severity": 140,
+                            "triage_status": 150,
+                            "type": 150,
+                            "code": 260,
+                            "user_id": 150,
+                            "route": 260,
+                            "message": 360,
+                            "triage_owner": 180,
+                        }
+                    }
+                },
+                "filter": None,
+                "icon": "bookmark",
+                "color": "#64748B",
+            }
+        )
+        upsert_preset(
+            {
+                "bookmark": "Баг-репорты: не взяты",
+                "user": None,
+                "role": rid,
+                "collection": "error_reports",
+                "layout": "tabular",
+                "layout_query": {
+                    "tabular": {
+                        "fields": ["id", "created_at", "triage_status", "type", "code", "route", "message"],
+                        "sort": "-created_at",
+                    }
+                },
+                "layout_options": {"tabular": {"widths": {"id": 200, "created_at": 180, "triage_status": 150, "type": 150, "code": 260, "route": 260, "message": 360}}},
+                "filter": {"triage_status": {"_eq": "new"}},
+                "icon": "bookmark",
+                "color": "#EF4444",
+            }
+        )
+        upsert_preset(
+            {
+                "bookmark": "Баг-репорты: просрочен triage (24ч)",
+                "user": None,
+                "role": rid,
+                "collection": "error_reports",
+                "layout": "tabular",
+                "layout_query": {
+                    "tabular": {
+                        "fields": ["id", "created_at", "triage_due_at", "triage_severity", "triage_status", "type", "code", "route", "message"],
+                        "sort": "triage_due_at",
+                    }
+                },
+                "layout_options": {"tabular": {"widths": {"id": 200, "created_at": 180, "triage_due_at": 180, "triage_severity": 140, "triage_status": 150, "type": 150, "code": 260, "route": 260, "message": 360}}},
+                "filter": {
+                    "_and": [
+                        {"triage_status": {"_eq": "new"}},
+                        {"triage_due_at": {"_nnull": True}},
+                        {"triage_due_at": {"_lte": "$NOW"}},
+                    ]
+                },
+                "icon": "bookmark",
+                "color": "#DC2626",
+            }
+        )
+        upsert_preset(
+            {
+                "bookmark": "Баг-репорты: в работе",
+                "user": None,
+                "role": rid,
+                "collection": "error_reports",
+                "layout": "tabular",
+                "layout_query": {
+                    "tabular": {
+                        "fields": ["id", "created_at", "triage_severity", "triage_status", "triage_owner", "type", "code", "route", "message"],
+                        "sort": "-triage_updated_at",
+                    }
+                },
+                "layout_options": {"tabular": {"widths": {"id": 200, "created_at": 180, "triage_severity": 140, "triage_status": 150, "triage_owner": 180, "type": 150, "code": 260, "route": 260, "message": 360}}},
+                "filter": {"triage_status": {"_eq": "in_progress"}},
+                "icon": "bookmark",
+                "color": "#F59E0B",
+            }
+        )
+        upsert_preset(
+            {
+                "bookmark": "Баг-репорты: исправлены",
+                "user": None,
+                "role": rid,
+                "collection": "error_reports",
+                "layout": "tabular",
+                "layout_query": {
+                    "tabular": {
+                        "fields": ["id", "created_at", "triage_status", "triage_updated_at", "type", "code", "route", "message"],
+                        "sort": "-triage_updated_at",
+                    }
+                },
+                "layout_options": {"tabular": {"widths": {"id": 200, "created_at": 180, "triage_status": 150, "triage_updated_at": 180, "type": 150, "code": 260, "route": 260, "message": 360}}},
+                "filter": {"triage_status": {"_eq": "resolved"}},
+                "icon": "bookmark",
+                "color": "#10B981",
+            }
+        )
 
     if viewer:
         rid = viewer["id"]
@@ -2581,6 +2847,7 @@ def main() -> None:
     ensure_nav_group_permissions(client)
     apply_collection_ux(client)
     apply_field_notes_ru(client)
+    apply_error_reports_form_ux(client)
     apply_tariffs_form_ux(client)
     ensure_tariffs_presentation_dividers(client)
     apply_users_form_ux(client)

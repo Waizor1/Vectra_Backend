@@ -38,6 +38,7 @@ except ImportError:  # pragma: no cover
 from bloobcat.bot.notifications.subscription.renewal import (
     notify_auto_renewal_success_balance,
     notify_auto_renewal_failure,
+    notify_family_purchase_success_yookassa,
     notify_renewal_success_yookassa,
     notify_payment_canceled_yookassa,
 )
@@ -121,6 +122,34 @@ async def _is_active_family_subscription(user: Users) -> bool:
     except Exception:
         return False
     return False
+
+
+async def _notify_successful_purchase(
+    *,
+    user: Users,
+    days: int,
+    amount_paid_via_yookassa: float,
+    amount_from_balance: float,
+    device_count: int,
+) -> None:
+    """
+    Sends purchase success notification with family-specific copy for 10-device plans.
+    """
+    normalized_device_count = int(device_count or 1)
+    if normalized_device_count >= 10:
+        await notify_family_purchase_success_yookassa(
+            user=user,
+            days=days,
+            amount_paid_via_yookassa=amount_paid_via_yookassa,
+            amount_from_balance=amount_from_balance,
+        )
+        return
+    await notify_renewal_success_yookassa(
+        user=user,
+        days=days,
+        amount_paid_via_yookassa=amount_paid_via_yookassa,
+        amount_from_balance=amount_from_balance,
+    )
 
 
 async def _apply_referral_first_payment_reward(
@@ -704,11 +733,12 @@ async def _apply_succeeded_payment_fallback(yk_payment, user: Users, meta: dict)
 
     # Notify user in bot (so they see the outcome even if webhook failed).
     try:
-        await notify_renewal_success_yookassa(
+        await _notify_successful_purchase(
             user=user,
             days=days,
             amount_paid_via_yookassa=float(amount_external),
             amount_from_balance=float(amount_from_balance),
+            device_count=int(device_count or 1),
         )
     except Exception:
         pass
@@ -1678,11 +1708,12 @@ async def yookassa_webhook(request: Request, secret: str):
             
             # IMPORTANT: всегда сообщаем пользователю результат оплаты в боте (и для ручных оплат тоже).
             try:
-                await notify_renewal_success_yookassa(
+                await _notify_successful_purchase(
                     user=user,
                     days=days,
                     amount_paid_via_yookassa=amount_paid_via_yookassa,
                     amount_from_balance=amount_from_balance,
+                    device_count=int(device_count or 1),
                 )
             except Exception as notify_exc:
                 logger.error(
@@ -2111,7 +2142,17 @@ async def pay(
                 f"Ошибка при отправке уведомления о платеже с баланса: {e}",
                 extra={'payment_id': payment_id, 'user_id': user.id}
             )
-            
+        try:
+            await _notify_successful_purchase(
+                user=user,
+                days=days,
+                amount_paid_via_yookassa=0.0,
+                amount_from_balance=float(full_price),
+                device_count=int(device_count or 1),
+            )
+        except Exception:
+            pass
+
         return {"status": "success", "message": "Оплачено с бонусного баланса"}
 
     else:

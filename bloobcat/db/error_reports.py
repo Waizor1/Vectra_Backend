@@ -15,6 +15,12 @@ class ErrorReports(models.Model):
     href = fields.CharField(max_length=1024, null=True)
     user_agent = fields.CharField(max_length=512, null=True)
     extra = fields.JSONField(null=True)
+    triage_severity = fields.CharField(max_length=24, default="medium")
+    triage_status = fields.CharField(max_length=24, default="new")
+    triage_owner = fields.CharField(max_length=128, null=True)
+    triage_note = fields.TextField(null=True)
+    triage_due_at = fields.DatetimeField(null=True)
+    triage_updated_at = fields.DatetimeField(auto_now=True)
     created_at = fields.DatetimeField(auto_now_add=True)
     reported_at = fields.DatetimeField(null=True)
 

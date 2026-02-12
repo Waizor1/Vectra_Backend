@@ -32,6 +32,10 @@
 						<v-icon name="payments" />
 						<span>Платежи</span>
 					</router-link>
+					<router-link class="nav__item" :to="{ path: '/content/error_reports' }">
+						<v-icon name="bug_report" />
+						<span>Логи ошибок</span>
+					</router-link>
 				</div>
 
 				<div class="nav__section">
@@ -814,6 +818,21 @@
 
 					<div class="settings">
 						<label class="settings__row">
+							<span>Технические работы</span>
+							<input v-model="settings.maintenance_mode" class="settings__input" type="checkbox" />
+						</label>
+
+						<label class="settings__row settings__row--textarea">
+							<span>Текст техработ</span>
+							<textarea
+								v-model="settings.maintenance_message"
+								class="settings__input settings__input--textarea"
+								rows="3"
+								placeholder="Например: обновляем серверы, ориентировочно до 15:00 МСК"
+							/>
+						</label>
+
+						<label class="settings__row">
 							<span>Алерты включены</span>
 							<input v-model="settings.alerts_enabled" class="settings__input" type="checkbox" />
 						</label>
@@ -908,6 +927,8 @@ const lastUpdated = ref(null);
 
 const settingsId = ref(null);
 const settings = ref({
+	maintenance_mode: false,
+	maintenance_message: '',
 	alerts_enabled: true,
 	reg_spike_factor: 3.0,
 	reg_spike_min: 10,
@@ -2369,6 +2390,10 @@ onMounted(() => {
 	opacity: 0.9;
 }
 
+.settings__row--textarea {
+	grid-template-columns: 1fr;
+}
+
 .settings__input {
 	width: 100%;
 }
@@ -2379,6 +2404,16 @@ onMounted(() => {
 	border: 1px solid rgba(255, 255, 255, 0.10);
 	background: rgba(255, 255, 255, 0.03);
 	color: inherit;
+}
+
+.settings__input--textarea {
+	min-height: 72px;
+	padding: 8px 10px;
+	border-radius: 10px;
+	border: 1px solid rgba(255, 255, 255, 0.10);
+	background: rgba(255, 255, 255, 0.03);
+	color: inherit;
+	resize: vertical;
 }
 
 .help__row {

@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Request
@@ -58,6 +58,9 @@ async def report_error(payload: ErrorReportPayload, request: Request) -> Dict[st
         href=payload.href,
         user_agent=payload.userAgent,
         extra=payload.extra,
+        triage_severity="medium",
+        triage_status="new",
+        triage_due_at=datetime.now(timezone.utc) + timedelta(hours=24),
         reported_at=reported_at,
     )
     logger.info("Error report received", extra={"code": payload.code, "type": payload.type, "user_id": user_id})

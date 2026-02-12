@@ -1,5 +1,47 @@
 ## Журнал изменений
 
+### 2026-02-13 — уведомление о покупке семейной подписки + CTA в раздел семьи
+
+- Добавлено отдельное пользовательское уведомление при успешной покупке семейной подписки (до 10 участников):
+  - `bloobcat/bot/notifications/subscription/renewal.py`: новая функция `notify_family_purchase_success_yookassa()`;
+  - текст уведомления уточняет, что теперь доступна семейная подписка до 10 человек и предлагает пригласить близких;
+  - кнопка в уведомлении открывает фронтенд-раздел семьи: `/subscription/family`.
+- Логика отправки интегрирована в покупку:
+  - `bloobcat/routes/payment.py`: добавлен helper `_notify_successful_purchase()` с выбором family-уведомления при `device_count >= 10`;
+  - применено в трех сценариях: webhook успеха YooKassa, fallback-активация оплаты, покупка с бонусного баланса.
+
+### 2026-02-13 — Логи ошибок в админке + triage workflow
+
+- Добавлен workflow-статус в backend-модель логов ошибок:
+  - `bloobcat/db/error_reports.py`: поля `triage_status`, `triage_owner`, `triage_note`, `triage_updated_at`.
+  - `bloobcat/routes/error_reports.py`: новые входящие баг-репорты создаются со статусом `triage_status='new'`.
+  - Миграция: `migrations/models/75_20260213_error_reports_triage_workflow.py`.
+- Расширен setup Directus:
+  - `scripts/directus_super_setup.py`:
+    - коллекция `error_reports` вынесена в левое меню: группа `Служебное` → `Логи ошибок`;
+    - добавлены RU-notes/переводы для полей error reports;
+    - `triage_status` настроен как dropdown (`new / in_progress / resolved`);
+    - добавлен UX формы/списка для triage;
+    - права: `Manager` получил `read + update` для `error_reports` (без create/delete), `Viewer` — `read`, `Administrator` — полный доступ;
+    - добавлены bookmarks: «не взяты», «в работе», «исправлены».
+- В модуле `tvpn-home` добавлен быстрый переход в раздел:
+  - `directus/extensions/tvpn-home/src/module.vue` → пункт навигации `Логи ошибок` (`/content/error_reports`).
+
+### 2026-02-13 — SLA по баг-репортам (критичность + просрочка 24ч)
+
+- Расширена модель `error_reports`:
+  - `triage_severity` (`low/medium/high/critical`, default `medium`);
+  - `triage_due_at` (SLA дедлайн triage).
+- Добавлена миграция:
+  - `migrations/models/76_20260213_error_reports_sla_and_severity.py`
+  - для исторических записей `triage_due_at` backfill: `created_at + 24h`.
+- Обновлен приём баг-репортов:
+  - `bloobcat/routes/error_reports.py` задает новым логам `triage_due_at = now + 24h`.
+- В Directus setup:
+  - поле `triage_severity` настроено как dropdown;
+  - добавлен bookmark **«Баг-репорты: просрочен triage (24ч)»** (`status=new` и `triage_due_at <= $NOW`);
+  - в bookmarks/таблицах добавлены колонки критичности и SLA дедлайна.
+
 ### 2026-02-12 — моментальный пересчет тарифов при сохранении в Directus (Hook)
 
 - Добавлен защищенный endpoint вычисления цены:

@@ -132,6 +132,55 @@ async def notify_renewal_success_yookassa(user, days: int, amount_paid_via_yooka
         logger.error(f"Ошибка отправки уведомления об успешном продлении (Yookassa) для {user.id}: {e}")
 
 
+async def notify_family_purchase_success_yookassa(
+    user,
+    days: int,
+    amount_paid_via_yookassa: float,
+    amount_from_balance: float,
+):
+    """
+    Уведомляет пользователя об успешной покупке семейной подписки через Yookassa/баланс.
+    """
+    lang = get_user_locale(user)
+    logger.info(f"Отправка уведомления о семейной подписке пользователю {user.id}")
+    if lang == 'ru':
+        parts = [
+            f"🎉 Привет, {user.full_name}! Теперь вам доступна семейная подписка на {days} дней.",
+            "Можно добавить до 10 человек в семью.",
+            "Скорее пригласите первых близких.",
+        ]
+        if amount_from_balance > 0:
+            parts.append(f"\nС вашего бонусного баланса списано {amount_from_balance:.2f}₽.")
+        if amount_paid_via_yookassa > 0:
+            parts.append(f"С вашего способа оплаты списано {amount_paid_via_yookassa:.2f}₽.")
+        text = "\n".join(parts)
+        button = await webapp_inline_button("Открыть раздел семьи", "/subscription/family")
+    else:
+        parts = [
+            f"🎉 Hi {user.full_name}! Your family subscription is now active for {days} days.",
+            "You can add up to 10 people to your family plan.",
+            "Invite your first close ones now.",
+        ]
+        if amount_from_balance > 0:
+            parts.append(f"\n{amount_from_balance:.2f} RUB has been deducted from your bonus balance.")
+        if amount_paid_via_yookassa > 0:
+            parts.append(f"{amount_paid_via_yookassa:.2f} RUB has been charged to your payment method.")
+        text = "\n".join(parts)
+        button = await webapp_inline_button("Open family section", "/subscription/family")
+    try:
+        await bot.send_message(user.id, text, reply_markup=button)
+        logger.info(f"Уведомление о семейной подписке успешно отправлено пользователю {user.id}")
+        await reset_user_failed_count(user.id)
+    except TelegramForbiddenError as e:
+        logger.warning(f"User {user.id} blocked the bot: {e}")
+        await handle_telegram_forbidden_error(user.id, e)
+    except TelegramBadRequest as e:
+        logger.error(f"Bad request error for user {user.id}: {e}")
+        await handle_telegram_bad_request(user.id, e)
+    except Exception as e:
+        logger.error(f"Ошибка отправки уведомления о семейной подписке для {user.id}: {e}")
+
+
 async def notify_payment_canceled_yookassa(user, reason: str | None = None):
     """
     Уведомляет пользователя об отмене/неуспешном завершении оплаты через YooKassa (ручной платеж).
