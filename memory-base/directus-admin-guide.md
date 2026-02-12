@@ -43,6 +43,13 @@
 2. Сумма вероятностей активных призов должна быть ≤ 1.0.
 3. Для `subscription` нужно указывать целое число дней в `prize_value`.
 
+**Тарифы: как менять цену карточек (рекомендуемый путь)**
+1. Открыть Tariffs и редактировать `final_price_default` (и `final_price_family` для 12 мес family).
+2. При сохранении Directus-hook выполняет пересчет и сразу записывает `base_price` + `progressive_multiplier`.
+3. Family-карточка отображается только если:
+   - `family_plan_enabled = true`
+   - `devices_limit_family > devices_limit_default`
+
 ### 3) Дашборды и метрики
 Раздел **Аналитика** (`/admin/insights`) — список дашбордов и панелей.
 API для графиков: `/admin-widgets/*`

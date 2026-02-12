@@ -1,5 +1,47 @@
 ## Журнал изменений
 
+### 2026-02-12 — моментальный пересчет тарифов при сохранении в Directus (Hook)
+
+- Добавлен защищенный endpoint вычисления цены:
+  - `POST /admin/integration/tariffs/compute-pricing`
+  - файл: `bloobcat/routes/admin_integration.py`
+  - логика: `bloobcat/services/admin_integration.py::compute_tariff_effective_pricing`.
+- Расширен Directus hook `directus/extensions/remnawave-sync`:
+  - `filter("items.create"/"items.update")` для коллекции `tariffs`;
+  - перед сохранением вызывается backend compute endpoint и в payload подставляются `base_price` и `progressive_multiplier`;
+  - за счет filter-хука пересчет происходит в момент сохранения карточки (без ожидания фронтовых/API обращений).
+- Безопасность:
+  - hook использует уже существующий `ADMIN_INTEGRATION_TOKEN`;
+  - при любой ошибке вычисления сохранение не блокируется (fallback: payload без пересчета).
+- UX/надежность setup:
+  - в `scripts/directus_super_setup.py` добавлена проверка `verify_tariffs_form_visibility()` для контроля, что ключевые поля `tariffs` не скрыты.
+
+### 2026-02-12 — UX-апгрейд админки тарифов: финальные цены карточек + понятная family-логика
+
+- Цель:
+  - упростить управление тарифами в Directus: редактировать именно финальную цену карточки, а не вручную подбирать `base_price`/`progressive_multiplier`;
+  - сделать структуру формы тарифов более понятной и ближе к фактическим карточкам витрины.
+- Что изменено:
+  - `bloobcat/db/tariff.py`:
+    - добавлены поля `family_plan_enabled`, `final_price_default`, `final_price_family`;
+    - добавлен авто-пересчет эффективных `base_price/progressive_multiplier` из финальных цен карточек;
+    - `calculate_price()` и snapshot-цены теперь используют эффективные (пересчитанные) параметры.
+  - `migrations/models/74_20260212_add_tariff_card_pricing_fields.py`:
+    - миграция новых полей карточек тарифа.
+  - `bloobcat/routes/subscription.py`:
+    - семейная карточка 12 месяцев учитывает `family_plan_enabled`;
+    - покупка по `12months_family` доступна только если семейный режим включен.
+  - `bloobcat/routes/payment.py`:
+    - в snapshot `ActiveTariffs.progressive_multiplier` сохраняется эффективный множитель (после авто-пересчета из финальных цен).
+  - `scripts/directus_super_setup.py`:
+    - обновлены заметки/переводы для `tariffs` с акцентом на редактирование финальных цен;
+    - добавлены `apply_tariffs_form_ux()` и `ensure_tariffs_presentation_dividers()`:
+      - секции формы: карточка, финальные цены, лимиты/family, формула, LTE;
+      - заметки-пояснения по family/non-family;
+    - добавлены presets: `Тарифы: карточки витрины`, `Тарифы: 12 месяцев + family`.
+  - `scripts/vps/seed_tariffs.sql`:
+    - сид дополнен новыми полями и финальными ценами карточек.
+
 ### 2026-02-12 — синхронизация тарифов frontend ↔ admin (Directus) ↔ backend
 
 - Проблема:

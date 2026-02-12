@@ -82,6 +82,8 @@ def _plan_id_for_months(months: int, family: bool = False) -> str:
 
 async def _build_plans() -> List[SubscriptionPlanResponse]:
     tariffs = await Tariffs.filter(is_active=True).order_by("order")
+    for tariff in tariffs:
+        await tariff.sync_effective_pricing_fields()
     by_months: Dict[int, Tariffs] = {int(t.months): t for t in tariffs}
     plans: List[SubscriptionPlanResponse] = []
 
@@ -120,7 +122,7 @@ async def _build_plans() -> List[SubscriptionPlanResponse]:
 
     # Family is a 12-month variant with a higher device limit on the same tariff.
     family_tariff = by_months.get(12)
-    if family_tariff:
+    if family_tariff and bool(getattr(family_tariff, "family_plan_enabled", True)):
         family_limit = max(1, int(family_tariff.devices_limit_family or 10))
         default_limit_12 = max(1, int(family_tariff.devices_limit_default or 3))
         if family_limit > default_limit_12:
@@ -151,14 +153,22 @@ async def get_plans() -> List[SubscriptionPlanResponse]:
 async def purchase(payload: SubscriptionPurchaseRequest, user: Users = Depends(validate)) -> SubscriptionStatusResponse:
     plan_id = payload.planId
     tariffs = await Tariffs.filter(is_active=True).all()
+    for tariff in tariffs:
+        await tariff.sync_effective_pricing_fields()
     by_months: Dict[int, Tariffs] = {int(t.months): t for t in tariffs}
+    family_tariff = by_months.get(12)
+    family_enabled = bool(getattr(family_tariff, "family_plan_enabled", True)) if family_tariff else False
     plan_map = {
         "1month": (1, max(1, int((by_months.get(1).devices_limit_default if by_months.get(1) else 3) or 3))),
         "3months": (3, max(1, int((by_months.get(3).devices_limit_default if by_months.get(3) else 3) or 3))),
         "6months": (6, max(1, int((by_months.get(6).devices_limit_default if by_months.get(6) else 3) or 3))),
         "12months_promo": (12, max(1, int((by_months.get(12).devices_limit_default if by_months.get(12) else 3) or 3))),
-        "12months_family": (12, max(1, int((by_months.get(12).devices_limit_family if by_months.get(12) else 10) or 10))),
     }
+    if family_enabled:
+        plan_map["12months_family"] = (
+            12,
+            max(1, int((by_months.get(12).devices_limit_family if by_months.get(12) else 10) or 10)),
+        )
     if plan_id not in plan_map:
         raise HTTPException(status_code=400, detail="Unknown planId")
     months, device_count = plan_map[plan_id]

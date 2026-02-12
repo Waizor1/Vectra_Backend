@@ -12,7 +12,7 @@
   - Readonly: все, кроме `lte_gb_total`
   - Editable: `lte_gb_total`
 - `tariffs` (из `Tariffs`)
-  - Editable: `order`, `is_active`, `progressive_multiplier`, `devices_limit_default`, `devices_limit_family`, `lte_enabled`, `lte_price_per_gb`, `base_price`, `name`, `months`
+  - Editable: `order`, `is_active`, `family_plan_enabled`, `final_price_default`, `final_price_family`, `devices_limit_default`, `devices_limit_family`, `base_price`, `progressive_multiplier`, `lte_enabled`, `lte_price_per_gb`, `name`, `months`
 - `promo_batches` (из `PromoBatch`)
   - Readonly: `id`, `created_at`
   - Связи: `created_by` -> directus_users.id (если хотим аудит)

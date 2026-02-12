@@ -11,6 +11,7 @@ from bloobcat.services.admin_integration import (
     sync_active_tariff_lte,
     sync_user_remnawave_fields,
     delete_user_via_admin,
+    compute_tariff_effective_pricing,
 )
 from bloobcat.settings import admin_integration_settings
 from bloobcat.db.users import Users
@@ -40,6 +41,11 @@ class ActiveTariffSyncPayload(BaseModel):
     lte_gb_used: Optional[float] = None
 
 
+class TariffPricingComputePayload(BaseModel):
+    tariff_id: Optional[int] = None
+    patch: dict = {}
+
+
 @router.post("/users/{user_id}/sync", dependencies=[Depends(require_admin_integration_token)])
 async def sync_user(user_id: int, payload: UserSyncPayload):
     await sync_user_lte(user_id, payload.lte_gb_total)
@@ -59,6 +65,15 @@ async def delete_user(user_id: int):
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
     return {"ok": True}
+
+
+@router.post("/tariffs/compute-pricing", dependencies=[Depends(require_admin_integration_token)])
+async def compute_tariff_pricing(payload: TariffPricingComputePayload):
+    computed = await compute_tariff_effective_pricing(
+        tariff_id=payload.tariff_id,
+        patch=payload.patch or {},
+    )
+    return {"ok": True, "computed": computed}
 
 
 @router.post("/family/{owner_id}/unblock-invites", dependencies=[Depends(require_admin_integration_token)])

@@ -1,6 +1,23 @@
 const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj || {}, key);
 
-export default function registerHook({ action }) {
+const TARIFF_PRICING_FIELDS = new Set([
+  "base_price",
+  "progressive_multiplier",
+  "devices_limit_default",
+  "devices_limit_family",
+  "family_plan_enabled",
+  "final_price_default",
+  "final_price_family",
+]);
+
+const hasTariffPricingInput = (payload) => {
+  if (!payload || typeof payload !== "object") {
+    return false;
+  }
+  return Object.keys(payload).some((key) => TARIFF_PRICING_FIELDS.has(key));
+};
+
+export default function registerHook({ action, filter }) {
   const baseUrl = process.env.ADMIN_INTEGRATION_URL;
   const token = process.env.ADMIN_INTEGRATION_TOKEN;
 
@@ -20,7 +37,59 @@ export default function registerHook({ action }) {
       const text = await res.text().catch(() => "");
       throw new Error(`Admin integration failed: ${res.status} ${text}`);
     }
+    const contentType = String(res.headers.get("content-type") || "").toLowerCase();
+    if (contentType.includes("application/json")) {
+      return await res.json();
+    }
+    return null;
   };
+
+  const enrichTariffPayload = async (payload, tariffId) => {
+    if (!baseUrl || !token) {
+      return payload;
+    }
+    if (!hasTariffPricingInput(payload)) {
+      return payload;
+    }
+    try {
+      const response = await callBackend(
+        "POST",
+        "/admin/integration/tariffs/compute-pricing",
+        {
+          tariff_id: tariffId != null ? Number(tariffId) : null,
+          patch: payload,
+        }
+      );
+      const computed = response?.computed;
+      if (!computed || typeof computed !== "object") {
+        return payload;
+      }
+      return {
+        ...payload,
+        base_price: computed.base_price,
+        progressive_multiplier: computed.progressive_multiplier,
+      };
+    } catch (error) {
+      console.error("[remnawave-sync] tariff pricing compute skipped:", error?.message || error);
+      return payload;
+    }
+  };
+
+  filter("items.create", async (payload, meta) => {
+    if (meta?.collection !== "tariffs") {
+      return payload;
+    }
+    return await enrichTariffPayload(payload || {}, null);
+  });
+
+  filter("items.update", async (payload, meta) => {
+    if (meta?.collection !== "tariffs") {
+      return payload;
+    }
+    const keys = meta?.keys;
+    const tariffId = Array.isArray(keys) ? keys[0] : keys;
+    return await enrichTariffPayload(payload || {}, tariffId);
+  });
 
   action("items.update", async (event) => {
     const collection = event?.collection;
@@ -70,6 +139,7 @@ export default function registerHook({ action }) {
         `/admin/integration/active-tariffs/${activeTariffId}/sync`,
         syncPayload
       );
+      return;
     }
   });
 

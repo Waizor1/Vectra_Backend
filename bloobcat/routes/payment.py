@@ -551,6 +551,8 @@ async def _apply_succeeded_payment_fallback(yk_payment, user: Users, meta: dict)
 
     if tariff_id is not None:
         original = await Tariffs.get_or_none(id=tariff_id)
+        if original:
+            await original.sync_effective_pricing_fields()
         if user.active_tariff_id:
             old_active = await ActiveTariffs.get_or_none(id=user.active_tariff_id)
             if old_active:
@@ -570,10 +572,11 @@ async def _apply_succeeded_payment_fallback(yk_payment, user: Users, meta: dict)
             usage_snapshot = await _fetch_today_lte_usage_gb(str(user.remnawave_uuid))
 
         if original and bool(getattr(original, "is_active", True)):
+            _, effective_multiplier = original.get_effective_pricing()
             calculated_price = int(original.calculate_price(device_count))
             active_name = original.name
             active_months = int(original.months)
-            active_multiplier = original.progressive_multiplier
+            active_multiplier = effective_multiplier
         else:
             # Keep system consistent even if tariff was deleted/deactivated after payment start.
             calculated_price = _round_rub(amount_external + amount_from_balance)
@@ -1195,6 +1198,8 @@ async def yookassa_webhook(request: Request, secret: str):
         if tariff_id is not None:
             # Получаем новый тариф
             new_tariff = await Tariffs.get_or_none(id=tariff_id)
+            if new_tariff:
+                await new_tariff.sync_effective_pricing_fields()
             if not new_tariff:
                 logger.error(f"Не найден тариф {tariff_id} при обработке платежа")
                 return {"status": "error", "message": "Tariff not found"}
@@ -1353,6 +1358,8 @@ async def yookassa_webhook(request: Request, secret: str):
             if tariff_id is not None:
                 original = await Tariffs.get_or_none(id=tariff_id)
                 if original:
+                    await original.sync_effective_pricing_fields()
+                    _, effective_multiplier = original.get_effective_pricing()
                     # Получаем device_count из метаданных платежа
                     try:
                         device_count = int(data.get("device_count", 1))
@@ -1399,7 +1406,7 @@ async def yookassa_webhook(request: Request, secret: str):
                         lte_price_per_gb=lte_price_snapshot,
                         lte_usage_last_date=msk_today,
                         lte_usage_last_total_gb=usage_snapshot if usage_snapshot is not None else 0.0,
-                        progressive_multiplier=original.progressive_multiplier,
+                        progressive_multiplier=effective_multiplier,
                         residual_day_fraction=0.0
                     )
                     active_tariff_for_lte = active_tariff
@@ -1647,6 +1654,7 @@ async def yookassa_webhook(request: Request, secret: str):
                 try:
                     original = await Tariffs.get_or_none(id=tariff_id)
                     if original:
+                        await original.sync_effective_pricing_fields()
                         try:
                             device_count = int(data.get("device_count", 1))
                         except (ValueError, TypeError):
@@ -1820,6 +1828,7 @@ async def pay(
     tariff = await Tariffs.get_or_none(id=tariff_id)
     if tariff is None or not bool(getattr(tariff, "is_active", True)):
         raise HTTPException(status_code=404, detail="Tariff not found")
+    await tariff.sync_effective_pricing_fields()
 
     # Проверяем количество устройств
     if device_count < 1:
@@ -1989,6 +1998,7 @@ async def pay(
         # Создаём новый активный тариф
         # ВАЖНО: сохраняем в price базовую стоимость тарифа без персональной скидки,
         # чтобы автоплатежи не применяли скидку дважды
+        _, effective_multiplier = tariff.get_effective_pricing()
         base_calculated_price = tariff.calculate_price(device_count)
         active_tariff = await ActiveTariffs.create(
             user=user,
@@ -2001,7 +2011,7 @@ async def pay(
             lte_price_per_gb=lte_price_per_gb,
             lte_usage_last_date=msk_today,
             lte_usage_last_total_gb=usage_snapshot if usage_snapshot is not None else 0.0,
-            progressive_multiplier=tariff.progressive_multiplier,
+            progressive_multiplier=effective_multiplier,
             residual_day_fraction=0.0
         )
         user.active_tariff_id = active_tariff.id

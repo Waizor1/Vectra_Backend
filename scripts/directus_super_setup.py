@@ -379,8 +379,9 @@ def apply_collection_ux(client: DirectusClient) -> None:
         "tariffs": {
             "group": "grp_main",
             "icon": "sell",
-            "note": "Справочник тарифов и цен",
+            "note": "Тарифные карточки: финальные цены, лимиты устройств и правила семейного плана",
             "sort": 3,
+            "display_template": "{{order}}. {{name}} — {{months}} мес",
             "hidden": False,
             "translations": [{"language": "ru-RU", "translation": "Тарифы"}],
         },
@@ -589,10 +590,15 @@ def apply_field_notes_ru(client: DirectusClient) -> None:
         },
         "tariffs": {
             "is_active": "Если выключить, тариф не будет доступен для новых покупок и пропадет с витрины фронтенда.",
-            "base_price": "Базовая цена за 1 устройство. Итоговая цена плана рассчитывается с progressive_multiplier.",
-            "progressive_multiplier": "Множитель скидки для каждого следующего устройства (например, 0.9).",
-            "devices_limit_default": "Лимит устройств для основного (не семейного) плана.",
-            "devices_limit_family": "Лимит устройств для семейного плана 12 месяцев.",
+            "base_price": "Базовая цена за 1 устройство (служебный расчетный параметр). Обновляется автоматически, если указана финальная цена карточки.",
+            "progressive_multiplier": "Множитель прогрессии цены. Если заданы финальные цены обычной и семейной карточки, рассчитывается автоматически.",
+            "devices_limit_default": "Лимит устройств для обычной карточки тарифа.",
+            "devices_limit_family": "Лимит устройств для семейной карточки (обычно 12 месяцев).",
+            "family_plan_enabled": "Включает/выключает показ семейной карточки для этого тарифа.",
+            "final_price_default": "Финальная цена обычной карточки (в рублях). Рекомендуем редактировать это поле, а не base_price.",
+            "final_price_family": "Финальная цена семейной карточки (в рублях). Используется вместе с family_plan_enabled и devices_limit_family.",
+            "months": "Срок тарифа в месяцах. На витрине отображаются карточки 1/3/6/12 месяцев.",
+            "name": "Название карточки тарифа в админке и внутренних данных.",
             "order": "Порядок отображения тарифа на витрине.",
         },
         "promo_codes": {
@@ -659,10 +665,15 @@ def apply_field_notes_ru(client: DirectusClient) -> None:
         },
         "tariffs": {
             "is_active": "Активен",
-            "base_price": "Базовая цена (1 устройство)",
-            "progressive_multiplier": "Множитель скидки",
+            "name": "Название",
+            "months": "Месяцев",
+            "base_price": "Базовая цена (служебная)",
+            "progressive_multiplier": "Множитель прогрессии",
             "devices_limit_default": "Лимит устройств (обычный)",
             "devices_limit_family": "Лимит устройств (семейный)",
+            "family_plan_enabled": "Семейный план включен",
+            "final_price_default": "Финальная цена (обычный)",
+            "final_price_family": "Финальная цена (семейный)",
             "order": "Порядок",
         },
         "promo_codes": {
@@ -1121,6 +1132,204 @@ def ensure_users_presentation_dividers(client: DirectusClient) -> None:
     patch_field_meta(client, "users", "last_hwid_reset", {"interface": "datetime", "options": {"use24": True, "includeSeconds": False}})
     patch_field_meta(client, "users", "last_failed_message_at", {"interface": "datetime", "options": {"use24": True, "includeSeconds": False}})
     patch_field_meta(client, "users", "custom_referral_percent", {"interface": "slider", "options": {"min": 0, "max": 100, "step": 1, "alwaysShowValue": True}})
+
+
+def apply_tariffs_form_ux(client: DirectusClient) -> None:
+    """
+    Make tariffs form explicit and editable by real card semantics:
+    - operators edit final prices first
+    - system parameters (base/multiplier) stay visible as technical fields
+    """
+    if client.get("/collections/tariffs").status_code != 200:
+        return
+
+    widths = {
+        "id": "quarter",
+        "name": "half",
+        "months": "quarter",
+        "order": "quarter",
+        "is_active": "quarter",
+        "family_plan_enabled": "quarter",
+        "final_price_default": "half",
+        "final_price_family": "half",
+        "devices_limit_default": "quarter",
+        "devices_limit_family": "quarter",
+        "base_price": "half",
+        "progressive_multiplier": "half",
+        "lte_enabled": "quarter",
+        "lte_price_per_gb": "quarter",
+    }
+
+    sort = {
+        "id": 10,
+        "name": 11,
+        "months": 12,
+        "order": 13,
+        "is_active": 14,
+        "family_plan_enabled": 15,
+        "final_price_default": 20,
+        "final_price_family": 21,
+        "devices_limit_default": 30,
+        "devices_limit_family": 31,
+        "base_price": 40,
+        "progressive_multiplier": 41,
+        "lte_enabled": 50,
+        "lte_price_per_gb": 51,
+    }
+
+    for field, width in widths.items():
+        meta: Dict[str, Any] = {"width": width, "hidden": False, "group": None}
+        if field in sort:
+            meta["sort"] = sort[field]
+        if field == "id":
+            meta["readonly"] = True
+        patch_field_meta(client, "tariffs", field, meta)
+
+    patch_field_meta(client, "tariffs", "is_active", {"interface": "toggle", "options": {"label": "Активен"}})
+    patch_field_meta(client, "tariffs", "family_plan_enabled", {"interface": "toggle", "options": {"label": "Семейный план"}})
+    patch_field_meta(client, "tariffs", "lte_enabled", {"interface": "toggle", "options": {"label": "LTE включен"}})
+    patch_field_meta(client, "tariffs", "name", {"interface": "input"})
+    patch_field_meta(client, "tariffs", "months", {"interface": "input"})
+    patch_field_meta(client, "tariffs", "order", {"interface": "input"})
+    patch_field_meta(client, "tariffs", "final_price_default", {"interface": "input"})
+    patch_field_meta(client, "tariffs", "final_price_family", {"interface": "input"})
+    patch_field_meta(client, "tariffs", "devices_limit_default", {"interface": "input"})
+    patch_field_meta(client, "tariffs", "devices_limit_family", {"interface": "input"})
+    patch_field_meta(client, "tariffs", "base_price", {"interface": "input"})
+    patch_field_meta(client, "tariffs", "progressive_multiplier", {"interface": "input"})
+    patch_field_meta(client, "tariffs", "lte_price_per_gb", {"interface": "input"})
+
+
+def ensure_tariffs_presentation_dividers(client: DirectusClient) -> None:
+    """
+    Add clear visual structure and family logic explanation for tariffs form.
+    """
+    if client.get("/collections/tariffs").status_code != 200:
+        return
+
+    def ensure_alias_field(field: str, meta: Dict[str, Any]) -> None:
+        resp = client.patch("/fields/tariffs/" + field, json={"meta": meta})
+        if resp.status_code == 404:
+            created = client.post(
+                "/fields/tariffs",
+                json={
+                    "field": field,
+                    "type": "alias",
+                    "schema": None,
+                    "meta": meta,
+                },
+            )
+            if created.status_code in (401, 403, 409):
+                return
+            created.raise_for_status()
+            return
+        if resp.status_code in (401, 403):
+            return
+        resp.raise_for_status()
+
+    ensure_alias_field(
+        "ui_tariff_divider_core",
+        {
+            "interface": "presentation-divider",
+            "special": ["alias", "no-data"],
+            "options": {"title": "Карточка тарифа", "icon": "view_compact"},
+            "width": "full",
+            "sort": 1,
+        },
+    )
+    ensure_alias_field(
+        "ui_tariff_divider_prices",
+        {
+            "interface": "presentation-divider",
+            "special": ["alias", "no-data"],
+            "options": {"title": "Финальные цены карточек", "icon": "sell"},
+            "width": "full",
+            "sort": 19,
+        },
+    )
+    ensure_alias_field(
+        "ui_tariff_prices_notice",
+        {
+            "interface": "presentation-notice",
+            "special": ["alias", "no-data"],
+            "options": {
+                "color": "info",
+                "icon": "tips_and_updates",
+                "text": (
+                    "Меняйте в первую очередь финальные цены карточек. "
+                    "Служебные параметры base_price и progressive_multiplier "
+                    "автоматически пересчитываются backend-логикой."
+                ),
+            },
+            "width": "full",
+            "sort": 22,
+        },
+    )
+    ensure_alias_field(
+        "ui_tariff_divider_devices",
+        {
+            "interface": "presentation-divider",
+            "special": ["alias", "no-data"],
+            "options": {"title": "Лимиты устройств и family-логика", "icon": "devices"},
+            "width": "full",
+            "sort": 29,
+        },
+    )
+    ensure_alias_field(
+        "ui_tariff_family_notice",
+        {
+            "interface": "presentation-notice",
+            "special": ["alias", "no-data"],
+            "options": {
+                "color": "normal",
+                "icon": "family_restroom",
+                "text": (
+                    "Обычная карточка использует devices_limit_default. "
+                    "Семейная карточка показывается только при family_plan_enabled=true "
+                    "и devices_limit_family > devices_limit_default."
+                ),
+            },
+            "width": "full",
+            "sort": 32,
+        },
+    )
+    ensure_alias_field(
+        "ui_tariff_divider_formula",
+        {
+            "interface": "presentation-divider",
+            "special": ["alias", "no-data"],
+            "options": {"title": "Служебные параметры расчета", "icon": "functions"},
+            "width": "full",
+            "sort": 39,
+        },
+    )
+    ensure_alias_field(
+        "ui_tariff_formula_notice",
+        {
+            "interface": "presentation-notice",
+            "special": ["alias", "no-data"],
+            "options": {
+                "color": "warning",
+                "icon": "calculate",
+                "text": (
+                    "base_price/progressive_multiplier хранятся для обратной совместимости "
+                    "и платежных snapshot-ов. Обычно вручную их менять не нужно."
+                ),
+            },
+            "width": "full",
+            "sort": 42,
+        },
+    )
+    ensure_alias_field(
+        "ui_tariff_divider_lte",
+        {
+            "interface": "presentation-divider",
+            "special": ["alias", "no-data"],
+            "options": {"title": "LTE", "icon": "network_cell"},
+            "width": "full",
+            "sort": 49,
+        },
+    )
 
 
 def apply_users_luxury_ux(client: DirectusClient) -> None:
@@ -2087,6 +2296,96 @@ def ensure_role_presets(client: DirectusClient) -> None:
         )
         upsert_preset(
             {
+                "bookmark": "Тарифы: карточки витрины",
+                "user": None,
+                "role": rid,
+                "collection": "tariffs",
+                "layout": "tabular",
+                "layout_query": {
+                    "tabular": {
+                        "fields": [
+                            "id",
+                            "order",
+                            "name",
+                            "months",
+                            "is_active",
+                            "final_price_default",
+                            "final_price_family",
+                            "devices_limit_default",
+                            "devices_limit_family",
+                            "family_plan_enabled",
+                        ],
+                        "sort": "order",
+                    }
+                },
+                "layout_options": {
+                    "tabular": {
+                        "widths": {
+                            "id": 100,
+                            "order": 90,
+                            "name": 180,
+                            "months": 110,
+                            "is_active": 120,
+                            "final_price_default": 180,
+                            "final_price_family": 180,
+                            "devices_limit_default": 180,
+                            "devices_limit_family": 180,
+                            "family_plan_enabled": 160,
+                        }
+                    }
+                },
+                "filter": None,
+                "icon": "bookmark",
+                "color": "#0EA5E9",
+            }
+        )
+        upsert_preset(
+            {
+                "bookmark": "Тарифы: 12 месяцев + family",
+                "user": None,
+                "role": rid,
+                "collection": "tariffs",
+                "layout": "tabular",
+                "layout_query": {
+                    "tabular": {
+                        "fields": [
+                            "id",
+                            "order",
+                            "name",
+                            "months",
+                            "is_active",
+                            "family_plan_enabled",
+                            "final_price_default",
+                            "final_price_family",
+                            "devices_limit_default",
+                            "devices_limit_family",
+                        ],
+                        "sort": "order",
+                    }
+                },
+                "layout_options": {
+                    "tabular": {
+                        "widths": {
+                            "id": 100,
+                            "order": 90,
+                            "name": 180,
+                            "months": 110,
+                            "is_active": 120,
+                            "family_plan_enabled": 160,
+                            "final_price_default": 180,
+                            "final_price_family": 180,
+                            "devices_limit_default": 180,
+                            "devices_limit_family": 180,
+                        }
+                    }
+                },
+                "filter": {"months": {"_eq": 12}},
+                "icon": "bookmark",
+                "color": "#14B8A6",
+            }
+        )
+        upsert_preset(
+            {
                 "bookmark": "Промо: отключенные",
                 "user": None,
                 "role": rid,
@@ -2234,6 +2533,37 @@ def verify_users_item_access(client: DirectusClient) -> None:
     item_resp.raise_for_status()
 
 
+def verify_tariffs_form_visibility(client: DirectusClient) -> None:
+    """
+    Safety check: make sure key tariffs fields are visible after UX setup.
+    """
+    required_fields = [
+        "name",
+        "months",
+        "order",
+        "is_active",
+        "family_plan_enabled",
+        "final_price_default",
+        "final_price_family",
+        "devices_limit_default",
+        "devices_limit_family",
+        "base_price",
+        "progressive_multiplier",
+        "lte_enabled",
+        "lte_price_per_gb",
+    ]
+    for field in required_fields:
+        resp = client.get(f"/fields/tariffs/{field}", params={"fields": "field,meta"})
+        if resp.status_code in (401, 403, 404):
+            print(f"WARN: tariffs field {field} not readable (status={resp.status_code})")
+            continue
+        resp.raise_for_status()
+        data = resp.json().get("data") or {}
+        meta = data.get("meta") or {}
+        if bool(meta.get("hidden", False)):
+            print(f"WARN: tariffs field {field} is hidden; forcing visible may be required.")
+
+
 def main() -> None:
     if load_dotenv:
         load_dotenv()
@@ -2251,6 +2581,8 @@ def main() -> None:
     ensure_nav_group_permissions(client)
     apply_collection_ux(client)
     apply_field_notes_ru(client)
+    apply_tariffs_form_ux(client)
+    ensure_tariffs_presentation_dividers(client)
     apply_users_form_ux(client)
     ensure_users_relations_ux(client)
     ensure_users_presentation_dividers(client)
@@ -2259,6 +2591,7 @@ def main() -> None:
     ensure_insights_dashboard(client)
     ensure_role_presets(client)
     verify_users_item_access(client)
+    verify_tariffs_form_visibility(client)
     # Enable optional app extensions if they are present on disk
     ensure_extension_enabled(client, "tvpn-home")
     ensure_extension_enabled(client, "id-link-editor")

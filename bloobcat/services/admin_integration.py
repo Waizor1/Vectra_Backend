@@ -5,6 +5,7 @@ from typing import Optional, Dict, Any
 
 from bloobcat.db.active_tariff import ActiveTariffs
 from bloobcat.db.notifications import NotificationMarks
+from bloobcat.db.tariff import Tariffs
 from bloobcat.db.users import Users
 from bloobcat.logger import get_logger
 from bloobcat.routes.remnawave.lte_utils import set_lte_squad_status
@@ -194,3 +195,70 @@ async def delete_user_via_admin(user_id: int) -> bool:
         return False
     await user_obj.delete()
     return True
+
+
+def _to_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _to_float(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+async def compute_tariff_effective_pricing(
+    *,
+    tariff_id: Optional[int],
+    patch: Dict[str, Any],
+) -> Dict[str, Any]:
+    existing = await Tariffs.get_or_none(id=tariff_id) if tariff_id is not None else None
+
+    base = _to_int(
+        patch.get("base_price"),
+        existing.base_price if existing else 1,
+    )
+    progressive_multiplier = _to_float(
+        patch.get("progressive_multiplier"),
+        existing.progressive_multiplier if existing else 0.9,
+    )
+    devices_limit_default = max(
+        1,
+        _to_int(
+            patch.get("devices_limit_default"),
+            existing.devices_limit_default if existing else 3,
+        ),
+    )
+    devices_limit_family = max(
+        devices_limit_default,
+        _to_int(
+            patch.get("devices_limit_family"),
+            existing.devices_limit_family if existing else 10,
+        ),
+    )
+    final_price_default = patch.get("final_price_default")
+    final_price_family = patch.get("final_price_family")
+    family_plan_enabled_raw = patch.get("family_plan_enabled")
+    if family_plan_enabled_raw is None:
+        family_plan_enabled = bool(existing.family_plan_enabled) if existing else True
+    else:
+        family_plan_enabled = bool(family_plan_enabled_raw)
+
+    model = Tariffs()
+    model.base_price = max(1, base)
+    model.progressive_multiplier = progressive_multiplier
+    model.devices_limit_default = devices_limit_default
+    model.devices_limit_family = devices_limit_family
+    model.family_plan_enabled = family_plan_enabled
+    model.final_price_default = _to_int(final_price_default, 0) if final_price_default is not None else (existing.final_price_default if existing else None)
+    model.final_price_family = _to_int(final_price_family, 0) if final_price_family is not None else (existing.final_price_family if existing else None)
+
+    effective_base, effective_multiplier = model.get_effective_pricing()
+    return {
+        "base_price": int(effective_base),
+        "progressive_multiplier": float(effective_multiplier),
+    }
