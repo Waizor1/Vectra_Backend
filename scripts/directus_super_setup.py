@@ -826,8 +826,9 @@ def ensure_admin_settings(client: DirectusClient) -> None:
         if resp.status_code == 200:
             # Keep it simple: don't overwrite if already exists.
             return
-        if resp.status_code not in (404,):
-            return
+        # Some Directus setups deny reading field metadata (403) while still allowing
+        # field creation. In that case, we still attempt POST and rely on idempotent
+        # handling below (409 duplicate is treated as success).
         created = client.post(
             f"/fields/{collection}",
             json={

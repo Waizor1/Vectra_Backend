@@ -468,3 +468,18 @@
   - `npm run build` для `tvpn-home` — успешно;
   - API check: `GET /items/tvpn_admin_settings` возвращает `200` и `{"data":{"id":1}}`.
 
+### 2026-02-13 — финальный фикс сохранения техработ (права/поля)
+
+- Симптом:
+  - В админке при сохранении блока "Технические работы" сохранялся UI-error `Не удалось сохранить настройки...`.
+- Корневая причина:
+  - В таблице `tvpn_admin_settings` в БД был только столбец `id` (остальные поля отсутствовали).
+  - Из-за этого `PATCH /items/tvpn_admin_settings` падал на payload с `maintenance_*` и алерт-полями.
+  - Почему так случилось: в `scripts/directus_super_setup.py` функция `ensure_field()` прекращала работу на `GET /fields/...` со статусом `403` и не пробовала создать поле, хотя `POST /fields/...` в этой инсталляции разрешен.
+- Исправление:
+  - `scripts/directus_super_setup.py` (`ensure_field`) изменен: при любом `GET != 200` выполняется попытка `POST /fields/{collection}` (с сохранением idempotency через `409`/`401`/`403`).
+  - Скрипт `directus_super_setup.py` повторно выполнен.
+- Подтверждение:
+  - В `tvpn_admin_settings` теперь есть все колонки (`maintenance_mode`, `maintenance_message`, `alerts_enabled`, пороговые поля и т.д.).
+  - `PATCH /items/tvpn_admin_settings` возвращает `200` и корректно обновляет значения.
+
