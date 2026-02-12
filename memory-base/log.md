@@ -451,3 +451,20 @@
 - Дополнительно:
   - В `scripts/directus_super_setup.py` для коллекции `tvpn_admin_settings` добавлена выдача `create` для роли Manager (вместе с `read/update`) для надежного fallback-создания записи.
 
+### 2026-02-13 — RCA по ошибке "Коллекция tvpn_admin_settings не найдена"
+
+- Что проверено вручную:
+  - `directus_super_setup.py` не выполнялся из-за недоступного `http://localhost:8055` (контейнер Directus не был запущен).
+  - После `docker compose up -d directus` и повторного запуска setup скрипт завершился успешно.
+  - В БД подтверждено наличие коллекции: `directus_collections.collection='tvpn_admin_settings'`, `singleton=true`.
+- Найден корневой дефект во frontend-модуле `tvpn-home`:
+  - fallback сохранения использовал `POST /items/tvpn_admin_settings`, а для singleton в текущем Directus этот route возвращает `404 ROUTE_NOT_FOUND`.
+  - из-за этого UI показывал сообщение "коллекция не найдена", хотя коллекция существовала.
+- Исправление в `directus/extensions/tvpn-home/src/module.vue`:
+  - чтение настроек переведено на `GET /items/tvpn_admin_settings` с корректным разбором singleton-ответа-объекта;
+  - сохранение переведено на `PATCH /items/tvpn_admin_settings` (рабочий singleton endpoint для данного окружения);
+  - оставлен fallback `PATCH /items/tvpn_admin_settings/{id}` для legacy/non-singleton сценариев.
+- Верификация:
+  - `npm run build` для `tvpn-home` — успешно;
+  - API check: `GET /items/tvpn_admin_settings` возвращает `200` и `{"data":{"id":1}}`.
+
