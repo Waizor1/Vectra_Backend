@@ -483,3 +483,26 @@
   - В `tvpn_admin_settings` теперь есть все колонки (`maintenance_mode`, `maintenance_message`, `alerts_enabled`, пороговые поля и т.д.).
   - `PATCH /items/tvpn_admin_settings` возвращает `200` и корректно обновляет значения.
 
+### 2026-02-13 — hardening сохранения техработ (multi-endpoint fallback + post-create grants)
+
+- Симптом:
+  - Пользователь продолжал видеть ошибку сохранения в блоке "Технические работы" даже после базовых фиксов.
+- Что доработано:
+  - `directus/extensions/tvpn-home/src/module.vue`:
+    - `loadSettings()` получил fallback чтения через `GET /items/tvpn_admin_settings/singleton`, если основной `GET /items/tvpn_admin_settings` недоступен;
+    - `saveSettings()` теперь:
+      - отправляет payload без `id`,
+      - сначала пробует `PATCH /items/tvpn_admin_settings`,
+      - затем fallback `PATCH /items/tvpn_admin_settings/singleton`,
+      - и в крайнем случае `PATCH /items/tvpn_admin_settings/{id}` для legacy-сценариев;
+    - улучшена диагностика ошибок: отдельный текст для network error и вывод деталей ответа API при неизвестном статусе.
+  - `scripts/directus_super_setup.py`:
+    - в `ensure_admin_settings()` добавлен grant `create` для Manager на `tvpn_admin_settings`;
+    - в `main()` добавлен повторный `ensure_permissions_baseline(client)` сразу после `ensure_admin_settings(client)`, чтобы права гарантированно выставлялись и для коллекций, созданных поздно по ходу setup.
+- Верификация:
+  - `python -m py_compile scripts/directus_super_setup.py` — успешно;
+  - `npm run build` в `directus/extensions/tvpn-home` — успешно;
+  - `python scripts/directus_super_setup.py` — успешно;
+  - `docker compose restart directus` — выполнено;
+  - API smoke: `PATCH /items/tvpn_admin_settings` — `200`, rollback — `200`.
+

@@ -1448,7 +1448,16 @@ async function loadSettings() {
 		settingsId.value = row.id ?? null;
 		settings.value = { ...settings.value, ...row };
 	} catch {
-		// It's optional; admins may choose to keep defaults.
+		// Fallback for Directus setups where singleton route is enforced.
+		try {
+			const res = await api.get('/items/tvpn_admin_settings/singleton');
+			const row = res?.data?.data;
+			if (!row) return;
+			settingsId.value = row.id ?? null;
+			settings.value = { ...settings.value, ...row };
+		} catch {
+			// It's optional; admins may choose to keep defaults.
+		}
 	}
 }
 
@@ -1456,17 +1465,28 @@ async function saveSettings() {
 	if (settingsSaving.value) return;
 	settingsSaving.value = true;
 	settingsSaveError.value = '';
+	const payload = { ...settings.value };
+	delete payload.id;
 	try {
-		// For singleton collections Directus supports patching through /items/{collection}.
-		// On this project it is the most stable route across environments.
-		await api.patch('/items/tvpn_admin_settings', settings.value);
+		// Try the most common singleton routes first; environments differ.
+		try {
+			await api.patch('/items/tvpn_admin_settings', payload);
+		} catch (firstErr) {
+			try {
+				await api.patch('/items/tvpn_admin_settings/singleton', payload);
+			} catch {
+				throw firstErr;
+			}
+		}
 		await loadSettings();
 	} catch (mainErr) {
 		const status = mainErr?.response?.status;
+		const detail = mainErr?.response?.data?.errors?.[0]?.message || mainErr?.response?.data?.error || mainErr?.message || '';
 		// Fallback for non-singleton/legacy environments.
 		try {
 			if (settingsId.value) {
-				await api.patch(`/items/tvpn_admin_settings/${settingsId.value}`, settings.value);
+				await api.patch(`/items/tvpn_admin_settings/${settingsId.value}`, payload);
+				await loadSettings();
 				settingsSaving.value = false;
 				return;
 			}
@@ -1479,8 +1499,12 @@ async function saveSettings() {
 			settingsSaveError.value = 'Недостаточно прав на сохранение `tvpn_admin_settings` (нужно право update).';
 		} else if (status === 404) {
 			settingsSaveError.value = 'Коллекция `tvpn_admin_settings` не найдена. Запустите scripts/directus_super_setup.py.';
+		} else if (!mainErr?.response) {
+			settingsSaveError.value = 'Ошибка сети при сохранении. Проверьте доступность Directus.';
 		} else {
-			settingsSaveError.value = 'Не удалось сохранить настройки. Проверьте права роли и наличие коллекции.';
+			settingsSaveError.value = detail
+				? `Не удалось сохранить настройки: ${detail}`
+				: 'Не удалось сохранить настройки. Проверьте права роли и наличие коллекции.';
 		}
 	}
 	settingsSaving.value = false;

@@ -939,6 +939,7 @@ def ensure_admin_settings(client: DirectusClient) -> None:
     if manager_policy_id:
         ensure_permission(client, manager_policy_id, collection, "read")
         ensure_permission(client, manager_policy_id, collection, "update")
+        ensure_permission(client, manager_policy_id, collection, "create")
     if viewer_policy_id:
         ensure_permission(client, viewer_policy_id, collection, "read")
 
@@ -2857,6 +2858,8 @@ def main() -> None:
     ensure_users_presentation_dividers(client)
     apply_users_luxury_ux(client)
     ensure_admin_settings(client)
+    # Re-run baseline after all late-created collections to avoid skipped grants.
+    ensure_permissions_baseline(client)
     ensure_insights_dashboard(client)
     ensure_role_presets(client)
     verify_users_item_access(client)
