@@ -1,5 +1,6 @@
 from datetime import date, datetime, timedelta
 from typing import Optional, Any, Union
+import asyncio
 
 from aiogram.types import User
 from aiogram.utils.web_app import WebAppUser
@@ -25,6 +26,18 @@ import zlib
 from bloobcat.bot.notifications.trial.granted import notify_trial_granted
 
 logger = get_logger("users_db")
+
+_REMNAWAVE_USER_LOCKS: dict[int, asyncio.Lock] = {}
+_REMNAWAVE_USER_LOCKS_GUARD = asyncio.Lock()
+
+
+async def _get_remnawave_user_lock(user_id: int) -> asyncio.Lock:
+    async with _REMNAWAVE_USER_LOCKS_GUARD:
+        lock = _REMNAWAVE_USER_LOCKS.get(user_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            _REMNAWAVE_USER_LOCKS[user_id] = lock
+        return lock
 
 
 def normalize_date(val: Optional[Union[date, datetime]]) -> Optional[date]:
@@ -98,193 +111,371 @@ class Users(models.Model):
     # Колесо призов: количество доступных попыток для пользователя
     prize_wheel_attempts = fields.IntField(default=0, description="Доступные попытки на колесе призов")
 
+    @staticmethod
+    def _extract_remnawave_user(payload: Any) -> Optional[dict]:
+        if not isinstance(payload, dict):
+            return None
+        response = payload.get("response")
+        if isinstance(response, dict):
+            return response
+        return None
+
+    @staticmethod
+    def _is_remnawave_username_exists_error(error_text: str) -> bool:
+        lowered = (error_text or "").lower()
+        return (
+            "already exists" in lowered
+            or "a019" in lowered
+            or "user username already exists" in lowered
+        )
+
+    @staticmethod
+    def _is_remnawave_not_found_error(error_text: str) -> bool:
+        lowered = (error_text or "").lower()
+        return (
+            "user not found" in lowered
+            or "a063" in lowered
+            or "404" in lowered
+            or "not found" in lowered
+        )
+
+    async def _find_existing_remnawave_user(self, remnawave: Any, base_username: str) -> Optional[dict]:
+        candidates: list[dict] = []
+
+        async def _collect(payload_coro, source: str):
+            try:
+                payload = await payload_coro
+            except Exception as exc:
+                err_text = str(exc)
+                # Endpoint может отсутствовать в старых версиях панели или пользователь не найден.
+                if self._is_remnawave_not_found_error(err_text):
+                    return
+                logger.debug(
+                    "Не удалось получить пользователя RemnaWave (%s) для local user=%s: %s",
+                    source,
+                    self.id,
+                    err_text,
+                )
+                return
+
+            user_payload = self._extract_remnawave_user(payload)
+            if user_payload:
+                candidates.append(user_payload)
+
+        # Быстрые точечные lookup'и
+        await _collect(remnawave.users.get_user_by_telegram_id(self.id), "telegram_id")
+        if self.email:
+            await _collect(remnawave.users.get_user_by_email(self.email), "email")
+        await _collect(remnawave.users.get_user_by_username(base_username), "username")
+
+        # Fallback по списку пользователей (на случай старой панели без точечных endpoint'ов)
+        try:
+            page_size = 100
+            start_index = 0
+            total_users = None
+            max_pages = 20
+            pages_fetched = 0
+            normalized_email = (self.email or "").strip().lower()
+            username_prefix = f"{base_username}_"
+
+            while pages_fetched < max_pages and (total_users is None or start_index < total_users):
+                response = await remnawave.users.get_users(size=page_size, start=start_index)
+                body = response.get("response") if isinstance(response, dict) else None
+                if not isinstance(body, dict):
+                    break
+
+                users_list = body.get("users") or []
+                if not isinstance(users_list, list):
+                    break
+
+                if total_users is None:
+                    total_users = body.get("total")
+
+                for remote_user in users_list:
+                    if not isinstance(remote_user, dict):
+                        continue
+                    username = str(remote_user.get("username") or "")
+                    telegram_id = remote_user.get("telegramId")
+                    email = str(remote_user.get("email") or "").strip().lower()
+                    if (
+                        str(telegram_id) == str(self.id)
+                        or username == base_username
+                        or username.startswith(username_prefix)
+                        or (normalized_email and email and email == normalized_email)
+                    ):
+                        candidates.append(remote_user)
+
+                pages_fetched += 1
+                if len(users_list) < page_size:
+                    break
+                start_index += page_size
+        except Exception as exc:
+            logger.debug(
+                "Не удалось выполнить fallback-поиск пользователя RemnaWave по списку для local user=%s: %s",
+                self.id,
+                exc,
+            )
+
+        # Дедупликация по UUID и выбор лучшего кандидата
+        unique_candidates: dict[str, dict] = {}
+        for candidate in candidates:
+            candidate_uuid = candidate.get("uuid")
+            if candidate_uuid:
+                unique_candidates[str(candidate_uuid)] = candidate
+
+        best_user = None
+        best_score = -1
+        for candidate in unique_candidates.values():
+            score = 0
+            candidate_username = str(candidate.get("username") or "")
+            candidate_telegram_id = candidate.get("telegramId")
+            candidate_email = str(candidate.get("email") or "").strip().lower()
+
+            if str(candidate_telegram_id) == str(self.id):
+                score += 100
+            if candidate_username == base_username:
+                score += 50
+            elif candidate_username.startswith(f"{base_username}_"):
+                score += 20
+            if self.email and candidate_email and candidate_email == self.email.strip().lower():
+                score += 30
+
+            if score > best_score:
+                best_user = candidate
+                best_score = score
+
+        return best_user
+
     async def _ensure_remnawave_user(self) -> bool:
         """
         Создает пользователя в RemnaWave, если он еще не создан.
-        Возвращает True, если пользователь был создан, False - если уже существовал.
+        Возвращает True, если пользователь был создан/перепривязан, False - если уже существовал или не удалось.
         """
-        if self.remnawave_uuid:
-            # Пользователь уже создан в RemnaWave
-            logger.info(f"Пользователь {self.id} уже имеет UUID в RemnaWave: {self.remnawave_uuid}")
-            return False
-        
-        try:
-            # Импортируем здесь, чтобы избежать циклических импортов
-            from bloobcat.routes.remnawave.client import RemnaWaveClient
-            from bloobcat.settings import remnawave_settings
-            
-            remnawave = RemnaWaveClient(remnawave_settings.url, remnawave_settings.token.get_secret_value())
-            
+        lock = await _get_remnawave_user_lock(int(self.id))
+        async with lock:
             try:
-                # Определяем дату истечения
-                expire_at_date = self.expired_at
-                if expire_at_date is None:
-                    # Если даты нет и триал не использован, назначаем триал 
-                    if not self.used_trial:
-                        expire_at_date = date.today() + timedelta(days=app_settings.trial_days)  # Используем значение из настроек
-                        self.is_trial = True
-                        self.used_trial = True
-                        self.expired_at = expire_at_date
-                        logger.info(f"Назначен триал для {self.id} до {expire_at_date}")
-                        # Send immediate notification about granted trial
-                        try:
-                            await notify_trial_granted(self)
-                        except Exception as e_notify:
-                            logger.error(f"Ошибка при отправке уведомления о предоставлении триала пользователю {self.id} в _ensure_remnawave_user: {e_notify}")
-                    
-                else:
-                    # Если триал использован, устанавливаем дату на сегодня
-                    expire_at_date = date.today()
-                    logger.warning(f"Пользователь {self.id} уже использовал триал, дата истечения: {expire_at_date}")
-                
-                # Базовый лимит устройств для триала: сразу сохраняем в БД, если не задано
-                if self.hwid_limit is None:
-                    self.hwid_limit = 1
+                current_user = await Users.get_or_none(id=self.id) or self
+                if current_user.remnawave_uuid:
+                    self.remnawave_uuid = current_user.remnawave_uuid
+                    logger.info(f"Пользователь {self.id} уже имеет UUID в RemnaWave: {self.remnawave_uuid}")
+                    return False
 
-                internal_squads = []
-                if remnawave_settings.default_internal_squad_uuid:
-                    internal_squads.append(remnawave_settings.default_internal_squad_uuid)
-                lte_uuid = remnawave_settings.lte_internal_squad_uuid
-                if lte_uuid:
-                    lte_allowed = False
-                    if self.is_trial:
-                        lte_allowed = True
-                    elif self.active_tariff_id:
-                        active_tariff = await ActiveTariffs.get_or_none(id=self.active_tariff_id)
-                        effective_lte_total = (
-                            self.lte_gb_total
-                            if self.lte_gb_total is not None
-                            else (active_tariff.lte_gb_total or 0 if active_tariff else 0)
+                from bloobcat.routes.remnawave.client import RemnaWaveClient
+                from bloobcat.settings import remnawave_settings
+
+                remnawave = RemnaWaveClient(
+                    remnawave_settings.url,
+                    remnawave_settings.token.get_secret_value(),
+                )
+                try:
+                    expire_at_date = current_user.expired_at
+                    if expire_at_date is None:
+                        if not current_user.used_trial:
+                            expire_at_date = date.today() + timedelta(days=app_settings.trial_days)
+                            current_user.is_trial = True
+                            current_user.used_trial = True
+                            current_user.expired_at = expire_at_date
+                            logger.info(f"Назначен триал для {self.id} до {expire_at_date}")
+                            try:
+                                await notify_trial_granted(current_user)
+                            except Exception as e_notify:
+                                logger.error(
+                                    "Ошибка при отправке уведомления о предоставлении триала "
+                                    f"пользователю {self.id} в _ensure_remnawave_user: {e_notify}"
+                                )
+                    else:
+                        # Сохраняем текущую бизнес-логику даты (без изменения поведения)
+                        expire_at_date = date.today()
+                        logger.warning(
+                            f"Пользователь {self.id} уже использовал триал, дата истечения: {expire_at_date}"
                         )
-                        effective_lte_used = active_tariff.lte_gb_used if active_tariff else 0
-                        if (effective_lte_total or 0) > (effective_lte_used or 0):
+
+                    if current_user.hwid_limit is None:
+                        current_user.hwid_limit = 1
+
+                    internal_squads = []
+                    if remnawave_settings.default_internal_squad_uuid:
+                        internal_squads.append(remnawave_settings.default_internal_squad_uuid)
+                    lte_uuid = remnawave_settings.lte_internal_squad_uuid
+                    if lte_uuid:
+                        lte_allowed = False
+                        if current_user.is_trial:
                             lte_allowed = True
-                    if lte_allowed:
-                        internal_squads.append(lte_uuid)
-                active_internal_squads = internal_squads or None
-                
-                # Создаем пользователя в RemnaWave
-                base_username = f"{self.id}_TEST" if test_mode else str(self.id)
-                username_to_try = base_username
-                counter = 1
-                while True:
+                        elif current_user.active_tariff_id:
+                            active_tariff = await ActiveTariffs.get_or_none(id=current_user.active_tariff_id)
+                            effective_lte_total = (
+                                current_user.lte_gb_total
+                                if current_user.lte_gb_total is not None
+                                else (active_tariff.lte_gb_total or 0 if active_tariff else 0)
+                            )
+                            effective_lte_used = active_tariff.lte_gb_used if active_tariff else 0
+                            if (effective_lte_total or 0) > (effective_lte_used or 0):
+                                lte_allowed = True
+                        if lte_allowed:
+                            internal_squads.append(lte_uuid)
+                    active_internal_squads = internal_squads or None
+
+                    base_username = f"{self.id}_TEST" if test_mode else str(self.id)
                     try:
                         response = await remnawave.users.create_user(
-                            username=username_to_try,
+                            username=base_username,
                             expire_at=expire_at_date,
                             telegram_id=self.id,
-                            email=self.email,
-                            description=f"Telegram: {self.name()}",
-                            hwid_device_limit=self.hwid_limit,
+                            email=current_user.email,
+                            description=f"Telegram: {current_user.name()}",
+                            hwid_device_limit=current_user.hwid_limit,
                             active_internal_squads=active_internal_squads,
                             external_squad_uuid=remnawave_settings.default_external_squad_uuid,
                         )
-                        break  # Успешно создали, выходим из цикла
-                    except Exception as e:
-                        # Проверяем, является ли ошибка 'Username already exists'
-                        if "already exists" in str(e).lower():
-                            logger.warning(f"Имя пользователя {username_to_try} уже занято. Пробуем следующее.")
-                            if test_mode:
-                                username_to_try = f"{base_username}_{counter}"
-                            else:
-                                username_to_try = f"{base_username}_{counter}"
-                            counter += 1
-                        else:
-                            raise e # Перевыбрасываем другие ошибки
+                    except Exception as create_err:
+                        if self._is_remnawave_username_exists_error(str(create_err)):
+                            existing_remote_user = await self._find_existing_remnawave_user(
+                                remnawave,
+                                base_username=base_username,
+                            )
+                            if existing_remote_user and existing_remote_user.get("uuid"):
+                                current_user.remnawave_uuid = existing_remote_user["uuid"]
+                                await current_user.save(update_fields=["remnawave_uuid", "is_trial", "used_trial", "expired_at"])
+                                self.remnawave_uuid = current_user.remnawave_uuid
+                                logger.warning(
+                                    "Вместо создания дубля выполнен rebind local user=%s к existing RemnaWave uuid=%s",
+                                    self.id,
+                                    self.remnawave_uuid,
+                                )
+                                return True
+                        raise
 
-                
-                # Сохраняем UUID
-                self.remnawave_uuid = response["response"]["uuid"]
-                await self.save()
-                
-                logger.info(f"Пользователь {self.id} успешно создан в RemnaWave с UUID: {self.remnawave_uuid}")
-                return True
-            finally:
-                # Гарантированно закрываем сессию клиента, даже при возникновении исключения
-                await remnawave.close()
-                logger.debug(f"Закрыта сессия клиента RemnaWave в _ensure_remnawave_user для пользователя {self.id}")
-            
-        except Exception as e:
-            logger.error(f"Ошибка при создании пользователя {self.id} в RemnaWave: {str(e)}")
-            # Не перевыбрасываем исключение, чтобы не блокировать работу приложения
-            return False
+                    current_user.remnawave_uuid = (response.get("response") or {}).get("uuid")
+                    if not current_user.remnawave_uuid:
+                        raise ValueError(f"create_user не вернул uuid для пользователя {self.id}")
+
+                    await current_user.save()
+                    self.remnawave_uuid = current_user.remnawave_uuid
+                    logger.info(f"Пользователь {self.id} успешно создан в RemnaWave с UUID: {self.remnawave_uuid}")
+                    return True
+                finally:
+                    await remnawave.close()
+                    logger.debug(
+                        "Закрыта сессия клиента RemnaWave в _ensure_remnawave_user для пользователя %s",
+                        self.id,
+                    )
+            except Exception as e:
+                logger.error(f"Ошибка при создании пользователя {self.id} в RemnaWave: {str(e)}")
+                return False
 
     async def recreate_remnawave_user(self) -> bool:
         """
         Форсирует пересоздание пользователя в RemnaWave даже если `remnawave_uuid` уже установлен.
-        Генерирует имя на основе telegram id, обрабатывает коллизии имени.
-        Возвращает True при успешном создании и сохранении нового UUID.
+        Возвращает True при успешном rebind/create и сохранении UUID.
         """
-        try:
-            from bloobcat.routes.remnawave.client import RemnaWaveClient
-            from bloobcat.settings import remnawave_settings
-            from datetime import date
-
-            remnawave = RemnaWaveClient(remnawave_settings.url, remnawave_settings.token.get_secret_value())
+        lock = await _get_remnawave_user_lock(int(self.id))
+        async with lock:
             try:
-                # Дата истечения: используем текущую `expired_at` или сегодняшнюю дату
-                expire_at_date = self.expired_at or date.today()
+                from bloobcat.routes.remnawave.client import RemnaWaveClient
+                from bloobcat.settings import remnawave_settings
+                from datetime import date
 
-                # Лимит устройств: используем персональный лимит, если задан, иначе 1
-                hwid_limit = self.hwid_limit if self.hwid_limit is not None else 1
+                current_user = await Users.get_or_none(id=self.id) or self
+                self.remnawave_uuid = current_user.remnawave_uuid
 
-                internal_squads = []
-                if remnawave_settings.default_internal_squad_uuid:
-                    internal_squads.append(remnawave_settings.default_internal_squad_uuid)
-                lte_uuid = remnawave_settings.lte_internal_squad_uuid
-                if lte_uuid:
-                    lte_allowed = False
-                    if self.is_trial:
-                        lte_allowed = True
-                    elif self.active_tariff_id:
-                        active_tariff = await ActiveTariffs.get_or_none(id=self.active_tariff_id)
-                        effective_lte_total = (
-                            self.lte_gb_total
-                            if self.lte_gb_total is not None
-                            else (active_tariff.lte_gb_total or 0 if active_tariff else 0)
+                remnawave = RemnaWaveClient(
+                    remnawave_settings.url,
+                    remnawave_settings.token.get_secret_value(),
+                )
+                try:
+                    if current_user.remnawave_uuid:
+                        try:
+                            payload = await remnawave.users.get_user_by_uuid(str(current_user.remnawave_uuid))
+                            if self._extract_remnawave_user(payload):
+                                self.remnawave_uuid = current_user.remnawave_uuid
+                                return True
+                        except Exception as lookup_err:
+                            if not self._is_remnawave_not_found_error(str(lookup_err)):
+                                raise
+
+                    base_username = f"{self.id}_TEST" if test_mode else str(self.id)
+                    existing_remote_user = await self._find_existing_remnawave_user(
+                        remnawave,
+                        base_username=base_username,
+                    )
+                    if existing_remote_user and existing_remote_user.get("uuid"):
+                        current_user.remnawave_uuid = existing_remote_user["uuid"]
+                        await current_user.save(update_fields=["remnawave_uuid"])
+                        self.remnawave_uuid = current_user.remnawave_uuid
+                        logger.info(
+                            "Пользователь %s rebind к существующему RemnaWave UUID: %s",
+                            self.id,
+                            self.remnawave_uuid,
                         )
-                        effective_lte_used = active_tariff.lte_gb_used if active_tariff else 0
-                        if (effective_lte_total or 0) > (effective_lte_used or 0):
-                            lte_allowed = True
-                    if lte_allowed:
-                        internal_squads.append(lte_uuid)
-                active_internal_squads = internal_squads or None
+                        return True
 
-                base_username = f"{self.id}_TEST" if test_mode else str(self.id)
-                username_to_try = base_username
-                counter = 1
-                while True:
+                    expire_at_date = current_user.expired_at or date.today()
+                    hwid_limit = current_user.hwid_limit if current_user.hwid_limit is not None else 1
+
+                    internal_squads = []
+                    if remnawave_settings.default_internal_squad_uuid:
+                        internal_squads.append(remnawave_settings.default_internal_squad_uuid)
+                    lte_uuid = remnawave_settings.lte_internal_squad_uuid
+                    if lte_uuid:
+                        lte_allowed = False
+                        if current_user.is_trial:
+                            lte_allowed = True
+                        elif current_user.active_tariff_id:
+                            active_tariff = await ActiveTariffs.get_or_none(id=current_user.active_tariff_id)
+                            effective_lte_total = (
+                                current_user.lte_gb_total
+                                if current_user.lte_gb_total is not None
+                                else (active_tariff.lte_gb_total or 0 if active_tariff else 0)
+                            )
+                            effective_lte_used = active_tariff.lte_gb_used if active_tariff else 0
+                            if (effective_lte_total or 0) > (effective_lte_used or 0):
+                                lte_allowed = True
+                        if lte_allowed:
+                            internal_squads.append(lte_uuid)
+                    active_internal_squads = internal_squads or None
+
                     try:
                         response = await remnawave.users.create_user(
-                            username=username_to_try,
+                            username=base_username,
                             expire_at=expire_at_date,
                             telegram_id=self.id,
-                            email=self.email,
-                            description=f"Telegram: {self.name()}",
+                            email=current_user.email,
+                            description=f"Telegram: {current_user.name()}",
                             hwid_device_limit=hwid_limit,
                             active_internal_squads=active_internal_squads,
                             external_squad_uuid=remnawave_settings.default_external_squad_uuid,
                         )
-                        break
-                    except Exception as e:
-                        # Если имя занято – пробуем следующее
-                        if "already exists" in str(e).lower():
-                            logger.warning(f"Имя пользователя {username_to_try} уже занято при пересоздании. Пробуем следующее.")
-                            username_to_try = f"{base_username}_{counter}"
-                            counter += 1
-                        else:
-                            raise
+                    except Exception as create_err:
+                        if self._is_remnawave_username_exists_error(str(create_err)):
+                            existing_remote_user = await self._find_existing_remnawave_user(
+                                remnawave,
+                                base_username=base_username,
+                            )
+                            if existing_remote_user and existing_remote_user.get("uuid"):
+                                current_user.remnawave_uuid = existing_remote_user["uuid"]
+                                await current_user.save(update_fields=["remnawave_uuid"])
+                                self.remnawave_uuid = current_user.remnawave_uuid
+                                logger.info(
+                                    "Пользователь %s rebind после коллизии username, RemnaWave UUID: %s",
+                                    self.id,
+                                    self.remnawave_uuid,
+                                )
+                                return True
+                        raise
 
-                # Сохраняем новый UUID
-                self.remnawave_uuid = response["response"]["uuid"]
-                await self.save()
-                logger.info(f"Пользователь {self.id} пересоздан в RemnaWave с UUID: {self.remnawave_uuid}")
-                return True
-            finally:
-                await remnawave.close()
-        except Exception as e:
-            logger.error(f"Не удалось пересоздать пользователя {self.id} в RemnaWave: {e}")
-            return False
+                    current_user.remnawave_uuid = (response.get("response") or {}).get("uuid")
+                    if not current_user.remnawave_uuid:
+                        raise ValueError(f"create_user не вернул uuid для пользователя {self.id}")
+
+                    await current_user.save(update_fields=["remnawave_uuid"])
+                    self.remnawave_uuid = current_user.remnawave_uuid
+                    logger.info(f"Пользователь {self.id} пересоздан в RemnaWave с UUID: {self.remnawave_uuid}")
+                    return True
+                finally:
+                    await remnawave.close()
+            except Exception as e:
+                logger.error(f"Не удалось пересоздать пользователя {self.id} в RemnaWave: {e}")
+                return False
 
     @classmethod
     async def get_user(

@@ -10,6 +10,9 @@ class Tariffs(models.Model):
     base_price = fields.IntField(description="Базовая цена за 1 устройство")
     progressive_multiplier = fields.FloatField(default=0.9, description="Множитель прогрессивной скидки (0.1-1.0). Чем меньше, тем больше скидка на каждое следующее устройство")
     order = fields.IntField(default=3, description="Порядок отображения тарифа")
+    is_active = fields.BooleanField(default=True, description="Активен ли тариф для новых покупок")
+    devices_limit_default = fields.IntField(default=3, description="Лимит устройств для основного плана тарифа")
+    devices_limit_family = fields.IntField(default=10, description="Лимит устройств для семейного плана (используется для 12 месяцев)")
     lte_enabled = fields.BooleanField(default=False, description="Доступ к LTE серверам")
     lte_price_per_gb = fields.FloatField(default=0.0, description="Цена за 1 GB LTE трафика")
 
@@ -38,7 +41,8 @@ class Tariffs(models.Model):
             device_price = self.base_price * (self.progressive_multiplier ** (device_num - 1))
             total_price += device_price
         
-        return int(total_price)
+        # Use rounding to keep UI/admin and payment calculations consistent.
+        return int(round(total_price))
 
     def get_device_savings_info(self, device_count: int = 1) -> dict:
         """
@@ -78,8 +82,27 @@ Tariffs_Pydantic = pydantic_model_creator(Tariffs, name="Tariffs")
 
 @register(Tariffs)
 class UsersModelAdmin(TortoiseModelAdmin):
-    list_display = ("order", "name", "months", "base_price", "progressive_multiplier", "lte_enabled", "lte_price_per_gb")
-    list_editable = ("order", "progressive_multiplier", "lte_enabled", "lte_price_per_gb")
+    list_display = (
+        "order",
+        "name",
+        "months",
+        "is_active",
+        "base_price",
+        "progressive_multiplier",
+        "devices_limit_default",
+        "devices_limit_family",
+        "lte_enabled",
+        "lte_price_per_gb",
+    )
+    list_editable = (
+        "order",
+        "is_active",
+        "progressive_multiplier",
+        "devices_limit_default",
+        "devices_limit_family",
+        "lte_enabled",
+        "lte_price_per_gb",
+    )
     ordering = ("order",)
     verbose_name = "Тарифы"
     verbose_name_plural = "Тарифы"

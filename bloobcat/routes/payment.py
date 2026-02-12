@@ -551,43 +551,57 @@ async def _apply_succeeded_payment_fallback(yk_payment, user: Users, meta: dict)
 
     if tariff_id is not None:
         original = await Tariffs.get_or_none(id=tariff_id)
-        if original:
+        if user.active_tariff_id:
+            old_active = await ActiveTariffs.get_or_none(id=user.active_tariff_id)
+            if old_active:
+                await old_active.delete()
+
+        if "lte_price_per_gb" in meta:
+            try:
+                lte_price_snapshot = float(meta.get("lte_price_per_gb") or 0)
+            except Exception:
+                lte_price_snapshot = float(original.lte_price_per_gb or 0) if original else 0.0
+        else:
+            lte_price_snapshot = float(original.lte_price_per_gb or 0) if original else 0.0
+
+        msk_today = datetime.now(MSK_TZ).date()
+        usage_snapshot = None
+        if user.remnawave_uuid:
+            usage_snapshot = await _fetch_today_lte_usage_gb(str(user.remnawave_uuid))
+
+        if original and bool(getattr(original, "is_active", True)):
             calculated_price = int(original.calculate_price(device_count))
-            if user.active_tariff_id:
-                old_active = await ActiveTariffs.get_or_none(id=user.active_tariff_id)
-                if old_active:
-                    await old_active.delete()
-
-            if "lte_price_per_gb" in meta:
-                try:
-                    lte_price_snapshot = float(meta.get("lte_price_per_gb") or 0)
-                except Exception:
-                    lte_price_snapshot = float(original.lte_price_per_gb or 0)
-            else:
-                lte_price_snapshot = float(original.lte_price_per_gb or 0)
-
-            msk_today = datetime.now(MSK_TZ).date()
-            usage_snapshot = None
-            if user.remnawave_uuid:
-                usage_snapshot = await _fetch_today_lte_usage_gb(str(user.remnawave_uuid))
-
-            active_tariff = await ActiveTariffs.create(
-                user=user,
-                name=original.name,
-                months=original.months,
-                price=calculated_price,
-                hwid_limit=device_count,
-                lte_gb_total=lte_gb,
-                lte_gb_used=0.0,
-                lte_price_per_gb=lte_price_snapshot,
-                lte_usage_last_date=msk_today,
-                lte_usage_last_total_gb=usage_snapshot if usage_snapshot is not None else 0.0,
-                progressive_multiplier=original.progressive_multiplier,
-                residual_day_fraction=0.0,
+            active_name = original.name
+            active_months = int(original.months)
+            active_multiplier = original.progressive_multiplier
+        else:
+            # Keep system consistent even if tariff was deleted/deactivated after payment start.
+            calculated_price = _round_rub(amount_external + amount_from_balance)
+            active_name = str(meta.get("tariff_name") or f"{months} months")
+            active_months = int(months)
+            active_multiplier = float(meta.get("progressive_multiplier") or 0.9)
+            logger.warning(
+                "Fallback payment used missing/inactive tariff snapshot",
+                extra={"user_id": user.id, "tariff_id": tariff_id, "payment_id": pid},
             )
-            user.active_tariff_id = active_tariff.id
-            user.hwid_limit = device_count
-            user.lte_gb_total = lte_gb
+
+        active_tariff = await ActiveTariffs.create(
+            user=user,
+            name=active_name,
+            months=active_months,
+            price=calculated_price,
+            hwid_limit=device_count,
+            lte_gb_total=lte_gb,
+            lte_gb_used=0.0,
+            lte_price_per_gb=lte_price_snapshot,
+            lte_usage_last_date=msk_today,
+            lte_usage_last_total_gb=usage_snapshot if usage_snapshot is not None else 0.0,
+            progressive_multiplier=active_multiplier,
+            residual_day_fraction=0.0,
+        )
+        user.active_tariff_id = active_tariff.id
+        user.hwid_limit = device_count
+        user.lte_gb_total = lte_gb
 
     if user.is_trial:
         user.is_trial = False
@@ -700,7 +714,7 @@ async def _apply_succeeded_payment_fallback(yk_payment, user: Users, meta: dict)
 
 @router.get("/tariffs")
 async def get_tariffs():
-    return await Tariffs.all().order_by("order")
+    return await Tariffs.filter(is_active=True).order_by("order")
 
 @router.get("/status/{payment_id}")
 async def get_payment_status(
@@ -1804,7 +1818,7 @@ async def pay(
     user: Users = Depends(validate),
 ):
     tariff = await Tariffs.get_or_none(id=tariff_id)
-    if tariff is None:
+    if tariff is None or not bool(getattr(tariff, "is_active", True)):
         raise HTTPException(status_code=404, detail="Tariff not found")
 
     # Проверяем количество устройств

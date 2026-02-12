@@ -587,6 +587,14 @@ def apply_field_notes_ru(client: DirectusClient) -> None:
             "lte_gb_total": "Общий LTE лимит для тарифа.",
             "lte_gb_used": "Использовано LTE (ГБ).",
         },
+        "tariffs": {
+            "is_active": "Если выключить, тариф не будет доступен для новых покупок и пропадет с витрины фронтенда.",
+            "base_price": "Базовая цена за 1 устройство. Итоговая цена плана рассчитывается с progressive_multiplier.",
+            "progressive_multiplier": "Множитель скидки для каждого следующего устройства (например, 0.9).",
+            "devices_limit_default": "Лимит устройств для основного (не семейного) плана.",
+            "devices_limit_family": "Лимит устройств для семейного плана 12 месяцев.",
+            "order": "Порядок отображения тарифа на витрине.",
+        },
         "promo_codes": {
             "code_hmac": "Можно указать сырой код — хук преобразует в HMAC.",
             "effects": "JSON с эффектами промокода.",
@@ -648,6 +656,14 @@ def apply_field_notes_ru(client: DirectusClient) -> None:
             "price": "Цена",
             "lte_gb_total": "Лимит LTE (ГБ)",
             "lte_gb_used": "Использовано LTE (ГБ)",
+        },
+        "tariffs": {
+            "is_active": "Активен",
+            "base_price": "Базовая цена (1 устройство)",
+            "progressive_multiplier": "Множитель скидки",
+            "devices_limit_default": "Лимит устройств (обычный)",
+            "devices_limit_family": "Лимит устройств (семейный)",
+            "order": "Порядок",
         },
         "promo_codes": {
             "code_hmac": "Код (HMAC)",

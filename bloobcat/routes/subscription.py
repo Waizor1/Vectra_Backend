@@ -25,6 +25,7 @@ class SubscriptionStatusResponse(BaseModel):
 
 class SubscriptionPlanResponse(BaseModel):
     id: str
+    tariffId: int
     title: str
     months: int
     devicesLimit: int
@@ -80,20 +81,23 @@ def _plan_id_for_months(months: int, family: bool = False) -> str:
 
 
 async def _build_plans() -> List[SubscriptionPlanResponse]:
-    tariffs = await Tariffs.all().order_by("order")
+    tariffs = await Tariffs.filter(is_active=True).order_by("order")
     by_months: Dict[int, Tariffs] = {int(t.months): t for t in tariffs}
     plans: List[SubscriptionPlanResponse] = []
 
-    def add_plan(months: int, device_count: int, badge: str | None = None):
+    def add_plan(months: int, device_count: int, badge: str | None = None, family: bool = False):
         tariff = by_months.get(months)
         if not tariff:
             return
+        if device_count < 1:
+            return
         price = int(tariff.calculate_price(device_count))
         per_month = int(round(price / months)) if months > 0 else price
-        plan_id = _plan_id_for_months(months, family=(device_count == 10 and months == 12))
+        plan_id = _plan_id_for_months(months, family=family)
         plans.append(
             SubscriptionPlanResponse(
                 id=plan_id,
+                tariffId=int(tariff.id),
                 title=f"{months} {'месяц' if months == 1 else 'месяцев'}",
                 months=months,
                 devicesLimit=device_count,
@@ -103,11 +107,24 @@ async def _build_plans() -> List[SubscriptionPlanResponse]:
             )
         )
 
-    add_plan(1, 3)
-    add_plan(3, 3)
-    add_plan(6, 3)
-    add_plan(12, 3, badge="выгодно")
-    add_plan(12, 10, badge="семейная")
+    def base_limit(months: int, default: int = 3) -> int:
+        tariff = by_months.get(months)
+        if not tariff:
+            return default
+        return max(1, int(tariff.devices_limit_default or default))
+
+    add_plan(1, base_limit(1))
+    add_plan(3, base_limit(3))
+    add_plan(6, base_limit(6))
+    add_plan(12, base_limit(12), badge="выгодно")
+
+    # Family is a 12-month variant with a higher device limit on the same tariff.
+    family_tariff = by_months.get(12)
+    if family_tariff:
+        family_limit = max(1, int(family_tariff.devices_limit_family or 10))
+        default_limit_12 = max(1, int(family_tariff.devices_limit_default or 3))
+        if family_limit > default_limit_12:
+            add_plan(12, family_limit, badge="семейная", family=True)
     return plans
 
 
@@ -133,18 +150,20 @@ async def get_plans() -> List[SubscriptionPlanResponse]:
 @router.post("/purchase", response_model=SubscriptionStatusResponse)
 async def purchase(payload: SubscriptionPurchaseRequest, user: Users = Depends(validate)) -> SubscriptionStatusResponse:
     plan_id = payload.planId
+    tariffs = await Tariffs.filter(is_active=True).all()
+    by_months: Dict[int, Tariffs] = {int(t.months): t for t in tariffs}
     plan_map = {
-        "1month": (1, 3),
-        "3months": (3, 3),
-        "6months": (6, 3),
-        "12months_promo": (12, 3),
-        "12months_family": (12, 10),
+        "1month": (1, max(1, int((by_months.get(1).devices_limit_default if by_months.get(1) else 3) or 3))),
+        "3months": (3, max(1, int((by_months.get(3).devices_limit_default if by_months.get(3) else 3) or 3))),
+        "6months": (6, max(1, int((by_months.get(6).devices_limit_default if by_months.get(6) else 3) or 3))),
+        "12months_promo": (12, max(1, int((by_months.get(12).devices_limit_default if by_months.get(12) else 3) or 3))),
+        "12months_family": (12, max(1, int((by_months.get(12).devices_limit_family if by_months.get(12) else 10) or 10))),
     }
     if plan_id not in plan_map:
         raise HTTPException(status_code=400, detail="Unknown planId")
     months, device_count = plan_map[plan_id]
 
-    tariff = await Tariffs.filter(months=months).first()
+    tariff = await Tariffs.filter(months=months, is_active=True).first()
     if not tariff:
         raise HTTPException(status_code=404, detail="Tariff not found")
     if not user.email:

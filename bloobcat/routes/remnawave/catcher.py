@@ -26,7 +26,7 @@ remnawave = RemnaWaveClient(remnawave_settings.url, remnawave_settings.token.get
 last_activated_info = {}
 last_notification_expired = {}
 user_state_cache: Dict[str, Dict[str, Any]] = {}
-update_in_progress = False
+update_lock = asyncio.Lock()
 
 @router.get("/webhook")
 async def webhook():
@@ -48,13 +48,14 @@ async def remnawave_updater():
     и выполняет bulk_update в конце. Перепланирование задач происходит только
     для пользователей, которым это действительно необходимо (первая регистрация).
     """
-    global update_in_progress, logger
-    
-    if update_in_progress:
+    global logger
+
+    try:
+        await asyncio.wait_for(update_lock.acquire(), timeout=0)
+    except asyncio.TimeoutError:
         logger.info("Процесс обновления уже запущен, пропускаем")
         return
-    
-    update_in_progress = True
+
     start_time = datetime.now(ZoneInfo("Europe/Moscow"))
     logger.info(f"Запуск remnawave_updater в {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
     updated = 0
@@ -605,7 +606,7 @@ async def remnawave_updater():
     except Exception as e:
         logger.error(f"Критическая ошибка в remnawave_updater: {str(e)}")
     finally:
-        update_in_progress = False
+        update_lock.release()
         # Лог завершения с использованием той же tz-aware даты
         end_time = datetime.now(ZoneInfo("Europe/Moscow"))
         total_time = (end_time - start_time).total_seconds()

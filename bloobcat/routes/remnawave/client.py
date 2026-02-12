@@ -3,6 +3,7 @@ import json
 import asyncio
 from typing import Dict, Any, Optional, List
 from datetime import datetime, date, time, timezone, timedelta
+from urllib.parse import quote
 from bloobcat.logger import get_logger
 from bloobcat.db.users import Users  # Добавляем импорт Users
 from zoneinfo import ZoneInfo
@@ -195,6 +196,27 @@ class UsersAPI:
         response = await self._execute_with_retry(self.client._request, "GET", f"/api/users/{uuid}")
         logger.debug(f"Ответ при получении пользователя по UUID: {response}")
         return response
+
+    async def get_user_by_telegram_id(self, telegram_id: int) -> Dict[str, Any]:
+        """Получение пользователя по Telegram ID.
+
+        Важно: вызов без retry, т.к. endpoint может отсутствовать в старых версиях панели.
+        """
+        return await self.client._request("GET", f"/api/users/by-telegram-id/{telegram_id}")
+
+    async def get_user_by_email(self, email: str) -> Dict[str, Any]:
+        """Получение пользователя по email.
+
+        Важно: вызов без retry, т.к. endpoint может отсутствовать в старых версиях панели.
+        """
+        return await self.client._request("GET", f"/api/users/by-email/{quote(email, safe='')}")
+
+    async def get_user_by_username(self, username: str) -> Dict[str, Any]:
+        """Получение пользователя по username.
+
+        Важно: вызов без retry, т.к. endpoint может отсутствовать в старых версиях панели.
+        """
+        return await self.client._request("GET", f"/api/users/by-username/{quote(username, safe='')}")
 
     async def get_user_usage_by_range(self, uuid: str, start: str, end: str) -> Dict[str, Any]:
         """Получение статистики трафика пользователя по диапазону дат (legacy)"""

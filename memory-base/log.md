@@ -1,5 +1,50 @@
 ## Журнал изменений
 
+### 2026-02-12 — синхронизация тарифов frontend ↔ admin (Directus) ↔ backend
+
+- Проблема:
+  - фронт строил планы из `GET /pay/tariffs` + локального маппинга, а не из `GET /subscription/plans`;
+  - в `tariffs` не было `is_active` и явных лимитов устройств для витрины планов;
+  - в админке нельзя было корректно управлять доступностью тарифа и лимитами планов.
+- Что изменено:
+  - `bloobcat/db/tariff.py`:
+    - добавлены поля `is_active`, `devices_limit_default`, `devices_limit_family`;
+    - `calculate_price()` переведен на `round`, чтобы цены совпадали с фронтовой витриной (290/748/1287/2189/4489).
+  - `bloobcat/routes/payment.py`:
+    - `GET /pay/tariffs` теперь возвращает только активные тарифы (`is_active=true`);
+    - `GET /pay/{tariff_id}` блокирует покупку неактивного тарифа;
+    - fallback-обработка платежа стала устойчивой к удаленному/неактивному тарифу (создается snapshot `ActiveTariff`, чтобы не терять состояние подписки).
+  - `bloobcat/routes/subscription.py`:
+    - `GET /subscription/plans` строится только из активных тарифов;
+    - добавлен `tariffId` в ответ планов;
+    - лимиты устройств для планов берутся из `tariffs.devices_limit_default/family`;
+    - семейный план остается 12-месячным вариантом (не отдельной базовой записью тарифа).
+  - `migrations/models/73_20260212_add_tariffs_activation_and_limits.py`:
+    - миграция полей `is_active`, `devices_limit_default`, `devices_limit_family`.
+  - `scripts/vps/seed_tariffs.sql`:
+    - сид обновлен под новые поля и синхронные лимиты устройств.
+  - `scripts/directus_super_setup.py`:
+    - добавлены русские подсказки/лейблы по новым полям тарифов в админке.
+
+### 2026-02-12 — расследование: 4 одинаковых trial-сообщения после регистрации
+
+- Симптом:
+  - новый пользователь получил 4 одинаковых сообщения «Поздравляем ... бесплатный 3-дневный доступ ...» сразу после первого входа.
+- Подтвержденный источник текста:
+  - `bloobcat/bot/notifications/trial/granted.py` (`notify_trial_granted`).
+- Где вызывается отправка:
+  - `bloobcat/db/users.py` в `_ensure_remnawave_user()`, когда одновременно выполняются условия:
+    - `expired_at is None`,
+    - `used_trial = False`,
+    - и идет первичная привязка к RemnaWave.
+- Почему возможны дубли:
+  - на старте фронт может параллельно дергать несколько endpoint (`/auth/telegram`, `/user`, `/devices` и др. через `validate -> Users.get_user`);
+  - локальный `asyncio.Lock` в `_ensure_remnawave_user` защищает только в рамках одного процесса;
+  - при нескольких воркерах/инстансах нет межпроцессной дедупликации именно для `trial_granted` (нет `NotificationMarks` на этот тип уведомления).
+- Важное уточнение по "регистрации":
+  - пользователь создается в БД при первом `Users.get_user()` (обычно на `/auth/telegram`/`validate`);
+  - флаг `is_registered=True` выставляется позже в `bloobcat/routes/remnawave/catcher.py` (`remnawave_updater`) только после первого фактического подключения к VPN (`onlineAt` в RemnaWave).
+
 ### 2026-02-12 — Directus users: пустые секции + клики из списка
 
 - Симптомы:
@@ -197,4 +242,79 @@
   - эти списки — `o2m` связи текущего пользователя, поэтому данные по определению уже фильтрованы только по нему.
 - Доп. правка UX:
   - текст индикатора обновлен, чтобы явно отражать новую механику: переход к встроенным спискам карточки пользователя (без заявлений про collection filtered-view).
+
+### 2026-02-12 — расследование дублей подписки в RemnaWave (один user -> много remote users)
+
+- Симптом:
+  - у одного Telegram user в RemnaWave появляется несколько пользователей/подписок (`id`, `id_1`, `id_2`...).
+- Подтвержденные причины в коде:
+  - на фронте при старте параллельно уходят `POST /auth/telegram`, `GET /user`, `GET /devices` (до появления Bearer токена часто с `initData`);
+  - при `initData` backend в `validate()` вызывает `Users.get_user()`, а он вызывает `_ensure_remnawave_user()` если `remnawave_uuid` пустой;
+  - гонка: несколько одновременных запросов видят `remnawave_uuid=None` и одновременно доходят до `create_user`;
+  - `_ensure_remnawave_user()` на коллизии имени (`already exists`) перебирает `username` с суффиксами `_1/_2`, фактически создавая дубликаты в RemnaWave;
+  - `recreate_remnawave_user()` используется в `remnawave_updater` и `payment` при `User not found` и не удаляет старого remote user перед пересозданием.
+- Дополнительный риск:
+  - в `remnawave/catcher.py` флаг `update_in_progress` не защищен lock'ом (check/set не атомарны), что может запускать конкурирующие апдейтеры.
+- Где подтверждено:
+  - `TVPN_BACK_END/bloobcat/db/users.py` (`_ensure_remnawave_user`, `recreate_remnawave_user`, `get_user`);
+  - `TVPN_BACK_END/bloobcat/routes/remnawave/catcher.py` (`update_in_progress`, `recreate_remnawave_user` вызовы);
+  - `TVPN_BACK_END/bloobcat/routes/payment.py` (retry/update + `recreate_remnawave_user`);
+  - `TelegramVPN/src/hooks/useAuthBootstrap.ts`, `useTvpnUserSync.ts`, `useTvpnDevicesSync.ts` (параллельный старт запросов).
+- Рекомендованный план фикса:
+  - сделать идемпотентность создания RemnaWave user на backend (пер-пользовательный lock + повторная проверка `remnawave_uuid` после lock);
+  - убрать автогенерацию `username_*` как fallback для одного Telegram user, сначала искать существующего remote user по `telegramId/email` (или иной стабильной связке);
+  - сделать `recreate_remnawave_user()` безопасным: сначала попытка rebind к существующему remote user, затем controlled recreate (по политике), опционально удаление/деактивация старого;
+  - защитить `remnawave_updater` через `asyncio.Lock`;
+  - добавить диагностику: `user_id`, caller, old/new uuid, причина recreate, correlation_id.
+
+### 2026-02-12 — фикс дублей RemnaWave без ломки синхронизации
+
+- Реализовано в `TVPN_BACK_END`:
+  - `bloobcat/db/users.py`:
+    - добавлен пер-пользовательный `asyncio.Lock` для `_ensure_remnawave_user()` и `recreate_remnawave_user()`;
+    - удалена стратегия создания `username` с суффиксами `_1/_2` (источник дублей);
+    - при коллизии имени добавлен **rebind** к существующему remote user по lookup (`telegramId/email/username`) + fallback-поиск по `/api/users`;
+    - в `recreate_remnawave_user()` добавлена проверка: если текущий UUID уже валиден, пересоздание не выполняется.
+  - `bloobcat/routes/remnawave/client.py`:
+    - добавлены методы lookup: `get_user_by_telegram_id`, `get_user_by_email`, `get_user_by_username` (без retry, чтобы не ждать 60с на старых панелях без endpoint'ов).
+  - `bloobcat/routes/remnawave/catcher.py`:
+    - `update_in_progress` заменен на `asyncio.Lock` + non-blocking acquire через `wait_for(..., timeout=0)` для безопасного skip при параллельных запусках.
+- Проверка:
+  - `python -m py_compile bloobcat/db/users.py bloobcat/routes/remnawave/client.py bloobcat/routes/remnawave/catcher.py` — успешно.
+- Известный компромисс:
+  - в админских миграционных отчётах (`miglte/migexternal`) счётчик `recreated` может включать случаи rebind (это не ломает синхронизацию, но меняет точность формулировки «пересоздано»).
+
+### 2026-02-12 — hardening под высокий трафик / штормы / ddos-like пики
+
+- Дополнительно усилено:
+  - `bloobcat/db/users.py`:
+    - добавлен межпроцессный lock через PostgreSQL advisory lock (`pg_try_advisory_lock`) поверх in-process lock, чтобы защитить создание/пересоздание пользователя и при нескольких воркерах/инстансах;
+    - fallback-safe поведение: при недоступности advisory lock система не падает, продолжает работу с локальным lock и логирует предупреждение.
+  - `bloobcat/funcs/validate.py`:
+    - добавлен fast-path: если пользователь уже есть и имеет `remnawave_uuid`, возвращаем его без повторного `Users.get_user()` (снижение нагрузки на БД и side-effects при initData-шторме).
+  - `bloobcat/middleware/rate_limit.py`:
+    - rate limiter сделан thread-safe/async-safe (`asyncio.Lock`);
+    - добавлены IP-лимиты для горячих endpoint'ов: `/auth/telegram`, `/user`, `/devices`, `/app/info`, `/partner/summary`;
+    - сохранены и адаптированы существующие user-level лимиты для операций (`reset_devices`, `family/revoke`, `promo/*`).
+- Верификация:
+  - `python -m py_compile bloobcat/db/users.py bloobcat/funcs/validate.py bloobcat/middleware/rate_limit.py` — успешно.
+  - lint по измененным файлам — без ошибок.
+
+### 2026-02-12 — post-review приоритетные фиксы (устранение найденных багов)
+
+- По результатам code review внесены корректировки:
+  - `bloobcat/middleware/rate_limit.py`:
+    - исправлен bypass user-rate-limit для Bearer токенов (`get_user_id_from_request` теперь понимает JWT и initData);
+    - добавлена защита от memory leak в limiter (очистка пустых ключей после window cleanup);
+    - ужесточена работа с `X-Forwarded-For`: используется только если прямой клиент в `RATE_LIMIT_TRUSTED_PROXIES`;
+    - добавлен fallback IP limiter для чувствительных endpoint'ов при `user_id=None`.
+  - `bloobcat/funcs/validate.py`:
+    - fast-path ограничен условием `not start_param`, чтобы не потерять referral/utm обработку.
+  - `bloobcat/db/users.py`:
+    - удален advisory-lock слой (как потенциально нестабильный из-за session-scoped семантики и пула соединений);
+    - сохранен устойчивый in-process lock + идемпотентный rebind/create подход;
+    - при rebind в `_ensure_remnawave_user` сохраняются также trial-поля (`is_trial`, `used_trial`, `expired_at`) во избежание повторной выдачи триала.
+- Проверка:
+  - `python -m py_compile ...` — успешно;
+  - lint по измененным файлам — без ошибок.
 

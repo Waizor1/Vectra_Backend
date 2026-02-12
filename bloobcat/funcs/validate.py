@@ -62,6 +62,14 @@ async def validate(init_data: str = Depends(oauth2_scheme)) -> Users:
 
         logger.debug(f"Успешная валидация для пользователя {user.user.id}")
 
+        # Fast-path под высокой нагрузкой:
+        # если пользователь уже есть в БД и связан с RemnaWave и нет старт-параметра,
+        # не запускаем повторный update_or_create/get_user.
+        # При наличии start_param оставляем обычный путь, чтобы не потерять referral/utm-обработку.
+        existing_user = await Users.get_or_none(id=user.user.id)
+        if existing_user and existing_user.remnawave_uuid and not user.start_param:
+            return existing_user
+
         referred_by = 0
         utm = None
         logger.debug(f"Проверка start_param для пользователя {user.user.id}: {user.start_param!r}") 
