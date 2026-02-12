@@ -2020,10 +2020,11 @@ def ensure_permissions_baseline(client: DirectusClient) -> None:
     for collection in sorted(viewer_ro):
         ensure_permission(client, viewer_policy_id, collection, "read")
 
-    # Dashboard settings (singleton): allow Manager to read/update, Viewer read-only.
+    # Dashboard settings (singleton): allow Manager to read/update/create, Viewer read-only.
     if client.get("/collections/tvpn_admin_settings").status_code == 200:
         ensure_permission(client, manager_policy_id, "tvpn_admin_settings", "read")
         ensure_permission(client, manager_policy_id, "tvpn_admin_settings", "update")
+        ensure_permission(client, manager_policy_id, "tvpn_admin_settings", "create")
         ensure_permission(client, viewer_policy_id, "tvpn_admin_settings", "read")
 
     # Critical for Data Studio form rendering:

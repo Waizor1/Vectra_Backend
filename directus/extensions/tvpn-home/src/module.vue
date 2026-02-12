@@ -1441,6 +1441,17 @@ async function fetchItems(collection, params = {}) {
 async function loadSettings() {
 	settingsSaveError.value = '';
 	try {
+		const singleton = await api.get('/items/tvpn_admin_settings/singleton');
+		const singletonRow = singleton?.data?.data;
+		if (singletonRow && typeof singletonRow === 'object') {
+			settingsId.value = singletonRow.id ?? null;
+			settings.value = { ...settings.value, ...singletonRow };
+			return;
+		}
+	} catch {
+		// Fallback for older setups where singleton endpoint may be unavailable.
+	}
+	try {
 		const res = await api.get('/items/tvpn_admin_settings', {
 			params: { limit: 1 },
 		});
@@ -1459,15 +1470,44 @@ async function saveSettings() {
 	settingsSaving.value = true;
 	settingsSaveError.value = '';
 	try {
-		if (!settingsId.value) {
-			const created = await api.post('/items/tvpn_admin_settings', settings.value);
-			const createdId = created?.data?.data?.id ?? null;
-			settingsId.value = createdId;
-		} else {
-			await api.patch(`/items/tvpn_admin_settings/${settingsId.value}`, settings.value);
+		await api.patch('/items/tvpn_admin_settings/singleton', settings.value);
+	} catch (singletonErr) {
+		const status = singletonErr?.response?.status;
+		if (status === 403 || status === 404) {
+			try {
+				if (!settingsId.value) {
+					const created = await api.post('/items/tvpn_admin_settings', settings.value);
+					const createdId = created?.data?.data?.id ?? null;
+					settingsId.value = createdId;
+				} else {
+					await api.patch(`/items/tvpn_admin_settings/${settingsId.value}`, settings.value);
+				}
+				settingsSaving.value = false;
+				return;
+			} catch (fallbackErr) {
+				const fallbackStatus = fallbackErr?.response?.status;
+				if (fallbackStatus === 401) {
+					settingsSaveError.value = 'Сессия Directus истекла. Обновите страницу и войдите заново.';
+				} else if (fallbackStatus === 403) {
+					settingsSaveError.value = 'Недостаточно прав на сохранение `tvpn_admin_settings` (нужны update/create).';
+				} else if (fallbackStatus === 404) {
+					settingsSaveError.value = 'Коллекция `tvpn_admin_settings` не найдена. Запустите scripts/directus_super_setup.py.';
+				} else {
+					settingsSaveError.value = 'Не удалось сохранить настройки. Проверьте права роли и наличие коллекции.';
+				}
+				settingsSaving.value = false;
+				return;
+			}
 		}
-	} catch {
-		settingsSaveError.value = 'Не удалось сохранить настройки (нет прав или коллекция не создана).';
+		if (status === 401) {
+			settingsSaveError.value = 'Сессия Directus истекла. Обновите страницу и войдите заново.';
+		} else if (status === 403) {
+			settingsSaveError.value = 'Недостаточно прав на сохранение `tvpn_admin_settings` (нужны update/create).';
+		} else if (status === 404) {
+			settingsSaveError.value = 'Коллекция `tvpn_admin_settings` не найдена. Запустите scripts/directus_super_setup.py.';
+		} else {
+			settingsSaveError.value = 'Не удалось сохранить настройки. Проверьте права роли и наличие коллекции.';
+		}
 	}
 	settingsSaving.value = false;
 }

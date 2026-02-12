@@ -433,3 +433,21 @@
   - lint по файлу `module.vue` — без ошибок;
   - пересборка расширения `tvpn-home` (`npm run build`) — успешно.
 
+### 2026-02-13 — Directus `tvpn-home`: сохранение через singleton endpoint
+
+- Проблема:
+  - В UI появлялась ошибка "Не удалось сохранить настройки (нет прав или коллекция не создана)".
+  - Основная причина: роль часто имеет `update`, но не имеет `create`; сценарий с `POST` при пустом `settingsId` ломался.
+- Исправление в `directus/extensions/tvpn-home/src/module.vue`:
+  - `loadSettings()` сначала читает `GET /items/tvpn_admin_settings/singleton`, затем fallback на list endpoint.
+  - `saveSettings()` сначала пишет `PATCH /items/tvpn_admin_settings/singleton`.
+  - При `403/404` добавлен fallback на старый сценарий (`POST`/`PATCH by id`), чтобы покрыть нестандартные окружения.
+  - Добавлены более точные тексты ошибок по статусам `401/403/404`.
+- Верификация:
+  - lint по `module.vue` — без ошибок.
+  - сборка `tvpn-home` (`npm run build`) — успешно.
+  - `python -m py_compile scripts/directus_super_setup.py` — успешно.
+
+- Дополнительно:
+  - В `scripts/directus_super_setup.py` для коллекции `tvpn_admin_settings` добавлена выдача `create` для роли Manager (вместе с `read/update`) для надежного fallback-создания записи.
+
