@@ -506,3 +506,17 @@
   - `docker compose restart directus` — выполнено;
   - API smoke: `PATCH /items/tvpn_admin_settings` — `200`, rollback — `200`.
 
+### 2026-02-13 — локальный E2E smoke (Manager + UI)
+
+- Выполнено на локальном стенде `http://localhost:8055`:
+  - создан тестовый пользователь `manager.local.test@example.com` с ролью `Manager` (active);
+  - под токеном Manager проверены:
+    - `GET /items/tvpn_admin_settings` -> `200`;
+    - `PATCH /items/tvpn_admin_settings` -> `200`;
+    - rollback сохранения -> `200`.
+- UI-проверка через браузер MCP:
+  - в `Directus /admin/tvpn-home` изменен `Текст для пользователей`;
+  - нажата кнопка `Сохранить` в блоке "Технические работы";
+  - после завершения запроса кнопка вернулась в активное состояние без error-алерта (признак успешного save).
+- После UI-теста значение `maintenance_message` откатили на `probe` (чтобы не оставлять тестовый текст).
+
