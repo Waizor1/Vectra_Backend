@@ -67,6 +67,13 @@ class DirectusClient:
             timeout=self.timeout,
         )
 
+    def delete(self, path: str) -> requests.Response:
+        return self.session.delete(
+            f"{self.auth.base_url}{path}",
+            headers=self.auth.headers,
+            timeout=self.timeout,
+        )
+
 
 def login(base_url: str, email: str, password: str) -> DirectusAuth:
     resp = requests.post(
@@ -252,13 +259,16 @@ def ensure_permission(
             "filter[collection][_eq]": collection,
             "filter[action][_eq]": action,
             "fields": "id,fields,permissions,validation,presets",
-            "limit": 1,
+            "limit": 200,
         },
     )
     if existing.status_code == 200:
         rows = existing.json().get("data") or []
         if rows:
-            perm_id = rows[0].get("id")
+            # Normalize first row and remove duplicates to avoid unpredictable
+            # behavior when many permission rows match the same policy/action.
+            first_row = rows[0]
+            perm_id = first_row.get("id")
             if perm_id is not None:
                 patch_payload = {
                     "fields": target_fields,
@@ -268,6 +278,14 @@ def ensure_permission(
                 }
                 patched = client.patch(f"/permissions/{perm_id}", json=patch_payload)
                 if patched.ok:
+                    for duplicate in rows[1:]:
+                        duplicate_id = duplicate.get("id")
+                        if duplicate_id is None:
+                            continue
+                        deleted = client.delete(f"/permissions/{duplicate_id}")
+                        # Best-effort dedupe. If delete is blocked, keep going.
+                        if deleted.status_code in (401, 403, 404):
+                            continue
                     return False
                 # If patch is rejected in this instance, continue with create path below.
 
@@ -529,12 +547,41 @@ def patch_field_meta(client: DirectusClient, collection: str, field: str, meta: 
 def apply_field_notes_ru(client: DirectusClient) -> None:
     field_notes = {
         "users": {
+            "id": "Внутренний ID пользователя в Directus.",
+            "is_admin": "Дает расширенные права в приложении. Включать только для доверенных сотрудников.",
+            "username": "Уникальный логин пользователя.",
+            "full_name": "Отображаемое имя/ФИО пользователя.",
+            "created_at": "Дата создания записи в системе.",
+            "email": "Email для связи и восстановления доступа.",
+            "language_code": "Предпочитаемый язык пользователя.",
             "lte_gb_total": "Лимит LTE в ГБ. Изменение синхронизируется с RemnaWave.",
             "expired_at": "Дата окончания подписки. Изменение синхронизируется с RemnaWave.",
             "hwid_limit": "Лимит устройств (HWID). Изменение синхронизируется с RemnaWave.",
             "balance": "Баланс пользователя в системе.",
             "is_blocked": "Блокировка пользователя.",
             "registration_date": "Дата регистрации пользователя. Используется в аналитике и алертах.",
+            "is_registered": "Флаг завершенной регистрации в боте/приложении.",
+            "is_subscribed": "Есть активная подписка на текущий момент.",
+            "is_trial": "Пользователь находится на пробном периоде.",
+            "used_trial": "Пробный период уже был использован ранее.",
+            "is_partner": "Участник партнерской программы.",
+            "custom_referral_percent": "Индивидуальный процент партнерского вознаграждения.",
+            "referred_by": "Родитель-реферер. Поле кликабельно для быстрого перехода.",
+            "referrals": "Количество приглашенных рефералов.",
+            "referral_bonus_days_total": "Сумма бонусных дней за реферальную активность.",
+            "referral_first_payment_rewarded": "Награда за первый платеж реферала уже начислена.",
+            "active_tariff": "Активный тариф пользователя (связь).",
+            "active_tariff_id": "ID активного тарифа. Поле для быстрого перехода к тарифу.",
+            "utm": "UTM-метка источника привлечения.",
+            "renew_id": "Внешний идентификатор для продления.",
+            "prize_wheel_attempts": "Доступное число попыток в колесе призов.",
+            "blocked_at": "Дата и время последней блокировки.",
+            "connected_at": "Последняя активность подключения.",
+            "last_hwid_reset": "Когда в последний раз выполнялся сброс HWID.",
+            "last_failed_message_at": "Когда в последний раз была ошибка отправки сообщения.",
+            "failed_message_count": "Сколько раз не удалось отправить сообщение пользователю.",
+            "familyurl": "Ссылка для семейного приглашения.",
+            "remnawave_uuid": "UUID пользователя в RemnaWave.",
         },
         "active_tariffs": {
             "lte_gb_total": "Общий LTE лимит для тарифа.",
@@ -559,13 +606,41 @@ def apply_field_notes_ru(client: DirectusClient) -> None:
     }
     field_translations = {
         "users": {
+            "id": "ID",
+            "is_admin": "Администратор",
             "username": "Логин",
             "full_name": "ФИО",
+            "email": "Email",
+            "language_code": "Язык",
+            "utm": "UTM-метка",
+            "renew_id": "ID продления",
+            "created_at": "Создан",
+            "activation_date": "Активация",
+            "connected_at": "Последнее подключение",
             "expired_at": "Дата окончания",
             "hwid_limit": "Лимит устройств",
             "lte_gb_total": "Лимит LTE (ГБ)",
             "balance": "Баланс",
             "is_blocked": "Заблокирован",
+            "blocked_at": "Дата блокировки",
+            "is_registered": "Зарегистрирован",
+            "is_subscribed": "Подписан",
+            "is_trial": "Триал",
+            "used_trial": "Триал использован",
+            "is_partner": "Партнер",
+            "custom_referral_percent": "Партнерский %",
+            "referred_by": "Чей реферал",
+            "referrals": "Рефералы",
+            "referral_bonus_days_total": "Бонусные дни",
+            "referral_first_payment_rewarded": "Награда за 1-й платеж",
+            "active_tariff": "Активный тариф",
+            "active_tariff_id": "Активный тариф (ID)",
+            "prize_wheel_attempts": "Попытки колеса",
+            "last_hwid_reset": "Сброс HWID",
+            "last_failed_message_at": "Последняя ошибка сообщений",
+            "failed_message_count": "Ошибки сообщений",
+            "familyurl": "Семейная ссылка",
+            "remnawave_uuid": "UUID RemnaWave",
             "registration_date": "Дата регистрации",
         },
         "active_tariffs": {
@@ -822,61 +897,10 @@ def apply_users_form_ux(client: DirectusClient) -> None:
         "familyurl": "half",
     }
 
-    # IMPORTANT:
-    # In Directus, field.meta.group should point to divider FIELD keys, not titles.
-    # If we store human labels here, UI may render empty sections.
-    groups = {
-        # Profile / identity
-        "id": "ui_divider_overview",
-        "username": "ui_divider_overview",
-        "full_name": "ui_divider_overview",
-        "email": "ui_divider_overview",
-        "language_code": "ui_divider_overview",
-        "created_at": "ui_divider_overview",
-        "registration_date": "ui_divider_overview",
-        "activation_date": "ui_divider_overview",
-        "connected_at": "ui_divider_overview",
-        "utm": "ui_divider_overview",
-        "renew_id": "ui_divider_overview",
-        # Subscription / access
-        "expired_at": "ui_divider_subscription",
-        "is_registered": "ui_divider_subscription",
-        "is_subscribed": "ui_divider_subscription",
-        "is_trial": "ui_divider_subscription",
-        "used_trial": "ui_divider_subscription",
-        "active_tariff": "ui_divider_subscription",
-        "active_tariff_id": "ui_divider_ops",
-        # Money / limits
-        "balance": "ui_divider_limits",
-        "lte_gb_total": "ui_divider_limits",
-        "hwid_limit": "ui_divider_limits",
-        "prize_wheel_attempts": "ui_divider_limits",
-        # Communication / status
-        "is_blocked": "ui_divider_status",
-        "blocked_at": "ui_divider_status",
-        "last_failed_message_at": "ui_divider_status",
-        "failed_message_count": "ui_divider_status",
-        # Referral
-        "is_partner": "ui_divider_partner",
-        "custom_referral_percent": "ui_divider_partner",
-        "referred_by": "ui_divider_partner",
-        "referrals": "ui_divider_partner",
-        "referral_bonus_days_total": "ui_divider_partner",
-        "referral_first_payment_rewarded": "ui_divider_partner",
-        "referred_users_list": "ui_divider_ops",
-        "active_tariffs_list": "ui_divider_ops",
-        "promo_usages_list": "ui_divider_ops",
-        "notification_marks_list": "ui_divider_ops",
-        "family_devices_list": "ui_divider_ops",
-        "partner_withdrawals_list": "ui_divider_ops",
-        "partner_earnings_list": "ui_divider_ops",
-        "family_audit_logs_owner": "ui_divider_ops",
-        # Technical / integration
-        "remnawave_uuid": "ui_divider_tech",
-        "last_hwid_reset": "ui_divider_tech",
-        "familyurl": "ui_divider_tech",
-        "is_admin": "ui_divider_overview",
-    }
+    # NOTE:
+    # In this production instance, grouping fields via `meta.group` to
+    # presentation-divider aliases can hide fields in item view.
+    # We keep dividers as visual separators by sort order, but keep fields ungrouped.
 
     # Sort order (best-effort): smaller number = higher on the form.
     sort = {
@@ -934,8 +958,7 @@ def apply_users_form_ux(client: DirectusClient) -> None:
             meta["readonly"] = True
         if field in sort:
             meta["sort"] = sort[field]
-        if field in groups:
-            meta["group"] = groups[field]
+        meta["group"] = None
         patch_field_meta(client, "users", field, meta)
 
 
@@ -1038,7 +1061,6 @@ def ensure_users_presentation_dividers(client: DirectusClient) -> None:
         {
             "interface": "id-link-editor",
             "options": {"collection": "users", "openInNewTab": False},
-            "group": "ui_divider_partner",
             "sort": 62,
             "note": "Чей реферал: можно быстро перейти к карточке связанного пользователя.",
         },
@@ -1059,7 +1081,6 @@ def ensure_users_presentation_dividers(client: DirectusClient) -> None:
         {
             "interface": "id-link-editor",
             "options": {"collection": "active_tariffs", "openInNewTab": False},
-            "group": "ui_divider_ops",
             "sort": 67,
         },
     )
@@ -1070,7 +1091,6 @@ def ensure_users_presentation_dividers(client: DirectusClient) -> None:
         {
             "interface": "toggle",
             "options": {"label": "Администратор"},
-            "group": "ui_divider_overview",
             "width": "quarter",
             "sort": 9,
             "hidden": False,
@@ -1085,6 +1105,235 @@ def ensure_users_presentation_dividers(client: DirectusClient) -> None:
     patch_field_meta(client, "users", "last_hwid_reset", {"interface": "datetime", "options": {"use24": True, "includeSeconds": False}})
     patch_field_meta(client, "users", "last_failed_message_at", {"interface": "datetime", "options": {"use24": True, "includeSeconds": False}})
     patch_field_meta(client, "users", "custom_referral_percent", {"interface": "slider", "options": {"min": 0, "max": 100, "step": 1, "alwaysShowValue": True}})
+
+
+def apply_users_luxury_ux(client: DirectusClient) -> None:
+    """
+    Add a safe premium layer for users item-view without changing base layout:
+    - keep previous iteration field order intact (no sort/width mutations)
+    - add optional visual separators only
+    - enrich notes/templates for operational blocks
+    """
+
+    if client.get("/collections/users").status_code != 200:
+        return
+
+    def ensure_divider(field: str, title: str, icon: str, sort: int) -> None:
+        meta = {
+            "interface": "presentation-divider",
+            "options": {"title": title, "icon": icon},
+            "special": ["alias", "no-data"],
+            "width": "full",
+            "sort": sort,
+        }
+        resp = client.patch("/fields/users/" + field, json={"meta": meta})
+        if resp.status_code == 404:
+            created = client.post(
+                "/fields/users",
+                json={
+                    "field": field,
+                    "type": "alias",
+                    "schema": None,
+                    "meta": meta,
+                },
+            )
+            if created.status_code in (401, 403, 409):
+                return
+            created.raise_for_status()
+            return
+        if resp.status_code in (401, 403):
+            return
+        resp.raise_for_status()
+
+    def ensure_alias_field(field: str, meta: Dict[str, Any]) -> None:
+        resp = client.patch("/fields/users/" + field, json={"meta": meta})
+        if resp.status_code == 404:
+            created = client.post(
+                "/fields/users",
+                json={
+                    "field": field,
+                    "type": "alias",
+                    "schema": None,
+                    "meta": meta,
+                },
+            )
+            if created.status_code in (401, 403, 409):
+                return
+            created.raise_for_status()
+            return
+        if resp.status_code in (401, 403):
+            return
+        resp.raise_for_status()
+
+    # Keep optional luxury section at the very bottom so base sections are not
+    # affected. It is purely additive and does not re-order existing fields.
+    ensure_divider("ui_divider_kpi", "KPI и быстрые действия", "insights", 9900)
+    patch_field_meta(client, "users", "ui_divider_quick_actions", {"hidden": True, "sort": 9992})
+    ensure_alias_field(
+        "ui_kpi_notice",
+        {
+            "interface": "presentation-notice",
+            "special": ["alias", "no-data"],
+            "options": {
+                "color": "info",
+                "icon": "insights",
+                "text": (
+                    "Единый блок KPI/действий: быстрый доступ к метрикам и переходам "
+                    "строго по текущему пользователю."
+                ),
+            },
+            "width": "full",
+            "sort": 9901,
+        },
+    )
+    ensure_alias_field(
+        "ui_filter_indicator",
+        {
+            "interface": "presentation-notice",
+            "special": ["alias", "no-data"],
+            "options": {
+                "color": "normal",
+                "icon": "filter_alt",
+                "text": "Фильтр активен: переходы ниже ведут к встроенным спискам карточки текущего пользователя.",
+            },
+            "width": "half",
+            "sort": 9902,
+        },
+    )
+    ensure_alias_field(
+        "ui_kpi_links",
+        {
+            "interface": "presentation-links",
+            "special": ["alias", "no-data"],
+            "options": {
+                "links": [
+                    {
+                        "label": "История тарифов (в карточке)",
+                        "icon": "subscriptions",
+                        "type": "primary",
+                        "actionType": "url",
+                        "url": "/content/users/{{id}}#active_tariffs_list",
+                    },
+                    {
+                        "label": "История промокодов (в карточке)",
+                        "icon": "confirmation_number",
+                        "type": "info",
+                        "actionType": "url",
+                        "url": "/content/users/{{id}}#promo_usages_list",
+                    },
+                    {
+                        "label": "История логов уведомлений (в карточке)",
+                        "icon": "notifications",
+                        "type": "normal",
+                        "actionType": "url",
+                        "url": "/content/users/{{id}}#notification_marks_list",
+                    },
+                    {
+                        "label": "История семейного аудита (в карточке)",
+                        "icon": "fact_check",
+                        "type": "normal",
+                        "actionType": "url",
+                        "url": "/content/users/{{id}}#family_audit_logs_owner",
+                    },
+                ]
+            },
+            "width": "full",
+            "sort": 9903,
+        },
+    )
+    ensure_alias_field(
+        "ui_quick_actions_notice",
+        {
+            "interface": "presentation-notice",
+            "special": ["alias", "no-data"],
+            "options": {
+                "color": "success",
+                "icon": "bolt",
+                "text": (
+                    "Каждый переход открывает либо конкретную связанную сущность, "
+                    "либо встроенные списки в карточке пользователя (уже отфильтрованные по нему)."
+                ),
+            },
+            "width": "full",
+            "sort": 9904,
+        },
+    )
+    ensure_alias_field(
+        "ui_quick_actions_links",
+        {
+            "interface": "presentation-links",
+            "special": ["alias", "no-data"],
+            "options": {
+                "links": [
+                    {
+                        "label": "Открыть карточку реферера",
+                        "icon": "person_search",
+                        "type": "primary",
+                        "actionType": "url",
+                        "url": "/content/users/{{referred_by}}",
+                    },
+                    {
+                        "label": "Открыть активный тариф",
+                        "icon": "local_offer",
+                        "type": "primary",
+                        "actionType": "url",
+                        "url": "/content/active_tariffs/{{active_tariff_id}}",
+                    },
+                    {
+                        "label": "Открыть список рефералов",
+                        "icon": "groups",
+                        "type": "normal",
+                        "actionType": "url",
+                        "url": "/content/users/{{id}}#referred_users_list",
+                    },
+                ]
+            },
+            "width": "full",
+            "sort": 9905,
+        },
+    )
+
+    # Premium templates for embedded logs.
+    patch_field_meta(
+        client,
+        "users",
+        "active_tariffs_list",
+        {
+            "interface": "list-o2m",
+            "options": {"template": "{{id}} • {{name}} • {{start_date}} → {{end_date}} • LTE {{lte_gb_used}}/{{lte_gb_total}}"},
+            "note": "История тарифов пользователя.",
+        },
+    )
+    patch_field_meta(
+        client,
+        "users",
+        "promo_usages_list",
+        {
+            "interface": "list-o2m",
+            "options": {"template": "{{id}} • {{used_at}} • {{promo_code_id}}"},
+            "note": "Какие промокоды и когда были применены.",
+        },
+    )
+    patch_field_meta(
+        client,
+        "users",
+        "notification_marks_list",
+        {
+            "interface": "list-o2m",
+            "options": {"template": "{{id}} • {{type}} • {{sent_at}}"},
+            "note": "Логи коммуникаций/уведомлений по пользователю.",
+        },
+    )
+    patch_field_meta(
+        client,
+        "users",
+        "family_audit_logs_owner",
+        {
+            "interface": "list-o2m",
+            "options": {"template": "{{id}} • {{action}} • {{created_at}}"},
+            "note": "Аудит действий в семейных сценариях.",
+        },
+    )
 
 
 def ensure_users_relations_ux(client: DirectusClient) -> None:
@@ -1174,7 +1423,7 @@ def ensure_users_relations_ux(client: DirectusClient) -> None:
             "display": "related-values",
             "width": "full",
             "sort": sort,
-            "group": "ui_divider_ops",
+            "group": None,
             "note": title,
             "translations": [{"language": "ru-RU", "translation": title}],
         }
@@ -1233,7 +1482,6 @@ def ensure_users_relations_ux(client: DirectusClient) -> None:
                 "display": "related-values",
                 "note": "Чей реферал: можно открыть и сразу перейти в карточку родителя.",
                 "readonly": False,
-                "group": "ui_divider_partner",
                 "sort": 62,
             },
         )
@@ -1402,6 +1650,19 @@ def ensure_permissions_baseline(client: DirectusClient) -> None:
         ensure_permission(client, manager_policy_id, "tvpn_admin_settings", "read")
         ensure_permission(client, manager_policy_id, "tvpn_admin_settings", "update")
         ensure_permission(client, viewer_policy_id, "tvpn_admin_settings", "read")
+
+    # Critical for Data Studio form rendering:
+    # without explicit read access to schema metadata collections, item views
+    # can load as blank sections for non-admin roles.
+    system_schema_collections = {
+        "directus_collections",
+        "directus_fields",
+        "directus_relations",
+        "directus_presets",
+    }
+    for collection in sorted(system_schema_collections):
+        ensure_permission(client, manager_policy_id, collection, "read")
+        ensure_permission(client, viewer_policy_id, collection, "read")
 
 
 def ensure_insights_dashboard(client: DirectusClient) -> None:
@@ -1977,6 +2238,7 @@ def main() -> None:
     apply_users_form_ux(client)
     ensure_users_relations_ux(client)
     ensure_users_presentation_dividers(client)
+    apply_users_luxury_ux(client)
     ensure_admin_settings(client)
     ensure_insights_dashboard(client)
     ensure_role_presets(client)
