@@ -3,7 +3,8 @@ import asyncio
 import os
 import ipaddress
 from typing import Dict, Tuple, Optional
-from fastapi import Request, HTTPException
+from fastapi import Request
+from fastapi.responses import JSONResponse
 from bloobcat.logger import get_logger
 
 logger = get_logger("rate_limit")
@@ -97,6 +98,14 @@ def get_client_ip(request: Request) -> str:
         return direct_ip
     return "unknown"
 
+
+def _rate_limited_response(wait_time: int, detail: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=429,
+        content={"detail": detail},
+        headers={"Retry-After": str(wait_time)},
+    )
+
 async def rate_limit_middleware(request: Request, call_next):
     """Middleware для rate limiting"""
     client_ip = get_client_ip(request)
@@ -106,46 +115,41 @@ async def rate_limit_middleware(request: Request, call_next):
         allowed, wait_time = await auth_ip_limiter.is_allowed(client_ip)
         if not allowed:
             logger.warning(f"Rate limit exceeded for /auth/telegram by ip={client_ip}, wait={wait_time}s")
-            raise HTTPException(
-                status_code=429,
+            return _rate_limited_response(
+                wait_time=wait_time or 1,
                 detail=f"Слишком много запросов. Попробуйте снова через {wait_time} секунд.",
-                headers={"Retry-After": str(wait_time)}
             )
     elif request.url.path == "/user" and request.method == "GET":
         allowed, wait_time = await user_ip_limiter.is_allowed(client_ip)
         if not allowed:
             logger.warning(f"Rate limit exceeded for /user by ip={client_ip}, wait={wait_time}s")
-            raise HTTPException(
-                status_code=429,
+            return _rate_limited_response(
+                wait_time=wait_time or 1,
                 detail=f"Слишком много запросов. Попробуйте снова через {wait_time} секунд.",
-                headers={"Retry-After": str(wait_time)}
             )
     elif request.url.path == "/devices" and request.method == "GET":
         allowed, wait_time = await devices_ip_limiter.is_allowed(client_ip)
         if not allowed:
             logger.warning(f"Rate limit exceeded for /devices by ip={client_ip}, wait={wait_time}s")
-            raise HTTPException(
-                status_code=429,
+            return _rate_limited_response(
+                wait_time=wait_time or 1,
                 detail=f"Слишком много запросов. Попробуйте снова через {wait_time} секунд.",
-                headers={"Retry-After": str(wait_time)}
             )
     elif request.url.path == "/app/info" and request.method == "GET":
         allowed, wait_time = await app_info_ip_limiter.is_allowed(client_ip)
         if not allowed:
             logger.warning(f"Rate limit exceeded for /app/info by ip={client_ip}, wait={wait_time}s")
-            raise HTTPException(
-                status_code=429,
+            return _rate_limited_response(
+                wait_time=wait_time or 1,
                 detail=f"Слишком много запросов. Попробуйте снова через {wait_time} секунд.",
-                headers={"Retry-After": str(wait_time)}
             )
     elif request.url.path == "/partner/summary" and request.method == "GET":
         allowed, wait_time = await partner_summary_ip_limiter.is_allowed(client_ip)
         if not allowed:
             logger.warning(f"Rate limit exceeded for /partner/summary by ip={client_ip}, wait={wait_time}s")
-            raise HTTPException(
-                status_code=429,
+            return _rate_limited_response(
+                wait_time=wait_time or 1,
                 detail=f"Слишком много запросов. Попробуйте снова через {wait_time} секунд.",
-                headers={"Retry-After": str(wait_time)}
             )
     
     # Проверяем только определенные эндпоинты
@@ -155,18 +159,16 @@ async def rate_limit_middleware(request: Request, call_next):
             allowed, wait_time = await reset_devices_limiter.is_allowed(str(user_id))
             if not allowed:
                 logger.warning(f"Rate limit exceeded for reset_devices by user {user_id}, wait {wait_time}s")
-                raise HTTPException(
-                    status_code=429,
+                return _rate_limited_response(
+                    wait_time=wait_time or 1,
                     detail=f"Слишком много запросов. Попробуйте снова через {wait_time} секунд.",
-                    headers={"Retry-After": str(wait_time)}
                 )
         else:
             allowed, wait_time = await unauth_sensitive_ip_limiter.is_allowed(client_ip)
             if not allowed:
-                raise HTTPException(
-                    status_code=429,
+                return _rate_limited_response(
+                    wait_time=wait_time or 1,
                     detail=f"Слишком много запросов. Попробуйте снова через {wait_time} секунд.",
-                    headers={"Retry-After": str(wait_time)}
                 )
     
     elif request.url.path == "/user/family/revoke" and request.method == "POST":
@@ -175,18 +177,16 @@ async def rate_limit_middleware(request: Request, call_next):
             allowed, wait_time = await family_revoke_limiter.is_allowed(str(user_id))
             if not allowed:
                 logger.warning(f"Rate limit exceeded for family/revoke by user {user_id}, wait {wait_time}s")
-                raise HTTPException(
-                    status_code=429,
+                return _rate_limited_response(
+                    wait_time=wait_time or 1,
                     detail=f"Слишком много запросов. Попробуйте снова через {wait_time} секунд.",
-                    headers={"Retry-After": str(wait_time)}
                 )
         else:
             allowed, wait_time = await unauth_sensitive_ip_limiter.is_allowed(client_ip)
             if not allowed:
-                raise HTTPException(
-                    status_code=429,
+                return _rate_limited_response(
+                    wait_time=wait_time or 1,
                     detail=f"Слишком много запросов. Попробуйте снова через {wait_time} секунд.",
-                    headers={"Retry-After": str(wait_time)}
                 )
 
     elif request.url.path == "/promo/validate" and request.method == "POST":
@@ -195,18 +195,16 @@ async def rate_limit_middleware(request: Request, call_next):
             allowed, wait_time = await promo_validate_limiter.is_allowed(str(user_id))
             if not allowed:
                 logger.warning(f"Rate limit exceeded for promo/validate by user {user_id}, wait {wait_time}s")
-                raise HTTPException(
-                    status_code=429,
+                return _rate_limited_response(
+                    wait_time=wait_time or 1,
                     detail=f"Слишком много запросов к проверке промокодов. Попробуйте снова через {wait_time} секунд.",
-                    headers={"Retry-After": str(wait_time)}
                 )
         else:
             allowed, wait_time = await unauth_sensitive_ip_limiter.is_allowed(client_ip)
             if not allowed:
-                raise HTTPException(
-                    status_code=429,
+                return _rate_limited_response(
+                    wait_time=wait_time or 1,
                     detail=f"Слишком много запросов. Попробуйте снова через {wait_time} секунд.",
-                    headers={"Retry-After": str(wait_time)}
                 )
 
     elif request.url.path == "/promo/redeem" and request.method == "POST":
@@ -215,18 +213,16 @@ async def rate_limit_middleware(request: Request, call_next):
             allowed, wait_time = await promo_redeem_limiter.is_allowed(str(user_id))
             if not allowed:
                 logger.warning(f"Rate limit exceeded for promo/redeem by user {user_id}, wait {wait_time}s")
-                raise HTTPException(
-                    status_code=429,
+                return _rate_limited_response(
+                    wait_time=wait_time or 1,
                     detail=f"Слишком много запросов к активации промокодов. Попробуйте снова через {wait_time} секунд.",
-                    headers={"Retry-After": str(wait_time)}
                 )
         else:
             allowed, wait_time = await unauth_sensitive_ip_limiter.is_allowed(client_ip)
             if not allowed:
-                raise HTTPException(
-                    status_code=429,
+                return _rate_limited_response(
+                    wait_time=wait_time or 1,
                     detail=f"Слишком много запросов. Попробуйте снова через {wait_time} секунд.",
-                    headers={"Retry-After": str(wait_time)}
                 )
     
     # Продолжаем обработку запроса
