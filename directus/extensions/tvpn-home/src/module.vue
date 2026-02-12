@@ -832,7 +832,7 @@
 							/>
 						</label>
 
-						<v-button small :loading="settingsSaving" :disabled="!settingsId" @click="saveSettings">
+						<v-button small :loading="settingsSaving" :disabled="settingsSaving" @click="saveSettings">
 							Сохранить
 						</v-button>
 					</div>
@@ -892,7 +892,7 @@
 							<input v-model.number="settings.suspicious_block_days" class="settings__input settings__input--num" type="number" step="1" min="1" max="30" />
 						</label>
 
-						<v-button small :loading="settingsSaving" :disabled="!settingsId" @click="saveSettings">
+						<v-button small :loading="settingsSaving" :disabled="settingsSaving" @click="saveSettings">
 							Сохранить
 						</v-button>
 					</div>
@@ -1455,12 +1455,17 @@ async function loadSettings() {
 }
 
 async function saveSettings() {
-	if (!settingsId.value) return;
 	if (settingsSaving.value) return;
 	settingsSaving.value = true;
 	settingsSaveError.value = '';
 	try {
-		await api.patch(`/items/tvpn_admin_settings/${settingsId.value}`, settings.value);
+		if (!settingsId.value) {
+			const created = await api.post('/items/tvpn_admin_settings', settings.value);
+			const createdId = created?.data?.data?.id ?? null;
+			settingsId.value = createdId;
+		} else {
+			await api.patch(`/items/tvpn_admin_settings/${settingsId.value}`, settings.value);
+		}
 	} catch {
 		settingsSaveError.value = 'Не удалось сохранить настройки (нет прав или коллекция не создана).';
 	}
