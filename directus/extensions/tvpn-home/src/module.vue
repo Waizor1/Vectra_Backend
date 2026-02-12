@@ -809,8 +809,8 @@
 				</v-card>
 
 				<v-card class="panel">
-					<div class="panel__title">Пороги алертов</div>
-					<div class="panel__subtitle">Настраивается через `tvpn_admin_settings` (сохраняется в базе).</div>
+					<div class="panel__title">Технические работы</div>
+					<div class="panel__subtitle">При включении фронтенд-пользователи увидят экран техработ вместо основного приложения.</div>
 
 					<v-notice v-if="settingsSaveError" type="danger">
 						{{ settingsSaveError }}
@@ -818,12 +818,12 @@
 
 					<div class="settings">
 						<label class="settings__row">
-							<span>Технические работы</span>
+							<span>Режим техработ включён</span>
 							<input v-model="settings.maintenance_mode" class="settings__input" type="checkbox" />
 						</label>
 
 						<label class="settings__row settings__row--textarea">
-							<span>Текст техработ</span>
+							<span>Текст для пользователей</span>
 							<textarea
 								v-model="settings.maintenance_message"
 								class="settings__input settings__input--textarea"
@@ -832,6 +832,21 @@
 							/>
 						</label>
 
+						<v-button small :loading="settingsSaving" :disabled="!settingsId" @click="saveSettings">
+							Сохранить
+						</v-button>
+					</div>
+				</v-card>
+
+				<v-card class="panel">
+					<div class="panel__title">Пороги алертов</div>
+					<div class="panel__subtitle">Настраивается через `tvpn_admin_settings` (сохраняется в базе).</div>
+
+					<v-notice v-if="settingsSaveError" type="danger">
+						{{ settingsSaveError }}
+					</v-notice>
+
+					<div class="settings">
 						<label class="settings__row">
 							<span>Алерты включены</span>
 							<input v-model="settings.alerts_enabled" class="settings__input" type="checkbox" />
