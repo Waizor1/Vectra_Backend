@@ -1,5 +1,15 @@
 ## Журнал изменений
 
+### 2026-02-13 — стабилизация auto-deploy Directus (готовность + retry)
+
+- В `TVPN_BACK_END/.github/workflows/auto-deploy.yml` усилен этап ожидания Directus:
+  - добавлен флаг `DIRECTUS_READY` и явная проверка после цикла ожидания;
+  - если health не достигнут за таймаут — деплой завершается с диагностикой (`docker compose ps` + `logs --tail=120 directus`), вместо тихого продолжения.
+- Устранен источник флаки-падений после рестарта Directus:
+  - запуск `scripts/directus_super_setup.py` внутри `bloobcat` обернут в retry (`4` попытки, пауза `10s` между попытками).
+- Контекст инцидента:
+  - предыдущий падший run имел `Connection refused` к `directus:8055` на шаге super-setup и `exit code 137` при том, что `git pull --ff-only` прошёл успешно.
+
 ### 2026-02-13 — RCA деплоя: это не Git
 
 - Проверен последний failed run `Auto Deploy Backend` (`21999897972`).

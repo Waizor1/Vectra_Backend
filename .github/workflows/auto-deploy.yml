@@ -72,18 +72,50 @@ jobs:
         fi
 
         echo "🩺 Ждем готовности Directus..."
-        for i in {1..45}; do
+        DIRECTUS_READY=0
+        for i in {1..60}; do
           if command -v curl >/dev/null; then
-            curl -sf "http://localhost:8055/server/health" >/dev/null && break
+            if curl -sf "http://localhost:8055/server/health" >/dev/null; then
+              DIRECTUS_READY=1
+              break
+            fi
           else
-            wget -qO- "http://localhost:8055/server/health" >/dev/null && break
+            if wget -qO- "http://localhost:8055/server/health" >/dev/null; then
+              DIRECTUS_READY=1
+              break
+            fi
           fi
           sleep 2
         done
 
+        if [ "$DIRECTUS_READY" -ne 1 ]; then
+          echo "❌ Directus не стал healthy за отведенное время"
+          docker compose $COMPOSE_ARGS ps
+          docker compose $COMPOSE_ARGS logs --tail=120 directus || true
+          exit 1
+        fi
+
         echo "🛠️  Применяем Directus super-setup (UI/UX метаданные, права, presets)..."
         # Run inside the app container where Python deps exist, and point DIRECTUS_URL to the internal service.
-        docker compose $COMPOSE_ARGS exec -T bloobcat sh -lc 'export DIRECTUS_URL="http://directus:8055"; (python scripts/directus_super_setup.py || python3 scripts/directus_super_setup.py)'
+        # Setup can fail transiently right after restart; retry to reduce flaky deploys.
+        docker compose $COMPOSE_ARGS exec -T bloobcat sh -lc '
+          export DIRECTUS_URL="http://directus:8055"
+          attempt=1
+          max_attempts=4
+          while [ "$attempt" -le "$max_attempts" ]; do
+            echo "Directus super-setup attempt $attempt/$max_attempts"
+            if (python scripts/directus_super_setup.py || python3 scripts/directus_super_setup.py); then
+              exit 0
+            fi
+            if [ "$attempt" -lt "$max_attempts" ]; then
+              echo "⚠️  super-setup failed, retry in 10s..."
+              sleep 10
+            fi
+            attempt=$((attempt + 1))
+          done
+          echo "❌ Directus super-setup failed after retries"
+          exit 1
+        '
 
         echo "✅ Деплой завершен"
         EOF
