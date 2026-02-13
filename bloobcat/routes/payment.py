@@ -1191,6 +1191,18 @@ async def yookassa_webhook(request: Request, secret: str):
                 )
             except Exception as notify_exc:
                 logger.error(f"LTE пополнение: не удалось отправить админ-уведомление: {notify_exc}")
+            try:
+                await _award_partner_cashback(
+                    payment_id=str(payment.id),
+                    referral_user=user,
+                    amount_rub_total=int(_round_rub(total_amount)),
+                )
+            except Exception as e_partner:
+                logger.warning(
+                    "LTE пополнение: не удалось начислить партнёрский кэшбек для payment %s: %s",
+                    payment.id,
+                    e_partner,
+                )
             return {"status": "ok"}
         
         try:

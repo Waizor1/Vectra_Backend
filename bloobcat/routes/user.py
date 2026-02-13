@@ -567,6 +567,21 @@ async def change_active_tariff_devices(payload: ChangeDevicesRequest, user: User
                     amount_from_balance=extra_cost,
                     status="succeeded",
                 )
+                # Keep partner cashback flow consistent for all successful payments.
+                try:
+                    from bloobcat.routes.payment import _award_partner_cashback
+
+                    await _award_partner_cashback(
+                        payment_id=str(payment_id),
+                        referral_user=user,
+                        amount_rub_total=int(extra_cost),
+                    )
+                except Exception as partner_exc:
+                    logger.warning(
+                        "Не удалось начислить партнёрский кэшбек для LTE оплаты с баланса %s: %s",
+                        payment_id,
+                        partner_exc,
+                    )
                 try:
                     await notify_lte_topup(
                         user_id=user.id,

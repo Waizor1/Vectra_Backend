@@ -172,7 +172,8 @@ async def get_summary(user: Users = Depends(validate)) -> PartnerSummaryResponse
     frozen_rows = await PartnerWithdrawals.filter(owner_id=user.id, status__in=pending_statuses).values_list("amount_rub", flat=True)
     frozen = int(sum(int(x or 0) for x in frozen_rows))
 
-    invited_count = await Users.filter(referred_by=user.id, is_registered=True).count()
+    # Count all referred users, even before first device activation.
+    invited_count = await Users.filter(referred_by=user.id).count()
 
     # Count referred users who have at least one succeeded payment.
     # Use a raw query for "count distinct" + join (fast & exact on Postgres).
