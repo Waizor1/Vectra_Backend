@@ -505,15 +505,23 @@ class Users(models.Model):
             
             needs_save = False
             
-            # Обработка UTM - устанавливаем только для новых пользователей
+            # Обработка UTM: first-touch — сохраняем при первом визите с меткой (новый пользователь
+            # или существующий без utm). Иначе у пришедших по партнёрской ссылке после первого
+            # захода без ссылки не считались активации и покупки в статистике партнёра.
             if utm:
                 logger.debug(f"Получен параметр UTM: {utm} для пользователя {user.id}")
-                if is_new:
+                current_utm = (getattr(user, "utm", None) or "").strip()
+                if is_new or not current_utm:
                     user.utm = utm
                     needs_save = True
-                    logger.debug(f"Пользователь новый, устанавливаем UTM: {utm}")
+                    logger.debug(
+                        "UTM установлен (is_new=%s, было пусто=%s): %s",
+                        is_new,
+                        not current_utm,
+                        utm,
+                    )
                 else:
-                    logger.debug(f"Пользователь {user.id} уже существует, пропускаем UTM")
+                    logger.debug(f"Пользователь {user.id} уже имеет UTM, пропускаем (first-touch)")
             
             # Обработка реферала:
             # Важно: пользователь мог уже существовать (например, ранее нажал /start без реф-ссылки),
