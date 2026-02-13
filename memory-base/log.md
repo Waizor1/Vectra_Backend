@@ -1,5 +1,16 @@
 ## Журнал изменений
 
+### 2026-02-13 — RCA деплоя: это не Git
+
+- Проверен последний failed run `Auto Deploy Backend` (`21999897972`).
+- На этапе `Deploy to server` Git-часть проходит штатно:
+  - `git stash push -u ...` -> `No local changes to save`;
+  - `git pull --ff-only` -> `Already up to date`.
+- Фактическое падение происходит позже:
+  - в `directus_super_setup.py` при логине в Directus (`http://directus:8055/auth/login`) получен `Connection refused`;
+  - job завершается `Process completed with exit code 137`.
+- Доп. наблюдение: в логе до SSH есть строка `fatal: not a git repository...`, но она не блокирует деплой и не является корневой причиной падения этого run.
+
 ### 2026-02-13 — уведомление о покупке семейной подписки + CTA в раздел семьи
 
 - Добавлено отдельное пользовательское уведомление при успешной покупке семейной подписки (до 10 участников):
