@@ -1,5 +1,15 @@
 ## Журнал изменений
 
+### 2026-02-15 — subscription status: добавлен явный флаг автопродления
+
+- В `bloobcat/routes/subscription.py` расширен ответ `GET /subscription/status`:
+  - добавлено поле `autoRenewEnabled` (`bool(user.renew_id)`).
+- `POST /subscription/cancel-renewal` теперь возвращает расширенный ответ:
+  - `ok`,
+  - `autoRenewEnabled: false`,
+  - `wasAlreadyCancelled` (помогает фронту различать первое/повторное нажатие).
+- Изменение обратно-совместимое для текущего фронта: дополнительные поля не ломают существующих клиентов.
+
 ### 2026-02-14 — найден root cause API 502: падение FastAPI на dependency-типе
 
 - По логам с VPS (`bloobcat` + `caddy`) подтверждено:

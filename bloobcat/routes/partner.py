@@ -93,7 +93,12 @@ async def _build_qr_link(title: str) -> str:
         bot_name = await get_bot_username()
     except Exception:
         bot_name = "TriadVPN_bot"
-    return f"https://t.me/{bot_name}?start=qr_{slug}"
+    payload = f"qr_{slug}"
+    webapp_url = (getattr(telegram_settings, "webapp_url", None) or "").strip()
+    if webapp_url and webapp_url.lower().startswith("https://"):
+        sep = "&" if "?" in webapp_url else "?"
+        return f"{webapp_url.rstrip('/')}{sep}startapp={quote(payload, safe='')}"
+    return f"https://t.me/{bot_name}?start={payload}"
 
 
 def _format_qr(qr: PartnerQr) -> PartnerQrResponse:
@@ -251,7 +256,13 @@ async def create_qr_code(payload: PartnerQrCreateRequest, user: Users = Depends(
     except Exception:
         bot_name = "TriadVPN_bot"
     token = str(qr.id).replace("-", "")
-    qr.link = f"https://t.me/{bot_name}?start=qr_{token}"
+    start_payload = f"qr_{token}"
+    webapp_url = (getattr(telegram_settings, "webapp_url", None) or "").strip()
+    if webapp_url and webapp_url.lower().startswith("https://"):
+        sep = "&" if "?" in webapp_url else "?"
+        qr.link = f"{webapp_url.rstrip('/')}{sep}startapp={quote(start_payload, safe='')}"
+    else:
+        qr.link = f"https://t.me/{bot_name}?start={start_payload}"
     await qr.save(update_fields=["link"])
     return _format_qr(qr)
 

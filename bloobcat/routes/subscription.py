@@ -21,6 +21,7 @@ class SubscriptionStatusResponse(BaseModel):
     endAtMs: int | None
     devicesLimit: int
     isFamilyEligible: bool
+    autoRenewEnabled: bool
 
 
 class SubscriptionPlanResponse(BaseModel):
@@ -141,6 +142,7 @@ async def get_status(user: Users = Depends(validate)) -> SubscriptionStatusRespo
         endAtMs=end_at_ms,
         devicesLimit=devices_limit,
         isFamilyEligible=is_family_eligible,
+        autoRenewEnabled=bool(user.renew_id),
     )
 
 
@@ -194,7 +196,12 @@ async def purchase(payload: SubscriptionPurchaseRequest, user: Users = Depends(v
 
 @router.post("/cancel-renewal")
 async def cancel_renewal(user: Users = Depends(validate)) -> Dict[str, Any]:
+    was_already_cancelled = not bool(user.renew_id)
     if user.renew_id:
         user.renew_id = None
         await user.save(update_fields=["renew_id"])
-    return {"ok": True}
+    return {
+        "ok": True,
+        "autoRenewEnabled": False,
+        "wasAlreadyCancelled": was_already_cancelled,
+    }

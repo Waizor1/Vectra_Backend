@@ -32,7 +32,9 @@ def _calc_level(count: int) -> int:
 
 @router.get("/status", response_model=ReferralStatusResponse)
 async def get_status(user: Users = Depends(validate)) -> ReferralStatusResponse:
-    friends_count = int(user.referrals or 0)
+    # Keep consistent with partner dashboard counters:
+    # count all invited users by referred_by, regardless of activation stage.
+    friends_count = await Users.filter(referred_by=user.id).count()
     level = _calc_level(friends_count)
     # Total earned referral bonus days (not money).
     # This value is accumulated when a referred user makes their first payment.
