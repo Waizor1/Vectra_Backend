@@ -1,5 +1,16 @@
 ## Журнал изменений
 
+### 2026-02-13 — hotfix workflow: корректная подстановка переменных в SSH heredoc
+
+- Выявлена причина новых падений деплоя после предыдущего hardening-патча:
+  - в `auto-deploy.yml` внутри `ssh << EOF` переменные shell (`$DIRECTUS_READY`, `$attempt`, `$max_attempts`, `$COMPOSE_ARGS`) интерпретировались некорректно;
+  - в логе это проявлялось как:
+    - `-bash: line ...: [: : integer expression expected`;
+    - `sh: ...: [: Illegal number:`;
+    - преждевременный fail `Directus super-setup failed after retries`.
+- Исправление:
+  - в проблемных местах переменные экранированы (`\$...`), чтобы они вычислялись на удаленном хосте в нужном контексте.
+
 ### 2026-02-13 — стабилизация auto-deploy Directus (готовность + retry)
 
 - В `TVPN_BACK_END/.github/workflows/auto-deploy.yml` усилен этап ожидания Directus:
