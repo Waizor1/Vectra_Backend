@@ -1,5 +1,31 @@
 ## Журнал изменений
 
+### 2026-02-14 — RCA: `super_setup` падает `exit 137` без traceback
+
+- Проверен свежий run `Auto Deploy Backend` (`22014607058`):
+  - шаг доходит до `Directus super-setup attempt 1/4`;
+  - затем immediate `Process completed with exit code 137`;
+  - Python traceback отсутствует.
+- Вывод: это не типичная логическая ошибка Python, а внешнее завершение процесса (OOM/SIGKILL/kill контейнера).
+- Сделано 2 уровня hardening:
+  - `.github/workflows/auto-deploy.yml`:
+    - `super-setup` переведен в non-blocking post-deploy шаг (не валит релиз бэкенда),
+    - при фейле печатаются диагностики `docker compose ps` + логи `bloobcat/directus`.
+  - `scripts/directus_super_setup.py`:
+    - уменьшена нагрузка на запрос пресетов (`/presets` limit `400` + ограниченный набор `fields`);
+    - добавлены короткие паузы между тяжелыми фазами (`DIRECTUS_SUPER_SETUP_PHASE_PAUSE`, default `0.2s`);
+    - фазы теперь логируются `Phase start: ...` для точного pinpoint места падения.
+
+### 2026-02-14 — deploy hardening: non-blocking super-setup on exit 137
+
+- По свежему failed run (`22014607058`) зафиксировано:
+  - `Directus super-setup attempt 1/4` -> мгновенный `exit code 137` без Python traceback.
+  - Это типично для принудительного убийства процесса (OOM/SIGKILL/перезапуск контейнера), а не для обычной логической ошибки в `directus_super_setup.py`.
+- В `TVPN_BACK_END/.github/workflows/auto-deploy.yml` изменено поведение:
+  - `super-setup` оставлен с retry, но больше не блокирует весь релиз при фейле;
+  - при неуспехе выводятся диагностические логи `bloobcat` и `directus`, затем деплой продолжается.
+- Цель: не срывать выпуск бэкенда из-за нестабильного post-deploy шага админского UX-setup.
+
 ### 2026-02-13 — hotfix workflow: корректная подстановка переменных в SSH heredoc
 
 - Выявлена причина новых падений деплоя после предыдущего hardening-патча:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Callable, Dict, Iterable, Optional
 
 import requests
 
@@ -73,6 +73,20 @@ class DirectusClient:
             headers=self.auth.headers,
             timeout=self.timeout,
         )
+
+
+def _phase_pause() -> None:
+    """
+    Small pause between heavy setup phases to reduce burst pressure on VPS/Directus.
+    Tunable via env var in seconds; defaults to 0.2s.
+    """
+    raw = os.getenv("DIRECTUS_SUPER_SETUP_PHASE_PAUSE", "0.2")
+    try:
+        delay = float(raw)
+    except ValueError:
+        delay = 0.2
+    if delay > 0:
+        time.sleep(delay)
 
 
 def login(base_url: str, email: str, password: str) -> DirectusAuth:
@@ -2199,7 +2213,13 @@ def ensure_role_presets(client: DirectusClient) -> None:
     if not admin_role and not manager and not viewer:
         return
 
-    existing_resp = client.get("/presets", params={"limit": 1000})
+    existing_resp = client.get(
+        "/presets",
+        params={
+            "limit": 400,
+            "fields": "id,role,user,collection,bookmark,layout,layout_query",
+        },
+    )
     existing_resp.raise_for_status()
     existing = existing_resp.json().get("data", []) or []
 
@@ -2844,29 +2864,35 @@ def main() -> None:
     auth = login(base_url, email, password)
     client = DirectusClient(auth)
 
-    set_language_ru(client)
-    ensure_permissions_baseline(client)
-    ensure_nav_groups(client)
-    ensure_nav_group_permissions(client)
-    apply_collection_ux(client)
-    apply_field_notes_ru(client)
-    apply_error_reports_form_ux(client)
-    apply_tariffs_form_ux(client)
-    ensure_tariffs_presentation_dividers(client)
-    apply_users_form_ux(client)
-    ensure_users_relations_ux(client)
-    ensure_users_presentation_dividers(client)
-    apply_users_luxury_ux(client)
-    ensure_admin_settings(client)
-    # Re-run baseline after all late-created collections to avoid skipped grants.
-    ensure_permissions_baseline(client)
-    ensure_insights_dashboard(client)
-    ensure_role_presets(client)
-    verify_users_item_access(client)
-    verify_tariffs_form_visibility(client)
-    # Enable optional app extensions if they are present on disk
-    ensure_extension_enabled(client, "tvpn-home")
-    ensure_extension_enabled(client, "id-link-editor")
+    phases: list[tuple[str, Callable[[], None]]] = [
+        ("set_language_ru", lambda: set_language_ru(client)),
+        ("ensure_permissions_baseline", lambda: ensure_permissions_baseline(client)),
+        ("ensure_nav_groups", lambda: ensure_nav_groups(client)),
+        ("ensure_nav_group_permissions", lambda: ensure_nav_group_permissions(client)),
+        ("apply_collection_ux", lambda: apply_collection_ux(client)),
+        ("apply_field_notes_ru", lambda: apply_field_notes_ru(client)),
+        ("apply_error_reports_form_ux", lambda: apply_error_reports_form_ux(client)),
+        ("apply_tariffs_form_ux", lambda: apply_tariffs_form_ux(client)),
+        ("ensure_tariffs_presentation_dividers", lambda: ensure_tariffs_presentation_dividers(client)),
+        ("apply_users_form_ux", lambda: apply_users_form_ux(client)),
+        ("ensure_users_relations_ux", lambda: ensure_users_relations_ux(client)),
+        ("ensure_users_presentation_dividers", lambda: ensure_users_presentation_dividers(client)),
+        ("apply_users_luxury_ux", lambda: apply_users_luxury_ux(client)),
+        ("ensure_admin_settings", lambda: ensure_admin_settings(client)),
+        # Re-run baseline after all late-created collections to avoid skipped grants.
+        ("ensure_permissions_baseline_post", lambda: ensure_permissions_baseline(client)),
+        ("ensure_insights_dashboard", lambda: ensure_insights_dashboard(client)),
+        ("ensure_role_presets", lambda: ensure_role_presets(client)),
+        ("verify_users_item_access", lambda: verify_users_item_access(client)),
+        ("verify_tariffs_form_visibility", lambda: verify_tariffs_form_visibility(client)),
+        ("enable_extension_tvpn_home", lambda: ensure_extension_enabled(client, "tvpn-home")),
+        ("enable_extension_id_link_editor", lambda: ensure_extension_enabled(client, "id-link-editor")),
+    ]
+
+    for phase_name, phase_fn in phases:
+        print(f"Phase start: {phase_name}")
+        phase_fn()
+        _phase_pause()
 
     print("Directus super-setup completed successfully.")
 

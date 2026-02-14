@@ -98,6 +98,7 @@ jobs:
         echo "🛠️  Применяем Directus super-setup (UI/UX метаданные, права, presets)..."
         # Run inside the app container where Python deps exist, and point DIRECTUS_URL to the internal service.
         # Setup can fail transiently right after restart; retry to reduce flaky deploys.
+        SUPER_SETUP_OK=0
         docker compose \$COMPOSE_ARGS exec -T bloobcat sh -lc '
           export DIRECTUS_URL="http://directus:8055"
           attempt=1
@@ -107,15 +108,26 @@ jobs:
             if (python scripts/directus_super_setup.py || python3 scripts/directus_super_setup.py); then
               exit 0
             fi
+            rc=\$?
+            echo "⚠️  super-setup attempt failed (exit=\$rc)"
+            if [ "\$rc" -eq 137 ]; then
+              echo "⚠️  super-setup terminated with 137 (likely OOM/SIGKILL)"
+            fi
             if [ "\$attempt" -lt "\$max_attempts" ]; then
-              echo "⚠️  super-setup failed, retry in 10s..."
+              echo "⚠️  retry in 10s..."
               sleep 10
             fi
             attempt=\$((attempt + 1))
           done
-          echo "❌ Directus super-setup failed after retries"
           exit 1
-        '
+        ' && SUPER_SETUP_OK=1 || true
+
+        if [ "\$SUPER_SETUP_OK" -ne 1 ]; then
+          echo "⚠️  Directus super-setup failed after retries; continue deploy without blocking release"
+          docker compose \$COMPOSE_ARGS ps
+          docker compose \$COMPOSE_ARGS logs --tail=150 bloobcat || true
+          docker compose \$COMPOSE_ARGS logs --tail=150 directus || true
+        fi
 
         echo "✅ Деплой завершен"
         EOF
