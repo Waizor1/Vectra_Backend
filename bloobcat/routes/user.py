@@ -20,6 +20,7 @@ from fastapi import FastAPI
 from starlette.background import BackgroundTask
 from bloobcat.routes.remnawave.hwid_utils import cleanup_user_hwid_devices
 from bloobcat.db.active_tariff import ActiveTariffs
+from bloobcat.db.family_members import FamilyMembers
 from bloobcat.db.tariff import Tariffs
 from bloobcat.db.notifications import NotificationMarks
 from bloobcat.db.payments import ProcessedPayments
@@ -92,6 +93,34 @@ async def check(user: Users = Depends(validate)) -> Dict[str, Any]:
         # Получаем стандартные данные пользователя
         user_data = await User_Pydantic.from_tortoise_orm(user)
         user_dict = user_data.model_dump(mode='json')
+
+        # Effective family context for members:
+        # - show owner as subscription source
+        # - use owner's expiration as effective subscription period
+        # - enforce allocated device quota in response
+        family_allocated_devices: int | None = None
+        family_membership = await FamilyMembers.get_or_none(member_id=user.id).prefetch_related("owner")
+        if family_membership:
+            owner = family_membership.owner
+            owner_expired = normalize_date(owner.expired_at)
+            family_is_active = bool(owner_expired and owner_expired >= date.today())
+            user_dict["family_member"] = {
+                "is_member": True,
+                "id": str(family_membership.id),
+                "owner_id": int(owner.id),
+                "owner_username": owner.username,
+                "owner_full_name": owner.full_name,
+                "allocated_devices": int(family_membership.allocated_devices or 0),
+                "status": family_membership.status,
+                "family_expires_at": owner.expired_at.isoformat() if owner.expired_at else None,
+                "family_is_active": family_is_active,
+                "can_leave": True,
+            }
+            user_dict["expired_at"] = owner.expired_at.isoformat() if owner.expired_at else None
+            user_dict["is_subscribed"] = family_is_active
+            family_allocated_devices = int(family_membership.allocated_devices or 0)
+        else:
+            user_dict["family_member"] = {"is_member": False}
 
         # Добавляем URL и возможную ошибку в ответ
         user_dict["subscription_url"] = subscription_url
@@ -168,6 +197,11 @@ async def check(user: Users = Depends(validate)) -> Dict[str, Any]:
         if user.hwid_limit is not None:
             devices_limit = user.hwid_limit
             source = "личной настройке в БД"
+
+        # Family membership quota has final priority for member-facing UX.
+        if family_allocated_devices is not None:
+            devices_limit = family_allocated_devices
+            source = "семейной квоте"
 
         logger.debug(f"Итоговый лимит устройств для пользователя {user.id} установлен по {source}: {devices_limit}")
         user_dict["devices_limit"] = devices_limit
