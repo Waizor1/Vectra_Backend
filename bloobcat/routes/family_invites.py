@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from bloobcat.bot.notifications.admin import send_admin_message
 from bloobcat.funcs.validate import validate
 from bloobcat.db.users import Users
+from bloobcat.db.active_tariff import ActiveTariffs
 from bloobcat.db.family_invites import FamilyInvites
 from bloobcat.db.family_members import FamilyMembers
 from bloobcat.db.family_audit_logs import FamilyAuditLogs
@@ -40,6 +41,34 @@ def _hash_token(token: str) -> str:
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+async def _resolve_personal_device_limit(user: Users) -> int:
+    # If member has own active tariff, restore this tariff limit.
+    # Otherwise use safe baseline = 1 device.
+    if user.active_tariff_id and user.expired_at and user.expired_at >= _now().date():
+        tariff = await ActiveTariffs.get_or_none(id=user.active_tariff_id)
+        if tariff and int(getattr(tariff, "hwid_limit", 0) or 0) > 0:
+            return int(tariff.hwid_limit)
+    return 1
+
+
+async def _sync_user_hwid_limit(user: Users, limit: int) -> None:
+    normalized_limit = max(0, int(limit or 0))
+    changed = user.hwid_limit != normalized_limit
+    if not changed:
+        return
+    user.hwid_limit = normalized_limit
+    await user.save(update_fields=["hwid_limit"])
+    if user.remnawave_uuid:
+        client = RemnaWaveClient(
+            remnawave_settings.url,
+            remnawave_settings.token.get_secret_value(),
+        )
+        try:
+            await client.users.update_user(user.remnawave_uuid, hwidDeviceLimit=normalized_limit)
+        finally:
+            await client.close()
 
 
 def _append_startapp_payload(base_url: str, payload: str) -> str:
@@ -458,16 +487,8 @@ async def accept_invite(token: str, user: Users = Depends(validate)) -> Dict[str
             await user._ensure_remnawave_user()
             user = await Users.get(id=user.id)
 
-        # Update limit for existing user
-        if user.remnawave_uuid:
-            client = RemnaWaveClient(
-                remnawave_settings.url,
-                remnawave_settings.token.get_secret_value(),
-            )
-            try:
-                await client.users.update_user(user.remnawave_uuid, hwidDeviceLimit=invite.allocated_devices)
-            finally:
-                await client.close()
+        # Update member limit both in local DB and RemnaWave.
+        await _sync_user_hwid_limit(user, invite.allocated_devices)
 
         member = await FamilyMembers.create(
             owner=owner,
@@ -547,15 +568,7 @@ async def update_member(member_id: str, payload: MemberLimitPatch, user: Users =
     if not target_user.remnawave_uuid:
         await target_user._ensure_remnawave_user()
         target_user = await Users.get(id=target_user.id)
-    if target_user.remnawave_uuid:
-        client = RemnaWaveClient(
-            remnawave_settings.url,
-            remnawave_settings.token.get_secret_value(),
-        )
-        try:
-            await client.users.update_user(target_user.remnawave_uuid, hwidDeviceLimit=payload.allocated_devices)
-        finally:
-            await client.close()
+    await _sync_user_hwid_limit(target_user, payload.allocated_devices)
     await _audit(
         owner=user,
         actor=user,
@@ -576,12 +589,61 @@ async def update_member(member_id: str, payload: MemberLimitPatch, user: Users =
 
 @router.delete("/members/{member_id}")
 async def delete_member(member_id: str, user: Users = Depends(validate)) -> Dict[str, Any]:
-    member = await FamilyMembers.get_or_none(id=member_id, owner_id=user.id)
+    member = await FamilyMembers.get_or_none(id=member_id, owner_id=user.id).prefetch_related("member")
     if not member:
         return {"ok": True, "note": "already_deleted"}
+    target_user = member.member
+    personal_limit = await _resolve_personal_device_limit(target_user)
+    await _sync_user_hwid_limit(target_user, personal_limit)
     await member.delete()
     await _audit(owner=user, actor=user, action="member_deleted", target_id=member_id)
     logger.info("family_member_deleted owner=%s member_record=%s", user.id, member_id)
+    return {"ok": True}
+
+
+@router.get("/membership")
+async def get_membership(user: Users = Depends(validate)) -> Dict[str, Any]:
+    # Returns membership details for current user (member role).
+    member = await FamilyMembers.get_or_none(member_id=user.id).prefetch_related("owner")
+    if not member:
+        return {"is_member": False}
+    # Self-heal stale member limits created before sync rollout.
+    await _sync_user_hwid_limit(user, int(member.allocated_devices or 0))
+    owner = member.owner
+    owner_expired_at = owner.expired_at.isoformat() if owner.expired_at else None
+    owner_is_active = bool(owner.expired_at and owner.expired_at >= _now().date())
+    return {
+        "is_member": True,
+        "id": str(member.id),
+        "owner_id": int(owner.id),
+        "owner_username": owner.username,
+        "owner_full_name": owner.full_name,
+        "allocated_devices": int(member.allocated_devices or 0),
+        "status": member.status,
+        "family_expires_at": owner_expired_at,
+        "family_is_active": owner_is_active,
+        "can_leave": True,
+    }
+
+
+@router.post("/members/leave")
+async def leave_family(user: Users = Depends(validate)) -> Dict[str, Any]:
+    member = await FamilyMembers.get_or_none(member_id=user.id).prefetch_related("owner")
+    if not member:
+        raise HTTPException(status_code=404, detail="Not a family member")
+    owner = member.owner
+    member_id = str(member.id)
+    personal_limit = await _resolve_personal_device_limit(user)
+    await _sync_user_hwid_limit(user, personal_limit)
+    await member.delete()
+    await _audit(
+        owner=owner,
+        actor=user,
+        action="member_left",
+        target_id=member_id,
+        details={"restored_hwid_limit": personal_limit},
+    )
+    logger.info("family_member_left owner=%s member=%s member_record=%s", owner.id, user.id, member_id)
     return {"ok": True}
 
 
