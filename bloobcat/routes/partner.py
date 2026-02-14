@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from tortoise.expressions import F
 from tortoise import connections
+from urllib.parse import quote
 
 from bloobcat.db.users import Users
 from bloobcat.db.partner_qr import PartnerQr
@@ -17,6 +18,7 @@ from bloobcat.db.payments import ProcessedPayments
 from bloobcat.funcs.validate import validate
 from bloobcat.bot.bot import get_bot_username
 from bloobcat.logger import get_logger
+from bloobcat.settings import telegram_settings
 
 logger = get_logger("routes.partner")
 
@@ -113,6 +115,13 @@ def _require_partner(user: Users) -> None:
 
 
 async def _build_referral_link(user: Users) -> str:
+    # Prefer direct Mini App deep link to reduce drop-off:
+    # open app instantly with startapp payload (no extra bot-button tap).
+    webapp_url = (getattr(telegram_settings, "webapp_url", None) or "").strip()
+    if webapp_url and webapp_url.lower().startswith("https://"):
+        sep = "&" if "?" in webapp_url else "?"
+        return f"{webapp_url.rstrip('/')}{sep}startapp={quote(str(user.id), safe='')}"
+
     try:
         bot_name = await get_bot_username()
     except Exception:

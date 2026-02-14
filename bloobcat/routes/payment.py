@@ -199,13 +199,27 @@ async def _apply_referral_first_payment_reward(
         friend_bonus_days = 7
         referrer_bonus_days = _calc_referrer_bonus_days(months=m, device_count=d)
 
-        # Friend subscription extension in DB (no external side effects here).
-        start_friend = max(normalize_date(referred.expired_at) or today, today)
-        new_friend_expired_at = start_friend + timedelta(days=friend_bonus_days)
-        await Users.filter(id=referred.id).using_db(conn).update(
-            expired_at=new_friend_expired_at,
-            referral_first_payment_rewarded=True,
-        )
+        # Family subscriptions should not be extended by referral days.
+        friend_applied_to_subscription = False
+        try:
+            is_friend_family = await _is_active_family_subscription(referred)
+        except Exception:
+            is_friend_family = False
+
+        if not is_friend_family and friend_bonus_days > 0:
+            start_friend = max(normalize_date(referred.expired_at) or today, today)
+            new_friend_expired_at = start_friend + timedelta(days=friend_bonus_days)
+            await Users.filter(id=referred.id).using_db(conn).update(
+                expired_at=new_friend_expired_at,
+                referral_first_payment_rewarded=True,
+            )
+            friend_applied_to_subscription = True
+        else:
+            await Users.filter(id=referred.id).using_db(conn).update(
+                referral_first_payment_rewarded=True,
+            )
+            # Keep rewards transparent for notifications/UI: +7 exists, but not applied to family expiry.
+            friend_applied_to_subscription = False
 
         # Referrer bonus counter always accumulates (UI uses this).
         if referrer_bonus_days > 0:
@@ -240,6 +254,7 @@ async def _apply_referral_first_payment_reward(
             "months": int(m),
             "device_count": int(d),
             "applied_to_subscription": bool(applied_to_subscription),
+            "friend_applied_to_subscription": bool(friend_applied_to_subscription),
         }
 
 

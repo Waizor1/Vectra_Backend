@@ -35,7 +35,7 @@ async def notify_trial_extended(user, days: int):
             # Создаём кнопку с таймаутом (оптимизировано до 5 секунд)
             try:
                 keyboard = await asyncio.wait_for(
-                    webapp_inline_button(text=button_text, url="/second"),
+                    webapp_inline_button(text=button_text, url="/connect"),
                     timeout=5.0
                 )
                 logger.debug(f"[{user.id}] Keyboard created successfully")
