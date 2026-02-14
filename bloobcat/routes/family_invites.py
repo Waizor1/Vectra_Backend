@@ -5,6 +5,7 @@ import hmac
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote, urlsplit, urlunsplit
 
 from fastapi import APIRouter, Depends, HTTPException
 from httpx import AsyncClient
@@ -17,7 +18,7 @@ from bloobcat.db.family_invites import FamilyInvites
 from bloobcat.db.family_members import FamilyMembers
 from bloobcat.db.family_audit_logs import FamilyAuditLogs
 from bloobcat.routes.remnawave.client import RemnaWaveClient
-from bloobcat.settings import remnawave_settings, app_settings
+from bloobcat.settings import remnawave_settings, app_settings, telegram_settings
 from bloobcat.logger import get_logger
 from tortoise.expressions import F, Q
 
@@ -39,6 +40,33 @@ def _hash_token(token: str) -> str:
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _append_startapp_payload(base_url: str, payload: str) -> str:
+    parsed = urlsplit(base_url.strip())
+    if parsed.scheme.lower() != "https" or not parsed.netloc:
+        raise ValueError("Invalid base URL")
+    query = parsed.query
+    next_query = f"{query}&startapp={quote(payload, safe='')}" if query else f"startapp={quote(payload, safe='')}"
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), next_query, parsed.fragment))
+
+
+async def _build_family_invite_link(token: str) -> str:
+    payload = f"family_{token}"
+    webapp_url = (getattr(telegram_settings, "webapp_url", None) or "").strip()
+    if webapp_url:
+        try:
+            return _append_startapp_payload(webapp_url, payload)
+        except Exception:
+            logger.warning("Invalid TELEGRAM_WEBAPP_URL for family invite link: {}", webapp_url)
+    # Fallback for misconfigured environments.
+    from bloobcat.bot.bot import get_bot_username
+
+    try:
+        bot_name = await get_bot_username()
+    except Exception:
+        bot_name = "TriadVPN_bot"
+    return f"https://t.me/{bot_name}?start={payload}"
 
 
 def _family_limit() -> int:
@@ -344,6 +372,7 @@ async def create_invite(payload: InviteCreateRequest, user: Users = Depends(vali
     return {
         "id": str(invite.id),
         "token": token,
+        "invite_url": await _build_family_invite_link(token),
         "expires_at": invite.expires_at,
     }
 
