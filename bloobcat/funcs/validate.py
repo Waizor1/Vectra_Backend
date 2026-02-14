@@ -122,7 +122,7 @@ async def _apply_referral_attribution_existing_user(
     return db_user
 
 
-async def validate(init_data: str = Depends(oauth2_scheme), request: Request | None = None) -> Users:
+async def validate(init_data: str = Depends(oauth2_scheme), request: Request = None) -> Users:
     try:
         preview = (init_data or "")[:50]
         logger.debug(f"Получены данные для валидации: {preview}...")  # логируем только начало для безопасности

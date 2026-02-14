@@ -1,0 +1,60 @@
+name: Server Diagnostics
+
+on:
+  workflow_dispatch:
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.8.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Add server to known hosts
+        run: |
+          ssh-keyscan -H "${{ secrets.SERVER_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Collect diagnostics
+        env:
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+          SERVER_USER: ${{ secrets.SERVER_USER }}
+          PROJECT_PATH: ${{ secrets.PROJECT_PATH }}
+        run: |
+          ssh $SERVER_USER@$SERVER_HOST << EOF
+          set -e
+          if [ -z "$PROJECT_PATH" ]; then
+            echo "PROJECT_PATH is empty"
+            exit 1
+          fi
+          cd "$PROJECT_PATH"
+
+          echo "=== host ==="
+          uname -a || true
+          uptime || true
+          free -h || true
+          df -h || true
+
+          echo "=== docker compose ps ==="
+          if [ -f docker-compose.prod.yml ]; then
+            COMPOSE_ARGS="-f docker-compose.yml -f docker-compose.prod.yml"
+          else
+            COMPOSE_ARGS="-f docker-compose.yml"
+          fi
+          docker compose $COMPOSE_ARGS ps || true
+
+          echo "=== bloobcat logs ==="
+          docker compose $COMPOSE_ARGS logs --tail=300 bloobcat || true
+
+          echo "=== caddy logs ==="
+          docker compose $COMPOSE_ARGS logs --tail=200 caddy || true
+
+          echo "=== directus logs ==="
+          docker compose $COMPOSE_ARGS logs --tail=200 directus || true
+
+          echo "=== in-server HTTP checks ==="
+          curl -sS -m 8 -i http://localhost:33083/health || true
+          curl -sS -m 8 -i http://localhost:8055/server/health || true
+          EOF

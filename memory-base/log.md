@@ -1,5 +1,27 @@
 ## Журнал изменений
 
+### 2026-02-14 — найден root cause API 502: падение FastAPI на dependency-типе
+
+- По логам с VPS (`bloobcat` + `caddy`) подтверждено:
+  - `caddy` отдавал `502` из-за `connect: connection refused` к `bloobcat:33083`;
+  - `bloobcat` падал на импорте роутов (`/status/{payment_id}`) с ошибкой FastAPI:
+    - `Invalid args for response field ... starlette.requests.Request | None`.
+- Корневая причина в `bloobcat/funcs/validate.py`:
+  - dependency `validate()` имел сигнатуру `request: Request | None = None`, которая ломает FastAPI schema/dependency analysis на текущем стеке.
+- Исправление:
+  - сигнатура заменена на `request: Request = None`.
+- Локальная проверка:
+  - `python -m py_compile bloobcat/funcs/validate.py` — успешно.
+
+### 2026-02-14 — пост-проверка после успешного деплоя: API все еще 502
+
+- GitHub Actions run `22014681822` завершился `success` (step `Deploy to server` тоже `success`).
+- Внешняя проверка прод-эндпоинтов показала:
+  - `https://api.waiz-store.ru/health` -> `502 Bad Gateway` (Server: Caddy);
+  - `https://api.waiz-store.ru/pay/tariffs` -> `502`;
+  - `https://admin.waiz-store.ru/server/health` -> `200`.
+- Вывод: деплой как процесс прошел, но backend app за reverse-proxy не отвечает корректно (или падает после старта); проблема не в GitHub workflow status.
+
 ### 2026-02-14 — RCA: `super_setup` падает `exit 137` без traceback
 
 - Проверен свежий run `Auto Deploy Backend` (`22014607058`):
