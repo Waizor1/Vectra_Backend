@@ -58,7 +58,7 @@ jobs:
           fi
 
           echo "Running DB growth monitor (warn_mb=$WARN_MB, send_always=$SEND_ALWAYS)"
-          docker compose $COMPOSE_ARGS exec -T bloobcat \
-            python scripts/db_growth_notify.py --warn-mb "$WARN_MB" --top-n 30 --top-lines 8 $SEND_FLAG
+          docker compose $COMPOSE_ARGS exec -T -w /app bloobcat \
+            python -m scripts.db_growth_notify --warn-mb "$WARN_MB" --top-n 30 --top-lines 8 $SEND_FLAG
           EOF
 

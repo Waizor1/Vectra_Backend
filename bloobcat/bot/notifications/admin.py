@@ -1,11 +1,19 @@
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.exceptions import TelegramBadRequest
+from html import escape
 
 from bloobcat.bot.bot import bot
 from bloobcat.settings import admin_settings
 from bloobcat.logger import get_logger
 
 logger = get_logger("admin_notifications")
+
+
+def _safe_html(value) -> str:
+    """Escape dynamic values before embedding into HTML parse_mode messages."""
+    if value is None:
+        return "—"
+    return escape(str(value), quote=False)
 
 async def write_to(user_id: int, referrer_id: int = 0):
     kb = InlineKeyboardBuilder()
@@ -141,8 +149,8 @@ async def on_payment(
         user = await Users.get_or_none(id=user_id)
         
         # Формируем имя пользователя
-        user_name = user.full_name if user else f"ID: <code>{user_id}</code>"
-        username = f"@{user.username}" if user and user.username else "Нет юзернейма"
+        user_name = _safe_html(user.full_name) if user else f"ID: <code>{user_id}</code>"
+        username = _safe_html(f"@{user.username}") if user and user.username else "Нет юзернейма"
         
         # Проверяем статус автопродления
         # is_sub передается из payment.py и содержит значение user.is_subscribed
@@ -181,15 +189,15 @@ async def on_payment(
 📶 LTE: {lte_display}
 🔄 Автоматическое списание: {auto_payment_status}
 ♻️ Автопродление: {recurrent_status}
-💳 Метод оплаты: {method}
+💳 Метод оплаты: {_safe_html(method)}
 🧾 ID платежа: <code>{payment_id}</code>"""
 
         if referrer:
-            text += f"\n👨‍👩‍👧‍👦 Реферер: {referrer}"
+            text += f"\n👨‍👩‍👧‍👦 Реферер: {_safe_html(referrer)}"
 
         # Добавляем UTM при наличии
         if utm or (user and user.utm):
-            text += f"\n🎯 UTM: {utm or user.utm}"
+            text += f"\n🎯 UTM: {_safe_html(utm or user.utm)}"
 
         # Добавляем информацию о скидке, если была применена
         if discount_percent and int(discount_percent) > 0:

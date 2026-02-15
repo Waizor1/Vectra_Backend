@@ -572,6 +572,8 @@ async def _apply_succeeded_payment_fallback(yk_payment, user: Users, meta: dict)
         # Already finalized by webhook / previous reconciliation.
         return True
 
+    old_expired_at = user.expired_at
+
     try:
         months = int(meta.get("month"))
     except Exception:
@@ -785,6 +787,39 @@ async def _apply_succeeded_payment_fallback(yk_payment, user: Users, meta: dict)
         )
     except Exception:
         pass
+
+    # Notify admin log channel as webhook path does.
+    # This keeps admin logs complete when webhook delivery is delayed/missed.
+    try:
+        referrer = await user.referrer()
+        discount_percent = None
+        try:
+            if meta.get("discount_percent") is not None:
+                discount_percent = int(meta.get("discount_percent"))
+        except Exception:
+            discount_percent = None
+
+        await on_payment(
+            user_id=user.id,
+            is_sub=user.is_subscribed,
+            referrer=referrer.name() if referrer else None,
+            amount=int(_round_rub(total_amount)),
+            months=months,
+            method="yookassa_fallback",
+            payment_id=pid,
+            is_auto=is_auto_payment,
+            utm=user.utm if hasattr(user, "utm") else None,
+            discount_percent=discount_percent,
+            device_count=device_count,
+            old_expired_at=old_expired_at,
+            new_expired_at=user.expired_at,
+            lte_gb_total=lte_gb,
+        )
+    except Exception as e:
+        logger.error(
+            f"Ошибка fallback-отправки уведомления о платеже: {e}",
+            extra={"payment_id": pid, "user_id": user.id},
+        )
 
     return True
 
