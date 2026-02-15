@@ -1,5 +1,13 @@
 ## 2026-02-15
 
+- **fix(admin/family-empty-section):** устранена причина пустого блока `Семья` для не-Administrator ролей в Directus.
+  - `scripts/directus_super_setup.py`: добавлены family-коллекции в `apply_collection_ux` (видимы в навигации): `family_members`, `family_invites`, `family_devices`, `family_audit_logs`.
+  - В `ensure_permissions_baseline` расширены права:
+    - `manager_rw` и `admin_rw` теперь включают `family_members`, `family_invites`, `family_devices`, `family_audit_logs`;
+    - `viewer_ro` включает read на те же family-коллекции.
+  - Это убирает ситуацию, когда раздел в карточке пользователя отрисован, но relation-поля пустые/недоступные из-за отсутствия read/update прав на связанные коллекции.
+  - Валидация: `python -m py_compile scripts/directus_super_setup.py` — успешно.
+
 - **fix(admin/family-visibility):** устранен риск "пустой" секции `Семья` в карточке `users` в Directus.
   - `scripts/directus_super_setup.py`: в `ensure_alias_o2m_field(...)` добавлен явный `meta.hidden = False` для alias o2m-полей (family/referred/relations), чтобы Directus не прятал их по умолчанию.
   - Порядок фаз в `main()` скорректирован: `ensure_users_relations_ux` теперь выполняется **до** `apply_users_form_ux`, чтобы form-UX/width/sort/visibility применялись уже к реально существующим alias-полям.
