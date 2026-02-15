@@ -9,6 +9,7 @@ from aiogram.types import BotCommand, MenuButtonWebApp, WebAppInfo
 from fastadmin import fastapi_app as admin_app # type: ignore
 from fastapi import FastAPI, Request # type: ignore
 from fastapi.middleware.cors import CORSMiddleware # type: ignore
+from tortoise import Tortoise
 from tortoise.contrib.fastapi import RegisterTortoise # type: ignore
 
 from bloobcat.bot import bot, router, setup_router
@@ -86,6 +87,69 @@ async def setup_webhook_with_retries(webhook_url: str) -> None:
                 except Exception as check_error:
                     logger.debug(f"Не удалось проверить текущий webhook: {check_error}")
 
+
+async def ensure_active_tariffs_fk_cascade() -> None:
+    """
+    Safety net against schema drift:
+    ensure active_tariffs.user_id -> users.id is ON DELETE CASCADE.
+    """
+    try:
+        conn = Tortoise.get_connection("default")
+    except Exception as e:
+        logger.warning("Не удалось получить DB connection для FK self-heal: {}", e)
+        return
+
+    try:
+        rows = await conn.execute_query_dict(
+            """
+            SELECT rc.delete_rule
+            FROM information_schema.table_constraints tc
+            JOIN information_schema.referential_constraints rc
+              ON tc.constraint_name = rc.constraint_name
+            WHERE tc.constraint_type = 'FOREIGN KEY'
+              AND tc.table_name = 'active_tariffs'
+              AND tc.constraint_name = 'fk_active_tariffs_user'
+            LIMIT 1;
+            """
+        )
+        delete_rule = (rows[0].get("delete_rule") if rows else None) or ""
+        if str(delete_rule).upper() == "CASCADE":
+            logger.info("FK check ok: fk_active_tariffs_user is CASCADE")
+            return
+
+        logger.warning(
+            "Обнаружен drift FK fk_active_tariffs_user (delete_rule={}): применяю self-heal",
+            delete_rule or "MISSING",
+        )
+        await conn.execute_script(
+            """
+            DO $$
+            DECLARE r RECORD;
+            BEGIN
+              FOR r IN
+                SELECT con.conname
+                FROM pg_constraint con
+                JOIN pg_class rel ON rel.oid = con.conrelid
+                JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace
+                JOIN pg_attribute att ON att.attrelid = rel.oid AND att.attnum = ANY (con.conkey)
+                WHERE con.contype = 'f'
+                  AND nsp.nspname = current_schema()
+                  AND rel.relname = 'active_tariffs'
+                  AND att.attname = 'user_id'
+              LOOP
+                EXECUTE format('ALTER TABLE "active_tariffs" DROP CONSTRAINT IF EXISTS %I', r.conname);
+              END LOOP;
+            END $$;
+
+            ALTER TABLE "active_tariffs"
+              ADD CONSTRAINT "fk_active_tariffs_user"
+              FOREIGN KEY ("user_id") REFERENCES "users" ("id") ON DELETE CASCADE;
+            """
+        )
+        logger.info("FK self-heal applied: fk_active_tariffs_user -> ON DELETE CASCADE")
+    except Exception as e:
+        logger.error("Ошибка FK self-heal для active_tariffs: {}", e, exc_info=True)
+
 @asynccontextmanager
 async def lifespan(fastapi_app: FastAPI):
     command = Command(tortoise_config=TORTOISE_ORM, location="migrations")
@@ -120,6 +184,9 @@ async def lifespan(fastapi_app: FastAPI):
         else:
             logger.error(f"Ошибка при инициализации базы данных: {str(e)}", exc_info=True)
             raise
+
+    # Extra schema guard for drifted environments.
+    await ensure_active_tariffs_fk_cascade()
 
     try:
         await bot.set_chat_menu_button(
