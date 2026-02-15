@@ -1798,21 +1798,13 @@ def ensure_users_relations_ux(client: DirectusClient) -> None:
         return
 
     def get_relation_item(many_collection: str, many_field: str) -> Optional[Dict[str, Any]]:
-        resp = client.get(
-            "/items/directus_relations",
-            params={
-                "filter[many_collection][_eq]": many_collection,
-                "filter[many_field][_eq]": many_field,
-                "limit": 1,
-            },
-        )
-        if resp.status_code in (401, 403):
+        # Prefer the dedicated /relations endpoint. In some Directus setups
+        # /items/directus_relations is forbidden even for admin API users.
+        resp = client.get(f"/relations/{many_collection}/{many_field}")
+        if resp.status_code in (401, 403, 404):
             return None
         resp.raise_for_status()
-        rows = resp.json().get("data") or []
-        if not rows:
-            return None
-        row = rows[0]
+        row = resp.json().get("data")
         if not isinstance(row, dict):
             return None
         return row
@@ -1828,16 +1820,19 @@ def ensure_users_relations_ux(client: DirectusClient) -> None:
     ) -> bool:
         relation = get_relation_item(many_collection, many_field)
         if relation:
-            relation_id = relation.get("id")
-            if relation_id is None:
-                return False
-            resp = client.patch(
-                f"/items/directus_relations/{relation_id}",
-                json={
+            payload = {
+                "collection": many_collection,
+                "field": many_field,
+                "related_collection": one_collection,
+                "meta": {
                     "one_collection": one_collection,
                     "one_field": one_field,
                     "one_deselect_action": one_deselect_action,
                 },
+            }
+            resp = client.patch(
+                f"/relations/{many_collection}/{many_field}",
+                json=payload,
             )
             if resp.status_code in (400, 401, 403, 404):
                 return False
@@ -1849,13 +1844,16 @@ def ensure_users_relations_ux(client: DirectusClient) -> None:
             return False
 
         created = client.post(
-            "/items/directus_relations",
+            "/relations",
             json={
-                "many_collection": many_collection,
-                "many_field": many_field,
-                "one_collection": one_collection,
-                "one_field": one_field,
-                "one_deselect_action": one_deselect_action,
+                "collection": many_collection,
+                "field": many_field,
+                "related_collection": one_collection,
+                "meta": {
+                    "one_collection": one_collection,
+                    "one_field": one_field,
+                    "one_deselect_action": one_deselect_action,
+                },
             },
         )
         if created.status_code in (400, 401, 403, 404):
@@ -1989,7 +1987,7 @@ def ensure_permissions_baseline(client: DirectusClient) -> None:
 
     # Bootstrap: some instances don't allow creating policies until the current policy
     # explicitly has system permissions. We grant them to the Administrator policy.
-    admin_policy_id = get_policy_id_by_name(client, "Administrator")
+    admin_policy_id = get_policy_id_by_name(client, "Administrator") or get_primary_policy_id_for_role(client, admin_role_id)
     if admin_policy_id:
         for collection in (
             "directus_policies",
@@ -1998,6 +1996,7 @@ def ensure_permissions_baseline(client: DirectusClient) -> None:
             "directus_access",
             "directus_relations",
             "directus_fields",
+            "directus_collections",
         ):
             for action in ("read", "create", "update", "delete"):
                 ensure_permission(client, admin_policy_id, collection, action)

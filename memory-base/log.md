@@ -1,5 +1,19 @@
 ## 2026-02-15
 
+- **fix(admin/family-relations-runtime):** выявлена и устранена реальная причина пустой секции `Семья` в Directus.
+  - Диагностика в локальном Docker показала:
+    - `POST /items/directus_relations` возвращал `403 FORBIDDEN`;
+    - relation rows для `family_members.owner_id/member_id` и `family_invites.owner_id` не получали `one_field`;
+    - из-за этого блоки в карточке `users` не были связаны с данными.
+  - Исправление в `scripts/directus_super_setup.py`:
+    - `ensure_users_relations_ux.ensure_relation(...)` переведен с `/items/directus_relations` на официальный endpoint `/relations` (`GET/PATCH/POST /relations...`).
+    - Для bootstrap-прав admin-policy расширен системный набор (`directus_collections` + fallback на `get_primary_policy_id_for_role(...)`).
+  - Проверка после прогона setup:
+    - `GET /relations/family_members/owner_id` -> `one_field=family_members_owner_list`;
+    - `GET /relations/family_members/member_id` -> `one_field=family_members_member_list`;
+    - `GET /relations/family_invites/owner_id` -> `one_field=family_invites_list`.
+  - Локальный стенд: `docker compose up -d --build`, `python scripts/directus_super_setup.py` — успешно.
+
 - **fix(admin/family-empty-section):** устранена причина пустого блока `Семья` для не-Administrator ролей в Directus.
   - `scripts/directus_super_setup.py`: добавлены family-коллекции в `apply_collection_ux` (видимы в навигации): `family_members`, `family_invites`, `family_devices`, `family_audit_logs`.
   - В `ensure_permissions_baseline` расширены права:
