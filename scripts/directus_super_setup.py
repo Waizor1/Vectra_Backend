@@ -1840,6 +1840,9 @@ def ensure_users_relations_ux(client: DirectusClient) -> None:
             "interface": "list-o2m",
             "options": {"template": template},
             "display": "related-values",
+            # Critical: in some Directus instances newly created alias fields may default to hidden.
+            # Force explicit visibility to avoid "empty section" regressions in item form.
+            "hidden": False,
             "width": "full",
             "sort": sort,
             "group": None,
@@ -2914,8 +2917,8 @@ def main() -> None:
         ("apply_error_reports_form_ux", lambda: apply_error_reports_form_ux(client)),
         ("apply_tariffs_form_ux", lambda: apply_tariffs_form_ux(client)),
         ("ensure_tariffs_presentation_dividers", lambda: ensure_tariffs_presentation_dividers(client)),
-        ("apply_users_form_ux", lambda: apply_users_form_ux(client)),
         ("ensure_users_relations_ux", lambda: ensure_users_relations_ux(client)),
+        ("apply_users_form_ux", lambda: apply_users_form_ux(client)),
         ("ensure_users_presentation_dividers", lambda: ensure_users_presentation_dividers(client)),
         ("apply_users_luxury_ux", lambda: apply_users_luxury_ux(client)),
         ("ensure_admin_settings", lambda: ensure_admin_settings(client)),

@@ -1,5 +1,10 @@
 ## 2026-02-15
 
+- **fix(admin/family-visibility):** устранен риск "пустой" секции `Семья` в карточке `users` в Directus.
+  - `scripts/directus_super_setup.py`: в `ensure_alias_o2m_field(...)` добавлен явный `meta.hidden = False` для alias o2m-полей (family/referred/relations), чтобы Directus не прятал их по умолчанию.
+  - Порядок фаз в `main()` скорректирован: `ensure_users_relations_ux` теперь выполняется **до** `apply_users_form_ux`, чтобы form-UX/width/sort/visibility применялись уже к реально существующим alias-полям.
+  - Валидация: `python -m py_compile scripts/directus_super_setup.py` — успешно.
+
 - **fix(admin/family):** расширена карточка пользователя в Directus для семейного контекста.
   - `scripts/directus_super_setup.py`: в `users` добавлены relation-блоки `family_members_owner_list`, `family_members_member_list`, `family_invites_list`.
   - В форму `users` добавлены размеры/сортировка для новых полей и отдельный divider `ui_divider_family` (секция "Семья").
