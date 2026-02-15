@@ -71,6 +71,39 @@ async def _sync_user_hwid_limit(user: Users, limit: int) -> None:
             await client.close()
 
 
+async def _sum_active_family_allocations(owner_id: int) -> int:
+    total_alloc = 0
+    for member in await FamilyMembers.filter(owner_id=owner_id, status="active", allocated_devices__gt=0):
+        total_alloc += int(member.allocated_devices or 0)
+    return total_alloc
+
+
+async def _owner_effective_devices_limit(owner: Users) -> int:
+    base_limit = int(owner.hwid_limit or 0)
+    if owner.active_tariff_id and _is_subscription_active(owner):
+        tariff = await ActiveTariffs.get_or_none(id=owner.active_tariff_id)
+        if tariff:
+            base_limit = max(base_limit, int(getattr(tariff, "hwid_limit", 0) or 0))
+    allocated = await _sum_active_family_allocations(owner.id)
+    return max(0, base_limit - allocated)
+
+
+async def _sync_owner_effective_remnawave_limit(owner: Users) -> None:
+    # Keep owner entitlement source in DB intact, but enforce effective remaining
+    # device quota in RemnaWave based on active member allocations.
+    if not owner.remnawave_uuid:
+        return
+    effective_limit = await _owner_effective_devices_limit(owner)
+    client = RemnaWaveClient(
+        remnawave_settings.url,
+        remnawave_settings.token.get_secret_value(),
+    )
+    try:
+        await client.users.update_user(owner.remnawave_uuid, hwidDeviceLimit=int(effective_limit))
+    finally:
+        await client.close()
+
+
 def _append_startapp_payload(base_url: str, payload: str) -> str:
     parsed = urlsplit(base_url.strip())
     if parsed.scheme.lower() != "https" or not parsed.netloc:
@@ -437,12 +470,49 @@ async def accept_invite(token: str, user: Users = Depends(validate)) -> Dict[str
         raise HTTPException(status_code=403, detail="Owner subscription expired")
 
     # ensure member isn't already in another family
-    member_family = await FamilyMembers.get_or_none(member_id=user.id)
+    member_family = await FamilyMembers.get_or_none(member_id=user.id, status="active", allocated_devices__gt=0)
     if member_family and member_family.owner_id != owner.id:
         raise HTTPException(status_code=409, detail="Member already in another family")
 
     existing = await FamilyMembers.get_or_none(owner_id=owner.id, member_id=user.id)
     if existing:
+        existing_allocated = int(existing.allocated_devices or 0)
+        should_reactivate = existing.status == "disabled" or existing_allocated <= 0
+        if should_reactivate:
+            total_alloc = await _sum_active_family_allocations(owner.id)
+            total_alloc = total_alloc - existing_allocated + int(invite.allocated_devices or 0)
+            if total_alloc > _family_limit():
+                raise HTTPException(status_code=409, detail="Family allocation limit exceeded")
+            if not user.remnawave_uuid:
+                await user._ensure_remnawave_user()
+                user = await Users.get(id=user.id)
+            await _sync_user_hwid_limit(user, int(invite.allocated_devices or 0))
+            existing.allocated_devices = int(invite.allocated_devices or 0)
+            existing.status = "active"
+            await existing.save(update_fields=["allocated_devices", "status"])
+            try:
+                await _sync_owner_effective_remnawave_limit(owner)
+            except Exception as exc:
+                logger.warning("family_owner_effective_limit_sync_failed owner=%s err=%s", owner.id, exc)
+            await _audit(
+                owner=owner,
+                actor=user,
+                action="member_reactivated",
+                target_id=str(existing.id),
+                details={"allocated_devices": existing.allocated_devices, "previous_allocated_devices": existing_allocated},
+            )
+            logger.info(
+                "family_invite_accept_reactivated owner=%s member=%s member_record=%s devices=%s",
+                owner.id,
+                user.id,
+                existing.id,
+                existing.allocated_devices,
+            )
+            return {
+                "ok": True,
+                "member_id": str(existing.id),
+                "allocated_devices": existing.allocated_devices,
+            }
         await _audit(
             owner=owner,
             actor=user,
@@ -466,9 +536,7 @@ async def accept_invite(token: str, user: Users = Depends(validate)) -> Dict[str
     if (owner.hwid_limit or 0) < _family_limit():
         raise HTTPException(status_code=403, detail="Owner has no family subscription")
     # Ensure owner has remaining allocation at accept time
-    total_alloc = 0
-    for m in await FamilyMembers.filter(owner_id=owner.id):
-        total_alloc += int(m.allocated_devices or 0)
+    total_alloc = await _sum_active_family_allocations(owner.id)
     if total_alloc + invite.allocated_devices > _family_limit():
         raise HTTPException(status_code=409, detail="Family allocation limit exceeded")
 
@@ -496,6 +564,10 @@ async def accept_invite(token: str, user: Users = Depends(validate)) -> Dict[str
             allocated_devices=invite.allocated_devices,
             status="active",
         )
+        try:
+            await _sync_owner_effective_remnawave_limit(owner)
+        except Exception as exc:
+            logger.warning("family_owner_effective_limit_sync_failed owner=%s err=%s", owner.id, exc)
         await _audit(
             owner=owner,
             actor=user,
@@ -526,7 +598,7 @@ async def accept_invite(token: str, user: Users = Depends(validate)) -> Dict[str
 async def list_members(user: Users = Depends(validate)) -> List[Dict[str, Any]]:
     if (user.hwid_limit or 0) < _family_limit():
         raise HTTPException(status_code=403, detail="Family subscription required")
-    members = await FamilyMembers.filter(owner_id=user.id).prefetch_related("member")
+    members = await FamilyMembers.filter(owner_id=user.id, status="active", allocated_devices__gt=0).prefetch_related("member")
     result = []
     for item in members:
         member_user = item.member
@@ -555,9 +627,7 @@ async def update_member(member_id: str, payload: MemberLimitPatch, user: Users =
     family_limit = _family_limit()
     if payload.allocated_devices > family_limit:
         raise HTTPException(status_code=400, detail="Allocated devices exceed family limit")
-    total_alloc = 0
-    for m in await FamilyMembers.filter(owner_id=user.id):
-        total_alloc += int(m.allocated_devices or 0)
+    total_alloc = await _sum_active_family_allocations(user.id)
     total_alloc = total_alloc - int(member.allocated_devices or 0) + payload.allocated_devices
     if total_alloc > family_limit:
         raise HTTPException(status_code=409, detail="Family allocation limit exceeded")
@@ -569,6 +639,10 @@ async def update_member(member_id: str, payload: MemberLimitPatch, user: Users =
         await target_user._ensure_remnawave_user()
         target_user = await Users.get(id=target_user.id)
     await _sync_user_hwid_limit(target_user, payload.allocated_devices)
+    try:
+        await _sync_owner_effective_remnawave_limit(user)
+    except Exception as exc:
+        logger.warning("family_owner_effective_limit_sync_failed owner=%s err=%s", user.id, exc)
     await _audit(
         owner=user,
         actor=user,
@@ -596,6 +670,10 @@ async def delete_member(member_id: str, user: Users = Depends(validate)) -> Dict
     personal_limit = await _resolve_personal_device_limit(target_user)
     await _sync_user_hwid_limit(target_user, personal_limit)
     await member.delete()
+    try:
+        await _sync_owner_effective_remnawave_limit(user)
+    except Exception as exc:
+        logger.warning("family_owner_effective_limit_sync_failed owner=%s err=%s", user.id, exc)
     await _audit(owner=user, actor=user, action="member_deleted", target_id=member_id)
     logger.info("family_member_deleted owner=%s member_record=%s", user.id, member_id)
     return {"ok": True}
@@ -604,7 +682,7 @@ async def delete_member(member_id: str, user: Users = Depends(validate)) -> Dict
 @router.get("/membership")
 async def get_membership(user: Users = Depends(validate)) -> Dict[str, Any]:
     # Returns membership details for current user (member role).
-    member = await FamilyMembers.get_or_none(member_id=user.id).prefetch_related("owner")
+    member = await FamilyMembers.get_or_none(member_id=user.id, status="active", allocated_devices__gt=0).prefetch_related("owner")
     if not member:
         return {"is_member": False}
     # Self-heal stale member limits created before sync rollout.
@@ -636,6 +714,10 @@ async def leave_family(user: Users = Depends(validate)) -> Dict[str, Any]:
     personal_limit = await _resolve_personal_device_limit(user)
     await _sync_user_hwid_limit(user, personal_limit)
     await member.delete()
+    try:
+        await _sync_owner_effective_remnawave_limit(owner)
+    except Exception as exc:
+        logger.warning("family_owner_effective_limit_sync_failed owner=%s err=%s", owner.id, exc)
     await _audit(
         owner=owner,
         actor=user,
@@ -651,7 +733,12 @@ async def leave_family(user: Users = Depends(validate)) -> Dict[str, Any]:
 async def list_invites(user: Users = Depends(validate)) -> List[Dict[str, Any]]:
     if (user.hwid_limit or 0) < _family_limit():
         raise HTTPException(status_code=403, detail="Family subscription required")
-    invites = await FamilyInvites.filter(owner_id=user.id, revoked_at=None).order_by("-created_at")
+    invites = (
+        await FamilyInvites.filter(owner_id=user.id, revoked_at=None)
+        .filter(Q(expires_at__isnull=True) | Q(expires_at__gte=_now()))
+        .filter(used_count__lt=F("max_uses"))
+        .order_by("-created_at")
+    )
     return [
         {
             "id": str(item.id),

@@ -1,3 +1,22 @@
+## 2026-02-15
+
+- **fix(family):** корректный расчет остатка устройств у главы семьи:
+  - `bloobcat/routes/user.py`: `/user` для owner теперь возвращает `devices_limit` как остаток `база - активные выделения участникам`.
+- **fix(family):** синхронизация реального лимита главы в RemnaWave при изменении состава/квоты семьи:
+  - `bloobcat/routes/family_invites.py`: после `accept` (new/reactivate), `patch member`, `delete member`, `member leave` выполняется `_sync_owner_effective_remnawave_limit(...)`.
+- **fix(family-legacy):** `bloobcat/routes/family.py` (`POST /subscription/family`) теперь учитывает аллокации участникам через `FamilyMembers` и ограничивает создание устройств по реальному остатку.
+- Валидация: `python -m py_compile` по 3 файлам — успешно.
+## 2026-02-15
+
+- **fix(family):** реактивация участника по новому инвайту после статуса `disabled`:
+  - файл: `bloobcat/routes/family_invites.py`, endpoint `POST /family/invites/{token}/accept`;
+  - если member-запись уже существует и `status=disabled`/`allocated_devices=0`, теперь запись реактивируется (`status=active`, новый `allocated_devices`) и синхронизируется `hwid_limit` в RemnaWave.
+- **fix(family):** чистка "мусора" в выдаче:
+  - `GET /family/members` возвращает только активных участников (`status=active`, `allocated_devices>0`);
+  - `GET /family/invites` возвращает только актуальные инвайты (не revoked, не expired, не exhausted).
+- **fix(family):** family-контекст для участника считается только при активном членстве:
+  - `bloobcat/routes/user.py` (`/user`) и `bloobcat/routes/family_invites.py` (`/family/membership`) фильтруют по `status=active` + `allocated_devices>0`.
+- Проверка: `python -m py_compile bloobcat/routes/family_invites.py bloobcat/routes/user.py` — OK.
 ## Журнал изменений
 
 ### 2026-02-15 — subscription status: добавлен явный флаг автопродления

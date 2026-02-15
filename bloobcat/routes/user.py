@@ -99,7 +99,11 @@ async def check(user: Users = Depends(validate)) -> Dict[str, Any]:
         # - use owner's expiration as effective subscription period
         # - enforce allocated device quota in response
         family_allocated_devices: int | None = None
-        family_membership = await FamilyMembers.get_or_none(member_id=user.id).prefetch_related("owner")
+        family_membership = await FamilyMembers.get_or_none(
+            member_id=user.id,
+            status="active",
+            allocated_devices__gt=0,
+        ).prefetch_related("owner")
         if family_membership:
             owner = family_membership.owner
             owner_expired = normalize_date(owner.expired_at)
@@ -197,6 +201,16 @@ async def check(user: Users = Depends(validate)) -> Dict[str, Any]:
         if user.hwid_limit is not None:
             devices_limit = user.hwid_limit
             source = "личной настройке в БД"
+
+        # For family owners, expose remaining personal quota after
+        # allocations to active members.
+        if family_allocated_devices is None:
+            owner_allocated = 0
+            for member in await FamilyMembers.filter(owner_id=user.id, status="active", allocated_devices__gt=0):
+                owner_allocated += int(member.allocated_devices or 0)
+            if owner_allocated > 0:
+                devices_limit = max(0, int(devices_limit or 0) - owner_allocated)
+                source = "семейному распределению (остаток владельца)"
 
         # Family membership quota has final priority for member-facing UX.
         if family_allocated_devices is not None:

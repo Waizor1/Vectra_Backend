@@ -7,6 +7,7 @@ from bloobcat.funcs.validate import validate
 from bloobcat.db.users import Users
 from bloobcat.db.active_tariff import ActiveTariffs
 from bloobcat.db.family_devices import FamilyDevices
+from bloobcat.db.family_members import FamilyMembers
 from bloobcat.settings import app_settings
 from bloobcat.logger import get_logger
 
@@ -60,7 +61,11 @@ async def create_family_device(payload: FamilyDeviceCreate, user: Users = Depend
     if devices_limit < 10:
         raise HTTPException(status_code=403, detail="Family subscription required")
     count = await FamilyDevices.filter(user_id=user.id).count()
-    if count >= family_max:
+    allocated_to_members = 0
+    for member in await FamilyMembers.filter(owner_id=user.id, status="active", allocated_devices__gt=0):
+        allocated_to_members += int(member.allocated_devices or 0)
+    owner_remaining = max(0, family_max - allocated_to_members)
+    if count >= owner_remaining:
         raise HTTPException(status_code=409, detail="Family devices limit reached")
 
     if payload.client_id:
