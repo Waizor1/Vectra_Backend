@@ -1172,10 +1172,28 @@ def apply_users_form_ux(client: DirectusClient) -> None:
         "familyurl": 82,
     }
 
+    # Important: Directus may treat `PATCH /fields/...` with `meta` as replacement-like
+    # for nested UI settings in some deployments. Preserve existing UI keys so o2m/alias
+    # blocks (including Family) don't lose their interface and appear as "empty sections".
+    preserve_meta_keys = ("interface", "options", "display", "special", "note", "translations")
+
+    def get_existing_meta(field: str) -> Dict[str, Any]:
+        resp = client.get(f"/fields/users/{field}", params={"fields": "meta"})
+        if resp.status_code in (403, 404):
+            return {}
+        resp.raise_for_status()
+        data = resp.json().get("data") or {}
+        meta = data.get("meta") or {}
+        return meta if isinstance(meta, dict) else {}
+
     for field, width in widths.items():
+        existing_meta = get_existing_meta(field)
         # Force field visibility in item form: legacy configs could leave business
         # fields hidden, which makes section dividers look "empty".
         meta: Dict[str, Any] = {"width": width, "hidden": False}
+        for key in preserve_meta_keys:
+            if key in existing_meta and existing_meta[key] is not None:
+                meta[key] = existing_meta[key]
         if field in readonly_fields:
             meta["readonly"] = True
         if field in sort:
