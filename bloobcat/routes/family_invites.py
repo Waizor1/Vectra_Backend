@@ -12,6 +12,15 @@ from httpx import AsyncClient
 from pydantic import BaseModel, Field
 
 from bloobcat.bot.notifications.admin import send_admin_message
+from bloobcat.bot.notifications.family.events import (
+    notify_family_member_joined,
+    notify_family_member_limit_updated,
+    notify_family_member_removed,
+    notify_family_owner_invites_blocked,
+    notify_family_owner_invites_unblocked,
+    notify_family_owner_invite_revoked,
+    notify_family_owner_member_joined,
+)
 from bloobcat.funcs.validate import validate
 from bloobcat.db.users import Users
 from bloobcat.db.active_tariff import ActiveTariffs
@@ -306,6 +315,40 @@ async def _maybe_block_invites(owner: Users, actor: Users, kind: str) -> None:
         "invite_blocked",
         {"blocked_until": blocked_until.isoformat(), "anomaly_count": anomaly_count, "window_hours": _anomaly_block_window_hours()},
     )
+    try:
+        await notify_family_owner_invites_blocked(
+            owner=owner,
+            blocked_until=blocked_until,
+            reason=f"repeated_anomalies:{kind}",
+        )
+    except Exception as exc:
+        logger.warning("family_owner_block_notification_failed owner=%s err=%s", owner.id, exc)
+
+
+async def _maybe_notify_owner_invites_unblocked(owner: Users, actor: Users) -> None:
+    """
+    Sends a one-time "unblocked" message when a previous temporary block has expired.
+    """
+    last_block = await FamilyAuditLogs.filter(owner_id=owner.id, action="invite_blocked").order_by("-created_at").first()
+    if not last_block or not last_block.details:
+        return
+    last_unblock = await FamilyAuditLogs.filter(owner_id=owner.id, action="invite_unblocked").order_by("-created_at").first()
+    if last_unblock and last_block.created_at and last_unblock.created_at and last_unblock.created_at >= last_block.created_at:
+        return
+    blocked_until = _parse_dt(last_block.details.get("blocked_until"))
+    if not blocked_until or blocked_until > _now():
+        return
+    await _audit(
+        owner=owner,
+        actor=actor,
+        action="invite_unblocked",
+        target_id=None,
+        details={"blocked_until": blocked_until.isoformat(), "reason": "expired"},
+    )
+    try:
+        await notify_family_owner_invites_unblocked(owner)
+    except Exception as exc:
+        logger.warning("family_owner_unblock_notification_failed owner=%s err=%s", owner.id, exc)
 
 
 async def _check_anomaly(owner: Users, actor: Users, action: str) -> None:
@@ -344,6 +387,7 @@ async def create_invite(payload: InviteCreateRequest, user: Users = Depends(vali
         raise HTTPException(status_code=403, detail="Family subscription required")
     if not _is_subscription_active(user):
         raise HTTPException(status_code=403, detail="Subscription expired")
+    await _maybe_notify_owner_invites_unblocked(owner=user, actor=user)
     blocked_until = await _get_active_invite_block(user)
     if blocked_until:
         retry_after = max(1, int((blocked_until - _now()).total_seconds()))
@@ -508,6 +552,21 @@ async def accept_invite(token: str, user: Users = Depends(validate)) -> Dict[str
                 existing.id,
                 existing.allocated_devices,
             )
+            try:
+                await notify_family_owner_member_joined(
+                    owner=owner,
+                    member=user,
+                    allocated_devices=int(existing.allocated_devices or 0),
+                    reactivated=True,
+                )
+                await notify_family_member_joined(
+                    member=user,
+                    owner=owner,
+                    allocated_devices=int(existing.allocated_devices or 0),
+                    reactivated=True,
+                )
+            except Exception as exc:
+                logger.warning("family_join_notifications_failed owner=%s member=%s err=%s", owner.id, user.id, exc)
             return {
                 "ok": True,
                 "member_id": str(existing.id),
@@ -583,6 +642,21 @@ async def accept_invite(token: str, user: Users = Depends(validate)) -> Dict[str
             member.id,
             invite.allocated_devices,
         )
+        try:
+            await notify_family_owner_member_joined(
+                owner=owner,
+                member=user,
+                allocated_devices=int(invite.allocated_devices or 0),
+                reactivated=False,
+            )
+            await notify_family_member_joined(
+                member=user,
+                owner=owner,
+                allocated_devices=int(invite.allocated_devices or 0),
+                reactivated=False,
+            )
+        except Exception as exc:
+            logger.warning("family_join_notifications_failed owner=%s member=%s err=%s", owner.id, user.id, exc)
         return {
             "ok": True,
             "member_id": str(member.id),
@@ -658,6 +732,14 @@ async def update_member(member_id: str, payload: MemberLimitPatch, user: Users =
         payload.allocated_devices,
         member.status,
     )
+    try:
+        await notify_family_member_limit_updated(
+            member=target_user,
+            owner=user,
+            allocated_devices=int(payload.allocated_devices),
+        )
+    except Exception as exc:
+        logger.warning("family_limit_notification_failed owner=%s member=%s err=%s", user.id, target_user.id, exc)
     return {"ok": True, "allocated_devices": member.allocated_devices}
 
 
@@ -676,6 +758,15 @@ async def delete_member(member_id: str, user: Users = Depends(validate)) -> Dict
         logger.warning("family_owner_effective_limit_sync_failed owner=%s err=%s", user.id, exc)
     await _audit(owner=user, actor=user, action="member_deleted", target_id=member_id)
     logger.info("family_member_deleted owner=%s member_record=%s", user.id, member_id)
+    try:
+        await notify_family_member_removed(
+            member=target_user,
+            owner=user,
+            removed_by_owner=True,
+            restored_limit=int(personal_limit or 0),
+        )
+    except Exception as exc:
+        logger.warning("family_member_removed_notification_failed owner=%s member=%s err=%s", user.id, target_user.id, exc)
     return {"ok": True}
 
 
@@ -726,6 +817,15 @@ async def leave_family(user: Users = Depends(validate)) -> Dict[str, Any]:
         details={"restored_hwid_limit": personal_limit},
     )
     logger.info("family_member_left owner=%s member=%s member_record=%s", owner.id, user.id, member_id)
+    try:
+        await notify_family_member_removed(
+            member=user,
+            owner=owner,
+            removed_by_owner=False,
+            restored_limit=int(personal_limit or 0),
+        )
+    except Exception as exc:
+        logger.warning("family_member_left_notification_failed owner=%s member=%s err=%s", owner.id, user.id, exc)
     return {"ok": True}
 
 
@@ -768,6 +868,13 @@ async def revoke_invite(invite_id: str, user: Users = Depends(validate)) -> Dict
     await _audit(owner=user, actor=user, action="invite_revoked", target_id=str(invite.id))
     await _check_anomaly(user, user, "invite_revoked")
     logger.info("family_invite_revoked owner=%s invite=%s", user.id, invite.id)
+    try:
+        await notify_family_owner_invite_revoked(
+            owner=user,
+            allocated_devices=int(invite.allocated_devices or 0),
+        )
+    except Exception as exc:
+        logger.warning("family_owner_invite_revoke_notification_failed owner=%s invite=%s err=%s", user.id, invite.id, exc)
     return {"ok": True}
 
 

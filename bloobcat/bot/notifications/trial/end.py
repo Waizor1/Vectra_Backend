@@ -16,14 +16,14 @@ async def notify_trial_ended(user):
         text = (
             f"👋 Привет, {user.full_name}! Ваш пробный период завершен. 🎉\n"
             "Не упустите возможность продления и получите эксклюзивные условия! 🔥\n"
-            "Напишите в поддержку @BloopCat_supbot или продлите прямо сейчас."
+            "Обратитесь в поддержку TVPN или продлите подписку прямо сейчас."
         )
         button = await webapp_inline_button("Продлить сейчас", "/pay")
     else:
         text = (
             f"👋 Hi {user.full_name}! Your trial period has ended. 🎉\n"
             "Don't miss out on exclusive offers and renew now! 🔥\n"
-            "Contact support @BloopCat_supbot or renew now."
+            "Contact TVPN support or renew now."
         )
         button = await webapp_inline_button("Renew Now", "/pay")
     try:

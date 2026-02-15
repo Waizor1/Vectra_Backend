@@ -1,4 +1,4 @@
-# BloobCat Backend
+# TVPN Backend
 
 Backend для Telegram-бота и WebApp. Поднимает HTTP API (FastAPI), админку FastAdmin,
 фоновые задачи и интеграции с RemnaWave и YooKassa.
@@ -64,6 +64,27 @@ docker compose up -d --build
 ```bash
 poetry run aerich upgrade
 ```
+
+## Диагностика роста БД
+
+Для безопасной проверки размера БД и потенциально "тяжёлых" таблиц:
+
+```bash
+poetry run python scripts/db_growth_report.py
+```
+
+Настраиваемые пороги через env:
+- `DB_GROWTH_WARN_MB` (по умолчанию `4096`)
+- `DB_GROWTH_TOP_N` (по умолчанию `30`)
+
+Отправка алерта в админ-чат (использует настройки бота из `.env`):
+
+```bash
+poetry run python scripts/db_growth_notify.py --warn-mb 4096 --top-n 30 --top-lines 8
+```
+
+- По умолчанию отправляет сообщение только при warning.
+- Для принудительной отправки используйте `--send-always`.
 
 ## TESTMODE
 

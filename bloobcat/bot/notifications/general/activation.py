@@ -17,7 +17,7 @@ async def on_activated_key(user: Users):
                 "Теперь вы можете включать и отключать VPN одним нажатием."
         text2 = (
             "Вернитесь в бот, чтобы управлять ключами и подписками.\n"
-            "Мы всегда на связи, BloopCat VPN 🤙"
+            "Мы всегда на связи, TVPN 🤙"
         )
         button = await webapp_inline_button()
     else:
@@ -25,7 +25,7 @@ async def on_activated_key(user: Users):
                 "You can turn your VPN on and off with ease."
         text2 = (
             "Return to the bot to manage your keys and subscriptions.\n"
-            "We're here for you, BloopCat VPN 🤙"
+            "We're here for you, TVPN 🤙"
         )
         button = await webapp_inline_button("Dashboard")
     # Отправка уведомлений

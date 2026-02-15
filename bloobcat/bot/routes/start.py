@@ -25,8 +25,8 @@ async def command_start_handler(message: Message, command: CommandObject):
 
     # Тексты приветствий (минималистичные)
     welcome_texts = {
-        "ru": "Привет! 👋 Нажми кнопку ниже, чтобы запустить BloopCat.",
-        "en": "Hi! 👋 Press the button below to launch BloopCat."
+        "ru": "Привет! 👋 Нажми кнопку ниже, чтобы запустить TVPN.",
+        "en": "Hi! 👋 Press the button below to launch TVPN."
     }
     
     button_texts = {
