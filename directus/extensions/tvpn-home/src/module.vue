@@ -839,6 +839,34 @@
 				</v-card>
 
 				<v-card class="panel">
+					<div class="panel__title">Ops Console</div>
+					<div class="panel__subtitle">Безопасные серверные операции из Directus (без полного shell-доступа).</div>
+
+					<v-notice v-if="opsError" type="danger">
+						{{ opsError }}
+					</v-notice>
+
+					<div class="ops-console">
+						<label class="ops-console__label">
+							<span>Команда</span>
+							<select v-model="opsCommandId" class="ops-console__select">
+								<option v-for="cmd in opsCommands" :key="cmd.id" :value="cmd.id">
+									{{ cmd.label }}
+								</option>
+							</select>
+						</label>
+
+						<div class="ops-console__actions">
+							<v-button small :loading="opsLoading" :disabled="opsLoading || !opsCommandId" @click="runOpsCommand">
+								Выполнить
+							</v-button>
+						</div>
+
+						<pre v-if="opsOutput" class="ops-console__output">{{ opsOutput }}</pre>
+					</div>
+				</v-card>
+
+				<v-card class="panel">
 					<div class="panel__title">Пороги алертов</div>
 					<div class="panel__subtitle">Настраивается через `tvpn_admin_settings` (сохраняется в базе).</div>
 
@@ -956,6 +984,16 @@ const settings = ref({
 });
 const settingsSaving = ref(false);
 const settingsSaveError = ref('');
+const opsLoading = ref(false);
+const opsError = ref('');
+const opsOutput = ref('');
+const opsCommandId = ref('fk_active_tariffs');
+const opsCommands = [
+	{ id: 'fk_users_overview', label: 'Проверить все FK -> users' },
+	{ id: 'fk_active_tariffs', label: 'Проверить fk_active_tariffs_user' },
+	{ id: 'fix_fk_active_tariffs', label: 'Исправить fk_active_tariffs_user (CASCADE)' },
+	{ id: 'family_quick_health', label: 'Family quick health (counts)' },
+];
 
 const trends = ref({
 	connections30d: [],
@@ -1508,6 +1546,29 @@ async function saveSettings() {
 		}
 	}
 	settingsSaving.value = false;
+}
+
+async function runOpsCommand() {
+	if (opsLoading.value || !opsCommandId.value) return;
+	opsLoading.value = true;
+	opsError.value = '';
+	try {
+		const res = await api.post('/server-ops/run', {
+			commandId: opsCommandId.value,
+		});
+		const payload = res?.data ?? {};
+		opsOutput.value = JSON.stringify(payload, null, 2);
+	} catch (e) {
+		const status = e?.response?.status;
+		const detail = e?.response?.data?.error || e?.response?.data?.errors?.[0]?.message || e?.message || '';
+		if (status === 403) {
+			opsError.value = 'Недостаточно прав: доступно только администраторам Directus.';
+		} else {
+			opsError.value = detail ? `Ошибка выполнения команды: ${detail}` : 'Не удалось выполнить команду.';
+		}
+	} finally {
+		opsLoading.value = false;
+	}
 }
 
 async function refresh() {
@@ -2472,6 +2533,46 @@ onMounted(() => {
 	background: rgba(255, 255, 255, 0.03);
 	color: inherit;
 	resize: vertical;
+}
+
+.ops-console {
+	display: grid;
+	gap: 10px;
+}
+
+.ops-console__label {
+	display: grid;
+	gap: 6px;
+	font-size: 12px;
+	opacity: 0.9;
+}
+
+.ops-console__select {
+	width: 100%;
+	padding: 8px 10px;
+	border-radius: 10px;
+	border: 1px solid rgba(255, 255, 255, 0.10);
+	background: rgba(255, 255, 255, 0.03);
+	color: inherit;
+}
+
+.ops-console__actions {
+	display: flex;
+	gap: 8px;
+}
+
+.ops-console__output {
+	margin: 0;
+	padding: 10px;
+	border-radius: 10px;
+	border: 1px solid rgba(255, 255, 255, 0.08);
+	background: rgba(2, 6, 23, 0.45);
+	max-height: 240px;
+	overflow: auto;
+	font-size: 11px;
+	line-height: 1.35;
+	white-space: pre-wrap;
+	word-break: break-word;
 }
 
 .help__row {
