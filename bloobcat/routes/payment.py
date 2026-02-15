@@ -505,6 +505,22 @@ def _round_rub(value: float) -> int:
         return 0
     return int(dec.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
+
+def _meta_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off", ""}:
+            return False
+    return default
+
 def _format_range_start(start_date: date) -> str:
     start_dt = datetime.combine(start_date, time.min, tzinfo=MSK_TZ)
     return start_dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
@@ -649,6 +665,17 @@ async def _apply_succeeded_payment_fallback(yk_payment, user: Users, meta: dict)
         user.active_tariff_id = active_tariff.id
         user.hwid_limit = device_count
         user.lte_gb_total = lte_gb
+
+    is_auto_payment = _meta_bool(meta.get("is_auto"), False)
+    if not is_auto_payment:
+        payment_method = getattr(yk_payment, "payment_method", None)
+        saved_method_id = getattr(payment_method, "id", None) if payment_method else None
+        saved_flag = _meta_bool(getattr(payment_method, "saved", None), False) if payment_method else False
+        # In fallback flow we may receive stringified flags from provider metadata.
+        # Keep renew_id when provider marks method as saved, or when id is present.
+        if saved_method_id and (saved_flag or getattr(payment_method, "saved", None) is None):
+            user.renew_id = str(saved_method_id)
+            user.is_subscribed = True
 
     if user.is_trial:
         user.is_trial = False
@@ -993,7 +1020,8 @@ async def yookassa_webhook(request: Request, secret: str):
             )
             # Ручные платежи: сообщаем пользователю outcome в боте,
             # чтобы после return_url он видел “успех/ошибка” без UI-поллинга в Mini App.
-            if not data.get("is_auto", False):
+            is_auto_payment = _meta_bool(data.get("is_auto"), False)
+            if not is_auto_payment:
                 try:
                     await notify_payment_canceled_yookassa(user=user)
                 except Exception as notify_exc:
@@ -1001,8 +1029,8 @@ async def yookassa_webhook(request: Request, secret: str):
                         f"Ошибка при отправке уведомления об отмене оплаты (YooKassa) для {user.id}: {notify_exc}",
                         extra={'payment_id': payment.id, 'user_id': user.id},
                     )
-            if data.get("is_auto", False):
-                disable = data.get("disable_on_fail", False)
+            if is_auto_payment:
+                disable = _meta_bool(data.get("disable_on_fail"), False)
                 if disable:
                     user.is_subscribed = False
                     user.renew_id = None
@@ -1017,8 +1045,9 @@ async def yookassa_webhook(request: Request, secret: str):
         
         if payment.status != "succeeded":
             logger.warning(f"Автоплатеж {payment.id} для пользователя {user.id} завершился со статусом {payment.status}")
-            if data.get("is_auto", False):
-                disable = data.get("disable_on_fail", False)
+            is_auto_payment = _meta_bool(data.get("is_auto"), False)
+            if is_auto_payment:
+                disable = _meta_bool(data.get("disable_on_fail"), False)
                 if disable:
                     user.is_subscribed = False
                     user.renew_id = None
@@ -1386,7 +1415,7 @@ async def yookassa_webhook(request: Request, secret: str):
             
             # Устанавливаем новую дату окончания подписки
             # В случае автопродления переходим на новый тариф, сбрасывая старую подписку
-            is_auto = data.get("is_auto", False)
+            is_auto = _meta_bool(data.get("is_auto"), False)
             if is_auto:
                 # Для автопродления используем extend_subscription вместо прямой установки даты
                 await user.extend_subscription(days)
@@ -1599,8 +1628,11 @@ async def yookassa_webhook(request: Request, secret: str):
                             logger.warning(f"Ошибка при закрытии клиента RemnaWave: {str(close_exc)}")
 
             # Если это автоплатеж и он успешен, обновляем статус подписки
-            if payment.payment_method.saved and not is_auto:
-                user.renew_id = payment.payment_method.id
+            payment_method = getattr(payment, "payment_method", None)
+            saved_method_id = getattr(payment_method, "id", None) if payment_method else None
+            saved_flag = _meta_bool(getattr(payment_method, "saved", None), False) if payment_method else False
+            if not is_auto and saved_method_id and (saved_flag or getattr(payment_method, "saved", None) is None):
+                user.renew_id = str(saved_method_id)
                 user.is_subscribed = True
             
             # Если это автоплатеж и он успешен, обновляем статус подписки
