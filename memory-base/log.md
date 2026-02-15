@@ -1,5 +1,14 @@
 ## 2026-02-15
 
+- **fix(admin/family-section-workspace):** добавлен fallback-workspace в секцию `Семья` карточки `users` Directus.
+  - В `scripts/directus_super_setup.py` добавлена фаза `ensure_users_family_workspace_aliases`.
+  - Создаются/обновляются два alias-поля, которые гарантированно видны между `Семья` и `Техника`:
+    - `family_workspace_notice` (`presentation-notice`) с пояснением и fallback-логикой;
+    - `family_workspace_links` (`presentation-links`) с быстрыми переходами в `family_members`, `family_invites`, `family_audit_logs` по текущему `{{id}}`.
+  - Это дает рабочий интерфейс даже в инстансах, где relation list-o2m может не рендериться в item-form.
+  - Применено на проде: `DIRECTUS_URL=https://admin.waiz-store.ru python scripts/directus_super_setup.py` — успешно.
+  - Проверка: `python -m py_compile scripts/directus_super_setup.py` + `ReadLints` — OK.
+
 - **fix(admin/family-self-heal):** добавлен защитный self-heal секции `Семья` в карточке `users` Directus.
   - `scripts/directus_super_setup.py`: добавлена фаза `ensure_users_family_section_ux`, которая повторно и идемпотентно:
     - восстанавливает `one_field` для family relations через `/relations/...`;

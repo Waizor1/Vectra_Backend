@@ -2099,17 +2099,117 @@ def ensure_users_family_section_ux(client: DirectusClient) -> None:
         )
 
 
+def ensure_users_family_workspace_aliases(client: DirectusClient) -> None:
+    """
+    Fallback workspace inside users item form.
+
+    Even if relation widgets are hidden by Directus internals, operators still
+    get visible family controls and quick links.
+    """
+    if client.get("/collections/users").status_code != 200:
+        return
+
+    def ensure_alias_field(field: str, meta: Dict[str, Any]) -> None:
+        resp = client.patch("/fields/users/" + field, json={"meta": meta})
+        if resp.status_code == 404:
+            created = client.post(
+                "/fields/users",
+                json={
+                    "field": field,
+                    "type": "alias",
+                    "schema": None,
+                    "meta": meta,
+                },
+            )
+            if created.status_code in (401, 403, 409):
+                return
+            created.raise_for_status()
+            return
+        if resp.status_code in (401, 403):
+            return
+        resp.raise_for_status()
+
+    ensure_alias_field(
+        "family_workspace_notice",
+        {
+            "interface": "presentation-notice",
+            "special": ["alias", "no-data"],
+            "options": {
+                "color": "info",
+                "icon": "family_restroom",
+                "text": (
+                    "Блок Семья: быстрый доступ к family-операциям. "
+                    "Если relation-виджеты временно не отрисовались, "
+                    "используйте ссылки ниже."
+                ),
+            },
+            "width": "full",
+            "sort": 76,
+            "hidden": False,
+            "group": None,
+            "translations": [{"language": "ru-RU", "translation": "Семья: быстрый доступ"}],
+        },
+    )
+
+    ensure_alias_field(
+        "family_workspace_links",
+        {
+            "interface": "presentation-links",
+            "special": ["alias", "no-data"],
+            "options": {
+                "links": [
+                    {
+                        "label": "Участники семьи (owner = текущий user)",
+                        "icon": "groups",
+                        "type": "primary",
+                        "actionType": "url",
+                        "url": "/content/family_members?filter[owner_id][_eq]={{id}}",
+                    },
+                    {
+                        "label": "Членство пользователя в семье (member = текущий user)",
+                        "icon": "person_search",
+                        "type": "info",
+                        "actionType": "url",
+                        "url": "/content/family_members?filter[member_id][_eq]={{id}}",
+                    },
+                    {
+                        "label": "Инвайты семьи (owner = текущий user)",
+                        "icon": "mail",
+                        "type": "normal",
+                        "actionType": "url",
+                        "url": "/content/family_invites?filter[owner_id][_eq]={{id}}",
+                    },
+                    {
+                        "label": "Аудит семьи (owner = текущий user)",
+                        "icon": "fact_check",
+                        "type": "normal",
+                        "actionType": "url",
+                        "url": "/content/family_audit_logs?filter[owner_id][_eq]={{id}}",
+                    },
+                ]
+            },
+            "width": "full",
+            "sort": 77,
+            "hidden": False,
+            "group": None,
+            "translations": [{"language": "ru-RU", "translation": "Семья: ссылки"}],
+        },
+    )
+
+
 def verify_users_family_section_visibility(client: DirectusClient) -> None:
     """
     Safety check: family section fields must stay visible and relation-based.
     """
-    required_fields = (
-        "family_audit_logs_owner",
-        "family_members_owner_list",
-        "family_members_member_list",
-        "family_invites_list",
-    )
-    for field in required_fields:
+    expected_interfaces = {
+        "family_workspace_notice": "presentation-notice",
+        "family_workspace_links": "presentation-links",
+        "family_audit_logs_owner": "list-o2m",
+        "family_members_owner_list": "list-o2m",
+        "family_members_member_list": "list-o2m",
+        "family_invites_list": "list-o2m",
+    }
+    for field, expected_interface in expected_interfaces.items():
         resp = client.get(f"/fields/users/{field}", params={"fields": "field,meta.interface,meta.hidden,meta.sort"})
         if resp.status_code in (401, 403, 404):
             print(f"WARN: users field {field} not readable (status={resp.status_code})")
@@ -2117,8 +2217,11 @@ def verify_users_family_section_visibility(client: DirectusClient) -> None:
         resp.raise_for_status()
         data = resp.json().get("data") or {}
         meta = data.get("meta") or {}
-        if meta.get("interface") != "list-o2m":
-            print(f"WARN: users field {field} interface is {meta.get('interface')!r}, expected 'list-o2m'")
+        if meta.get("interface") != expected_interface:
+            print(
+                f"WARN: users field {field} interface is {meta.get('interface')!r}, "
+                f"expected {expected_interface!r}"
+            )
         if bool(meta.get("hidden", False)):
             print(f"WARN: users field {field} is hidden")
 
@@ -3115,6 +3218,7 @@ def main() -> None:
         ("ensure_users_presentation_dividers", lambda: ensure_users_presentation_dividers(client)),
         ("apply_users_luxury_ux", lambda: apply_users_luxury_ux(client)),
         ("ensure_users_family_section_ux", lambda: ensure_users_family_section_ux(client)),
+        ("ensure_users_family_workspace_aliases", lambda: ensure_users_family_workspace_aliases(client)),
         ("ensure_admin_settings", lambda: ensure_admin_settings(client)),
         # Re-run baseline after all late-created collections to avoid skipped grants.
         ("ensure_permissions_baseline_post", lambda: ensure_permissions_baseline(client)),
