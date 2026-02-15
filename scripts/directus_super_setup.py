@@ -1076,6 +1076,9 @@ def apply_users_form_ux(client: DirectusClient) -> None:
         "partner_withdrawals_list": "full",
         "partner_earnings_list": "full",
         "family_audit_logs_owner": "full",
+        "family_members_owner_list": "full",
+        "family_members_member_list": "full",
+        "family_invites_list": "full",
         "remnawave_uuid": "half",
         "last_hwid_reset": "half",
         "familyurl": "half",
@@ -1129,6 +1132,9 @@ def apply_users_form_ux(client: DirectusClient) -> None:
         "partner_withdrawals_list": 73,
         "partner_earnings_list": 74,
         "family_audit_logs_owner": 75,
+        "family_members_owner_list": 76,
+        "family_members_member_list": 77,
+        "family_invites_list": 78,
         "remnawave_uuid": 80,
         "last_hwid_reset": 81,
         "familyurl": 82,
@@ -1196,6 +1202,7 @@ def ensure_users_presentation_dividers(client: DirectusClient) -> None:
     ensure_divider("ui_divider_status", "Статус", "shield", 49)
     ensure_divider("ui_divider_partner", "Партнерка", "groups", 59)
     ensure_divider("ui_divider_ops", "Операции", "build", 66)
+    ensure_divider("ui_divider_family", "Семья", "family_restroom", 75)
     ensure_divider("ui_divider_tech", "Техника", "settings", 79)
 
     # Hide deprecated divider variants to avoid duplicate/empty sections.
@@ -1716,6 +1723,36 @@ def apply_users_luxury_ux(client: DirectusClient) -> None:
             "note": "Аудит действий в семейных сценариях.",
         },
     )
+    patch_field_meta(
+        client,
+        "users",
+        "family_members_owner_list",
+        {
+            "interface": "list-o2m",
+            "options": {"template": "{{id}} • member {{member_id}} • {{status}} • {{allocated_devices}} devices"},
+            "note": "Участники семьи, где пользователь выступает владельцем.",
+        },
+    )
+    patch_field_meta(
+        client,
+        "users",
+        "family_members_member_list",
+        {
+            "interface": "list-o2m",
+            "options": {"template": "{{id}} • owner {{owner_id}} • {{status}} • {{allocated_devices}} devices"},
+            "note": "Членство в семье, где пользователь выступает участником.",
+        },
+    )
+    patch_field_meta(
+        client,
+        "users",
+        "family_invites_list",
+        {
+            "interface": "list-o2m",
+            "options": {"template": "{{id}} • {{used_count}}/{{max_uses}} • {{expires_at}}"},
+            "note": "Инвайты семьи, созданные пользователем.",
+        },
+    )
 
 
 def ensure_users_relations_ux(client: DirectusClient) -> None:
@@ -1880,6 +1917,9 @@ def ensure_users_relations_ux(client: DirectusClient) -> None:
         ("partner_withdrawals", "owner_id", "partner_withdrawals_list", "Выводы партнера", 73, "{{id}} — {{status}} — {{amount}}"),
         ("partner_earnings", "partner_id", "partner_earnings_list", "Начисления партнера", 74, "{{id}} — {{amount}} — {{created_at}}"),
         ("family_audit_logs", "owner_id", "family_audit_logs_owner", "Аудит семьи", 75, "{{id}} — {{action}} — {{created_at}}"),
+        ("family_members", "owner_id", "family_members_owner_list", "Участники семьи (owner)", 76, "{{id}} — member {{member_id}} — {{status}} — {{allocated_devices}}"),
+        ("family_members", "member_id", "family_members_member_list", "Членство в семье (member)", 77, "{{id}} — owner {{owner_id}} — {{status}} — {{allocated_devices}}"),
+        ("family_invites", "owner_id", "family_invites_list", "Инвайты семьи", 78, "{{id}} — {{used_count}}/{{max_uses}} — {{expires_at}}"),
     ]
     for many_collection, many_field, one_field, title, sort, template in relation_specs:
         # Make the o2m block visible first; relation metadata can be patched after.

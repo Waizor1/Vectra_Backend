@@ -1,5 +1,15 @@
 ## 2026-02-15
 
+- **fix(admin/family):** расширена карточка пользователя в Directus для семейного контекста.
+  - `scripts/directus_super_setup.py`: в `users` добавлены relation-блоки `family_members_owner_list`, `family_members_member_list`, `family_invites_list`.
+  - В форму `users` добавлены размеры/сортировка для новых полей и отдельный divider `ui_divider_family` (секция "Семья").
+  - В `ensure_users_relations_ux` добавлены o2m связи:
+    - `family_members.owner_id -> users.family_members_owner_list`,
+    - `family_members.member_id -> users.family_members_member_list`,
+    - `family_invites.owner_id -> users.family_invites_list`.
+  - В `apply_users_luxury_ux` добавлены шаблоны отображения (owner/member/status/allocated devices/usage).
+  - Валидация: `python -m py_compile scripts/directus_super_setup.py` — успешно.
+
 - **fix(family):** корректный расчет остатка устройств у главы семьи:
   - `bloobcat/routes/user.py`: `/user` для owner теперь возвращает `devices_limit` как остаток `база - активные выделения участникам`.
 - **fix(family):** синхронизация реального лимита главы в RemnaWave при изменении состава/квоты семьи:
