@@ -695,3 +695,15 @@
   - после завершения запроса кнопка вернулась в активное состояние без error-алерта (признак успешного save).
 - После UI-теста значение `maintenance_message` откатили на `probe` (чтобы не оставлять тестовый текст).
 
+### 2026-02-16 — hotfix backend startup crash (NameError Any)
+
+- Симптом:
+  - продовый backend не поднимался, публичные endpoint (`/health`, `/app/info`) отдавали `502` через reverse-proxy;
+  - в контейнерных логах повторялась ошибка запуска: `NameError: name 'Any' is not defined` в `bloobcat/routes/payment.py`.
+- Корневая причина:
+  - в `payment.py` использовалась аннотация `Any` (`def _meta_bool(value: Any, ...)`), но импорт `Any` из `typing` отсутствовал.
+- Исправление:
+  - в `TVPN_BACK_END/bloobcat/routes/payment.py` добавлен импорт `from typing import Any`.
+- Проверка:
+  - `python -m py_compile bloobcat/routes/payment.py` проходит без ошибок.
+

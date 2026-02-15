@@ -7,6 +7,7 @@ import random
 from functools import partial
 from urllib.parse import urlparse
 import uuid
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Header, Request # type: ignore
 from yookassa import Configuration, Payment, Webhook
