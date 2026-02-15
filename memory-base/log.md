@@ -1,5 +1,16 @@
 ## 2026-02-15
 
+- **fix(db/family-fk-delete):** устранен `INTERNAL_SERVER_ERROR` при удалении пользователей из админки (`family_members_member_id_fkey`).
+  - Добавлена миграция `migrations/models/77_20260215035500_fix_family_fk_on_delete.py`.
+  - Все FK family-таблиц к `users` принудительно приведены к `ON DELETE CASCADE`:
+    - `family_members.member_id`, `family_members.owner_id`
+    - `family_invites.owner_id`
+    - `family_devices.user_id`
+    - `family_audit_logs.actor_id`, `family_audit_logs.owner_id`
+  - Проверено на локальном Docker после `apply_migrations`:
+    - до фикса часть FK была `NO ACTION`;
+    - после фикса все перечисленные FK = `CASCADE`.
+
 - **fix(admin/family-relations-runtime):** выявлена и устранена реальная причина пустой секции `Семья` в Directus.
   - Диагностика в локальном Docker показала:
     - `POST /items/directus_relations` возвращал `403 FORBIDDEN`;
