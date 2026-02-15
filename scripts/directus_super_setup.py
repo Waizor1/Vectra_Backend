@@ -1990,6 +1990,138 @@ def ensure_users_relations_ux(client: DirectusClient) -> None:
             ensure_alias_o2m_field(one_field, title, sort, template)
 
 
+def ensure_users_family_section_ux(client: DirectusClient) -> None:
+    """
+    Final self-heal for users -> Family section.
+
+    Why:
+    - some Directus environments can partially apply relation metadata
+      (or lose one_field/interface after upgrades/imports);
+    - this phase re-applies family o2m aliases and relation links to avoid
+      empty "Семья" section regressions.
+    """
+    if client.get("/collections/users").status_code != 200:
+        return
+
+    field_specs: list[tuple[str, str, int, str]] = [
+        (
+            "family_audit_logs_owner",
+            "Аудит семьи",
+            75,
+            "{{id}} — {{action}} — {{created_at}}",
+        ),
+        (
+            "family_members_owner_list",
+            "Участники семьи (owner)",
+            76,
+            "{{id}} — member {{member_id}} — {{status}} — {{allocated_devices}}",
+        ),
+        (
+            "family_members_member_list",
+            "Членство в семье (member)",
+            77,
+            "{{id}} — owner {{owner_id}} — {{status}} — {{allocated_devices}}",
+        ),
+        (
+            "family_invites_list",
+            "Инвайты семьи",
+            78,
+            "{{id}} — {{used_count}}/{{max_uses}} — {{expires_at}}",
+        ),
+    ]
+
+    relation_specs: list[tuple[str, str, str]] = [
+        ("family_audit_logs", "owner_id", "family_audit_logs_owner"),
+        ("family_members", "owner_id", "family_members_owner_list"),
+        ("family_members", "member_id", "family_members_member_list"),
+        ("family_invites", "owner_id", "family_invites_list"),
+    ]
+
+    for many_collection, many_field, one_field in relation_specs:
+        resp = client.patch(
+            f"/relations/{many_collection}/{many_field}",
+            json={
+                "collection": many_collection,
+                "field": many_field,
+                "related_collection": "users",
+                "meta": {
+                    "one_collection": "users",
+                    "one_field": one_field,
+                    "one_deselect_action": "nullify",
+                },
+            },
+        )
+        # Best-effort: missing relation/forbidden should not break whole setup.
+        if resp.status_code in (400, 401, 403, 404):
+            continue
+        if resp.status_code not in (502, 503, 504):
+            resp.raise_for_status()
+
+    for field, title, sort, template in field_specs:
+        # Create alias field if missing.
+        create_resp = client.post(
+            "/fields/users",
+            json={
+                "field": field,
+                "type": "alias",
+                "schema": None,
+                "meta": {
+                    "interface": "list-o2m",
+                    "display": "related-values",
+                    "options": {"template": template},
+                    "width": "full",
+                    "sort": sort,
+                    "hidden": False,
+                    "group": None,
+                    "note": title,
+                    "translations": [{"language": "ru-RU", "translation": title}],
+                },
+            },
+        )
+        if create_resp.status_code not in (200, 201, 204, 400, 401, 403, 404, 409):
+            create_resp.raise_for_status()
+
+        patch_field_meta(
+            client,
+            "users",
+            field,
+            {
+                "interface": "list-o2m",
+                "display": "related-values",
+                "options": {"template": template},
+                "width": "full",
+                "sort": sort,
+                "hidden": False,
+                "group": None,
+                "note": title,
+                "translations": [{"language": "ru-RU", "translation": title}],
+            },
+        )
+
+
+def verify_users_family_section_visibility(client: DirectusClient) -> None:
+    """
+    Safety check: family section fields must stay visible and relation-based.
+    """
+    required_fields = (
+        "family_audit_logs_owner",
+        "family_members_owner_list",
+        "family_members_member_list",
+        "family_invites_list",
+    )
+    for field in required_fields:
+        resp = client.get(f"/fields/users/{field}", params={"fields": "field,meta.interface,meta.hidden,meta.sort"})
+        if resp.status_code in (401, 403, 404):
+            print(f"WARN: users field {field} not readable (status={resp.status_code})")
+            continue
+        resp.raise_for_status()
+        data = resp.json().get("data") or {}
+        meta = data.get("meta") or {}
+        if meta.get("interface") != "list-o2m":
+            print(f"WARN: users field {field} interface is {meta.get('interface')!r}, expected 'list-o2m'")
+        if bool(meta.get("hidden", False)):
+            print(f"WARN: users field {field} is hidden")
+
 def set_language_ru(client: DirectusClient) -> None:
     # Make the whole instance default to Russian and set the current user language too.
     client.patch("/settings", json={"default_language": "ru-RU"}).raise_for_status()
@@ -2982,12 +3114,14 @@ def main() -> None:
         ("apply_users_form_ux", lambda: apply_users_form_ux(client)),
         ("ensure_users_presentation_dividers", lambda: ensure_users_presentation_dividers(client)),
         ("apply_users_luxury_ux", lambda: apply_users_luxury_ux(client)),
+        ("ensure_users_family_section_ux", lambda: ensure_users_family_section_ux(client)),
         ("ensure_admin_settings", lambda: ensure_admin_settings(client)),
         # Re-run baseline after all late-created collections to avoid skipped grants.
         ("ensure_permissions_baseline_post", lambda: ensure_permissions_baseline(client)),
         ("ensure_insights_dashboard", lambda: ensure_insights_dashboard(client)),
         ("ensure_role_presets", lambda: ensure_role_presets(client)),
         ("verify_users_item_access", lambda: verify_users_item_access(client)),
+        ("verify_users_family_section_visibility", lambda: verify_users_family_section_visibility(client)),
         ("verify_tariffs_form_visibility", lambda: verify_tariffs_form_visibility(client)),
         ("enable_extension_tvpn_home", lambda: ensure_extension_enabled(client, "tvpn-home")),
         ("enable_extension_id_link_editor", lambda: ensure_extension_enabled(client, "id-link-editor")),

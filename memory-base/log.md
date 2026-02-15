@@ -1,5 +1,14 @@
 ## 2026-02-15
 
+- **fix(admin/family-self-heal):** добавлен защитный self-heal секции `Семья` в карточке `users` Directus.
+  - `scripts/directus_super_setup.py`: добавлена фаза `ensure_users_family_section_ux`, которая повторно и идемпотентно:
+    - восстанавливает `one_field` для family relations через `/relations/...`;
+    - гарантирует наличие alias-полей `family_*` с `interface=list-o2m`;
+    - форсирует `hidden=false`, `width=full`, корректный `sort`, `group=None`.
+  - Добавлена верификация `verify_users_family_section_visibility` в финальные проверки setup.
+  - Цель: исключить повторный регресс вида «есть divider `Семья`, но блоки внутри не рендерятся».
+  - Валидация: `python -m py_compile scripts/directus_super_setup.py` — успешно, `ReadLints` — без ошибок.
+
 - **fix(db/family-fk-delete):** устранен `INTERNAL_SERVER_ERROR` при удалении пользователей из админки (`family_members_member_id_fkey`).
   - Добавлена миграция `migrations/models/77_20260215035500_fix_family_fk_on_delete.py`.
   - Все FK family-таблиц к `users` принудительно приведены к `ON DELETE CASCADE`:
