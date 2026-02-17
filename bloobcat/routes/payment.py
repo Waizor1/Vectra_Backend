@@ -175,8 +175,24 @@ async def _apply_referral_first_payment_reward(
     async with in_transaction() as conn:
         # Lock referred user to avoid races with other operations on the same user.
         referred = await Users.select_for_update().using_db(conn).get(id=referred_user_id)
-        if not int(getattr(referred, "referred_by", 0) or 0):
+        ref_by = int(getattr(referred, "referred_by", 0) or 0)
+        if not ref_by:
+            logger.info(
+                "referral_reward_skip_no_referrer user=%s payment=%s referred_by=%s",
+                referred_user_id,
+                payment_id,
+                ref_by,
+            )
             return {"applied": False}
+
+        logger.info(
+            "referral_reward_attempt user=%s referrer=%s payment=%s months=%s devices=%s",
+            referred_user_id,
+            ref_by,
+            payment_id,
+            months,
+            device_count,
+        )
 
         # Try to insert a ledger row first (unique on (referred_user_id, kind)).
         # If it already exists -> reward already applied (or in progress previously).
@@ -193,6 +209,11 @@ async def _apply_referral_first_payment_reward(
                 using_db=conn,
             )
         except IntegrityError:
+            logger.info(
+                "referral_reward_already_applied user=%s payment=%s",
+                referred_user_id,
+                payment_id,
+            )
             return {"applied": False}
 
         referrer = await Users.using_db(conn).get(id=int(referred.referred_by))
@@ -760,8 +781,8 @@ async def _apply_succeeded_payment_fallback(yk_payment, user: Users, meta: dict)
                         device_count=int(reward_res["device_count"]),
                         applied_to_subscription=bool(reward_res["applied_to_subscription"]),
                     )
-                except Exception:
-                    pass
+                except Exception as e_ref_notify:
+                    logger.warning("referral_payment_notification_failed referrer=%s err=%s", referrer.id, e_ref_notify)
                 if on_referral_friend_bonus is not None:
                     try:
                         await on_referral_friend_bonus(
@@ -771,10 +792,10 @@ async def _apply_succeeded_payment_fallback(yk_payment, user: Users, meta: dict)
                             months=int(reward_res["months"]),
                             device_count=int(reward_res["device_count"]),
                         )
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+                    except Exception as e_friend_notify:
+                        logger.warning("referral_friend_bonus_notification_failed user=%s err=%s", user.id, e_friend_notify)
+        except Exception as e_reward:
+            logger.warning("referral_reward_failed user=%s payment=%s err=%s", user.id, pid, e_reward)
 
     # Notify user in bot (so they see the outcome even if webhook failed).
     try:

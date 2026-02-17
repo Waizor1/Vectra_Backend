@@ -706,4 +706,3 @@
   - в `TVPN_BACK_END/bloobcat/routes/payment.py` добавлен импорт `from typing import Any`.
 - Проверка:
   - `python -m py_compile bloobcat/routes/payment.py` проходит без ошибок.
-

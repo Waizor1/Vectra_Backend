@@ -88,6 +88,13 @@ async def _build_plans() -> List[SubscriptionPlanResponse]:
     by_months: Dict[int, Tariffs] = {int(t.months): t for t in tariffs}
     plans: List[SubscriptionPlanResponse] = []
 
+    # Reference price for discount calculation: 1-month plan for default device count.
+    one_month_tariff = by_months.get(1)
+    one_month_price_ref: int | None = None
+    if one_month_tariff:
+        one_month_default_devices = max(1, int(one_month_tariff.devices_limit_default or 3))
+        one_month_price_ref = int(one_month_tariff.calculate_price(one_month_default_devices))
+
     def add_plan(months: int, device_count: int, badge: str | None = None, family: bool = False):
         tariff = by_months.get(months)
         if not tariff:
@@ -97,6 +104,21 @@ async def _build_plans() -> List[SubscriptionPlanResponse]:
         price = int(tariff.calculate_price(device_count))
         per_month = int(round(price / months)) if months > 0 else price
         plan_id = _plan_id_for_months(months, family=family)
+
+        discount_text: str | None = None
+        default_devices = max(1, int(tariff.devices_limit_default or 3))
+        if (
+            months > 1
+            and device_count == default_devices
+            and one_month_price_ref
+            and one_month_price_ref > 0
+        ):
+            full_price = one_month_price_ref * months
+            if full_price > 0:
+                pct = round((1 - price / full_price) * 100)
+                if 0 < pct < 100:
+                    discount_text = f"\u2212{pct}%"
+
         plans.append(
             SubscriptionPlanResponse(
                 id=plan_id,
@@ -106,6 +128,7 @@ async def _build_plans() -> List[SubscriptionPlanResponse]:
                 devicesLimit=device_count,
                 priceRub=price,
                 perMonthText=f"≈ {per_month} ₽/мес",
+                discountText=discount_text,
                 badge=badge,
             )
         )

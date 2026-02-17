@@ -97,17 +97,29 @@ async def _apply_referral_attribution_existing_user(
             db_user.utm = utm
             update_fields.append("utm")
 
-    # Bind referral once before first activation to avoid rebind abuse.
+    # Bind referral once if not already set. Relaxed: allow even for registered users
+    # so that users who registered before clicking a referral link can still be attributed.
     if (
         referred_by
         and int(referred_by) != int(db_user.id)
         and int(getattr(db_user, "referred_by", 0) or 0) == 0
-        and not bool(getattr(db_user, "is_registered", False))
     ):
         referrer = await Users.get_or_none(id=int(referred_by))
         if referrer:
             db_user.referred_by = int(referred_by)
             update_fields.append("referred_by")
+            logger.info(
+                "referral_bind user=%s referrer=%s is_registered=%s",
+                db_user.id,
+                referred_by,
+                getattr(db_user, "is_registered", None),
+            )
+        else:
+            logger.warning(
+                "referral_bind_skip_no_referrer user=%s referrer_id=%s",
+                db_user.id,
+                referred_by,
+            )
 
     if update_fields:
         await db_user.save(update_fields=update_fields)

@@ -518,6 +518,17 @@ async def accept_invite(token: str, user: Users = Depends(validate)) -> Dict[str
     if member_family and member_family.owner_id != owner.id:
         raise HTTPException(status_code=409, detail="Member already in another family")
 
+    # Referral attribution: family invite owner becomes referrer if not already set.
+    _user_referred_by = int(getattr(user, "referred_by", 0) or 0)
+    if _user_referred_by == 0 and int(owner.id) != int(user.id):
+        user.referred_by = int(owner.id)
+        await user.save(update_fields=["referred_by"])
+        logger.info(
+            "family_invite_referral_attribution member=%s referred_by=%s",
+            user.id,
+            owner.id,
+        )
+
     existing = await FamilyMembers.get_or_none(owner_id=owner.id, member_id=user.id)
     if existing:
         existing_allocated = int(existing.allocated_devices or 0)

@@ -159,16 +159,25 @@ class Tariffs(models.Model):
     def calculate_price(self, device_count: int = 1) -> int:
         """
         Рассчитывает цену тарифа для указанного количества устройств с прогрессивной скидкой.
-        Формула: базовая_цена + сумма(базовая_цена * (множитель ^ номер_устройства)) для каждого дополнительного устройства
-        
-        Примеры с base_price=100, progressive_multiplier=0.9:
-        - 1 устройство: 100₽
-        - 2 устройства: 100₽ + 100₽*0.9 = 190₽ (среднее 95₽ за устройство)
-        - 3 устройства: 100₽ + 100₽*0.9 + 100₽*0.81 = 271₽ (среднее 90₽ за устройство)
-        - 5 устройств: 100₽ + 90₽ + 81₽ + 73₽ + 66₽ = 410₽ (среднее 82₽ за устройство)
+
+        Если в админке задана финальная цена карточки (final_price_default / final_price_family)
+        и запрошенное количество устройств совпадает с лимитом карточки, возвращается
+        точная финальная цена без пересчёта, чтобы исключить ошибки округления.
         """
         if device_count <= 0:
             return 0
+
+        # Fast path: return exact final card price when device_count matches a card tier.
+        default_devices = max(1, int(self.devices_limit_default or 1))
+        family_devices = max(default_devices, int(self.devices_limit_family or default_devices))
+
+        target_default = int(self.final_price_default or 0)
+        target_family = int(self.final_price_family or 0)
+
+        if target_default > 0 and device_count == default_devices:
+            return target_default
+        if target_family > 0 and device_count == family_devices and family_devices > default_devices:
+            return target_family
 
         effective_base_price, effective_multiplier = self.get_effective_pricing()
 
