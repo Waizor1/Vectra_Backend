@@ -360,14 +360,14 @@ async def get_withdraw_status(tx_id: str, user: Users = Depends(validate)) -> Pa
 
 @router.get("/profit")
 async def get_profit(
-    range: str = Query("week", pattern="^(week|month|year)$"),
+    range_param: str = Query("week", pattern="^(week|month|year)$", alias="range"),
     qrIds: Optional[List[str]] = Query(None),
     user: Users = Depends(validate),
 ) -> Dict[str, Any]:
     _require_partner(user)
 
     now = datetime.now(timezone.utc)
-    days = 7 if range == "week" else 30 if range == "month" else 365
+    days = 7 if range_param == "week" else 30 if range_param == "month" else 365
     start = (now - timedelta(days=days - 1)).replace(hour=0, minute=0, second=0, microsecond=0)
     end = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
 
