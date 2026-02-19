@@ -27,6 +27,7 @@ class TelegramAuthRequest(BaseModel):
 class TelegramAuthResponse(BaseModel):
     accessToken: str
     expiresIn: int
+    is_registered: bool = False
 
 
 @router.post("/telegram", response_model=TelegramAuthResponse)
@@ -96,4 +97,8 @@ async def auth_telegram(payload: TelegramAuthRequest) -> TelegramAuthResponse:
         raise HTTPException(status_code=500, detail="User not found in database")
 
     token, ttl_seconds = create_access_token(db_user.id)
-    return TelegramAuthResponse(accessToken=token, expiresIn=ttl_seconds)
+    return TelegramAuthResponse(
+        accessToken=token,
+        expiresIn=ttl_seconds,
+        is_registered=bool(db_user.is_registered),
+    )
