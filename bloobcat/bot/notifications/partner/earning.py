@@ -38,7 +38,7 @@ async def notify_partner_earning(
     if lang == "ru":
         qr_line = f"\nQR: {qr_part}" if qr_part else ""
         text = (
-            "💸 Начисление по партнерке\n\n"
+            "Начисление по партнерке\n\n"
             f"Кэшбек: +{int(reward_rub)} ₽ ({int(percent)}%)\n"
             f"Покупка: {int(amount_total_rub)} ₽\n"
             f"Пользователь: {referral.name()} (ID: {int(referral.id)})\n"
@@ -48,7 +48,7 @@ async def notify_partner_earning(
     else:
         qr_line = f"\nQR: {qr_part}" if qr_part else ""
         text = (
-            "💸 Partner earning\n\n"
+            "Partner earning\n\n"
             f"Cashback: +{int(reward_rub)} RUB ({int(percent)}%)\n"
             f"Purchase: {int(amount_total_rub)} RUB\n"
             f"User: {referral.name()} (ID: {int(referral.id)})\n"

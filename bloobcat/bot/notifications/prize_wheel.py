@@ -58,11 +58,11 @@ async def notify_logs_channel(user: Users, prize_name: str, prize_value: str, bo
             return
 
         message = (
-            f"🎰 **Колесо призов**\n\n"
-            f"👤 Пользователь: {user.name()}\n"
-            f"🆔 ID: `{user.id}`\n"
-            f"🏆 Приз: **{prize_name}**\n"
-            f"📅 Время: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}"
+            f"**Колесо призов**\n\n"
+            f"Пользователь: {user.name()}\n"
+            f"ID: `{user.id}`\n"
+            f"Приз: **{prize_name}**\n"
+            f"Время: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}"
         )
 
         try:
@@ -97,29 +97,29 @@ async def notify_admins_about_prize(
             inline_keyboard=[
                 [
                     InlineKeyboardButton(
-                        text="✅ Подтвердить",
+                        text="Подтвердить",
                         callback_data=f"prize_confirm_prompt:{history_id}",
                     ),
                     InlineKeyboardButton(
-                        text="❌ Отклонить",
+                        text="Отклонить",
                         callback_data=f"prize_reject_prompt:{history_id}",
                     ),
                 ],
                 [
                     InlineKeyboardButton(
-                        text="📝 Написать", url=f"tg://user?id={user.id}"
+                        text="Написать", url=f"tg://user?id={user.id}"
                     )
                 ],
             ]
         )
 
         message = (
-            f"🎰 **Колесо призов - Требуется участие админа**\n\n"
-            f"👤 Пользователь: {user.name()}\n"
-            f"🆔 ID: `{user.id}`\n"
-            f"🏆 Приз: **{prize_name}**\n"
-            f"📅 Время выигрыша: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}\n\n"
-            f"⚠️ Этот приз требует участия админа для выдачи."
+            f"**Колесо призов - Требуется участие админа**\n\n"
+            f"Пользователь: {user.name()}\n"
+            f"ID: `{user.id}`\n"
+            f"Приз: **{prize_name}**\n"
+            f"Время выигрыша: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}\n\n"
+            f"[!] Этот приз требует участия админа для выдачи."
         )
 
         for admin in admins:
@@ -138,11 +138,11 @@ async def notify_admins_about_prize(
                     inline_keyboard=[
                         [
                             InlineKeyboardButton(
-                                text="✅ Подтвердить",
+                                text="Подтвердить",
                                 callback_data=f"prize_confirm_prompt:{history_id}",
                             ),
                             InlineKeyboardButton(
-                                text="❌ Отклонить",
+                                text="Отклонить",
                                 callback_data=f"prize_reject_prompt:{history_id}",
                             ),
                         ]
@@ -193,7 +193,7 @@ async def handle_prize_confirmation(
         if history_entry.is_claimed:
             await bot.send_message(
                 chat_id=admin_id,
-                text=f"ℹ️ Приз '{history_entry.prize_name}' для пользователя {user.name()} уже обработан ранее"
+                text=f"[INFO] Приз '{history_entry.prize_name}' для пользователя {user.name()} уже обработан ранее"
             )
             logger.info(f"Повторное нажатие подтверждения/отмены для history_id={history_id} проигнорировано")
             return
@@ -217,15 +217,15 @@ async def handle_prize_confirmation(
             await bot.send_message(
                 chat_id=user.id,
                 text=(
-                    f"🎉 **Отличные новости!**\n\n"
-                    f"🏆 Ваш приз **{history_entry.prize_name}** подтвержден!\n\n"
-                    f"📞 С вами свяжутся для получения приза."
+                    f"**Отличные новости!**\n\n"
+                    f"Ваш приз **{history_entry.prize_name}** подтвержден!\n\n"
+                    f"С вами свяжутся для получения приза."
                 ),
                 parse_mode="Markdown",
             )
             await bot.send_message(
                 chat_id=admin_id,
-                text=f"✅ Приз {history_entry.prize_name} для пользователя {user.name()} подтвержден",
+                text=f"[OK] Приз {history_entry.prize_name} для пользователя {user.name()} подтвержден",
             )
             logger.info(
                 f"Приз {history_entry.prize_name} для пользователя {user.id} подтвержден админом {admin_id}"
@@ -240,15 +240,15 @@ async def handle_prize_confirmation(
             await bot.send_message(
                 chat_id=user.id,
                 text=(
-                    f"😔 **К сожалению**\n\n"
-                    f"🏆 Ваш приз **{history_entry.prize_name}** был отклонен.\n\n"
-                    f"📞 Обратитесь в поддержку для уточнения деталей."
+                    f"**К сожалению**\n\n"
+                    f"Ваш приз **{history_entry.prize_name}** был отклонен.\n\n"
+                    f"Обратитесь в поддержку для уточнения деталей."
                 ),
                 parse_mode="Markdown",
             )
             await bot.send_message(
                 chat_id=admin_id,
-                text=f"❌ Приз {history_entry.prize_name} для пользователя {user.name()} отклонен",
+                text=f"[!] Приз {history_entry.prize_name} для пользователя {user.name()} отклонен",
             )
             if not history_entry.admin_notified:
                 await history_entry.mark_admin_notified()
@@ -279,14 +279,14 @@ async def notify_spin_awarded(user: Users, added_attempts: int, total_attempts: 
         lang = get_user_locale(user)
         if lang == 'ru':
             text = (
-                f"🎰 Начислены {int(added_attempts)} {ru_spins(added_attempts)} за автопродление.\n"
+                f"Начислены {int(added_attempts)} {ru_spins(added_attempts)} за автопродление.\n"
                 f"Доступно попыток: {int(total_attempts)}"
             )
             button = await webapp_inline_button("Личный кабинет")
         else:
             plural = "spin attempt" if int(added_attempts) == 1 else "spin attempts"
             text = (
-                f"🎰 You received {int(added_attempts)} {plural} for auto-renewal.\n"
+                f"You received {int(added_attempts)} {plural} for auto-renewal.\n"
                 f"Available attempts: {int(total_attempts)}"
             )
             button = await webapp_inline_button("Dashboard")

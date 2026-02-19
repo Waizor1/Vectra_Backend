@@ -1,5 +1,47 @@
 ## 2026-02-15
 
+- **fix(remnawave/updater):** восстановлена наблюдаемость ошибок воркера активации и anti-bot.
+  - `bloobcat/tasks/remnawave_updater.py`: удалено глотание ошибок в scheduler, добавлен `logger.exception(...)`.
+  - `bloobcat/routes/remnawave/catcher.py`: расширено логирование traceback в критичных ветках updater; webhook на `/remnawave/webhook` переведен на фоновой запуск обновления с lock-защитой от параллельного выполнения.
+
+- **fix(hwid/checker):** унифицирован парсинг устройств RemnaWave и усилена анти-твинк логика.
+  - `bloobcat/routes/remnawave/hwid_utils.py`:
+    - единый парсер `parse_remnawave_devices(...)` для форматов `list`, `response`, `response.devices`, `response.data`;
+    - унифицированное извлечение HWID (`hwid | deviceId | id`);
+    - helper `has_duplicate_hwid(...)` для проверки дубликатов между user UUID.
+  - `bloobcat/routes/remnawave/catcher.py`: переход на общие HWID-утилиты + race-safe fallback при `IntegrityError` в `HwidDeviceLocal.get_or_create(...)`.
+  - добавлен `bloobcat/routes/remnawave/activation_logic.py` с изолированным правилом `should_trigger_registration(...)`.
+
+- **feat(in-app-notifications):** реализована backend-система динамических уведомлений.
+  - Новые модели:
+    - `InAppNotification` (title/body/start/end/limits/auto-hide/is_active);
+    - `NotificationView` (user_id, notification_id, session_id, viewed_at).
+  - Новые API:
+    - `GET /notifications/active` — фильтр по периоду и лимитам per-user/per-session;
+    - `POST /notifications/{id}/view` — фиксация показа (idempotent при duplicate).
+  - Интеграция:
+    - `bloobcat/routes/notifications.py`,
+    - подключение в `bloobcat/routes/__init__.py`,
+    - регистрация моделей в `bloobcat/clients.py`.
+  - Миграции:
+    - `79_20260219120000_in_app_notifications.py`,
+    - `80_20260220120000_notification_views_unique.py` (UNIQUE `(user_id, notification_id, session_id)`).
+
+- **feat(admin/notifications):** добавлен FastAdmin CRUD для `InAppNotification`.
+  - Валидации:
+    - `end_at >= start_at` (если обе даты заданы),
+    - `max_per_user/max_per_session >= 1` или `null`,
+    - `auto_hide_seconds >= 1` или `null`.
+
+- **test(remnawave/hwid):** добавлены регресс-тесты:
+  - `tests/test_remnawave_activation.py`,
+  - `tests/test_hwid_antitwink.py`.
+
+- Проверки:
+  - `python -m py_compile` по измененным backend-файлам — успешно;
+  - `ReadLints` — ошибок нет;
+  - `pytest` локально блокируется из-за отсутствующей зависимости `yookassa` в окружении (ModuleNotFoundError при collection).
+
 - **fix(admin/family-section-workspace):** добавлен fallback-workspace в секцию `Семья` карточки `users` Directus.
   - В `scripts/directus_super_setup.py` добавлена фаза `ensure_users_family_workspace_aliases`.
   - Создаются/обновляются два alias-поля, которые гарантированно видны между `Семья` и `Техника`:

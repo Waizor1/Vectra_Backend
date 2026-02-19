@@ -6,7 +6,7 @@ from datetime import date
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from bloobcat.db.promotions import PromoCode, PromoUsage
 from bloobcat.funcs.validate import validate
@@ -18,7 +18,7 @@ router = APIRouter(prefix="/promo", tags=["promo"])
 
 
 class PromoValidateRequest(BaseModel):
-    code: str
+    code: str = Field(min_length=4, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
 
 
 class PromoValidateResponse(BaseModel):

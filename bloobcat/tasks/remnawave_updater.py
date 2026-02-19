@@ -17,7 +17,7 @@ async def run_remnawave_scheduler(interval_seconds: int = 600):
             from bloobcat.routes.remnawave.catcher import remnawave_updater  # noqa: WPS433
             await remnawave_updater()
         except Exception:
-            pass
+            logger.exception("RemnaWave updater scheduler iteration failed")
         await asyncio.sleep(interval_seconds)
 
 

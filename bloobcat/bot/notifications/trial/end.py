@@ -14,15 +14,15 @@ async def notify_trial_ended(user):
     lang = get_user_locale(user)
     if lang == 'ru':
         text = (
-            f"👋 Привет, {user.full_name}! Ваш пробный период завершен. 🎉\n"
-            "Не упустите возможность продления и получите эксклюзивные условия! 🔥\n"
+            f"Привет, {user.full_name}! Ваш пробный период завершен.\n"
+            "Не упустите возможность продления и получите эксклюзивные условия!\n"
             "Обратитесь в поддержку TVPN или продлите подписку прямо сейчас."
         )
         button = await webapp_inline_button("Продлить сейчас", "/pay")
     else:
         text = (
-            f"👋 Hi {user.full_name}! Your trial period has ended. 🎉\n"
-            "Don't miss out on exclusive offers and renew now! 🔥\n"
+            f"Hi {user.full_name}! Your trial period has ended.\n"
+            "Don't miss out on exclusive offers and renew now!\n"
             "Contact TVPN support or renew now."
         )
         button = await webapp_inline_button("Renew Now", "/pay")

@@ -26,16 +26,16 @@ async def notify_trial_granted(user: 'Users'): # Changed Users to 'Users'
 
     if lang == 'ru':
         text = (
-            f"🎉 Поздравляем, {user.full_name}! Вам предоставлен бесплатный {trial_duration_days}-дневный доступ к TVPN.\n\n"
+            f"Поздравляем, {user.full_name}! Вам предоставлен бесплатный {trial_duration_days}-дневный доступ к TVPN.\n\n"
             "Оцените все преимущества нашего сервиса прямо сейчас!"
         )
-        button_text = "🚀 В кабинет"
+        button_text = "В кабинет"
     else:
         text = (
-            f"🎉 Congratulations, {user.full_name}! You've been granted a free {trial_duration_days}-day access to TVPN.\n\n"
+            f"Congratulations, {user.full_name}! You've been granted a free {trial_duration_days}-day access to TVPN.\n\n"
             "Explore all the benefits of our service right now!"
         )
-        button_text = "🚀 To Dashboard"
+        button_text = "To Dashboard"
     
     button = await webapp_inline_button(button_text) # Assuming default WebApp URL is fine
 

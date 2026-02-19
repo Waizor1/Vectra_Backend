@@ -26,6 +26,7 @@ TORTOISE_ORM = {
                 "bloobcat.db.partner_earnings",
                 "bloobcat.db.error_reports",
                 "bloobcat.db.referral_rewards",
+                "bloobcat.db.in_app_notifications",
             ],
             "default_connection": "default",
         },

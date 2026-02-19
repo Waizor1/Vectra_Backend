@@ -434,7 +434,7 @@ def apply_collection_ux(client: DirectusClient) -> None:
         "promo_batches": {
             "group": "grp_promo",
             "icon": "inventory_2",
-            "note": "Партии промокодов",
+            "note": "Партии промокодов для группировки и аудита. Создайте партию перед добавлением кодов.",
             "sort": 1,
             "hidden": False,
             "translations": [{"language": "ru-RU", "translation": "Партии промокодов"}],
@@ -442,7 +442,7 @@ def apply_collection_ux(client: DirectusClient) -> None:
         "promo_codes": {
             "group": "grp_promo",
             "icon": "confirmation_number",
-            "note": "Промокоды и эффекты (HMAC генерируется хуком)",
+            "note": "Промокоды и эффекты. Введите сырой код — хук преобразует в HMAC. Используйте закладки: активные / отключённые / истёкшие.",
             "sort": 2,
             "hidden": False,
             "translations": [{"language": "ru-RU", "translation": "Промокоды"}],
@@ -450,7 +450,7 @@ def apply_collection_ux(client: DirectusClient) -> None:
         "promo_usages": {
             "group": "grp_promo",
             "icon": "history",
-            "note": "История использования промокодов",
+            "note": "История активаций промокодов пользователями. Связь: промокод → пользователь.",
             "sort": 3,
             "hidden": False,
             "translations": [{"language": "ru-RU", "translation": "Использование промокодов"}],
@@ -655,12 +655,25 @@ def apply_field_notes_ru(client: DirectusClient) -> None:
             "name": "Название карточки тарифа в админке и внутренних данных.",
             "order": "Порядок отображения тарифа на витрине.",
         },
+        "promo_batches": {
+            "title": "Название партии/кампании. Отображается в списках.",
+            "notes": "Заметки по партии: цель, канал распространения и т.п.",
+        },
         "promo_codes": {
-            "code_hmac": "Можно указать сырой код — хук преобразует в HMAC.",
-            "effects": "JSON с эффектами промокода.",
+            "name": "Человекочитаемое имя для админки (не сам код).",
+            "code_hmac": "Введите сырой промокод — хук преобразует в HMAC. Или вставьте готовый 64-символьный hex.",
+            "effects": "JSON с эффектами: extend_days, discount_percent, add_hwid и др.",
+            "batch_id": "Партия для группировки. Опционально.",
+            "max_activations": "Максимум активаций всего. 0 = без лимита.",
+            "per_user_limit": "Сколько раз один пользователь может активировать.",
+            "expires_at": "Дата истечения (включительно). Пусто = бессрочно.",
+            "disabled": "Принудительное отключение. Отключённые коды не принимаются.",
         },
         "promo_usages": {
-            "used_at": "Когда промокод был применен.",
+            "promo_code_id": "Какой промокод был применён.",
+            "user_id": "Кто применил промокод.",
+            "used_at": "Когда промокод был активирован.",
+            "context": "Доп. контекст (payment_id и т.п.).",
         },
         "prize_wheel_config": {
             "probability": "Вероятность от 0 до 1. Сумма активных призов ≤ 1.",
@@ -747,16 +760,31 @@ def apply_field_notes_ru(client: DirectusClient) -> None:
             "final_price_family": "Финальная цена (семейный)",
             "order": "Порядок",
         },
+        "promo_batches": {
+            "id": "ID",
+            "title": "Название",
+            "notes": "Заметки",
+            "created_at": "Создана",
+            "created_by_id": "Создал",
+        },
         "promo_codes": {
+            "id": "ID",
+            "name": "Имя",
             "code_hmac": "Код (HMAC)",
             "effects": "Эффекты",
-            "disabled": "Отключен",
             "batch_id": "Партия",
+            "max_activations": "Макс. активаций",
+            "per_user_limit": "На пользователя",
+            "expires_at": "Истекает",
+            "disabled": "Отключен",
+            "created_at": "Создан",
         },
         "promo_usages": {
-            "used_at": "Дата использования",
-            "user_id": "Пользователь",
+            "id": "ID",
             "promo_code_id": "Промокод",
+            "user_id": "Пользователь",
+            "used_at": "Дата использования",
+            "context": "Контекст",
         },
         "prize_wheel_config": {
             "prize_type": "Тип приза",
@@ -2896,6 +2924,77 @@ def ensure_role_presets(client: DirectusClient) -> None:
                 "color": "#14B8A6",
             }
         )
+        # promo_codes: default list
+        promo_codes_tabular_fields = [
+            "id",
+            "name",
+            "code_hmac",
+            "batch_id",
+            "disabled",
+            "expires_at",
+            "max_activations",
+            "per_user_limit",
+            "created_at",
+        ]
+        promo_codes_widths = {
+            "id": 80,
+            "name": 160,
+            "code_hmac": 220,
+            "batch_id": 100,
+            "disabled": 100,
+            "expires_at": 130,
+            "max_activations": 120,
+            "per_user_limit": 120,
+            "created_at": 160,
+        }
+        upsert_preset(
+            {
+                "bookmark": None,
+                "user": None,
+                "role": rid,
+                "collection": "promo_codes",
+                "layout": "tabular",
+                "layout_query": {
+                    "tabular": {
+                        "fields": promo_codes_tabular_fields,
+                        "sort": "-created_at",
+                    }
+                },
+                "layout_options": {"tabular": {"widths": promo_codes_widths}},
+                "filter": None,
+                "icon": "bookmark",
+                "color": None,
+            }
+        )
+        upsert_preset(
+            {
+                "bookmark": "Промо: активные",
+                "user": None,
+                "role": rid,
+                "collection": "promo_codes",
+                "layout": "tabular",
+                "layout_query": {
+                    "tabular": {
+                        "fields": promo_codes_tabular_fields,
+                        "sort": "-created_at",
+                    }
+                },
+                "layout_options": {"tabular": {"widths": promo_codes_widths}},
+                "filter": {
+                    "_and": [
+                        {"disabled": {"_eq": False}},
+                        {
+                            "_or": [
+                                {"expires_at": {"_null": True}},
+                                {"expires_at": {"_gte": "$NOW"}},
+                            ]
+                        },
+                    ]
+                },
+                "icon": "bookmark",
+                "color": "#10B981",
+            }
+        )
         upsert_preset(
             {
                 "bookmark": "Промо: отключенные",
@@ -2905,14 +3004,101 @@ def ensure_role_presets(client: DirectusClient) -> None:
                 "layout": "tabular",
                 "layout_query": {
                     "tabular": {
-                        "fields": ["name", "code_hmac", "disabled", "expires_at", "max_activations", "per_user_limit", "created_at"],
+                        "fields": promo_codes_tabular_fields,
                         "sort": "-created_at",
                     }
                 },
-                "layout_options": {"tabular": {"widths": {"name": 180, "code_hmac": 260, "disabled": 120, "expires_at": 160}}},
+                "layout_options": {"tabular": {"widths": promo_codes_widths}},
                 "filter": {"disabled": {"_eq": True}},
                 "icon": "bookmark",
                 "color": "#F59E0B",
+            }
+        )
+        upsert_preset(
+            {
+                "bookmark": "Промо: истёкшие",
+                "user": None,
+                "role": rid,
+                "collection": "promo_codes",
+                "layout": "tabular",
+                "layout_query": {
+                    "tabular": {
+                        "fields": promo_codes_tabular_fields,
+                        "sort": "expires_at",
+                    }
+                },
+                "layout_options": {"tabular": {"widths": promo_codes_widths}},
+                "filter": {
+                    "_and": [
+                        {"expires_at": {"_nnull": True}},
+                        {"expires_at": {"_lt": "$NOW"}},
+                    ]
+                },
+                "icon": "bookmark",
+                "color": "#EF4444",
+            }
+        )
+        # promo_batches: default list
+        promo_batches_tabular_fields = ["id", "title", "notes", "created_at", "created_by_id"]
+        promo_batches_widths = {"id": 80, "title": 200, "notes": 200, "created_at": 160, "created_by_id": 120}
+        upsert_preset(
+            {
+                "bookmark": None,
+                "user": None,
+                "role": rid,
+                "collection": "promo_batches",
+                "layout": "tabular",
+                "layout_query": {
+                    "tabular": {
+                        "fields": promo_batches_tabular_fields,
+                        "sort": "-created_at",
+                    }
+                },
+                "layout_options": {"tabular": {"widths": promo_batches_widths}},
+                "filter": None,
+                "icon": "bookmark",
+                "color": None,
+            }
+        )
+        # promo_usages: default and latest
+        promo_usages_tabular_fields = ["id", "promo_code_id", "user_id", "used_at", "context"]
+        promo_usages_widths = {"id": 80, "promo_code_id": 120, "user_id": 140, "used_at": 180, "context": 150}
+        upsert_preset(
+            {
+                "bookmark": None,
+                "user": None,
+                "role": rid,
+                "collection": "promo_usages",
+                "layout": "tabular",
+                "layout_query": {
+                    "tabular": {
+                        "fields": promo_usages_tabular_fields,
+                        "sort": "-used_at",
+                    }
+                },
+                "layout_options": {"tabular": {"widths": promo_usages_widths}},
+                "filter": None,
+                "icon": "bookmark",
+                "color": None,
+            }
+        )
+        upsert_preset(
+            {
+                "bookmark": "Использование: последние",
+                "user": None,
+                "role": rid,
+                "collection": "promo_usages",
+                "layout": "tabular",
+                "layout_query": {
+                    "tabular": {
+                        "fields": promo_usages_tabular_fields,
+                        "sort": "-used_at",
+                    }
+                },
+                "layout_options": {"tabular": {"widths": promo_usages_widths}},
+                "filter": None,
+                "icon": "bookmark",
+                "color": "#8B5CF6",
             }
         )
         upsert_preset(

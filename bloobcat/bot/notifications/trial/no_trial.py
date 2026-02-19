@@ -25,14 +25,14 @@ async def notify_no_trial_taken(user, hours_passed: int):
 
     if lang == 'ru':
         text = (
-            f"👋 Привет, {user.full_name}! Еще не воспользовались бесплатным доступом к VPN? 🔓\n"
+            f"Привет, {user.full_name}! Еще не воспользовались бесплатным доступом к VPN?\n"
             f"Активируйте {trial_duration_days}-дневный пробный период прямо сейчас и оцените все преимущества TVPN.\n"
             "Если возникнут вопросы, обратитесь в поддержку TVPN."
         )
         button = await webapp_inline_button("Подключить VPN", "/second")
     else:
         text = (
-            f"👋 Hi {user.full_name}! Haven't tried our free VPN access yet? 🔓\n"
+            f"Hi {user.full_name}! Haven't tried our free VPN access yet?\n"
             f"Activate a {trial_duration_days}-day trial now and experience all benefits of TVPN.\n"
             "Have questions? Contact TVPN support."
         )

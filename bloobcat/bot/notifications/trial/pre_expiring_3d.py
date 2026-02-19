@@ -184,8 +184,8 @@ async def notify_trial_three_days_left(user):
         text = (
             f"<b>Спасибо, что вы с нами уже {tenure_text}!</b>\n"
             "Рады, что TVPN был вам полезен. Хотим, чтобы так оставалось и дальше — ещё и выгоднее для вас.\n\n"
-            "⏳ До окончания триала: <b>3 дня</b>\n"
-            f"📱 Вы использовали: <b>{devices_count}</b> устройство(а)\n\n"
+            "До окончания триала: <b>3 дня</b>\n"
+            f"Вы использовали: <b>{devices_count}</b> устройство(а)\n\n"
             "<b>Рассказываем как продлить и платить меньше</b>:\n"
             f"• <b>Зайдите в \"Подписку\" и выберите 2 устройства — выйдет всего {price_two} ₽/мес</b>\n"
             f"• <b>Если нужно только 1 устройство — {price_one} ₽/мес</b>\n"
@@ -200,8 +200,8 @@ async def notify_trial_three_days_left(user):
         text = (
             f"<b>Thanks for being with us for {tenure_text}!</b>\n"
             "We hope TVPN has been useful. Keep it going — even more affordably for you.\n\n"
-            "⏳ Trial ends in: <b>3 days</b>\n"
-            f"📱 Devices used: <b>{devices_count}</b>\n\n"
+            "Trial ends in: <b>3 days</b>\n"
+            f"Devices used: <b>{devices_count}</b>\n\n"
             "<b>How to renew and pay less</b>:\n"
             f"• <b>Select 2 devices in \"Subscription\" — just {price_two} RUB/mo</b>\n"
             f"• <b>Only 1 device needed — {price_one} RUB/mo</b>\n"

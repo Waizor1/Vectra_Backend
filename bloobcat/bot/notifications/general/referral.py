@@ -35,7 +35,7 @@ async def on_referral_payment(
             else "Бонусные дни добавлены к вашей подписке."
         )
         text = (
-            f"🎉 Привет, {user.full_name}! Ваш друг {referral.name()} оплатил подписку.\n"
+            f"Привет, {user.full_name}! Ваш друг {referral.name()} оплатил подписку.\n"
             f"Вы получили +{bonus_days} дней (за покупку {months} мес.).\n"
             f"Друг получил +{friend_bonus_days} дней при первой оплате.\n"
             f"{applied_line}"
@@ -52,7 +52,7 @@ async def on_referral_payment(
             else "Bonus days were added to your subscription."
         )
         text = (
-            f"🎉 Hi {user.full_name}! Your friend {referral.name()} just paid for a subscription.\n"
+            f"Hi {user.full_name}! Your friend {referral.name()} just paid for a subscription.\n"
             f"You got +{bonus_days} days (purchase: {months} month(s)).\n"
             f"Your friend got +{friend_bonus_days} days on the first payment.\n"
             f"{applied_line}"
@@ -83,7 +83,7 @@ async def on_referral_friend_bonus(
     lang = get_user_locale(user)
     if lang == "ru":
         text = (
-            f"🎉 Привет, {user.full_name}! Спасибо за оплату.\n"
+            f"Привет, {user.full_name}! Спасибо за оплату.\n"
             f"Вам начислено +{friend_bonus_days} бонусных дней за переход по реферальной ссылке.\n"
             f"Реферер: {referrer.name()}.\n"
             f"Покупка: {months} мес., устройств: {device_count}."
@@ -91,7 +91,7 @@ async def on_referral_friend_bonus(
         button = await webapp_inline_button("Личный кабинет")
     else:
         text = (
-            f"🎉 Hi {user.full_name}! Thanks for your payment.\n"
+            f"Hi {user.full_name}! Thanks for your payment.\n"
             f"You got +{friend_bonus_days} bonus days for joining via a referral link.\n"
             f"Referrer: {referrer.name()}.\n"
             f"Purchase: {months} month(s), devices: {device_count}."
@@ -116,15 +116,15 @@ async def on_referral_registration(user: Users, referral: Users):
     if lang == 'ru':
         logger.info(f"Реферальная регистрация: у пользователя {user.id} зарегистрировался реферал {referral.id}")
         text = (
-            f"🎉 Привет, {user.full_name}! Ваш реферал {referral.name()} только что зарегистрировался.\n"
-            "Бонусные дни начисляются после первой оплаты друга. Спасибо, что рекомендуете нас! 🎊"
+            f"Привет, {user.full_name}! Ваш реферал {referral.name()} только что зарегистрировался.\n"
+            "Бонусные дни начисляются после первой оплаты друга. Спасибо, что рекомендуете нас!"
         )
         button = await webapp_inline_button("Реферальная программа", "/ref")
     else:
         logger.info(f"Referral registration: user {user.id} got a new referral signup {referral.id}")
         text = (
-            f"🎉 Hi {user.full_name}! Your referral {referral.name()} just signed up.\n"
-            "Bonus days are credited after your friend's first payment. Thanks for spreading the word! 🎊"
+            f"Hi {user.full_name}! Your referral {referral.name()} just signed up.\n"
+            "Bonus days are credited after your friend's first payment. Thanks for spreading the word!"
         )
         button = await webapp_inline_button("Реферальная программа", "/ref")
     try:
@@ -145,14 +145,14 @@ async def on_referral_prompt(user: Users, days: int):
     lang = get_user_locale(user)
     if lang == 'ru':
         text = (
-            f"🎉 Привет, {user.full_name}! Уже {days} дней вместе.\n"
+            f"Привет, {user.full_name}! Уже {days} дней вместе.\n"
             "Пригласите друга — и получите бонусные дни к подписке.\n"
             "Друг тоже получит +7 дней при первой оплате."
         )
         button = await webapp_inline_button("Реферальная программа", "/ref")
     else:
         text = (
-            f"🎉 Hi {user.full_name}! You've been with us for {days} days.\n"
+            f"Hi {user.full_name}! You've been with us for {days} days.\n"
             "Invite a friend and get bonus subscription days.\n"
             "Your friend also gets +7 days on the first payment."
         )

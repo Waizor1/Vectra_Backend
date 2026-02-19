@@ -1,4 +1,4 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, BackgroundTasks
 from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
 import asyncio
@@ -13,10 +13,13 @@ from bloobcat.db.partner_qr import PartnerQr
 from bloobcat.logger import get_logger
 from bloobcat.db.hwid_local import HwidDeviceLocal
 from .client import RemnaWaveClient
+from .activation_logic import should_trigger_registration
+from .hwid_utils import extract_hwid_from_device, has_duplicate_hwid, parse_remnawave_devices
 from bloobcat.settings import remnawave_settings, test_mode
 from bloobcat.bot.notifications.general.referral import on_referral_registration
 from bloobcat.bot.notifications.trial.revoked_hwid import notify_trial_revoked_hwid
 from tortoise.expressions import F
+from tortoise.exceptions import IntegrityError
 
 router = APIRouter(prefix="/remnawave", tags=["remnawave"])
 logger = get_logger("remnawave_catcher")
@@ -29,15 +32,15 @@ user_state_cache: Dict[str, Dict[str, Any]] = {}
 update_lock = asyncio.Lock()
 
 @router.get("/webhook")
-async def webhook():
-    """Обработчик вебхука для запуска обновления RemnaWave"""
-    try:
-        logger.info("Получен запрос на вебхук, запуск remnawave_updater")
-        await remnawave_updater()
-        return {"status": "ok"}
-    except Exception as e:
-        logger.error(f"Ошибка в обработчике вебхука: {str(e)}")
-        return {"status": "error", "detail": str(e)}
+async def webhook(background_tasks: BackgroundTasks):
+    """Обработчик вебхука для запуска обновления RemnaWave.
+
+    Запускает remnawave_updater в фоне, чтобы не блокировать HTTP-ответ.
+    update_lock в updater предотвращает гонки при параллельных вызовах.
+    """
+    logger.info("Получен запрос на вебхук, планирование remnawave_updater")
+    background_tasks.add_task(remnawave_updater)
+    return {"status": "ok"}
 
 
 async def remnawave_updater():
@@ -48,10 +51,10 @@ async def remnawave_updater():
     и выполняет bulk_update в конце. Перепланирование задач происходит только
     для пользователей, которым это действительно необходимо (первая регистрация).
     """
-    global logger
-
+    lock_acquired = False
     try:
         await asyncio.wait_for(update_lock.acquire(), timeout=0)
+        lock_acquired = True
     except asyncio.TimeoutError:
         logger.info("Процесс обновления уже запущен, пропускаем")
         return
@@ -209,36 +212,32 @@ async def remnawave_updater():
                         logger.warning("Не удалось получить HWID для %s: %s", user_uuid_str, e)
                         continue
 
-                    devices_payload = []
-                    if isinstance(raw_devices, list):
-                        devices_payload = [item for item in raw_devices if isinstance(item, dict)]
-                    elif isinstance(raw_devices, dict):
-                        data = raw_devices.get("response", raw_devices) or {}
-                        maybe_devices = data.get("devices") or data.get("response") or []
-                        if isinstance(maybe_devices, list):
-                            devices_payload = [item for item in maybe_devices if isinstance(item, dict)]
+                    devices_payload = parse_remnawave_devices(raw_devices)
 
                     for item in devices_payload:
-                        hwid = item.get("hwid")
-                        if not hwid:
+                        hwid_str = extract_hwid_from_device(item)
+                        if not hwid_str:
                             continue
-                        hwid_str = str(hwid)
                         hwid_index.setdefault(hwid_str, set()).add(user_uuid_str)
 
                         try:
-                            obj, created = await HwidDeviceLocal.get_or_create(
-                                hwid=hwid_str,
-                                user_uuid=user_uuid_str,
-                                defaults={"telegram_user_id": user.id},
-                            )
-                            need_update = False
+                            try:
+                                obj, created = await HwidDeviceLocal.get_or_create(
+                                    hwid=hwid_str,
+                                    user_uuid=user_uuid_str,
+                                    defaults={"telegram_user_id": user.id},
+                                )
+                            except IntegrityError:
+                                obj = await HwidDeviceLocal.get_or_none(
+                                    hwid=hwid_str, user_uuid=user_uuid_str
+                                )
+                                if not obj:
+                                    raise
+                                created = False
                             if obj.telegram_user_id != user.id:
                                 obj.telegram_user_id = user.id
-                                need_update = True
                             obj.last_seen_at = datetime.now(ZoneInfo("UTC"))
-                            need_update = True
-                            if need_update:
-                                await obj.save(update_fields=["telegram_user_id", "last_seen_at"])
+                            await obj.save(update_fields=["telegram_user_id", "last_seen_at"])
                         except Exception as persist_exc:
                             logger.warning(
                                 "Не удалось сохранить HWID %s/%s локально: %s",
@@ -335,18 +334,14 @@ async def remnawave_updater():
                             and not user.is_registered
                         ):
                             current_uuid = str(user.remnawave_uuid) if user.remnawave_uuid else None
-                            user_devices_hwid = []
-                            if current_uuid:
-                                for hwid_value, owners in hwid_index.items():
-                                    if current_uuid in owners:
-                                        user_devices_hwid.append(hwid_value)
-
-                            duplicate_hwid = False
-                            for hwid_value in user_devices_hwid:
-                                owners = hwid_index.get(hwid_value, set())
-                                if any(owner != current_uuid for owner in owners):
-                                    duplicate_hwid = True
-                                    break
+                            user_devices_hwid = (
+                                [hwid for hwid, owners in hwid_index.items() if current_uuid in owners]
+                                if current_uuid
+                                else []
+                            )
+                            duplicate_hwid = (
+                                bool(current_uuid) and has_duplicate_hwid(current_uuid, hwid_index)
+                            )
 
                             if duplicate_hwid and not has_paid_subscription:
                                 block_registration = True
@@ -398,10 +393,12 @@ async def remnawave_updater():
                                 )
 
                         # Разрешаем регистрацию, только если нет блокировки (включая сохранённую анти-твинк санкцию)
-                        if (
-                            not user.is_registered
-                            and not block_registration
-                            and not is_antitwink_sanction
+                        if should_trigger_registration(
+                            online_at=online_at,
+                            old_connected_at=old_connected_at,
+                            is_registered=user.is_registered,
+                            block_registration=block_registration,
+                            is_antitwink_sanction=is_antitwink_sanction,
                         ):
                             referrer = await user.referrer()
                             await on_activated_key(user.id, user.full_name, referrer_id=referrer.id if referrer else None, referrer_name=referrer.full_name if referrer else None, utm=user.utm)
@@ -514,8 +511,8 @@ async def remnawave_updater():
                             else:
                                 raise
 
-                except Exception as e:
-                    logger.error(f"Ошибка при обработке пользователя {user.id}: {str(e)}")
+                except Exception:
+                    logger.exception("Ошибка при обработке пользователя %s", user.id)
                     errors += 1
             else:
                 logger.warning(f"Пользователь {user.id} с UUID {user_uuid_str} не найден в RemnaWave")
@@ -549,14 +546,14 @@ async def remnawave_updater():
                     fields=['connected_at', 'is_registered']
                 )
                 logger.info(f"Батчевое обновление выполнено для {len(users_to_bulk_update)} пользователей")
-            except Exception as e:
-                logger.error(f"Ошибка при батчевом обновлении пользователей: {e}")
+            except Exception:
+                logger.exception("Ошибка при батчевом обновлении пользователей")
                 # Fallback: сохраняем пользователей по одному
                 for user in users_to_bulk_update:
                     try:
                         await user.save(update_fields=['connected_at', 'is_registered'])
-                    except Exception as save_error:
-                        logger.error(f"Ошибка при сохранении пользователя {user.id}: {save_error}")
+                    except Exception:
+                        logger.exception("Ошибка при сохранении пользователя %s", user.id)
                         errors += 1
 
         if users_hwid_limit_updates:
@@ -566,22 +563,22 @@ async def remnawave_updater():
                     fields=['hwid_limit']
                 )
                 logger.info(f"Батчевое обновление hwid_limit выполнено для {len(users_hwid_limit_updates)} пользователей")
-            except Exception as e:
-                logger.error(f"Ошибка при батчевом обновлении hwid_limit: {e}")
+            except Exception:
+                logger.exception("Ошибка при батчевом обновлении hwid_limit")
                 for user in users_hwid_limit_updates:
                     try:
                         await user.save(update_fields=['hwid_limit'])
-                    except Exception as save_error:
-                        logger.error(f"Ошибка при сохранении hwid_limit пользователя {user.id}: {save_error}")
+                    except Exception:
+                        logger.exception("Ошибка при сохранении hwid_limit пользователя %s", user.id)
                         errors += 1
 
-        # Точечно фиксируем санкционные изменения expire_at
+        # Санкционные поля (is_trial, used_trial, expired_at) сохраняются отдельно от bulk_update
         if users_with_sanctions:
             for user in users_with_sanctions:
                 try:
                     await user.save(update_fields=['is_trial', 'used_trial', 'expired_at'])
-                except Exception as e:
-                    logger.error(f"Ошибка при сохранении санкционных изменений пользователя {user.id}: {e}")
+                except Exception:
+                    logger.exception("Ошибка при сохранении санкционных изменений пользователя %s", user.id)
                     errors += 1
         
         # Перепланируем задачи только для пользователей, которым это действительно нужно
@@ -592,22 +589,22 @@ async def remnawave_updater():
                     try:
                         await schedule_user_tasks(user)
                         logger.debug(f"Задачи перепланированы для пользователя {user.id}")
-                    except Exception as e:
-                        logger.error(f"Ошибка при перепланировании задач для пользователя {user.id}: {e}")
+                    except Exception:
+                        logger.exception("Ошибка при перепланировании задач для пользователя %s", user.id)
                         errors += 1
                 logger.info(f"Задачи перепланированы для {len(users_need_task_reschedule)} пользователей")
-            except Exception as e:
-                logger.error(f"Ошибка при импорте или выполнении schedule_user_tasks: {e}")
+            except Exception:
+                logger.exception("Ошибка при импорте или выполнении schedule_user_tasks")
         
         # Вычисляем время выполнения с учётом одинаковой tz-aware метки
         elapsed = (datetime.now(ZoneInfo("Europe/Moscow")) - start_time).total_seconds()
         logger.info(f"Синхронизация завершена за {elapsed:.2f} секунд. Обновлено: {updated}, ошибок: {errors}, батчевых обновлений: {len(users_to_bulk_update)}, перепланировано задач: {len(users_need_task_reschedule)}")
         
-    except Exception as e:
-        logger.error(f"Критическая ошибка в remnawave_updater: {str(e)}")
+    except Exception:
+        logger.exception("Критическая ошибка в remnawave_updater")
     finally:
-        update_lock.release()
-        # Лог завершения с использованием той же tz-aware даты
-        end_time = datetime.now(ZoneInfo("Europe/Moscow"))
-        total_time = (end_time - start_time).total_seconds()
-        logger.info(f"Завершение работы remnawave_updater, время выполнения: {total_time:.2f} секунд")
+        if lock_acquired:
+            update_lock.release()
+            end_time = datetime.now(ZoneInfo("Europe/Moscow"))
+            total_time = (end_time - start_time).total_seconds()
+            logger.info(f"Завершение работы remnawave_updater, время выполнения: {total_time:.2f} секунд")

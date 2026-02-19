@@ -20,14 +20,14 @@ async def notify_trial_revoked_hwid(user):
     lang = get_user_locale(user)
     if lang == "ru":
         text = (
-            f"⚠️ {user.full_name}, бесплатный период не доступен, потому что это устройство уже использовалось.\n"
+            f"[!] {user.full_name}, бесплатный период не доступен, потому что это устройство уже использовалось.\n"
             "Вы можете продолжить, оформив подписку."
         )
         button_text = "Купить подписку"
         button = await webapp_inline_button(button_text, "/pay")
     else:
         text = (
-            f"⚠️ {user.full_name}, the free trial is unavailable because this device was used before.\n"
+            f"[!] {user.full_name}, the free trial is unavailable because this device was used before.\n"
             "You can continue by purchasing a subscription."
         )
         button_text = "Buy Subscription"

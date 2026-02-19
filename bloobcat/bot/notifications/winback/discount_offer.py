@@ -22,7 +22,7 @@ async def notify_winback_discount_offer(user: Users, percent: int, expires_at: d
 
     if lang == 'ru':
         text = (
-            f"👋 Привет, {user.full_name}! Давно не виделись.\n\n"
+            f"Привет, {user.full_name}! Давно не виделись.\n\n"
             f"Мы скучаем и хотим предложить вам вернуться! "
             f"Поэтому дарим вам персональную скидку **{percent}%** на следующую покупку тарифа.\n\n"
             f"Скидка действует до {expires_formatted}.\n\n"
@@ -31,7 +31,7 @@ async def notify_winback_discount_offer(user: Users, percent: int, expires_at: d
         button_text = "Получить скидку"
     else:
         text = (
-            f"👋 Hi {user.full_name}! We haven't seen you in a while.\n\n"
+            f"Hi {user.full_name}! We haven't seen you in a while.\n\n"
             f"We miss you and want to invite you back! "
             f"That's why we're giving you a personal discount of **{percent}%** on your next purchase of a subscription.\n\n"
             f"The discount is valid until {expires_formatted}.\n\n"

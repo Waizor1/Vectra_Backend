@@ -24,7 +24,7 @@ async def notify_lte_half_limit(user, used_gb: float, total_gb: float, is_trial:
 
     if lang == "ru":
         text = (
-            f"⚠️ Вы использовали 50% LTE-лимита: {used} из {total} GB.\n"
+            f"[!] Вы использовали 50% LTE-лимита: {used} из {total} GB.\n"
             "Доступ к LTE-нодам будет отключен при исчерпании лимита."
         )
         if is_trial:
@@ -32,7 +32,7 @@ async def notify_lte_half_limit(user, used_gb: float, total_gb: float, is_trial:
         button = await webapp_inline_button("Личный кабинет")
     else:
         text = (
-            f"⚠️ You have used 50% of your LTE limit: {used} out of {total} GB.\n"
+            f"[!] You have used 50% of your LTE limit: {used} out of {total} GB.\n"
             "LTE access will be disabled once the limit is reached."
         )
         if is_trial:
@@ -59,7 +59,7 @@ async def notify_lte_full_limit(user, used_gb: float, total_gb: float, is_trial:
 
     if lang == "ru":
         text = (
-            f"⛔️ LTE-лимит исчерпан: {used} из {total} GB.\n"
+            f"[!] LTE-лимит исчерпан: {used} из {total} GB.\n"
             "Мы отключили доступ к LTE-нодам до обновления лимита.\n"
             "Можно увеличить LTE в разделе «Подписка → Изменить тариф»."
         )
@@ -68,7 +68,7 @@ async def notify_lte_full_limit(user, used_gb: float, total_gb: float, is_trial:
         button = await webapp_inline_button("Докупить LTE", "subscription/change")
     else:
         text = (
-            f"⛔️ LTE limit reached: {used} out of {total} GB.\n"
+            f"[!] LTE limit reached: {used} out of {total} GB.\n"
             "We disabled LTE access until the limit is refreshed.\n"
             "You can increase LTE in Subscription → Change plan."
         )

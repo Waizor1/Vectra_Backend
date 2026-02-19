@@ -1,10 +1,82 @@
 import asyncio
-from typing import Union
+from typing import Any, Dict, List, Optional, Union
 from bloobcat.routes.remnawave.client import RemnaWaveClient
 from bloobcat.settings import remnawave_settings
 from bloobcat.logger import get_logger
 
 logger = get_logger("remnawave_hwid_utils")
+
+
+def parse_remnawave_devices(raw: Any) -> List[Dict[str, Any]]:
+    """Единообразный парсинг ответа RemnaWave для устройств.
+
+    Поддерживает форматы:
+    - list: [{"hwid": "...", ...}, ...]
+    - dict: {"response": [...]} | {"response": {"devices": [...]}} | {"response": {"data": [...]}}
+    - вложенный: {"response": {"data": {"devices": [...]}}}
+    """
+
+    def _to_list(val: Any) -> List[Dict[str, Any]]:
+        if isinstance(val, list):
+            return [item for item in val if isinstance(item, dict)]
+        return []
+
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        return _to_list(raw)
+    if isinstance(raw, dict):
+        if "response" in raw:
+            inner = raw["response"]
+            if inner is None:
+                return []
+        else:
+            inner = raw
+        if isinstance(inner, list):
+            return _to_list(inner)
+        if isinstance(inner, dict):
+            maybe = inner.get("devices") or inner.get("data") or inner.get("response") or []
+            result = _to_list(maybe)
+            if result:
+                return result
+            if isinstance(maybe, dict):
+                maybe2 = maybe.get("devices") or maybe.get("data") or maybe.get("response") or []
+                return _to_list(maybe2)
+    return []
+
+
+def extract_hwid_from_device(device: Dict[str, Any]) -> Optional[str]:
+    """Извлекает HWID из записи устройства (hwid, deviceId, id). Пустые значения отбрасываются."""
+    if not isinstance(device, dict):
+        return None
+    hwid = device.get("hwid") or device.get("deviceId") or device.get("id")
+    if hwid is None:
+        return None
+    s = str(hwid).strip()
+    return s if s else None
+
+
+def has_duplicate_hwid(user_uuid: str, hwid_index: Dict[str, set]) -> bool:
+    """Проверяет, есть ли у пользователя HWID, используемый другим аккаунтом (anti-twink).
+
+    Arguments:
+        user_uuid: UUID пользователя в RemnaWave
+        hwid_index: словарь hwid -> set(user_uuids)
+
+    Returns:
+        True если хотя бы один HWID пользователя привязан к другому аккаунту
+    """
+    user_devices_hwid = [
+        hwid_value
+        for hwid_value, owners in hwid_index.items()
+        if user_uuid in owners
+    ]
+    for hwid_value in user_devices_hwid:
+        owners = hwid_index.get(hwid_value, set())
+        if any(owner != user_uuid for owner in owners):
+            return True
+    return False
+
 
 async def cleanup_user_hwid_devices(user_id: int, user_uuid: Union[str, object]) -> None:
     """
@@ -22,22 +94,11 @@ async def cleanup_user_hwid_devices(user_id: int, user_uuid: Union[str, object])
         )
         raw_resp = await client.users.get_user_hwid_devices(str(user_uuid))
         logger.debug(f"Ответ API списка HWID устройств для пользователя {user_id}: {raw_resp}")
-        # Парсим список устройств
-        devices: list = []
-        if isinstance(raw_resp, list):
-            devices = raw_resp
-        elif isinstance(raw_resp, dict):
-            resp = raw_resp.get("response")
-            if isinstance(resp, list):
-                devices = resp
-            elif isinstance(resp, dict) and isinstance(resp.get("devices"), list):
-                devices = resp.get("devices")
+        devices = parse_remnawave_devices(raw_resp)
         logger.debug(f"Распарсированные HWID устройства для пользователя {user_id}: {devices}")
 
         for device in devices:
-            hwid = None
-            if isinstance(device, dict):
-                hwid = device.get("hwid") or device.get("deviceId") or device.get("id")
+            hwid = extract_hwid_from_device(device)
             if not hwid:
                 logger.warning(f"Нет HWID в записи устройства для пользователя {user_id}: {device}")
                 continue
