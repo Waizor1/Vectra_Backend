@@ -748,3 +748,26 @@
   - в `TVPN_BACK_END/bloobcat/routes/payment.py` добавлен импорт `from typing import Any`.
 - Проверка:
   - `python -m py_compile bloobcat/routes/payment.py` проходит без ошибок.
+
+### 2026-02-20 — self-heal FK для notification_marks (ON DELETE CASCADE)
+
+- Симптом:
+  - удаление пользователей через Directus падало с ошибкой: `FOREIGN KEY constraint violation` на `notification_marks_user_id_fkey`.
+- Причина:
+  - FK constraint `notification_marks_user_id_fkey` был создан без `ON DELETE CASCADE`;
+  - Aerich записал миграцию `81_20260220_fix_notification_marks_cascade.py` как "applied", но SQL на проде не выполнился;
+  - из-за этого удаление cascade'ом не работало.
+- Исправление:
+  - в `bloobcat/__main__.py` добавлена функция `ensure_notification_marks_fk_cascade()` (строки 153–198) по аналогии с `ensure_active_tariffs_fk_cascade()`;
+  - функция при старте приложения проверяет constraint через `information_schema.table_constraints / key_column_usage`;
+  - если constraint существует, но без `ON DELETE CASCADE` — автоматически пересоздаёт его с CASCADE (self-heal);
+  - функция вызывается в `lifespan` (строка 238) сразу после `ensure_active_tariffs_fk_cascade()`.
+- Пример SQL (что исправляется):
+  - было: `ALTER TABLE notification_marks ... ON DELETE NO ACTION`;
+  - стало: `ALTER TABLE notification_marks ... ON DELETE CASCADE`.
+- Верификация:
+  - `python -m py_compile bloobcat/__main__.py` — успешно;
+  - `ReadLints` по файлу — ошибок нет;
+  - при старте backend логирует: `[INFO] Self-healing FK constraint notification_marks_user_id_fkey with ON DELETE CASCADE` (если пересоздание произошло).
+- Файл:
+  - `TVPN_BACK_END/bloobcat/__main__.py`.

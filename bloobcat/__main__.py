@@ -150,6 +150,54 @@ async def ensure_active_tariffs_fk_cascade() -> None:
     except Exception as e:
         logger.error("Ошибка FK self-heal для active_tariffs: {}", e, exc_info=True)
 
+async def ensure_notification_marks_fk_cascade() -> None:
+    """
+    Safety net against schema drift:
+    ensure notification_marks.user_id -> users.id is ON DELETE CASCADE.
+    """
+    try:
+        conn = Tortoise.get_connection("default")
+    except Exception as e:
+        logger.warning("Не удалось получить DB connection для FK self-heal (notification_marks): {}", e)
+        return
+
+    try:
+        rows = await conn.execute_query_dict(
+            """
+            SELECT rc.delete_rule
+            FROM information_schema.table_constraints tc
+            JOIN information_schema.referential_constraints rc
+              ON tc.constraint_name = rc.constraint_name
+            WHERE tc.constraint_type = 'FOREIGN KEY'
+              AND tc.table_name = 'notification_marks'
+              AND tc.constraint_name = 'notification_marks_user_id_fkey'
+            LIMIT 1;
+            """
+        )
+        delete_rule = (rows[0].get("delete_rule") if rows else None) or ""
+        if str(delete_rule).upper() == "CASCADE":
+            logger.info("FK check ok: notification_marks_user_id_fkey is CASCADE")
+            return
+
+        logger.warning(
+            "Обнаружен drift FK notification_marks_user_id_fkey (delete_rule={}): применяю self-heal",
+            delete_rule or "MISSING",
+        )
+        await conn.execute_script(
+            """
+            ALTER TABLE "notification_marks"
+              DROP CONSTRAINT IF EXISTS "notification_marks_user_id_fkey";
+
+            ALTER TABLE "notification_marks"
+              ADD CONSTRAINT "notification_marks_user_id_fkey"
+              FOREIGN KEY ("user_id") REFERENCES "users" ("id") ON DELETE CASCADE;
+            """
+        )
+        logger.info("FK self-heal applied: notification_marks_user_id_fkey -> ON DELETE CASCADE")
+    except Exception as e:
+        logger.error("Ошибка FK self-heal для notification_marks: {}", e, exc_info=True)
+
+
 @asynccontextmanager
 async def lifespan(fastapi_app: FastAPI):
     command = Command(tortoise_config=TORTOISE_ORM, location="migrations")
@@ -187,6 +235,7 @@ async def lifespan(fastapi_app: FastAPI):
 
     # Extra schema guard for drifted environments.
     await ensure_active_tariffs_fk_cascade()
+    await ensure_notification_marks_fk_cascade()
 
     try:
         await bot.set_chat_menu_button(
