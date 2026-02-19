@@ -31,6 +31,10 @@
   - Readonly: все (для дашборда)
 - `notification_marks`, `personal_discounts`, `hwid_devices_local`, `processed_payments`
   - Readonly по умолчанию, открывать только при необходимости (в отдельной роли).
+- `in_app_notifications` — всплывающие popup-уведомления в Mini App
+  - Manager: CRUD; Viewer: read-only
+  - Группа навигации: Основное (grp_main)
+  - Связанная служебная таблица: `notification_views` (история показов, только чтение)
 
 ### Роли Directus
 - `Admin` (полный доступ + управление ролями)

@@ -431,6 +431,15 @@ def apply_collection_ux(client: DirectusClient) -> None:
             "hidden": False,
             "translations": [{"language": "ru-RU", "translation": "Аудит семьи"}],
         },
+        "in_app_notifications": {
+            "group": "grp_main",
+            "icon": "notifications",
+            "note": "Всплывающие уведомления в Mini App",
+            "sort": 8,
+            "hidden": False,
+            "display_template": "{{title}}",
+            "translations": [{"language": "ru-RU", "translation": "In-App уведомления"}],
+        },
         "promo_batches": {
             "group": "grp_promo",
             "icon": "inventory_2",
@@ -569,6 +578,14 @@ def apply_collection_ux(client: DirectusClient) -> None:
             "hidden": True,
             "translations": [{"language": "ru-RU", "translation": "Миграции Aerich"}],
         },
+        "notification_views": {
+            "group": "grp_service",
+            "icon": "visibility",
+            "note": "История показов уведомлений",
+            "sort": 6,
+            "hidden": True,
+            "translations": [{"language": "ru-RU", "translation": "История показов уведомлений"}],
+        },
     }
 
     for collection, meta in meta_updates.items():
@@ -701,6 +718,24 @@ def apply_field_notes_ru(client: DirectusClient) -> None:
             "created_at": "Когда запись лога была создана в БД.",
             "reported_at": "Время ошибки на клиенте (по часам пользователя).",
         },
+        "in_app_notifications": {
+            "title": "Заголовок уведомления.",
+            "body": "Текст уведомления. Поддерживает многострочный текст.",
+            "start_at": "Дата/время начала показа уведомления (включительно).",
+            "end_at": "Дата/время окончания показа уведомления (включительно).",
+            "max_per_user": "Максимум показов на пользователя. Пусто = без лимита.",
+            "max_per_session": "Максимум показов на сессию. Пусто = без лимита.",
+            "auto_hide_seconds": "Авто-скрытие через N секунд. Пусто = ручное закрытие.",
+            "is_active": "Активно ли уведомление. Неактивные не показываются.",
+            "created_at": "Дата создания записи.",
+            "updated_at": "Дата последнего изменения.",
+        },
+        "notification_views": {
+            "user_id": "Пользователь, которому было показано уведомление.",
+            "notification_id": "Уведомление, которое было показано.",
+            "session_id": "Идентификатор сессии показа.",
+            "viewed_at": "Дата и время показа уведомления.",
+        },
     }
     field_translations = {
         "users": {
@@ -816,6 +851,26 @@ def apply_field_notes_ru(client: DirectusClient) -> None:
             "triage_updated_at": "Обновлен",
             "created_at": "Создан",
             "reported_at": "Время на клиенте",
+        },
+        "in_app_notifications": {
+            "id": "ID",
+            "title": "Заголовок",
+            "body": "Текст уведомления",
+            "start_at": "Показывать с",
+            "end_at": "Показывать до",
+            "max_per_user": "Макс. показов на пользователя",
+            "max_per_session": "Макс. показов на сессию",
+            "auto_hide_seconds": "Авто-скрытие (сек)",
+            "is_active": "Активно",
+            "created_at": "Создано",
+            "updated_at": "Обновлено",
+        },
+        "notification_views": {
+            "id": "ID",
+            "user_id": "Пользователь",
+            "notification_id": "Уведомление",
+            "session_id": "Сессия",
+            "viewed_at": "Просмотрено",
         },
     }
 
@@ -2336,6 +2391,7 @@ def ensure_permissions_baseline(client: DirectusClient) -> None:
         "prize_wheel_config",
         "prize_wheel_history",
         "processed_payments",
+        "in_app_notifications",
         # Partners (optional)
         "partner_withdrawals",
     }
@@ -2345,6 +2401,7 @@ def ensure_permissions_baseline(client: DirectusClient) -> None:
     manager_ro = {
         "connections",
         "error_reports",
+        "notification_views",
     }
     viewer_ro = {
         "users",
@@ -2357,6 +2414,8 @@ def ensure_permissions_baseline(client: DirectusClient) -> None:
         "connections",
         "processed_payments",
         "error_reports",
+        "in_app_notifications",
+        "notification_views",
     }
     admin_rw = {
         "users",
@@ -2373,6 +2432,8 @@ def ensure_permissions_baseline(client: DirectusClient) -> None:
         "prize_wheel_history",
         "connections",
         "processed_payments",
+        "in_app_notifications",
+        "notification_views",
         # Partners (optional)
         "partner_withdrawals",
         "partner_qr_codes",
@@ -3253,6 +3314,71 @@ def ensure_role_presets(client: DirectusClient) -> None:
                 "filter": {"triage_status": {"_eq": "resolved"}},
                 "icon": "bookmark",
                 "color": "#10B981",
+            }
+        )
+        # in_app_notifications: default list + bookmarks
+        notif_tabular_fields = ["id", "title", "is_active", "start_at", "end_at", "max_per_user", "max_per_session", "auto_hide_seconds", "created_at"]
+        notif_widths = {
+            "id": 80,
+            "title": 240,
+            "is_active": 100,
+            "start_at": 180,
+            "end_at": 180,
+            "max_per_user": 170,
+            "max_per_session": 170,
+            "auto_hide_seconds": 160,
+            "created_at": 160,
+        }
+        upsert_preset(
+            {
+                "bookmark": None,
+                "user": None,
+                "role": rid,
+                "collection": "in_app_notifications",
+                "layout": "tabular",
+                "layout_query": {"tabular": {"fields": notif_tabular_fields, "sort": "-created_at"}},
+                "layout_options": {"tabular": {"widths": notif_widths}},
+                "filter": None,
+                "icon": "bookmark",
+                "color": None,
+            }
+        )
+        upsert_preset(
+            {
+                "bookmark": "Уведомления: активные",
+                "user": None,
+                "role": rid,
+                "collection": "in_app_notifications",
+                "layout": "tabular",
+                "layout_query": {"tabular": {"fields": notif_tabular_fields, "sort": "-created_at"}},
+                "layout_options": {"tabular": {"widths": notif_widths}},
+                "filter": {
+                    "_and": [
+                        {"is_active": {"_eq": True}},
+                        {
+                            "_or": [
+                                {"end_at": {"_null": True}},
+                                {"end_at": {"_gte": "$NOW"}},
+                            ]
+                        },
+                    ]
+                },
+                "icon": "bookmark",
+                "color": "#10B981",
+            }
+        )
+        upsert_preset(
+            {
+                "bookmark": "Уведомления: неактивные",
+                "user": None,
+                "role": rid,
+                "collection": "in_app_notifications",
+                "layout": "tabular",
+                "layout_query": {"tabular": {"fields": notif_tabular_fields, "sort": "-created_at"}},
+                "layout_options": {"tabular": {"widths": notif_widths}},
+                "filter": {"is_active": {"_eq": False}},
+                "icon": "bookmark",
+                "color": "#EF4444",
             }
         )
 
