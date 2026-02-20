@@ -1,5 +1,4 @@
 from aiogram import Router, F
-from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import CommandObject, CommandStart
 from aiogram.types import CallbackQuery, Message
 
@@ -38,13 +37,6 @@ async def command_start_handler(message: Message, command: CommandObject):
     response_text = welcome_texts.get(detected_lang, welcome_texts["en"])
     button_text = button_texts.get(detected_lang, button_texts["en"])
 
-    # Отправляем стикер и приветственное сообщение с кнопкой WebApp
-    try:
-        await message.answer_sticker(
-            "CAACAgIAAxkBAAE0A7NoBql4h4j5JDT3bBQCoMNP4FcSgwACbwAD29t-AAGZW1Coe5OAdDYE"
-        )
-    except TelegramAPIError as e:
-        print(f"Error sending sticker: {e}")
     # Forward /start payload into the Mini App URL as a query param.
     # Telegram's `start_param` is available only for MiniApp deep links, so we store it in the URL
     # and let the Mini App bootstrap send it to backend via /auth/telegram.
