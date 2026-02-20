@@ -157,9 +157,9 @@ jobs:
         fi
 
         if [ "\$HAS_DB_SERVICE" -eq 1 ]; then
-          docker compose \$COMPOSE_ARGS exec -T bloobcat_db sh -lc '
-            psql -U postgres -d postgres -v ON_ERROR_STOP=1 <<'"'"'SQL'"'"'
-            DO $$
+          docker compose \$COMPOSE_ARGS exec -T bloobcat_db \
+            psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
+              -c "DO \$\$
             DECLARE
               s RECORD;
               c RECORD;
@@ -218,30 +218,28 @@ jobs:
                   'id'
                 );
               END LOOP;
-            END $$;
-
-            SELECT
-              tc.table_schema,
-              tc.constraint_name,
-              rc.delete_rule
-            FROM information_schema.table_constraints tc
-            JOIN information_schema.key_column_usage kcu
-              ON tc.constraint_name = kcu.constraint_name
-             AND tc.constraint_schema = kcu.constraint_schema
-            JOIN information_schema.constraint_column_usage ccu
-              ON tc.constraint_name = ccu.constraint_name
-             AND tc.constraint_schema = ccu.constraint_schema
-            JOIN information_schema.referential_constraints rc
-              ON tc.constraint_name = rc.constraint_name
-             AND tc.constraint_schema = rc.constraint_schema
-            WHERE tc.constraint_type = 'FOREIGN KEY'
-              AND tc.table_name = 'active_tariffs'
-              AND kcu.column_name = 'user_id'
-              AND ccu.table_name = 'users'
-              AND ccu.column_name = 'id'
-            ORDER BY tc.table_schema, tc.constraint_name;
-SQL
-          ' && FK_FIX_OK=1 || true
+            END \$\$;" \
+              -c "SELECT
+            tc.table_schema,
+            tc.constraint_name,
+            rc.delete_rule
+          FROM information_schema.table_constraints tc
+          JOIN information_schema.key_column_usage kcu
+            ON tc.constraint_name = kcu.constraint_name
+           AND tc.constraint_schema = kcu.constraint_schema
+          JOIN information_schema.constraint_column_usage ccu
+            ON tc.constraint_name = ccu.constraint_name
+           AND tc.constraint_schema = ccu.constraint_schema
+          JOIN information_schema.referential_constraints rc
+            ON tc.constraint_name = rc.constraint_name
+           AND tc.constraint_schema = rc.constraint_schema
+          WHERE tc.constraint_type = 'FOREIGN KEY'
+            AND tc.table_name = 'active_tariffs'
+            AND kcu.column_name = 'user_id'
+            AND ccu.table_name = 'users'
+            AND ccu.column_name = 'id'
+          ORDER BY tc.table_schema, tc.constraint_name;" \
+          && FK_FIX_OK=1 || true
         else
           echo "Warning: service bloobcat_db not found in compose config; skipping FK DB fix"
           FK_FIX_OK=1
