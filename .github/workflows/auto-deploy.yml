@@ -149,6 +149,111 @@ jobs:
         echo "🛠️  Применяем Directus super-setup (UI/UX метаданные, права, presets)..."
         # Run inside the app container where Python deps exist, and point DIRECTUS_URL to the internal service.
         # Setup can fail transiently right after restart; retry to reduce flaky deploys.
+        echo "Fixing FK active_tariffs.user_id -> users.id (ON DELETE CASCADE)..."
+        FK_FIX_OK=0
+        HAS_DB_SERVICE=0
+        if docker compose \$COMPOSE_ARGS config --services | grep -qx "bloobcat_db"; then
+          HAS_DB_SERVICE=1
+        fi
+
+        if [ "\$HAS_DB_SERVICE" -eq 1 ]; then
+          docker compose \$COMPOSE_ARGS exec -T bloobcat_db sh -lc '
+            psql -U postgres -d postgres -v ON_ERROR_STOP=1 <<'"'"'SQL'"'"'
+            DO $$
+            DECLARE
+              s RECORD;
+              c RECORD;
+            BEGIN
+              FOR s IN
+                SELECT n.nspname AS schema_name
+                FROM pg_namespace n
+                WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+                  AND EXISTS (
+                    SELECT 1
+                    FROM pg_class c
+                    WHERE c.relnamespace = n.oid
+                      AND c.relname = 'active_tariffs'
+                      AND c.relkind IN ('r', 'p')
+                  )
+                  AND EXISTS (
+                    SELECT 1
+                    FROM pg_class c
+                    WHERE c.relnamespace = n.oid
+                      AND c.relname = 'users'
+                      AND c.relkind IN ('r', 'p')
+                  )
+              LOOP
+                FOR c IN
+                  SELECT tc.constraint_name
+                  FROM information_schema.table_constraints tc
+                  JOIN information_schema.key_column_usage kcu
+                    ON tc.constraint_name = kcu.constraint_name
+                   AND tc.constraint_schema = kcu.constraint_schema
+                  JOIN information_schema.constraint_column_usage ccu
+                    ON tc.constraint_name = ccu.constraint_name
+                   AND tc.constraint_schema = ccu.constraint_schema
+                  WHERE tc.constraint_type = 'FOREIGN KEY'
+                    AND tc.table_schema = s.schema_name
+                    AND tc.table_name = 'active_tariffs'
+                    AND kcu.column_name = 'user_id'
+                    AND ccu.table_name = 'users'
+                    AND ccu.column_name = 'id'
+                LOOP
+                  EXECUTE format(
+                    'ALTER TABLE %I.%I DROP CONSTRAINT IF EXISTS %I',
+                    s.schema_name,
+                    'active_tariffs',
+                    c.constraint_name
+                  );
+                END LOOP;
+
+                EXECUTE format(
+                  'ALTER TABLE %I.%I ADD CONSTRAINT %I FOREIGN KEY (%I) REFERENCES %I.%I (%I) ON DELETE CASCADE',
+                  s.schema_name,
+                  'active_tariffs',
+                  'fk_active_tariffs_user',
+                  'user_id',
+                  s.schema_name,
+                  'users',
+                  'id'
+                );
+              END LOOP;
+            END $$;
+
+            SELECT
+              tc.table_schema,
+              tc.constraint_name,
+              rc.delete_rule
+            FROM information_schema.table_constraints tc
+            JOIN information_schema.key_column_usage kcu
+              ON tc.constraint_name = kcu.constraint_name
+             AND tc.constraint_schema = kcu.constraint_schema
+            JOIN information_schema.constraint_column_usage ccu
+              ON tc.constraint_name = ccu.constraint_name
+             AND tc.constraint_schema = ccu.constraint_schema
+            JOIN information_schema.referential_constraints rc
+              ON tc.constraint_name = rc.constraint_name
+             AND tc.constraint_schema = rc.constraint_schema
+            WHERE tc.constraint_type = 'FOREIGN KEY'
+              AND tc.table_name = 'active_tariffs'
+              AND kcu.column_name = 'user_id'
+              AND ccu.table_name = 'users'
+              AND ccu.column_name = 'id'
+            ORDER BY tc.table_schema, tc.constraint_name;
+SQL
+          ' && FK_FIX_OK=1 || true
+        else
+          echo "Warning: service bloobcat_db not found in compose config; skipping FK DB fix"
+          FK_FIX_OK=1
+        fi
+
+        if [ "\$FK_FIX_OK" -ne 1 ]; then
+          echo "FK DB fix failed; abort deploy"
+          docker compose \$COMPOSE_ARGS ps
+          docker compose \$COMPOSE_ARGS logs --tail=150 bloobcat_db || true
+          exit 1
+        fi
+
         SUPER_SETUP_OK=0
         docker compose \$COMPOSE_ARGS exec -T bloobcat sh -lc '
           export DIRECTUS_URL="http://directus:8055"
