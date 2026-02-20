@@ -3,6 +3,7 @@
 from bloobcat.routes.remnawave.activation_logic import should_trigger_registration
 from bloobcat.routes.remnawave.catcher import _extract_online_at
 from bloobcat.routes.remnawave.hwid_utils import (
+    count_active_devices,
     extract_hwid_from_device,
     parse_remnawave_devices,
 )
@@ -105,6 +106,86 @@ def test_extract_hwid_from_device_non_dict_returns_none():
     """Не-dict -> None."""
     assert extract_hwid_from_device(None) is None
     assert extract_hwid_from_device([]) is None
+
+
+# --- count_active_devices ---
+
+
+def test_count_active_devices_list_format():
+    """Формат list: считаются только валидные активные."""
+    raw = [
+        {"hwid": "a1"},
+        {"hwid": ""},
+        {"deviceId": "d1"},
+        {"hwid": "x", "status": "disabled"},
+        {"id": "i1"},
+    ]
+    assert count_active_devices(raw) == 3
+
+
+def test_count_active_devices_response_devices_format():
+    """Формат response.devices сохраняет совместимость."""
+    raw = {"response": {"devices": [{"hwid": "d1"}, {"hwid": "d2"}]}}
+    assert count_active_devices(raw) == 2
+
+
+def test_count_active_devices_excludes_deleted_status():
+    """status=deleted/removed/inactive исключаются."""
+    raw = [
+        {"hwid": "ok"},
+        {"hwid": "del", "status": "deleted"},
+        {"hwid": "rem", "status": "removed"},
+        {"hwid": "ina", "status": "inactive"},
+        {"hwid": "dis", "status": "disabled"},
+    ]
+    assert count_active_devices(raw) == 1
+
+
+def test_count_active_devices_excludes_flags():
+    """isDeleted, isDisabled, deleted, deletedAt исключают запись."""
+    raw = [
+        {"hwid": "ok"},
+        {"hwid": "x", "isDeleted": True},
+        {"hwid": "y", "isDisabled": True},
+        {"hwid": "z", "deleted": True},
+        {"hwid": "w", "deletedAt": "2025-01-01T00:00:00Z"},
+    ]
+    assert count_active_devices(raw) == 1
+
+
+def test_count_active_devices_string_flags_respected():
+    """String flags from external APIs should be parsed safely."""
+    raw = [
+        {"hwid": "ok1", "isDeleted": "false"},
+        {"hwid": "ok2", "isDisabled": "0"},
+        {"hwid": "drop1", "deleted": "true"},
+        {"hwid": "drop2", "isDeleted": "YES"},
+    ]
+    assert count_active_devices(raw) == 2
+
+
+def test_count_active_devices_none_returns_zero():
+    assert count_active_devices(None) == 0
+
+
+def test_count_active_devices_dedup_same_hwid():
+    """Одинаковый hwid в нескольких записях считается как одно устройство."""
+    raw = [
+        {"hwid": "same-hwid-1"},
+        {"hwid": "same-hwid-1", "deviceId": "other-field"},
+        {"deviceId": "same-hwid-1"},
+    ]
+    assert count_active_devices(raw) == 1
+
+
+def test_count_active_devices_dedup_preserves_status_filter():
+    """Дедупликация не ломает фильтрацию статусов: дубликат с excluded статусом не считается."""
+    raw = [
+        {"hwid": "h1"},
+        {"hwid": "h1", "status": "deleted"},
+        {"hwid": "h2"},
+    ]
+    assert count_active_devices(raw) == 2
 
 
 # --- should_trigger_registration: onlineAt есть, connected_at пустой ---

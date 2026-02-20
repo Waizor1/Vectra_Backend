@@ -18,7 +18,7 @@ from bloobcat.settings import remnawave_settings, app_settings
 from bloobcat.logger import get_logger
 from fastapi import FastAPI
 from starlette.background import BackgroundTask
-from bloobcat.routes.remnawave.hwid_utils import cleanup_user_hwid_devices
+from bloobcat.routes.remnawave.hwid_utils import cleanup_user_hwid_devices, count_active_devices
 from bloobcat.db.active_tariff import ActiveTariffs
 from bloobcat.db.family_members import FamilyMembers
 from bloobcat.db.tariff import Tariffs
@@ -133,21 +133,12 @@ async def check(user: Users = Depends(validate)) -> Dict[str, Any]:
             f"[/user check] sub_url_present={bool(subscription_url)}, url_error={error_getting_url}"
         )
 
-        # Добавляем количество HWID устройств для пользователя
+        # Добавляем количество HWID устройств для пользователя (только валидные активные)
         devices_count = 0
         if user.remnawave_uuid:
             try:
                 raw_resp = await remnawave_client.users.get_user_hwid_devices(str(user.remnawave_uuid))
-                devices_list = []
-                if isinstance(raw_resp, list):
-                    devices_list = raw_resp
-                elif isinstance(raw_resp, dict):
-                    resp = raw_resp.get("response")
-                    if isinstance(resp, list):
-                        devices_list = resp
-                    elif isinstance(resp, dict) and isinstance(resp.get("devices"), list):
-                        devices_list = resp.get("devices")
-                devices_count = len(devices_list)
+                devices_count = count_active_devices(raw_resp)
             except Exception as e:
                 logger.error(f"Ошибка получения списка устройств для пользователя {user.id}: {e}")
         user_dict["devices_count"] = devices_count
@@ -725,23 +716,14 @@ async def get_family_subscription(familyurl: str):
     user_dict["subscription_url"] = subscription_url
     user_dict["subscription_url_error"] = error_getting_url
 
-    # Подсчёт устройств
+    # Подсчёт устройств (только валидные активные)
     devices_count = 0
     if user.remnawave_uuid:
         try:
             raw_resp = await remnawave_client.users.get_user_hwid_devices(str(user.remnawave_uuid))
-            devices_list = []
-            if isinstance(raw_resp, list):
-                devices_list = raw_resp
-            elif isinstance(raw_resp, dict):
-                resp = raw_resp.get("response")
-                if isinstance(resp, list):
-                    devices_list = resp
-                elif isinstance(resp, dict) and isinstance(resp.get("devices"), list):
-                    devices_list = resp.get("devices")
-            devices_count = len(devices_list)
-        except Exception:
-            pass
+            devices_count = count_active_devices(raw_resp)
+        except Exception as e:
+            logger.warning(f"Ошибка получения списка устройств для пользователя {user.id} (family/{familyurl}): {e}")
     user_dict["devices_count"] = devices_count
 
     # --- Определение лимита устройств (только из БД) ---

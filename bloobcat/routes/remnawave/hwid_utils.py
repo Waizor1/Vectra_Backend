@@ -56,6 +56,53 @@ def extract_hwid_from_device(device: Dict[str, Any]) -> Optional[str]:
     return s if s else None
 
 
+# Статусы, при которых устройство не считается активным (для devices_count)
+_DEVICE_EXCLUDED_STATUSES = frozenset({"disabled", "deleted", "removed", "inactive"})
+
+
+def _is_truthy_flag(value: Any) -> bool:
+    """Safe bool parser for loose API payloads."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        return normalized in {"1", "true", "yes", "y", "on"}
+    return False
+
+
+def _is_device_excluded_by_status(device: Dict[str, Any]) -> bool:
+    """Проверяет, исключено ли устройство по явному статусу удаления/disabled."""
+    if not isinstance(device, dict):
+        return True
+    status = device.get("status")
+    if status is not None and str(status).strip().lower() in _DEVICE_EXCLUDED_STATUSES:
+        return True
+    if _is_truthy_flag(device.get("isDeleted")) or _is_truthy_flag(device.get("isDisabled")) or _is_truthy_flag(device.get("deleted")):
+        return True
+    deleted_at = device.get("deletedAt")
+    if deleted_at is not None and deleted_at:
+        return True
+    return False
+
+
+def count_active_devices(raw: Any) -> int:
+    """Подсчёт валидных активных устройств из ответа RemnaWave.
+
+    Учитывает: непустой hwid/deviceId/id; исключает записи с status=disabled/deleted/removed/inactive,
+    isDeleted/isDisabled/deleted=true, deletedAt непустой.
+    Считает только уникальные устройства по HWID (дедупликация).
+    """
+    devices = parse_remnawave_devices(raw)
+    seen_hwids: set[str] = set()
+    for d in devices:
+        hwid = extract_hwid_from_device(d)
+        if hwid and not _is_device_excluded_by_status(d):
+            seen_hwids.add(hwid)
+    return len(seen_hwids)
+
+
 def has_duplicate_hwid(user_uuid: str, hwid_index: Dict[str, set]) -> bool:
     """Проверяет, есть ли у пользователя HWID, используемый другим аккаунтом (anti-twink).
 
