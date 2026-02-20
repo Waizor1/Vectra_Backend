@@ -159,7 +159,7 @@ jobs:
         if [ "\$HAS_DB_SERVICE" -eq 1 ]; then
           docker compose \$COMPOSE_ARGS exec -T bloobcat_db \
             psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
-              -c "DO \$\$
+              -c "DO \\\$\\\$
             DECLARE
               s RECORD;
               c RECORD;
@@ -218,7 +218,7 @@ jobs:
                   'id'
                 );
               END LOOP;
-            END \$\$;" \
+            END \\\$\\\$;" \
               -c "SELECT
             tc.table_schema,
             tc.constraint_name,
