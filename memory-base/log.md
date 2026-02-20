@@ -1,5 +1,19 @@
 ## 2026-02-20
 
+- **fix(db/users-delete-fk-guard):** устранен повторяющийся `INTERNAL_SERVER_ERROR` при удалении пользователя из-за дрейфа FK `active_tariffs -> users`.
+  - **Симптом:** удаление `users` падало с `violates foreign key constraint "fk_active_tariffs_user"` (в `active_tariffs` было `NO ACTION/RESTRICT` вместо `CASCADE`).
+  - **RCA:** проверка self-heal в `bloobcat/__main__.py` была завязана на фиксированное имя constraint (`fk_active_tariffs_user`) и могла пропустить drift при другом имени FK.
+  - **Исправление:**
+    - добавлен модуль `bloobcat/db/fk_guards.py` с устойчивой проверкой FK по структуре связи (`active_tariffs.user_id -> users.id`), а не по имени;
+    - `bloobcat/__main__.py` переведен на импорт guard-функций из `fk_guards`;
+    - в `bloobcat/db/users.py::Users.delete()` добавлен runtime fail-safe `await ensure_active_tariffs_fk_cascade()` перед `super().delete()`.
+  - **Ops-диагностика:** `directus/extensions/endpoints/server-ops/index.js` команда `fk_active_tariffs` теперь также проверяет FK по таблице/колонке и показывает фактические constraints + `delete_rule`.
+  - Дополнительно исправлен SQL в `fk_users_overview` (PostgreSQL-совместимый join через `constraint_column_usage`), чтобы команда не падала при диагностике.
+  - **Тесты:** в `tests/test_resilience_hardening.py` добавлены регрессии:
+    - self-heal применяет repair при `NO ACTION`;
+    - `Users.delete()` вызывает FK guard перед удалением.
+  - Прогон: `py -3.12 -m pytest tests/test_resilience_hardening.py -q` -> `11 passed`.
+
 - **feat(deploy/tariffs):** автосидирование тарифов добавлено в backend auto-deploy.
   - Добавлен новый идемпотентный скрипт `scripts/seed_tariffs.py`:
     - source-of-truth по дефолтным тарифам теперь хранится в `TARIFFS` (редактирование/добавление позиций в одном месте);

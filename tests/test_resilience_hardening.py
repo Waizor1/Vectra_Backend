@@ -6,6 +6,8 @@ from fastapi import HTTPException
 from starlette.requests import Request
 
 from bloobcat.db.users import _get_remnawave_user_lock
+from bloobcat.db.users import Users
+from bloobcat.db import fk_guards
 from bloobcat.middleware.rate_limit import RateLimiter, get_client_ip, get_user_id_from_request
 from bloobcat.funcs import validate as validate_module
 
@@ -190,3 +192,92 @@ async def test_validate_with_non_whitelisted_start_param_missing_user_returns_no
 
     assert exc.value.status_code == 403
     assert exc.value.detail == "User not registered"
+
+
+@pytest.mark.asyncio
+async def test_ensure_active_tariffs_fk_cascade_repairs_non_cascade(monkeypatch):
+    class _Conn:
+        def __init__(self):
+            self.script_calls = 0
+
+        async def execute_query_dict(self, _query):
+            return [{"constraint_name": "active_tariffs_user_id_fkey", "delete_rule": "NO ACTION"}]
+
+        async def execute_script(self, _script):
+            self.script_calls += 1
+
+    conn = _Conn()
+    monkeypatch.setattr(fk_guards.Tortoise, "get_connection", lambda _name: conn)
+    await fk_guards.ensure_active_tariffs_fk_cascade()
+    assert conn.script_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_ensure_active_tariffs_fk_cascade_repairs_missing_constraint(monkeypatch):
+    class _Conn:
+        def __init__(self):
+            self.script_calls = 0
+
+        async def execute_query_dict(self, _query):
+            return []
+
+        async def execute_script(self, _script):
+            self.script_calls += 1
+
+    conn = _Conn()
+    monkeypatch.setattr(fk_guards.Tortoise, "get_connection", lambda _name: conn)
+    await fk_guards.ensure_active_tariffs_fk_cascade()
+    assert conn.script_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_users_delete_calls_active_tariffs_fk_guard(monkeypatch):
+    calls = {"guard": 0, "cancel": 0, "super_delete": 0}
+
+    async def _guard():
+        calls["guard"] += 1
+
+    def _cancel(_user_id):
+        calls["cancel"] += 1
+
+    async def _super_delete(_self, *args, **kwargs):
+        calls["super_delete"] += 1
+        return 1
+
+    monkeypatch.setattr("bloobcat.db.users.ensure_active_tariffs_fk_cascade", _guard)
+    monkeypatch.setattr("bloobcat.scheduler.cancel_user_tasks", _cancel)
+    monkeypatch.setattr("tortoise.models.Model.delete", _super_delete)
+
+    user = Users()
+    user.id = 777001
+    user.remnawave_uuid = None
+
+    result = await user.delete()
+    assert result == 1
+    assert calls == {"guard": 1, "cancel": 1, "super_delete": 1}
+
+
+@pytest.mark.asyncio
+async def test_users_delete_calls_guard_before_super_delete(monkeypatch):
+    order = []
+
+    async def _guard():
+        order.append("guard")
+
+    def _cancel(_user_id):
+        order.append("cancel")
+
+    async def _super_delete(_self, *args, **kwargs):
+        order.append("super_delete")
+        return 1
+
+    monkeypatch.setattr("bloobcat.db.users.ensure_active_tariffs_fk_cascade", _guard)
+    monkeypatch.setattr("bloobcat.scheduler.cancel_user_tasks", _cancel)
+    monkeypatch.setattr("tortoise.models.Model.delete", _super_delete)
+
+    user = Users()
+    user.id = 777002
+    user.remnawave_uuid = None
+
+    await user.delete()
+    assert order == ["cancel", "guard", "super_delete"]

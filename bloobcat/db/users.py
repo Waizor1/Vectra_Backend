@@ -19,6 +19,7 @@ from bloobcat.settings import remnawave_settings, test_mode, app_settings
 from bloobcat.logger import get_logger
 
 from bloobcat.db.active_tariff import ActiveTariffs
+from bloobcat.db.fk_guards import ensure_active_tariffs_fk_cascade
 
 import zlib
 
@@ -687,6 +688,8 @@ class Users(models.Model):
         # Cancel all scheduled asyncio tasks for this user
         from bloobcat.scheduler import cancel_user_tasks
         cancel_user_tasks(self.id)
+        # Safety net: перед удалением пользователя гарантируем CASCADE для active_tariffs.user_id.
+        await ensure_active_tariffs_fk_cascade()
         # Удаляем пользователя в RemnaWave
         if self.remnawave_uuid:
             from bloobcat.routes.remnawave.client import RemnaWaveClient

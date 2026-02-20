@@ -21,10 +21,15 @@ async function cmdFkUsersOverview(database) {
     FROM information_schema.table_constraints AS tc
     JOIN information_schema.key_column_usage AS kcu
       ON tc.constraint_name = kcu.constraint_name
+     AND tc.constraint_schema = kcu.constraint_schema
+    JOIN information_schema.constraint_column_usage AS ccu
+      ON tc.constraint_name = ccu.constraint_name
+     AND tc.constraint_schema = ccu.constraint_schema
     JOIN information_schema.referential_constraints AS rc
       ON tc.constraint_name = rc.constraint_name
+     AND tc.constraint_schema = rc.constraint_schema
     WHERE tc.constraint_type = 'FOREIGN KEY'
-      AND kcu.referenced_table_name = 'users'
+      AND ccu.table_name = 'users'
     ORDER BY tc.table_name, tc.constraint_name;
     `
   );
@@ -34,9 +39,28 @@ async function cmdFkUsersOverview(database) {
 async function cmdFkActiveTariffs(database) {
   const raw = await database.raw(
     `
-    SELECT conname, pg_get_constraintdef(oid) AS definition
-    FROM pg_constraint
-    WHERE conname = 'fk_active_tariffs_user';
+    SELECT
+      tc.constraint_name,
+      rc.delete_rule,
+      pg_get_constraintdef(con.oid) AS definition
+    FROM information_schema.table_constraints tc
+    JOIN information_schema.key_column_usage kcu
+      ON tc.constraint_name = kcu.constraint_name
+     AND tc.constraint_schema = kcu.constraint_schema
+    JOIN information_schema.constraint_column_usage ccu
+      ON tc.constraint_name = ccu.constraint_name
+     AND tc.constraint_schema = ccu.constraint_schema
+    JOIN information_schema.referential_constraints rc
+      ON tc.constraint_name = rc.constraint_name
+     AND tc.constraint_schema = rc.constraint_schema
+    JOIN pg_constraint con
+      ON con.conname = tc.constraint_name
+    WHERE tc.constraint_type = 'FOREIGN KEY'
+      AND tc.table_name = 'active_tariffs'
+      AND kcu.column_name = 'user_id'
+      AND ccu.table_name = 'users'
+      AND ccu.column_name = 'id'
+    ORDER BY tc.constraint_name;
     `
   );
   return rowsFromRaw(raw);
