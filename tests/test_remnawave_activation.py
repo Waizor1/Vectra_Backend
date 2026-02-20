@@ -1,7 +1,7 @@
 """Регрессионные тесты для activation/registration path RemnaWave."""
 
 from bloobcat.routes.remnawave.activation_logic import should_trigger_registration
-from bloobcat.routes.remnawave.catcher import _extract_online_at
+from bloobcat.routes.remnawave.catcher import _extract_online_at, _safe_parse_online_at
 from bloobcat.routes.remnawave.hwid_utils import (
     count_active_devices,
     extract_hwid_from_device,
@@ -57,6 +57,23 @@ def test_parse_remnawave_devices_dict_response_data_devices():
     result = parse_remnawave_devices(raw)
     assert len(result) == 1
     assert result[0]["hwid"] == "n1"
+
+
+def test_parse_remnawave_devices_dict_response_items():
+    """Формат dict: {"response": {"items": [...]}}."""
+    raw = {"response": {"items": [{"hwid": "it1"}, {"deviceId": "it2"}]}}
+    result = parse_remnawave_devices(raw)
+    assert len(result) == 2
+    assert result[0]["hwid"] == "it1"
+    assert result[1]["deviceId"] == "it2"
+
+
+def test_parse_remnawave_devices_single_device_dict_failsafe():
+    """Fail-safe: одиночный dict с полями устройства должен считаться 1 устройством."""
+    raw = {"response": {"hwid": "single-hwid"}}
+    result = parse_remnawave_devices(raw)
+    assert len(result) == 1
+    assert result[0]["hwid"] == "single-hwid"
 
 
 def test_parse_remnawave_devices_none_returns_empty():
@@ -275,3 +292,12 @@ def test_extract_online_at_falls_back_to_first_connected_at():
         }
     }
     assert _extract_online_at(data) == "2026-02-19T07:30:00Z"
+
+
+def test_safe_parse_online_at_invalid_format_returns_none():
+    assert _safe_parse_online_at("not-a-timestamp") is None
+
+
+def test_safe_parse_online_at_valid_iso_returns_datetime():
+    parsed = _safe_parse_online_at("2026-02-20T12:00:00Z")
+    assert parsed is not None

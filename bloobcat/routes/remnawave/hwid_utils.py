@@ -21,6 +21,27 @@ def parse_remnawave_devices(raw: Any) -> List[Dict[str, Any]]:
             return [item for item in val if isinstance(item, dict)]
         return []
 
+    def _device_keys_dict(val: Any) -> bool:
+        if not isinstance(val, dict):
+            return False
+        return any(key in val for key in ("hwid", "deviceId", "id"))
+
+    def _extract_from_dict(inner: Dict[str, Any]) -> List[Dict[str, Any]]:
+        # Поддерживаем несколько популярных форматов, встречающихся в разных версиях API.
+        for key in ("devices", "data", "response", "items", "rows", "result"):
+            maybe = inner.get(key)
+            result = _to_list(maybe)
+            if result:
+                return result
+            if isinstance(maybe, dict):
+                nested = _extract_from_dict(maybe)
+                if nested:
+                    return nested
+        # Fail-safe: иногда API может вернуть одно устройство как dict без списка.
+        if _device_keys_dict(inner):
+            return [inner]
+        return []
+
     if raw is None:
         return []
     if isinstance(raw, list):
@@ -35,13 +56,7 @@ def parse_remnawave_devices(raw: Any) -> List[Dict[str, Any]]:
         if isinstance(inner, list):
             return _to_list(inner)
         if isinstance(inner, dict):
-            maybe = inner.get("devices") or inner.get("data") or inner.get("response") or []
-            result = _to_list(maybe)
-            if result:
-                return result
-            if isinstance(maybe, dict):
-                maybe2 = maybe.get("devices") or maybe.get("data") or maybe.get("response") or []
-                return _to_list(maybe2)
+            return _extract_from_dict(inner)
     return []
 
 

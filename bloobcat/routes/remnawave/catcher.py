@@ -41,6 +41,19 @@ def _extract_online_at(remnawave_user: Dict[str, Any] | None) -> Optional[str]:
         or user_traffic.get("firstConnectedAt")
     )
 
+
+def _safe_parse_online_at(raw_online_at: Any) -> Optional[datetime]:
+    """Парсит timestamp подключения и не роняет цикл на неожиданных форматах."""
+    if not raw_online_at:
+        return None
+    try:
+        value = str(raw_online_at).strip()
+        if not value:
+            return None
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
 @router.get("/webhook")
 async def webhook(background_tasks: BackgroundTasks):
     """Обработчик вебхука для запуска обновления RemnaWave.
@@ -129,6 +142,11 @@ async def remnawave_updater():
             
         # Проверка пользователей    
         users_with_uuid = [u for u in users if u.remnawave_uuid and hasattr(u, 'expired_at') and u.expired_at]
+        logger.info(
+            "Checker input: total_users=%s users_with_uuid_and_expired=%s",
+            len(users),
+            len(users_with_uuid),
+        )
         if not users_with_uuid:
             logger.warning("Не найдено пользователей с UUID и датой истечения")
             return
@@ -209,8 +227,11 @@ async def remnawave_updater():
 
         # Анти-твинк: выключаем только в тестовом режиме
         anti_twink_enabled = not test_mode
+        logger.info("Anti-twink checker enabled=%s (test_mode=%s)", anti_twink_enabled, test_mode)
 
         hwid_index: dict[str, set[str]] = {}
+        total_hwid_payload_items = 0
+        users_with_any_hwid_payload = 0
         if anti_twink_enabled:
             try:
                 # 0) Берем локальный кеш, чтобы учитывать старые HWID (даже если удалены на панели)
@@ -231,6 +252,9 @@ async def remnawave_updater():
                         continue
 
                     devices_payload = parse_remnawave_devices(raw_devices)
+                    total_hwid_payload_items += len(devices_payload)
+                    if devices_payload:
+                        users_with_any_hwid_payload += 1
 
                     for item in devices_payload:
                         hwid_str = extract_hwid_from_device(item)
@@ -264,7 +288,12 @@ async def remnawave_updater():
                                 persist_exc,
                             )
 
-                logger.debug("Индекс HWID собран (лок+панель): %s записей", len(hwid_index))
+                logger.info(
+                    "HWID index built: unique_hwid=%s users_with_payload=%s payload_items=%s",
+                    len(hwid_index),
+                    users_with_any_hwid_payload,
+                    total_hwid_payload_items,
+                )
             except Exception as e:
                 anti_twink_enabled = False
                 logger.warning(
@@ -291,6 +320,15 @@ async def remnawave_updater():
 
         # Выполним проверку пользователей
         not_found_users = []
+        online_at_available_count = 0
+        online_at_recovered_count = 0
+        activation_path_entered_count = 0
+        activation_notify_sent_count = 0
+        activation_skipped_flags_count = 0
+        duplicate_hwid_detected_count = 0
+        duplicate_hwid_blocked_count = 0
+        duplicate_hwid_paid_skip_count = 0
+
         for user in users_with_uuid:
             # Получаем UUID пользователя как строку
             user_uuid_str = str(user.remnawave_uuid)
@@ -329,6 +367,7 @@ async def remnawave_updater():
                             ) or {}
                             online_at = _extract_online_at(user_detail)
                             if online_at:
+                                online_at_recovered_count += 1
                                 logger.info(
                                     "Recovered onlineAt via individual fetch for user %s: %s",
                                     user.id,
@@ -342,7 +381,15 @@ async def remnawave_updater():
                             )
                     
                     if online_at:
-                        new_connected_at = datetime.fromisoformat(online_at.replace('Z', '+00:00'))
+                        online_at_available_count += 1
+                        new_connected_at = _safe_parse_online_at(online_at)
+                        if not new_connected_at:
+                            logger.warning(
+                                "Skip onlineAt processing for user %s: invalid timestamp format (%s)",
+                                user.id,
+                                online_at,
+                            )
+                            continue
                         old_connected_at = user.connected_at
 
                         registration_changed = False
@@ -386,6 +433,8 @@ async def remnawave_updater():
                             )
 
                             if duplicate_hwid and not has_paid_subscription:
+                                duplicate_hwid_detected_count += 1
+                                duplicate_hwid_blocked_count += 1
                                 block_registration = True
                                 user.is_trial = False
                                 user.used_trial = True
@@ -433,19 +482,29 @@ async def remnawave_updater():
                                     "Анти-твинк: HWID повтор у пользователя %s, триал отозван",
                                     user.id,
                                 )
+                            elif duplicate_hwid and has_paid_subscription:
+                                duplicate_hwid_detected_count += 1
+                                duplicate_hwid_paid_skip_count += 1
+                                logger.info(
+                                    "HWID duplicate detected for paid user %s: sanction skipped",
+                                    user.id,
+                                )
 
                         # Разрешаем регистрацию, только если нет блокировки (включая сохранённую анти-твинк санкцию)
-                        if should_trigger_registration(
+                        should_register = should_trigger_registration(
                             online_at=online_at,
                             old_connected_at=old_connected_at,
                             is_registered=user.is_registered,
                             block_registration=block_registration,
                             is_antitwink_sanction=is_antitwink_sanction,
-                        ):
+                        )
+                        if should_register:
+                            activation_path_entered_count += 1
                             referrer = await user.referrer()
                             await on_activated_key(user.id, user.full_name, referrer_id=referrer.id if referrer else None, referrer_name=referrer.full_name if referrer else None, utm=user.utm)
                             user.is_registered = True
                             registration_changed = True
+                            activation_notify_sent_count += 1
                             logger.info(f"Первое подключение пользователя {user.id}, отправлено уведомление")
 
                             # Partner QR "activation": when a user connects for the first time,
@@ -476,6 +535,17 @@ async def remnawave_updater():
                                     logger.info(f"Реферал зарегистрировался: уведомили реферера {referrer.id} о регистрации {user.id}")
                                 except Exception as e_ref_reg:
                                     logger.warning("Не удалось отправить уведомление о регистрации реферала %s -> %s: %s", referrer.id, user.id, e_ref_reg)
+                        else:
+                            activation_skipped_flags_count += 1
+                            logger.info(
+                                "Activation skipped user=%s reason_flags: is_registered=%s block_registration=%s antitwink_sanction=%s has_paid_subscription=%s old_connected_at=%s",
+                                user.id,
+                                user.is_registered,
+                                block_registration,
+                                is_antitwink_sanction,
+                                has_paid_subscription,
+                                bool(old_connected_at),
+                            )
                         
                         if not old_connected_at or new_connected_at > old_connected_at:
                             user.connected_at = new_connected_at
@@ -579,6 +649,18 @@ async def remnawave_updater():
                     except Exception as e2:
                         logger.error(f"Ошибка при пересоздании пользователя {user.id}: {e2}")
         
+        logger.info(
+            "Checker summary: onlineAt_available=%s recovered_onlineAt=%s activation_candidates=%s activation_notify_sent=%s activation_skipped=%s duplicate_hwid_detected=%s duplicate_hwid_blocked=%s duplicate_hwid_paid_skip=%s",
+            online_at_available_count,
+            online_at_recovered_count,
+            activation_path_entered_count,
+            activation_notify_sent_count,
+            activation_skipped_flags_count,
+            duplicate_hwid_detected_count,
+            duplicate_hwid_blocked_count,
+            duplicate_hwid_paid_skip_count,
+        )
+
         # Выполняем батчевое обновление пользователей
         if users_to_bulk_update:
             try:
