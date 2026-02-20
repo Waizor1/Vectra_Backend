@@ -586,15 +586,34 @@ class Users(models.Model):
             else:
                 logger.debug(f"Пользователь {user.id} не сохранялся, изменений не было. Текущий UTM: {user.utm}")
                 
-            await user.count_referrals()
+            # Referral count recalculation is non-critical for auth flow.
+            # Do not fail user registration if this side effect is temporary unavailable.
+            try:
+                await user.count_referrals()
+            except Exception as e_referrals:
+                logger.warning(
+                    "Не удалось пересчитать referrals для user=%s (non-blocking): %s",
+                    user.id,
+                    e_referrals,
+                )
 
             # Создаем пользователя в RemnaWave, если он еще не создан
             if is_new or not user.remnawave_uuid:
                 await user._ensure_remnawave_user()
             # Schedule referral notifications for new users
             if is_new:
-                from bloobcat.scheduler import schedule_user_tasks
-                await schedule_user_tasks(user)
+                # Scheduling is a post-registration side effect.
+                # Registration must still succeed even if scheduler is temporarily unhealthy.
+                try:
+                    from bloobcat.scheduler import schedule_user_tasks
+                    await schedule_user_tasks(user)
+                except Exception as e_schedule:
+                    logger.error(
+                        "Не удалось запланировать задачи для нового user=%s (non-blocking): %s",
+                        user.id,
+                        e_schedule,
+                        exc_info=True,
+                    )
 
             return user, is_new
             

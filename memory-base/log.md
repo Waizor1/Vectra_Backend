@@ -1,5 +1,17 @@
 ## 2026-02-20
 
+- **fix(auth/registration-resilience):** снижена вероятность `Internal Server Error` на welcome-регистрации (`POST /auth/telegram`).
+  - `bloobcat/db/users.py`:
+    - `count_referrals()` переведен в non-blocking режим (ошибка логируется, но не валит регистрацию);
+    - `schedule_user_tasks(user)` для нового пользователя обёрнут в `try/except` (ошибка планировщика не прерывает выдачу токена).
+  - `bloobcat/routes/auth.py`:
+    - основной путь `/auth/telegram` обёрнут защитным `try/except` с traceback-логированием;
+    - если `Users.get_user(...)` неожиданно вернул `None`, endpoint больше не падает `500`, а возвращает `requires_registration=true`;
+    - неожиданные ошибки теперь возвращают `503 Service temporarily unavailable` вместо необработанного `500`.
+  - Цель: успешная регистрация пользователя даже при временной деградации side-effect логики (scheduler/referrals/внешние зависимости).
+
+## 2026-02-20
+
 - **fix(auth/registration-policy):** внедрен безопасный режим отложенной регистрации пользователя.
   - `bloobcat/routes/auth.py`:
     - добавлен `registerIntent` в `POST /auth/telegram`;
