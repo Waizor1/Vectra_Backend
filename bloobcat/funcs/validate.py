@@ -218,7 +218,7 @@ async def validate(init_data: str = Depends(oauth2_scheme), request: Request = N
         raise HTTPException(status_code=403, detail=str(e))
     
     # Явно передаем параметры по имени для большей ясности
-    db_user = await Users.get_user(
+    db_user, _ = await Users.get_user(
         telegram_user=user.user, 
         referred_by=referred_by, 
         utm=utm

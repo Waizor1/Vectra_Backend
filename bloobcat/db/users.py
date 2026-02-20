@@ -483,7 +483,7 @@ class Users(models.Model):
     ):
         if not telegram_user:
             logger.error("get_user: telegram_user is None")
-            return None
+            return None, False
 
         try:
             user, is_new = await Users.update_or_create(
@@ -596,7 +596,7 @@ class Users(models.Model):
                 from bloobcat.scheduler import schedule_user_tasks
                 await schedule_user_tasks(user)
 
-            return user
+            return user, is_new
             
         except Exception as e:
             logger.error(f"Ошибка создания/обновления пользователя: {str(e)}")

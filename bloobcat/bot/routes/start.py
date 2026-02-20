@@ -63,7 +63,7 @@ async def command_start_handler(message: Message, command: CommandObject):
     
     # Автоматическая установка админской клавиатуры для админов
     try:
-        user = await Users.get_user(message.from_user)
+        user, _ = await Users.get_user(message.from_user)
         if user and user.is_admin:
             from bloobcat.bot.routes.admin.admin_menu import set_admin_keyboard
             await set_admin_keyboard(message.bot, user.id)

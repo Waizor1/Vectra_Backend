@@ -9,7 +9,7 @@ logger = get_logger("bot_admin_functions")
 
 class IsAdmin(BaseFilter):
     async def __call__(self, message: Message):
-        user = await Users.get_user(message.from_user)
+        user, _ = await Users.get_user(message.from_user)
         if not user:
             return False
         return user.is_admin
@@ -17,7 +17,7 @@ class IsAdmin(BaseFilter):
 
 class IsPartnerOrAdmin(BaseFilter):
     async def __call__(self, message: Message):
-        user = await Users.get_user(message.from_user)
+        user, _ = await Users.get_user(message.from_user)
         if not user:
             return False
         return user.is_admin or user.is_partner
