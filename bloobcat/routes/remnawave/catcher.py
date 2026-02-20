@@ -29,7 +29,8 @@ remnawave = RemnaWaveClient(remnawave_settings.url, remnawave_settings.token.get
 last_activated_info = {}
 last_notification_expired = {}
 user_state_cache: Dict[str, Dict[str, Any]] = {}
-update_lock = asyncio.Lock()
+update_state_lock = asyncio.Lock()
+_update_in_progress = False
 
 # Diagnostic: last run status (readable via /remnawave/status endpoint)
 _last_run_status: Dict[str, Any] = {
@@ -40,6 +41,22 @@ _last_run_status: Dict[str, Any] = {
     "total_errors": 0,
     "last_summary": {},
 }
+
+
+async def _try_start_updater_run() -> bool:
+    """Atomically mark updater as running and reject concurrent starts."""
+    global _update_in_progress
+    async with update_state_lock:
+        if _update_in_progress:
+            return False
+        _update_in_progress = True
+        return True
+
+
+async def _finish_updater_run() -> None:
+    global _update_in_progress
+    async with update_state_lock:
+        _update_in_progress = False
 
 
 def _eligible_users_for_checker(users: list[Any]) -> list[Any]:
@@ -91,7 +108,7 @@ async def webhook(background_tasks: BackgroundTasks):
     """Обработчик вебхука для запуска обновления RemnaWave.
 
     Запускает remnawave_updater в фоне, чтобы не блокировать HTTP-ответ.
-    update_lock в updater предотвращает гонки при параллельных вызовах.
+    update_state_lock в updater предотвращает гонки при параллельных вызовах.
     """
     logger.info("Получен запрос на вебхук, планирование remnawave_updater")
     background_tasks.add_task(remnawave_updater)
@@ -106,11 +123,7 @@ async def remnawave_updater():
     и выполняет bulk_update в конце. Перепланирование задач происходит только
     для пользователей, которым это действительно необходимо (первая регистрация).
     """
-    lock_acquired = False
-    try:
-        await asyncio.wait_for(update_lock.acquire(), timeout=0)
-        lock_acquired = True
-    except asyncio.TimeoutError:
+    if not await _try_start_updater_run():
         logger.info("Процесс обновления уже запущен, пропускаем")
         return
 
@@ -779,8 +792,7 @@ async def remnawave_updater():
     finally:
         _last_run_status["total_runs"] = _last_run_status.get("total_runs", 0) + 1
         _last_run_status["last_run_at"] = start_time.isoformat()
-        if lock_acquired:
-            update_lock.release()
-            end_time = datetime.now(ZoneInfo("Europe/Moscow"))
-            total_time = (end_time - start_time).total_seconds()
-            logger.info(f"Завершение работы remnawave_updater, время выполнения: {total_time:.2f} секунд")
+        await _finish_updater_run()
+        end_time = datetime.now(ZoneInfo("Europe/Moscow"))
+        total_time = (end_time - start_time).total_seconds()
+        logger.info(f"Завершение работы remnawave_updater, время выполнения: {total_time:.2f} секунд")
