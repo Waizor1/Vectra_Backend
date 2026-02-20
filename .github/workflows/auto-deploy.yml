@@ -157,7 +157,7 @@ jobs:
         fi
 
         if [ "\$HAS_DB_SERVICE" -eq 1 ]; then
-          docker compose \$COMPOSE_ARGS exec -T bloobcat_db \
+          if docker compose \$COMPOSE_ARGS exec -T bloobcat_db \
             psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
               -c "DO \\\$\\\$
             DECLARE
@@ -239,7 +239,9 @@ jobs:
             AND ccu.table_name = 'users'
             AND ccu.column_name = 'id'
           ORDER BY tc.table_schema, tc.constraint_name;" \
-          && FK_FIX_OK=1 || true
+            </dev/null; then
+            FK_FIX_OK=1
+          fi
         else
           echo "Warning: service bloobcat_db not found in compose config; skipping FK DB fix"
           FK_FIX_OK=1
@@ -253,7 +255,7 @@ jobs:
         fi
 
         SUPER_SETUP_OK=0
-        docker compose \$COMPOSE_ARGS exec -T bloobcat sh -lc '
+        if docker compose \$COMPOSE_ARGS exec -T bloobcat sh -lc '
           export DIRECTUS_URL="http://directus:8055"
           attempt=1
           max_attempts=4
@@ -274,7 +276,9 @@ jobs:
             attempt=\$((attempt + 1))
           done
           exit 1
-        ' && SUPER_SETUP_OK=1 || true
+        ' </dev/null; then
+          SUPER_SETUP_OK=1
+        fi
 
         if [ "\$SUPER_SETUP_OK" -ne 1 ]; then
           echo "⚠️  Directus super-setup failed after retries; continue deploy without blocking release"
@@ -285,7 +289,7 @@ jobs:
 
         echo "📦 Применяем тарифы (idempotent seed)..."
         TARIFFS_SEED_OK=0
-        docker compose \$COMPOSE_ARGS exec -T bloobcat sh -lc '
+        if docker compose \$COMPOSE_ARGS exec -T bloobcat sh -lc '
           attempt=1
           max_attempts=3
           while [ "\$attempt" -le "\$max_attempts" ]; do
@@ -302,7 +306,9 @@ jobs:
             attempt=\$((attempt + 1))
           done
           exit 1
-        ' && TARIFFS_SEED_OK=1 || true
+        ' </dev/null; then
+          TARIFFS_SEED_OK=1
+        fi
 
         if [ "\$TARIFFS_SEED_OK" -ne 1 ]; then
           echo "❌ Tariffs seed failed after retries; abort deploy"
