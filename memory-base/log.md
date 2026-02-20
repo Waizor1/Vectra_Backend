@@ -1,5 +1,14 @@
 ## 2026-02-20
 
+- **fix(db/active-tariffs-fk-hardening):** закрыт повторяющийся падеж удаления `users` по FK `fk_active_tariffs_user`.
+  - **Симптом:** удаление пользователя через Directus/GraphQL продолжало падать `violates foreign key constraint "fk_active_tariffs_user"` даже при наличии runtime-guard в `Users.delete()`.
+  - **RCA:** удаление в Directus идет напрямую на уровне БД, а не через Python `Users.delete()`; при drift схемы в target schema FK на `active_tariffs.user_id` мог остаться не-CASCADE/дублированным.
+  - **Исправление:**
+    - `bloobcat/db/fk_guards.py`: `ensure_active_tariffs_fk_cascade()` усилен до schema-aware проверки/ремонта (не завязан на `current_schema()`, чинит все FK для `active_tariffs.user_id` в целевой схеме, оставляет единый CASCADE);
+    - добавлена миграция `migrations/models/84_20260220203000_harden_active_tariffs_fk_schema_safe.py` с таким же schema-safe repair на уровне БД;
+    - `directus/extensions/endpoints/server-ops/index.js`: команды `fk_active_tariffs` и `fix_fk_active_tariffs` синхронизированы с schema-safe логикой и корректным `pg_constraint` join по схеме/таблице.
+  - **Тесты:** `tests/test_resilience_hardening.py` расширен кейсами mixed-rules и single-cascade для `ensure_active_tariffs_fk_cascade()`.
+
 - **fix(db/users-delete-fk-guard):** устранен повторяющийся `INTERNAL_SERVER_ERROR` при удалении пользователя из-за дрейфа FK `active_tariffs -> users`.
   - **Симптом:** удаление `users` падало с `violates foreign key constraint "fk_active_tariffs_user"` (в `active_tariffs` было `NO ACTION/RESTRICT` вместо `CASCADE`).
   - **RCA:** проверка self-heal в `bloobcat/__main__.py` была завязана на фиксированное имя constraint (`fk_active_tariffs_user`) и могла пропустить drift при другом имени FK.

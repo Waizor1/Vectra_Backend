@@ -201,7 +201,9 @@ async def test_ensure_active_tariffs_fk_cascade_repairs_non_cascade(monkeypatch)
             self.script_calls = 0
 
         async def execute_query_dict(self, _query):
-            return [{"constraint_name": "active_tariffs_user_id_fkey", "delete_rule": "NO ACTION"}]
+            if "SELECT n.nspname AS table_schema" in _query:
+                return [{"table_schema": "public"}]
+            return [{"table_schema": "public", "constraint_name": "active_tariffs_user_id_fkey", "delete_rule": "NO ACTION"}]
 
         async def execute_script(self, _script):
             self.script_calls += 1
@@ -219,6 +221,8 @@ async def test_ensure_active_tariffs_fk_cascade_repairs_missing_constraint(monke
             self.script_calls = 0
 
         async def execute_query_dict(self, _query):
+            if "SELECT n.nspname AS table_schema" in _query:
+                return [{"table_schema": "public"}]
             return []
 
         async def execute_script(self, _script):
@@ -228,6 +232,55 @@ async def test_ensure_active_tariffs_fk_cascade_repairs_missing_constraint(monke
     monkeypatch.setattr(fk_guards.Tortoise, "get_connection", lambda _name: conn)
     await fk_guards.ensure_active_tariffs_fk_cascade()
     assert conn.script_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_ensure_active_tariffs_fk_cascade_repairs_when_mixed_rules(monkeypatch):
+    class _Conn:
+        def __init__(self):
+            self.script_calls = 0
+
+        async def execute_query_dict(self, _query):
+            if "SELECT n.nspname AS table_schema" in _query:
+                return [{"table_schema": "public"}]
+            return [
+                {"table_schema": "public", "constraint_name": "fk_ok", "delete_rule": "CASCADE"},
+                {"table_schema": "public", "constraint_name": "fk_bad", "delete_rule": "NO ACTION"},
+            ]
+
+        async def execute_script(self, _script):
+            self.script_calls += 1
+
+    conn = _Conn()
+    monkeypatch.setattr(fk_guards.Tortoise, "get_connection", lambda _name: conn)
+    await fk_guards.ensure_active_tariffs_fk_cascade()
+    assert conn.script_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_ensure_active_tariffs_fk_cascade_skips_when_single_cascade(monkeypatch):
+    class _Conn:
+        def __init__(self):
+            self.script_calls = 0
+
+        async def execute_query_dict(self, _query):
+            if "SELECT n.nspname AS table_schema" in _query:
+                return [{"table_schema": "public"}]
+            return [
+                {
+                    "table_schema": "public",
+                    "constraint_name": "fk_active_tariffs_user",
+                    "delete_rule": "CASCADE",
+                }
+            ]
+
+        async def execute_script(self, _script):
+            self.script_calls += 1
+
+    conn = _Conn()
+    monkeypatch.setattr(fk_guards.Tortoise, "get_connection", lambda _name: conn)
+    await fk_guards.ensure_active_tariffs_fk_cascade()
+    assert conn.script_calls == 0
 
 
 @pytest.mark.asyncio

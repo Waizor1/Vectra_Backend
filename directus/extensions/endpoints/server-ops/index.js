@@ -40,6 +40,7 @@ async function cmdFkActiveTariffs(database) {
   const raw = await database.raw(
     `
     SELECT
+      tc.table_schema,
       tc.constraint_name,
       rc.delete_rule,
       pg_get_constraintdef(con.oid) AS definition
@@ -53,14 +54,21 @@ async function cmdFkActiveTariffs(database) {
     JOIN information_schema.referential_constraints rc
       ON tc.constraint_name = rc.constraint_name
      AND tc.constraint_schema = rc.constraint_schema
+    JOIN pg_namespace ns
+      ON ns.nspname = tc.table_schema
+    JOIN pg_class rel
+      ON rel.relname = tc.table_name
+     AND rel.relnamespace = ns.oid
     JOIN pg_constraint con
       ON con.conname = tc.constraint_name
+     AND con.connamespace = ns.oid
+     AND con.conrelid = rel.oid
     WHERE tc.constraint_type = 'FOREIGN KEY'
       AND tc.table_name = 'active_tariffs'
       AND kcu.column_name = 'user_id'
       AND ccu.table_name = 'users'
       AND ccu.column_name = 'id'
-    ORDER BY tc.constraint_name;
+    ORDER BY tc.table_schema, tc.constraint_name;
     `
   );
   return rowsFromRaw(raw);
@@ -70,26 +78,59 @@ async function cmdFixFkActiveTariffs(database) {
   await database.raw(
     `
     DO $$
-    DECLARE r RECORD;
+    DECLARE
+      target_schema text;
+      r RECORD;
     BEGIN
-      FOR r IN
-        SELECT con.conname
-        FROM pg_constraint con
-        JOIN pg_class rel ON rel.oid = con.conrelid
-        JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace
-        JOIN pg_attribute att ON att.attrelid = rel.oid AND att.attnum = ANY (con.conkey)
-        WHERE con.contype = 'f'
-          AND nsp.nspname = current_schema()
-          AND rel.relname = 'active_tariffs'
-          AND att.attname = 'user_id'
-      LOOP
-        EXECUTE format('ALTER TABLE "active_tariffs" DROP CONSTRAINT IF EXISTS %I', r.conname);
-      END LOOP;
-    END $$;
+      SELECT n.nspname
+        INTO target_schema
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE c.relname = 'active_tariffs'
+        AND c.relkind IN ('r', 'p')
+        AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+      ORDER BY CASE WHEN n.nspname = 'public' THEN 0 ELSE 1 END, n.nspname
+      LIMIT 1;
 
-    ALTER TABLE "active_tariffs"
-      ADD CONSTRAINT "fk_active_tariffs_user"
-      FOREIGN KEY ("user_id") REFERENCES "users" ("id") ON DELETE CASCADE;
+      IF target_schema IS NULL THEN
+        RETURN;
+      END IF;
+
+      FOR r IN
+        SELECT tc.constraint_name
+        FROM information_schema.table_constraints tc
+        JOIN information_schema.key_column_usage kcu
+          ON tc.constraint_name = kcu.constraint_name
+         AND tc.constraint_schema = kcu.constraint_schema
+        JOIN information_schema.constraint_column_usage ccu
+          ON tc.constraint_name = ccu.constraint_name
+         AND tc.constraint_schema = ccu.constraint_schema
+        WHERE tc.constraint_type = 'FOREIGN KEY'
+          AND tc.table_schema = target_schema
+          AND tc.table_name = 'active_tariffs'
+          AND kcu.column_name = 'user_id'
+          AND ccu.table_name = 'users'
+          AND ccu.column_name = 'id'
+      LOOP
+        EXECUTE format(
+          'ALTER TABLE %I.%I DROP CONSTRAINT IF EXISTS %I',
+          target_schema,
+          'active_tariffs',
+          r.constraint_name
+        );
+      END LOOP;
+
+      EXECUTE format(
+        'ALTER TABLE %I.%I ADD CONSTRAINT %I FOREIGN KEY (%I) REFERENCES %I.%I (%I) ON DELETE CASCADE',
+        target_schema,
+        'active_tariffs',
+        'fk_active_tariffs_user',
+        'user_id',
+        target_schema,
+        'users',
+        'id'
+      );
+    END $$;
     `
   );
 
