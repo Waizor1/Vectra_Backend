@@ -31,6 +31,16 @@ last_notification_expired = {}
 user_state_cache: Dict[str, Dict[str, Any]] = {}
 update_lock = asyncio.Lock()
 
+# Diagnostic: last run status (readable via /remnawave/status endpoint)
+_last_run_status: Dict[str, Any] = {
+    "last_run_at": None,
+    "last_success_at": None,
+    "last_error": None,
+    "total_runs": 0,
+    "total_errors": 0,
+    "last_summary": {},
+}
+
 
 def _extract_online_at(remnawave_user: Dict[str, Any] | None) -> Optional[str]:
     data = remnawave_user or {}
@@ -53,6 +63,16 @@ def _safe_parse_online_at(raw_online_at: Any) -> Optional[datetime]:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except Exception:
         return None
+
+@router.get("/status")
+async def remnawave_status():
+    """Diagnostic endpoint: last run status of remnawave_updater."""
+    from bloobcat.bot.notifications.admin import get_admin_msg_stats
+    return {
+        **_last_run_status,
+        "admin_notifications": get_admin_msg_stats(),
+    }
+
 
 @router.get("/webhook")
 async def webhook(background_tasks: BackgroundTasks):
@@ -379,85 +399,86 @@ async def remnawave_updater():
                                 user.id,
                                 detail_err,
                             )
-                    
+
+                    registration_changed = False
+                    connection_changed = False
+                    sanction_changed = False
+
                     if online_at:
                         online_at_available_count += 1
                         new_connected_at = _safe_parse_online_at(online_at)
                         if not new_connected_at:
                             logger.warning(
-                                "Skip onlineAt processing for user %s: invalid timestamp format (%s)",
+                                "Invalid onlineAt for user %s: %r (type=%s) — skipping activation/connection, proceeding to sync",
                                 user.id,
                                 online_at,
+                                type(online_at).__name__,
                             )
-                            continue
-                        old_connected_at = user.connected_at
+                        else:
+                            old_connected_at = user.connected_at
 
-                        registration_changed = False
-                        connection_changed = False
-
-                        # Флаги регистрации и санкций
-                        block_registration = False
-                        sanction_changed = False
-                        has_paid_subscription = bool(
-                            db_active_tariff_id
-                            and db_expired_at
-                            and normalize_date(db_expired_at) >= msk_today
-                            and not db_is_trial
-                        )
-
-                        # Уже санкционирован ранее за дубль HWID — сохраняем блок, чтобы не прошло повторно
-                        persisted_expired_at = db_expired_at
-                        persisted_expired_date = normalize_date(persisted_expired_at)
-                        is_antitwink_sanction = bool(
-                            not db_is_trial
-                            and db_used_trial
-                            and persisted_expired_date
-                            and persisted_expired_date <= msk_today
-                            and not has_paid_subscription
-                        )
-                        if is_antitwink_sanction:
-                            block_registration = True
-                        if (
-                            anti_twink_enabled
-                            and not old_connected_at
-                            and not user.is_registered
-                        ):
-                            current_uuid = str(user.remnawave_uuid) if user.remnawave_uuid else None
-                            user_devices_hwid = (
-                                [hwid for hwid, owners in hwid_index.items() if current_uuid in owners]
-                                if current_uuid
-                                else []
-                            )
-                            duplicate_hwid = (
-                                bool(current_uuid) and has_duplicate_hwid(current_uuid, hwid_index)
+                            # Флаги регистрации и санкций
+                            block_registration = False
+                            has_paid_subscription = bool(
+                                db_active_tariff_id
+                                and db_expired_at
+                                and normalize_date(db_expired_at) >= msk_today
+                                and not db_is_trial
                             )
 
-                            if duplicate_hwid and not has_paid_subscription:
-                                duplicate_hwid_detected_count += 1
-                                duplicate_hwid_blocked_count += 1
+                            # Уже санкционирован ранее за дубль HWID — сохраняем блок, чтобы не прошло повторно
+                            persisted_expired_at = db_expired_at
+                            persisted_expired_date = normalize_date(persisted_expired_at)
+                            is_antitwink_sanction = bool(
+                                not db_is_trial
+                                and db_used_trial
+                                and persisted_expired_date
+                                and persisted_expired_date <= msk_today
+                                and not has_paid_subscription
+                            )
+                            if is_antitwink_sanction:
                                 block_registration = True
-                                user.is_trial = False
-                                user.used_trial = True
-                                user.expired_at = msk_today
-                                sanction_changed = True
-                                users_with_sanctions.append(user)
-                                try:
-                                    await notify_trial_revoked_hwid(user)
-                                except Exception as notify_err:
-                                    logger.warning(
-                                        "Не удалось отправить уведомление об отзыве триала пользователю %s: %s",
-                                        user.id,
-                                        notify_err,
-                                    )
-                                try:
-                                    referrer = await user.referrer()
-                                    ref_text = (
-                                        f"{referrer.full_name} (ID: <code>{referrer.id}</code>)"
-                                        if referrer
-                                        else "Отсутствует"
-                                    )
-                                    hwid_preview = ", ".join(user_devices_hwid[:5]) if user_devices_hwid else "—"
-                                    text = f"""🚫 Отозван триал (дублирующий HWID)
+                            if (
+                                anti_twink_enabled
+                                and not old_connected_at
+                                and not user.is_registered
+                            ):
+                                current_uuid = str(user.remnawave_uuid) if user.remnawave_uuid else None
+                                user_devices_hwid = (
+                                    [hwid for hwid, owners in hwid_index.items() if current_uuid in owners]
+                                    if current_uuid
+                                    else []
+                                )
+                                duplicate_hwid = (
+                                    bool(current_uuid) and has_duplicate_hwid(current_uuid, hwid_index)
+                                )
+
+                                if duplicate_hwid and not has_paid_subscription:
+                                    duplicate_hwid_detected_count += 1
+                                    duplicate_hwid_blocked_count += 1
+                                    block_registration = True
+                                    user.is_trial = False
+                                    user.used_trial = True
+                                    user.expired_at = msk_today
+                                    sanction_changed = True
+                                    users_with_sanctions.append(user)
+                                    try:
+                                        await notify_trial_revoked_hwid(user)
+                                    except Exception as notify_err:
+                                        logger.warning(
+                                            "Не удалось отправить уведомление об отзыве триала пользователю %s: %s",
+                                            user.id,
+                                            notify_err,
+                                        )
+                                    try:
+                                        referrer = await user.referrer()
+                                        ref_text = (
+                                            f"{referrer.full_name} (ID: <code>{referrer.id}</code>)"
+                                            if referrer
+                                            else "Отсутствует"
+                                        )
+                                        hwid_preview = ", ".join(user_devices_hwid[:5]) if user_devices_hwid else "—"
+                                        text = f"""🚫 Отозван триал (дублирующий HWID)
 
 👤 Пользователь: {user.full_name} ({'@'+user.username if user.username else 'нет юзернейма'})
 🆔 ID: <code>{user.id}</code>
@@ -466,102 +487,100 @@ async def remnawave_updater():
 📅 expireAt → {msk_today}
 
 #trial #hwid #antitwink"""
-                                    await send_admin_message(
-                                        text=text,
-                                        reply_markup=await write_to(
-                                            user.id, referrer.id if referrer else 0
-                                        ),
-                                    )
-                                except Exception as admin_log_err:
-                                    logger.warning(
-                                        "Не удалось отправить лог в админ-чат об отзыве триала %s: %s",
+                                        await send_admin_message(
+                                            text=text,
+                                            reply_markup=await write_to(
+                                                user.id, referrer.id if referrer else 0
+                                            ),
+                                        )
+                                    except Exception as admin_log_err:
+                                        logger.warning(
+                                            "Не удалось отправить лог в админ-чат об отзыве триала %s: %s",
+                                            user.id,
+                                            admin_log_err,
+                                        )
+                                    logger.info(
+                                        "Анти-твинк: HWID повтор у пользователя %s, триал отозван",
                                         user.id,
-                                        admin_log_err,
                                     )
-                                logger.info(
-                                    "Анти-твинк: HWID повтор у пользователя %s, триал отозван",
-                                    user.id,
-                                )
-                            elif duplicate_hwid and has_paid_subscription:
-                                duplicate_hwid_detected_count += 1
-                                duplicate_hwid_paid_skip_count += 1
-                                logger.info(
-                                    "HWID duplicate detected for paid user %s: sanction skipped",
-                                    user.id,
-                                )
+                                elif duplicate_hwid and has_paid_subscription:
+                                    duplicate_hwid_detected_count += 1
+                                    duplicate_hwid_paid_skip_count += 1
+                                    logger.info(
+                                        "HWID duplicate detected for paid user %s: sanction skipped",
+                                        user.id,
+                                    )
 
-                        # Разрешаем регистрацию, только если нет блокировки (включая сохранённую анти-твинк санкцию)
-                        should_register = should_trigger_registration(
-                            online_at=online_at,
-                            old_connected_at=old_connected_at,
-                            is_registered=user.is_registered,
-                            block_registration=block_registration,
-                            is_antitwink_sanction=is_antitwink_sanction,
-                        )
-                        if should_register:
-                            activation_path_entered_count += 1
-                            referrer = await user.referrer()
-                            await on_activated_key(user.id, user.full_name, referrer_id=referrer.id if referrer else None, referrer_name=referrer.full_name if referrer else None, utm=user.utm)
-                            user.is_registered = True
-                            registration_changed = True
-                            activation_notify_sent_count += 1
-                            logger.info(f"Первое подключение пользователя {user.id}, отправлено уведомление")
-
-                            # Partner QR "activation": when a user connects for the first time,
-                            # and their utm/start param points to a QR token, increment QR activations counter.
-                            try:
-                                utm = (user.utm or "").strip() if hasattr(user, "utm") else ""
-                                if utm.startswith("qr_"):
-                                    token = utm[3:]
-                                    qr = None
-                                    try:
-                                        qr_uuid = uuid.UUID(token) if len(token) != 32 else uuid.UUID(hex=token)
-                                        qr = await PartnerQr.get_or_none(id=qr_uuid)
-                                    except Exception:
-                                        qr = None
-                                    if not qr:
-                                        qr = await PartnerQr.get_or_none(slug=token)
-                                    if qr:
-                                        await PartnerQr.filter(id=qr.id).update(activations_count=F("activations_count") + 1)
-                            except Exception as e_qr_act:
-                                logger.warning("Failed to update partner QR activations for user %s: %s", user.id, e_qr_act)
-
-                            # TVPN referral program is days-based (not money-based).
-                            # We do NOT credit any RUB bonus on registration.
-                            # Optional: keep a lightweight "friend registered" notification (no balance changes).
-                            if referrer:
-                                try:
-                                    await on_referral_registration(referrer, user)
-                                    logger.info(f"Реферал зарегистрировался: уведомили реферера {referrer.id} о регистрации {user.id}")
-                                except Exception as e_ref_reg:
-                                    logger.warning("Не удалось отправить уведомление о регистрации реферала %s -> %s: %s", referrer.id, user.id, e_ref_reg)
-                        else:
-                            activation_skipped_flags_count += 1
-                            logger.info(
-                                "Activation skipped user=%s reason_flags: is_registered=%s block_registration=%s antitwink_sanction=%s has_paid_subscription=%s old_connected_at=%s",
-                                user.id,
-                                user.is_registered,
-                                block_registration,
-                                is_antitwink_sanction,
-                                has_paid_subscription,
-                                bool(old_connected_at),
+                            # Разрешаем регистрацию, только если нет блокировки (включая сохранённую анти-твинк санкцию)
+                            should_register = should_trigger_registration(
+                                online_at=online_at,
+                                old_connected_at=old_connected_at,
+                                is_registered=user.is_registered,
+                                block_registration=block_registration,
+                                is_antitwink_sanction=is_antitwink_sanction,
                             )
-                        
-                        if not old_connected_at or new_connected_at > old_connected_at:
-                            user.connected_at = new_connected_at
-                            connection_changed = True
-                            await Connections.process(user.id, new_connected_at.date())
-                            logger.debug(f"Обновлен статус подключения для {user.id}: {new_connected_at}")
-                            
-                        # Добавляем пользователя в список для батчевого обновления, если были изменения
-                        if connection_changed or registration_changed:
-                            users_to_bulk_update.append(user)
-                            # Только при первой регистрации нужно перепланировать задачи
-                            if registration_changed:
-                                users_need_task_reschedule.append(user)
-                        elif sanction_changed:
-                            # Сохраняем пользователя, чтобы зафиксировать отзыв триала
-                            users_to_bulk_update.append(user)
+                            if should_register:
+                                activation_path_entered_count += 1
+                                referrer = await user.referrer()
+                                await on_activated_key(user.id, user.full_name, referrer_id=referrer.id if referrer else None, referrer_name=referrer.full_name if referrer else None, utm=user.utm)
+                                user.is_registered = True
+                                registration_changed = True
+                                activation_notify_sent_count += 1
+                                logger.info(f"Первое подключение пользователя {user.id}, отправлено уведомление")
+
+                                # Partner QR "activation": when a user connects for the first time,
+                                # and their utm/start param points to a QR token, increment QR activations counter.
+                                try:
+                                    utm = (user.utm or "").strip() if hasattr(user, "utm") else ""
+                                    if utm.startswith("qr_"):
+                                        token = utm[3:]
+                                        qr = None
+                                        try:
+                                            qr_uuid = uuid.UUID(token) if len(token) != 32 else uuid.UUID(hex=token)
+                                            qr = await PartnerQr.get_or_none(id=qr_uuid)
+                                        except Exception:
+                                            qr = None
+                                        if not qr:
+                                            qr = await PartnerQr.get_or_none(slug=token)
+                                        if qr:
+                                            await PartnerQr.filter(id=qr.id).update(activations_count=F("activations_count") + 1)
+                                except Exception as e_qr_act:
+                                    logger.warning("Failed to update partner QR activations for user %s: %s", user.id, e_qr_act)
+
+                                # TVPN referral program is days-based (not money-based).
+                                # We do NOT credit any RUB bonus on registration.
+                                # Optional: keep a lightweight "friend registered" notification (no balance changes).
+                                if referrer:
+                                    try:
+                                        await on_referral_registration(referrer, user)
+                                        logger.info(f"Реферал зарегистрировался: уведомили реферера {referrer.id} о регистрации {user.id}")
+                                    except Exception as e_ref_reg:
+                                        logger.warning("Не удалось отправить уведомление о регистрации реферала %s -> %s: %s", referrer.id, user.id, e_ref_reg)
+                            else:
+                                activation_skipped_flags_count += 1
+                                logger.debug(
+                                    "Activation skipped user=%s reason_flags: is_registered=%s block_registration=%s antitwink_sanction=%s has_paid_subscription=%s old_connected_at=%s",
+                                    user.id,
+                                    user.is_registered,
+                                    block_registration,
+                                    is_antitwink_sanction,
+                                    has_paid_subscription,
+                                    bool(old_connected_at),
+                                )
+
+                            if not old_connected_at or new_connected_at > old_connected_at:
+                                user.connected_at = new_connected_at
+                                connection_changed = True
+                                await Connections.process(user.id, new_connected_at.date())
+                                logger.debug(f"Обновлен статус подключения для {user.id}: {new_connected_at}")
+
+                    # Добавляем пользователя в список для батчевого обновления, если были изменения
+                    if connection_changed or registration_changed:
+                        users_to_bulk_update.append(user)
+                        if registration_changed:
+                            users_need_task_reschedule.append(user)
+                    elif sanction_changed:
+                        users_to_bulk_update.append(user)
 
                     # ----------------- Логика синхронизации `expired_at` (БД -> RemnaWave) -----------------
                     # Используем актуальное значение expired_at из fresh_data_map (загруженного в начале)
@@ -649,17 +668,23 @@ async def remnawave_updater():
                     except Exception as e2:
                         logger.error(f"Ошибка при пересоздании пользователя {user.id}: {e2}")
         
-        logger.info(
-            "Checker summary: onlineAt_available=%s recovered_onlineAt=%s activation_candidates=%s activation_notify_sent=%s activation_skipped=%s duplicate_hwid_detected=%s duplicate_hwid_blocked=%s duplicate_hwid_paid_skip=%s",
-            online_at_available_count,
-            online_at_recovered_count,
-            activation_path_entered_count,
-            activation_notify_sent_count,
-            activation_skipped_flags_count,
-            duplicate_hwid_detected_count,
-            duplicate_hwid_blocked_count,
-            duplicate_hwid_paid_skip_count,
-        )
+        summary = {
+            "total_users_db": len(users),
+            "users_with_uuid": len(users_with_uuid),
+            "remnawave_users_fetched": len(remnawave_users),
+            "onlineAt_available": online_at_available_count,
+            "onlineAt_recovered_individual": online_at_recovered_count,
+            "activation_candidates": activation_path_entered_count,
+            "activation_notify_sent": activation_notify_sent_count,
+            "activation_skipped": activation_skipped_flags_count,
+            "duplicate_hwid_detected": duplicate_hwid_detected_count,
+            "duplicate_hwid_blocked": duplicate_hwid_blocked_count,
+            "duplicate_hwid_paid_skip": duplicate_hwid_paid_skip_count,
+            "not_found_in_remnawave": len(not_found_users),
+            "anti_twink_enabled": anti_twink_enabled,
+            "hwid_unique_count": len(hwid_index),
+        }
+        logger.info("Checker summary: %s", summary)
 
         # Выполняем батчевое обновление пользователей
         if users_to_bulk_update:
@@ -722,11 +747,23 @@ async def remnawave_updater():
         
         # Вычисляем время выполнения с учётом одинаковой tz-aware метки
         elapsed = (datetime.now(ZoneInfo("Europe/Moscow")) - start_time).total_seconds()
+        summary["elapsed_seconds"] = round(elapsed, 2)
+        summary["remnawave_updated"] = updated
+        summary["errors"] = errors
+        summary["bulk_updates"] = len(users_to_bulk_update)
+        summary["tasks_rescheduled"] = len(users_need_task_reschedule)
         logger.info(f"Синхронизация завершена за {elapsed:.2f} секунд. Обновлено: {updated}, ошибок: {errors}, батчевых обновлений: {len(users_to_bulk_update)}, перепланировано задач: {len(users_need_task_reschedule)}")
-        
-    except Exception:
+
+        _last_run_status["last_success_at"] = start_time.isoformat()
+        _last_run_status["last_summary"] = summary
+
+    except Exception as critical_err:
         logger.exception("Критическая ошибка в remnawave_updater")
+        _last_run_status["last_error"] = f"{type(critical_err).__name__}: {critical_err}"
+        _last_run_status["total_errors"] = _last_run_status.get("total_errors", 0) + 1
     finally:
+        _last_run_status["total_runs"] = _last_run_status.get("total_runs", 0) + 1
+        _last_run_status["last_run_at"] = start_time.isoformat()
         if lock_acquired:
             update_lock.release()
             end_time = datetime.now(ZoneInfo("Europe/Moscow"))

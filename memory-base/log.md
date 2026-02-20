@@ -1,5 +1,29 @@
 ## 2026-02-20
 
+- **fix(remnawave/checkers):** устранена регрессия чекеров активации, подключений и HWID — восстановлена синхронизация с Directus и отправка в лог-канал.
+  - **Симптом:** после миграции с FastAdmin на Directus перестали работать чекеры активации устройств, количества подключений и одинаковых HWID; значения не обновлялись в Directus (админ-панель), уведомления не приходили в лог-чат.
+  - **Корневая причина (баг `continue`):**
+    - В `bloobcat/routes/remnawave/catcher.py` на строке ~392 при неудачном парсинге `onlineAt` через `_safe_parse_online_at()` выполнялся `continue`, который пропускал **ВСЮ** оставшуюся обработку пользователя, включая:
+      - синхронизацию `expired_at` (БД → RemnaWave),
+      - синхронизацию `hwid_limit` (двустороннюю),
+      - отправку обновлений в RemnaWave.
+    - В эталонном бэкенде при ошибке парсинга исключение ловилось outer try/except, и пропускался только этот пользователь, но expired_at/hwid_limit sync НЕ пропускался.
+  - **Исправление:**
+    - Убран `continue` при неудачном парсинге `onlineAt`. Теперь если `onlineAt` невалиден, пропускается только activation/connection блок, а expired_at/hwid_limit sync продолжается.
+    - Вынесены `registration_changed`, `connection_changed`, `sanction_changed` флаги перед блоком `if online_at:`.
+    - Блок батчевого обновления (bulk_update) и перепланирования задач вынесен после `if online_at:`, чтобы работать для всех вариантов.
+    - Activation skip логирование переведено с `INFO` на `DEBUG` для уменьшения шума в логах.
+  - **Добавлена диагностика:**
+    - Новый endpoint `GET /remnawave/status` — возвращает статус последнего запуска `remnawave_updater` (время, summary, ошибки).
+    - `_last_run_status` глобальный dict с метриками: `last_run_at`, `last_success_at`, `last_error`, `total_runs`, `total_errors`, `last_summary`.
+    - `Checker summary` теперь логируется как структурированный dict с полями: `total_users_db`, `users_with_uuid`, `remnawave_users_fetched`, `onlineAt_available`, `activation_candidates`, `activation_notify_sent`, `duplicate_hwid_detected/blocked`, `not_found_in_remnawave`, `elapsed_seconds`, `errors`.
+    - `send_admin_message()` теперь ведёт счётчик `_admin_msg_stats` (sent/failed/last_error), доступный через `/remnawave/status` → `admin_notifications`.
+    - В warning при невалидном `onlineAt` добавлен тип значения для диагностики формата.
+  - **Файлы:**
+    - `bloobcat/routes/remnawave/catcher.py` — основной фикс + диагностика.
+    - `bloobcat/bot/notifications/admin.py` — счётчик ошибок отправки.
+  - **Тесты:** `pytest tests/test_remnawave_activation.py tests/test_hwid_antitwink.py tests/test_connections_process.py tests/test_resilience_hardening.py` → 49 passed.
+
 - **fix(auth/referral-fk):** устранен крэш регистрации из-за `users.referred_by = 0` при FK-ограничении.
   - **Симптом в прод-логах:** `insert or update on table "users" violates foreign key constraint "users_referred_by_foreign"` с `Key (referred_by)=(0) is not present`.
   - Причина: в средах с self-FK на `users.referred_by -> users.id` значение `0` невалидно (должно быть `NULL`, если реферера нет).

@@ -8,6 +8,12 @@ from bloobcat.logger import get_logger
 
 logger = get_logger("admin_notifications")
 
+_admin_msg_stats = {"sent": 0, "failed": 0, "last_error": None, "last_error_at": None}
+
+
+def get_admin_msg_stats() -> dict:
+    return _admin_msg_stats.copy()
+
 
 def _safe_html(value) -> str:
     """Escape dynamic values before embedding into HTML parse_mode messages."""
@@ -25,8 +31,9 @@ async def write_to(user_id: int, referrer_id: int = 0):
 
 async def send_admin_message(text: str, reply_markup=None):
     """Общая функция для отправки сообщений админу/в канал"""
+    from datetime import datetime
+    chat_id = admin_settings.telegram_id
     try:
-        chat_id = admin_settings.telegram_id
         logger.info(f"Отправка сообщения в чат {chat_id}: {text[:100]}...")
         try:
             await bot.send_message(
@@ -42,14 +49,21 @@ async def send_admin_message(text: str, reply_markup=None):
                 text=text,
                 parse_mode="HTML"
             )
-        
+        _admin_msg_stats["sent"] += 1
+
     except TelegramBadRequest as e:
+        _admin_msg_stats["failed"] += 1
+        _admin_msg_stats["last_error"] = str(e)
+        _admin_msg_stats["last_error_at"] = datetime.utcnow().isoformat()
         if "chat not found" in str(e):
-            logger.error(f"Чат {chat_id} не найден. Убедитесь, что бот добавлен в канал или начат диалог с админом")
+            logger.error(f"Чат {chat_id} не найден. Убедитесь, что бот добавлен в канал или начат диалог с админом (ADMIN_TELEGRAM_ID={chat_id})")
         else:
-            logger.error(f"Ошибка отправки в Telegram: {str(e)}")
+            logger.error(f"Ошибка отправки в Telegram (chat_id={chat_id}): {str(e)}")
     except Exception as e:
-        logger.error(f"Неожиданная ошибка при отправке сообщения: {str(e)}")
+        _admin_msg_stats["failed"] += 1
+        _admin_msg_stats["last_error"] = str(e)
+        _admin_msg_stats["last_error_at"] = datetime.utcnow().isoformat()
+        logger.error(f"Неожиданная ошибка при отправке сообщения (chat_id={chat_id}): {str(e)}")
 
 async def on_activated_bot(
     user_id: int, name: str, referrer_id: int | None, referrer_name: str | None, utm: str | None = None
