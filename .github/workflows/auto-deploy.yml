@@ -161,29 +161,29 @@ jobs:
             psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
               -c "DO \\\$\\\$
             DECLARE
-              s RECORD;
-              c RECORD;
+              schema_rec RECORD;
+              fk_rec RECORD;
             BEGIN
-              FOR s IN
-                SELECT n.nspname AS schema_name
-                FROM pg_namespace n
-                WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+              FOR schema_rec IN
+                SELECT ns.nspname AS schema_name
+                FROM pg_namespace ns
+                WHERE ns.nspname NOT IN ('pg_catalog', 'information_schema')
                   AND EXISTS (
                     SELECT 1
-                    FROM pg_class c
-                    WHERE c.relnamespace = n.oid
-                      AND c.relname = 'active_tariffs'
-                      AND c.relkind IN ('r', 'p')
+                    FROM pg_class cls
+                    WHERE cls.relnamespace = ns.oid
+                      AND cls.relname = 'active_tariffs'
+                      AND cls.relkind IN ('r', 'p')
                   )
                   AND EXISTS (
                     SELECT 1
-                    FROM pg_class c
-                    WHERE c.relnamespace = n.oid
-                      AND c.relname = 'users'
-                      AND c.relkind IN ('r', 'p')
+                    FROM pg_class cls
+                    WHERE cls.relnamespace = ns.oid
+                      AND cls.relname = 'users'
+                      AND cls.relkind IN ('r', 'p')
                   )
               LOOP
-                FOR c IN
+                FOR fk_rec IN
                   SELECT tc.constraint_name
                   FROM information_schema.table_constraints tc
                   JOIN information_schema.key_column_usage kcu
@@ -193,7 +193,7 @@ jobs:
                     ON tc.constraint_name = ccu.constraint_name
                    AND tc.constraint_schema = ccu.constraint_schema
                   WHERE tc.constraint_type = 'FOREIGN KEY'
-                    AND tc.table_schema = s.schema_name
+                    AND tc.table_schema = schema_rec.schema_name
                     AND tc.table_name = 'active_tariffs'
                     AND kcu.column_name = 'user_id'
                     AND ccu.table_name = 'users'
@@ -201,19 +201,19 @@ jobs:
                 LOOP
                   EXECUTE format(
                     'ALTER TABLE %I.%I DROP CONSTRAINT IF EXISTS %I',
-                    s.schema_name,
+                    schema_rec.schema_name,
                     'active_tariffs',
-                    c.constraint_name
+                    fk_rec.constraint_name
                   );
                 END LOOP;
 
                 EXECUTE format(
                   'ALTER TABLE %I.%I ADD CONSTRAINT %I FOREIGN KEY (%I) REFERENCES %I.%I (%I) ON DELETE CASCADE',
-                  s.schema_name,
+                  schema_rec.schema_name,
                   'active_tariffs',
                   'fk_active_tariffs_user',
                   'user_id',
-                  s.schema_name,
+                  schema_rec.schema_name,
                   'users',
                   'id'
                 );
