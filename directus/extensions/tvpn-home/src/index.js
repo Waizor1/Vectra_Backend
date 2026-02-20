@@ -1,4 +1,4 @@
-import { defineModule } from '@directus/extensions-sdk';
+﻿import { defineModule } from '@directus/extensions-sdk';
 
 import ModuleHome from './module.vue';
 

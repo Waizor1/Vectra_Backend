@@ -1,5 +1,5 @@
 {
-  "name": "tvpn-home",
+  "name": "tvpn-content-ops",
   "version": "1.0.0",
   "type": "module",
   "keywords": [
@@ -17,8 +17,5 @@
     "path": "dist/index.js",
     "source": "src/index.js",
     "host": "^11.15.0"
-  },
-  "dependencies": {
-    "echarts": "^6.0.0"
   }
 }

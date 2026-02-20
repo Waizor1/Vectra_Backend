@@ -1,5 +1,24 @@
 ## 2026-02-20
 
+### fix(deploy/ci/directus-user-delete): CI hardening + forced FK CASCADE repair in deploy
+
+- **Симптом:** после фиксов в коде удаление пользователя в Directus всё равно падало с
+  `violates foreign key constraint "fk_active_tariffs_user"`.
+- **Что сделано (infra/deploy):**
+  - `.github/workflows/auto-deploy.yml`:
+    - тестовый этап переведен на стабильный импорт-контекст:
+      - `pip install pytest pytest-asyncio`
+      - `pip install -e . --no-deps`
+      - `python -m pytest tests -q`
+    - перед тестами добавлен `cp .env.example .env` (иначе падал импорт `bloobcat.settings` из-за обязательных env).
+    - добавлен debug-шаг для CI (cwd/sys.path/пути модулей) на период стабилизации.
+    - в deploy-шаг добавлен **принудительный SQL repair** FK
+      `active_tariffs.user_id -> users.id` с `ON DELETE CASCADE` через `psql` в `bloobcat_db`.
+    - после добавления SQL-блока исправлена YAML-ошибка workflow (убран heredoc, заменено на `psql -c ...`).
+- **Результат:** пайплайн проходит, FK приводится к `CASCADE` в целевой БД, удаление пользователей в Directus снова работает.
+- **Операционный note:** если регресс повторится, сначала проверить deploy-лог шага
+  `Fixing FK active_tariffs.user_id -> users.id (ON DELETE CASCADE)` и `delete_rule` в выводе SQL-проверки.
+
 ### DB-005: FK `active_tariffs -> users` — финальный хардening + миграция
 
 **Симптом (воспроизведен локально):**
@@ -974,3 +993,29 @@
   - `tests/test_auth_registration_modes.py`: добавлен кейс `campaign-abc` (не whitelist) -> `requires_registration=true`;
   - `tests/test_resilience_hardening.py`: добавлен кейс `validate` с не-whitelist `start_param` -> `403 User not registered`;
   - прогон: `py -3.12 -m pytest tests/test_auth_registration_modes.py tests/test_resilience_hardening.py -q` -> `13 passed`.
+
+
+### 2026-02-20 ? Directus Content v2 (Premium Ops + readable tables)
+
+- ?????????? redesign `Content` ? hybrid-??????:
+  - role-level presets ??? ???????? ????????;
+  - ???????? ????????? ?????? `??????? Ops` (`tvpn-content-ops`, `/admin/tvpn-content-ops`);
+  - ??????? ????????? cleanup legacy role bookmarks ?? keep-set.
+- `scripts/directus_super_setup.py`:
+  - nav-group collapse: `grp_main=open`, ????????? ???????? ?????? `closed`;
+  - ???????? rollout cleanup user-level presets ?? env-????? `DIRECTUS_CONTENT_UX_CLEAN_USER_PRESETS=1`;
+  - ???????? ???? `enable_extension_tvpn_content_ops` ????? role presets;
+  - ????????? ??????? default/bookmarks ??? redesign scope ????????? ? self-heal `id` ? tabular/cards.
+- `admin-widgets` endpoint ????????:
+  - `GET /content-ops/summary`
+  - `GET /content-ops/queues`
+  - `GET /content-ops/search`
+  - ????????? ?????? ??? optional partner-path (??? 500 ??? ?????????? ??????).
+- ???????? ?????? `directus/extensions/tvpn-content-ops`:
+  - KPI, ???????, ?????????? ?????, launch-grid;
+  - route-scoped full-width fix (??? inline mutation shared containers);
+  - ?????????? ??????? Graphite + Cyan/Amber, ??????? desktop/mobile.
+- ??????:
+  - `python -m py_compile scripts/directus_super_setup.py` ? OK
+  - `npm run build` ? `directus/extensions/admin-widgets` ? OK
+  - `npm run build` ? `directus/extensions/tvpn-content-ops` ? OK

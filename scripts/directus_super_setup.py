@@ -342,13 +342,13 @@ def patch_collection_meta(client: DirectusClient, collection: str, meta: Dict[st
 
 def ensure_nav_groups(client: DirectusClient) -> None:
     group_defs = [
-        {"collection": "grp_main", "label": "Основное", "icon": "dashboard", "sort": 1},
-        {"collection": "grp_promo", "label": "Промо", "icon": "confirmation_number", "sort": 2},
-        {"collection": "grp_prizes", "label": "Колесо призов", "icon": "casino", "sort": 3},
-        {"collection": "grp_partners", "label": "Партнерка", "icon": "handshake", "sort": 4},
-        {"collection": "grp_analytics", "label": "Аналитика", "icon": "timeline", "sort": 5},
-        {"collection": "grp_payments", "label": "Платежи", "icon": "payments", "sort": 6},
-        {"collection": "grp_service", "label": "Служебное", "icon": "build", "sort": 7},
+        {"collection": "grp_main", "label": "Основное", "icon": "dashboard", "sort": 1, "collapse": "open"},
+        {"collection": "grp_promo", "label": "Промо", "icon": "confirmation_number", "sort": 2, "collapse": "closed"},
+        {"collection": "grp_prizes", "label": "Колесо призов", "icon": "casino", "sort": 3, "collapse": "closed"},
+        {"collection": "grp_partners", "label": "Партнерка", "icon": "handshake", "sort": 4, "collapse": "closed"},
+        {"collection": "grp_analytics", "label": "Аналитика", "icon": "timeline", "sort": 5, "collapse": "closed"},
+        {"collection": "grp_payments", "label": "Платежи", "icon": "payments", "sort": 6, "collapse": "closed"},
+        {"collection": "grp_service", "label": "Служебное", "icon": "build", "sort": 7, "collapse": "closed"},
     ]
 
     for group in group_defs:
@@ -359,7 +359,7 @@ def ensure_nav_groups(client: DirectusClient) -> None:
             "icon": group["icon"],
             "note": group["label"],
             "sort": group["sort"],
-            "collapse": "open",
+            "collapse": group["collapse"],
             "hidden": False,
             "translations": [{"language": "ru-RU", "translation": group["label"]}],
         }
@@ -2632,7 +2632,7 @@ def ensure_nav_group_permissions(client: DirectusClient) -> None:
             ensure_permission(client, policy_id, grp, "read")
 
 
-def ensure_role_presets(client: DirectusClient) -> None:
+def ensure_role_presets_legacy(client: DirectusClient) -> None:
     # Presets/bookmarks define the UX of listing pages (fields, widths, filters, sorts).
     role_map = get_role_map(client)
     admin_role = role_map.get("Administrator")
@@ -3421,6 +3421,632 @@ def ensure_role_presets(client: DirectusClient) -> None:
         )
 
 
+def get_content_redesign_collections() -> list[str]:
+    return [
+        "users",
+        "active_tariffs",
+        "tariffs",
+        "family_members",
+        "family_invites",
+        "family_devices",
+        "family_audit_logs",
+        "promo_codes",
+        "promo_batches",
+        "promo_usages",
+        "processed_payments",
+        "in_app_notifications",
+        "prize_wheel_config",
+        "prize_wheel_history",
+        "error_reports",
+        "partner_withdrawals",
+        "partner_qr_codes",
+        "connections",
+    ]
+
+
+def cleanup_user_presets_for_scope(client: DirectusClient, collections: Iterable[str]) -> None:
+    """
+    Rollout helper:
+    DIRECTUS_CONTENT_UX_CLEAN_USER_PRESETS=1 removes personal presets in scope
+    so new role-level defaults become immediately visible.
+    """
+    if os.getenv("DIRECTUS_CONTENT_UX_CLEAN_USER_PRESETS", "0").strip() != "1":
+        return
+
+    target = {c for c in collections if isinstance(c, str) and c}
+    if not target:
+        return
+
+    resp = client.get("/presets", params={"limit": 1200, "fields": "id,user,collection"})
+    if resp.status_code in (401, 403):
+        return
+    resp.raise_for_status()
+    rows = resp.json().get("data") or []
+    removed = 0
+    for row in rows:
+        if row.get("collection") not in target:
+            continue
+        if not row.get("user"):
+            continue
+        preset_id = row.get("id")
+        if not preset_id:
+            continue
+        deleted = client.delete(f"/presets/{preset_id}")
+        if deleted.status_code in (401, 403, 404):
+            continue
+        deleted.raise_for_status()
+        removed += 1
+
+    if removed:
+        print(f"Removed user-level presets in redesign scope: {removed}")
+
+
+def ensure_role_presets(client: DirectusClient) -> None:
+    """
+    Redesigned role-level presets:
+    - role-only defaults (no user-level preset writes),
+    - legacy bookmark pruning by keep-set,
+    - PK self-heal for tabular/cards.
+    """
+    role_map = get_role_map(client)
+    admin_role = role_map.get("Administrator")
+    manager_role = role_map.get("Manager")
+    viewer_role = role_map.get("Viewer")
+    if not admin_role and not manager_role and not viewer_role:
+        return
+
+    available_collections = set(list_collections(client))
+    redesign_scope = set(get_content_redesign_collections()) & available_collections
+    if not redesign_scope:
+        return
+
+    resp = client.get(
+        "/presets",
+        params={
+            "limit": 1200,
+            "fields": "id,role,user,collection,bookmark,layout,layout_query,layout_options,filter,color,icon,search",
+        },
+    )
+    resp.raise_for_status()
+    existing = resp.json().get("data") or []
+
+    def ensure_tabular_fields_include_pk(preset: Dict[str, Any], *, pk_field: str = "id") -> Optional[Dict[str, Any]]:
+        layout_query = preset.get("layout_query")
+        if not isinstance(layout_query, dict):
+            return {"tabular": {"fields": [pk_field]}}
+        tabular = layout_query.get("tabular")
+        if not isinstance(tabular, dict):
+            return {"tabular": {"fields": [pk_field]}}
+        fields = tabular.get("fields")
+        if not isinstance(fields, list):
+            return {**layout_query, "tabular": {**tabular, "fields": [pk_field]}}
+        if pk_field in fields:
+            return None
+        return {**layout_query, "tabular": {**tabular, "fields": [pk_field, *fields]}}
+
+    def ensure_cards_fields_include_pk(
+        preset: Dict[str, Any],
+        *,
+        pk_field: str = "id",
+        required_fields: Optional[list[str]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        layout_query = preset.get("layout_query")
+        if not isinstance(layout_query, dict):
+            layout_query = {}
+        cards = layout_query.get("cards")
+        if not isinstance(cards, dict):
+            cards = {}
+        fields = cards.get("fields")
+        if not isinstance(fields, list):
+            fields = []
+
+        desired = [pk_field]
+        if required_fields:
+            for field in required_fields:
+                if isinstance(field, str) and field and field not in desired:
+                    desired.append(field)
+
+        new_fields = list(fields)
+        changed = False
+        for field in reversed(desired):
+            if field not in new_fields:
+                new_fields.insert(0, field)
+                changed = True
+        if not changed:
+            return None
+        return {**layout_query, "cards": {**cards, "fields": new_fields}}
+
+    # Auto-heal PK in existing presets for redesigned collections.
+    for row in list(existing):
+        if row.get("collection") not in redesign_scope:
+            continue
+        preset_id = row.get("id")
+        if not preset_id:
+            continue
+        layout = row.get("layout")
+        if layout == "tabular":
+            new_layout = ensure_tabular_fields_include_pk(row, pk_field="id")
+        elif layout == "cards":
+            new_layout = ensure_cards_fields_include_pk(row, pk_field="id", required_fields=["username", "full_name"])
+        else:
+            continue
+        if not new_layout:
+            continue
+        client.patch(f"/presets/{preset_id}", json={"layout_query": new_layout}).raise_for_status()
+        row["layout_query"] = new_layout
+
+    def upsert_preset(payload: Dict[str, Any]) -> None:
+        collection = payload.get("collection")
+        if not collection or collection not in available_collections:
+            return
+        key = (
+            str(payload.get("role") or ""),
+            str(payload.get("user") or ""),
+            payload.get("collection"),
+            payload.get("bookmark"),
+        )
+        found = next(
+            (
+                p
+                for p in existing
+                if (
+                    str(p.get("role") or ""),
+                    str(p.get("user") or ""),
+                    p.get("collection"),
+                    p.get("bookmark"),
+                )
+                == key
+            ),
+            None,
+        )
+        if found and found.get("id"):
+            client.patch(f"/presets/{found['id']}", json=payload).raise_for_status()
+            found.update(payload)
+            return
+        created = client.post("/presets", json=payload)
+        created.raise_for_status()
+        created_row = created.json().get("data") or {}
+        existing.append(created_row)
+
+    def prune_legacy_role_bookmarks(role_id: Any, collection: str, keep_set: set[str]) -> None:
+        role_key = str(role_id)
+        to_remove: list[Dict[str, Any]] = []
+        for row in existing:
+            if row.get("collection") != collection:
+                continue
+            if str(row.get("role") or "") != role_key:
+                continue
+            if row.get("user") is not None:
+                continue
+            bookmark = row.get("bookmark")
+            if bookmark is None:
+                continue
+            if isinstance(bookmark, str) and bookmark in keep_set:
+                continue
+            to_remove.append(row)
+        for row in to_remove:
+            preset_id = row.get("id")
+            if not preset_id:
+                continue
+            deleted = client.delete(f"/presets/{preset_id}")
+            if deleted.status_code in (401, 403, 404):
+                continue
+            deleted.raise_for_status()
+            try:
+                existing.remove(row)
+            except ValueError:
+                pass
+
+    width_map = {
+        "id": 110,
+        "username": 170,
+        "full_name": 220,
+        "balance": 120,
+        "expired_at": 170,
+        "is_subscribed": 130,
+        "is_trial": 110,
+        "is_blocked": 120,
+        "hwid_limit": 140,
+        "lte_gb_total": 140,
+        "active_tariff_id": 140,
+        "connected_at": 180,
+        "registration_date": 180,
+        "is_partner": 110,
+        "referrals": 110,
+        "user_id": 150,
+        "name": 190,
+        "months": 100,
+        "price": 120,
+        "lte_gb_used": 130,
+        "devices_decrease_count": 170,
+        "lte_price_per_gb": 150,
+        "progressive_multiplier": 170,
+        "residual_day_fraction": 170,
+        "order": 90,
+        "is_active": 120,
+        "family_plan_enabled": 160,
+        "final_price_default": 160,
+        "final_price_family": 160,
+        "devices_limit_default": 170,
+        "devices_limit_family": 170,
+        "lte_enabled": 120,
+        "owner_id": 150,
+        "member_id": 150,
+        "status": 130,
+        "allocated_devices": 170,
+        "created_at": 170,
+        "updated_at": 170,
+        "max_uses": 110,
+        "used_count": 110,
+        "expires_at": 170,
+        "revoked_at": 170,
+        "title": 220,
+        "subtitle": 260,
+        "client_id": 190,
+        "actor_id": 150,
+        "action": 180,
+        "target_id": 180,
+        "batch_id": 120,
+        "disabled": 110,
+        "max_activations": 150,
+        "per_user_limit": 150,
+        "code_hmac": 260,
+        "notes": 280,
+        "created_by_id": 130,
+        "promo_code_id": 160,
+        "used_at": 180,
+        "context": 240,
+        "payment_id": 220,
+        "amount": 120,
+        "amount_external": 160,
+        "amount_from_balance": 180,
+        "start_at": 170,
+        "end_at": 170,
+        "max_per_user": 150,
+        "max_per_session": 150,
+        "auto_hide_seconds": 170,
+        "prize_type": 150,
+        "prize_name": 200,
+        "prize_value": 130,
+        "probability": 130,
+        "requires_admin": 150,
+        "is_claimed": 120,
+        "is_rejected": 120,
+        "admin_notified": 130,
+        "triage_due_at": 170,
+        "triage_severity": 140,
+        "triage_status": 140,
+        "triage_owner": 170,
+        "type": 130,
+        "code": 260,
+        "route": 260,
+        "message": 360,
+        "amount_rub": 130,
+        "method": 120,
+        "error": 240,
+        "slug": 170,
+        "views_count": 130,
+        "activations_count": 150,
+        "at": 170,
+    }
+
+    def widths_for(fields: list[str]) -> Dict[str, int]:
+        return {field: width_map.get(field, 160) for field in fields}
+
+    def make_tabular(
+        *,
+        role_id: Any,
+        collection: str,
+        fields: list[str],
+        sort: str,
+        bookmark: Optional[str] = None,
+        filter_query: Any = None,
+        color: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        safe_fields = list(fields)
+        if "id" not in safe_fields:
+            safe_fields = ["id", *safe_fields]
+        return {
+            "bookmark": bookmark,
+            "user": None,
+            "role": role_id,
+            "collection": collection,
+            "layout": "tabular",
+            "layout_query": {"tabular": {"fields": safe_fields, "sort": sort}},
+            "layout_options": {"tabular": {"widths": widths_for(safe_fields)}},
+            "search": None,
+            "filter": filter_query,
+            "icon": "bookmark",
+            "color": color,
+        }
+
+    def make_cards(
+        *,
+        role_id: Any,
+        collection: str,
+        fields: list[str],
+        sort: str,
+        bookmark: str,
+        title: str,
+        subtitle: str,
+        color: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        safe_fields = list(fields)
+        if "id" not in safe_fields:
+            safe_fields = ["id", *safe_fields]
+        return {
+            "bookmark": bookmark,
+            "user": None,
+            "role": role_id,
+            "collection": collection,
+            "layout": "cards",
+            "layout_query": {"cards": {"fields": safe_fields, "sort": sort}},
+            "layout_options": {"cards": {"title": title, "subtitle": subtitle, "icon": "person", "size": 2}},
+            "search": None,
+            "filter": None,
+            "icon": "bookmark",
+            "color": color,
+        }
+
+    matrix = {
+        "users": {
+            "default_fields": ["id", "username", "full_name", "balance", "expired_at", "is_subscribed", "is_trial", "is_blocked", "hwid_limit", "lte_gb_total", "active_tariff_id", "connected_at", "registration_date", "is_partner", "referrals"],
+            "default_sort": "-registration_date",
+            "bookmarks": [
+                {
+                    "bookmark": "Пользователи · Риск",
+                    "sort": "-registration_date",
+                    "filter": {"_or": [{"is_blocked": {"_eq": True}}, {"expired_at": {"_lte": "$NOW"}}]},
+                    "color": "#F59E0B",
+                },
+                {
+                    "bookmark": "Пользователи · Доход",
+                    "sort": "-balance",
+                    "filter": None,
+                    "color": "#10B981",
+                },
+                {
+                    "bookmark": "Пользователи · Карточки",
+                    "layout": "cards",
+                    "sort": "-registration_date",
+                    "fields": ["id", "username", "full_name", "expired_at", "balance", "is_blocked", "is_subscribed", "registration_date"],
+                    "color": "#3B82F6",
+                },
+            ],
+        },
+        "active_tariffs": {
+            "default_fields": ["id", "user_id", "name", "months", "price", "hwid_limit", "lte_gb_total", "lte_gb_used", "devices_decrease_count", "lte_price_per_gb", "progressive_multiplier", "residual_day_fraction"],
+            "default_sort": "-id",
+            "bookmarks": [
+                {"bookmark": "Активные тарифы · LTE usage", "sort": "-lte_gb_used", "filter": {"lte_gb_total": {"_gt": 0}}, "color": "#06B6D4"},
+                {"bookmark": "Активные тарифы · Устройства", "sort": "-devices_decrease_count", "filter": None, "color": "#F59E0B"},
+            ],
+        },
+        "tariffs": {
+            "default_fields": ["id", "order", "name", "months", "is_active", "family_plan_enabled", "final_price_default", "final_price_family", "devices_limit_default", "devices_limit_family", "lte_enabled", "lte_price_per_gb"],
+            "default_sort": "order",
+            "bookmarks": [
+                {"bookmark": "Тарифы · Семейные", "sort": "order", "filter": {"family_plan_enabled": {"_eq": True}}, "color": "#14B8A6"},
+                {"bookmark": "Тарифы · Неактивные", "sort": "order", "filter": {"is_active": {"_eq": False}}, "color": "#EF4444"},
+            ],
+        },
+        "family_members": {
+            "default_fields": ["id", "owner_id", "member_id", "status", "allocated_devices", "created_at", "updated_at"],
+            "default_sort": "-updated_at",
+            "bookmarks": [
+                {"bookmark": "Семья · Активные", "sort": "-updated_at", "filter": {"status": {"_eq": "active"}}, "color": "#10B981"},
+                {"bookmark": "Семья · Последние изменения", "sort": "-updated_at", "filter": None, "color": "#06B6D4"},
+            ],
+        },
+        "family_invites": {
+            "default_fields": ["id", "owner_id", "allocated_devices", "max_uses", "used_count", "expires_at", "revoked_at", "created_at"],
+            "default_sort": "-created_at",
+            "bookmarks": [
+                {
+                    "bookmark": "Инвайты · Активные",
+                    "sort": "-created_at",
+                    "filter": {"_and": [{"revoked_at": {"_null": True}}, {"_or": [{"expires_at": {"_null": True}}, {"expires_at": {"_gte": "$NOW"}}]}]},
+                    "color": "#10B981",
+                },
+                {"bookmark": "Инвайты · Использованные", "sort": "-created_at", "filter": {"used_count": {"_gt": 0}}, "color": "#F59E0B"},
+            ],
+        },
+        "family_devices": {
+            "default_fields": ["id", "user_id", "title", "subtitle", "client_id", "created_at"],
+            "default_sort": "-created_at",
+            "bookmarks": [{"bookmark": "Устройства · Последние", "sort": "-created_at", "filter": None, "color": "#06B6D4"}],
+        },
+        "family_audit_logs": {
+            "default_fields": ["id", "owner_id", "actor_id", "action", "target_id", "created_at"],
+            "default_sort": "-created_at",
+            "bookmarks": [{"bookmark": "Аудит семьи · Последние", "sort": "-created_at", "filter": None, "color": "#64748B"}],
+        },
+        "promo_codes": {
+            "default_fields": ["id", "name", "batch_id", "disabled", "expires_at", "max_activations", "per_user_limit", "code_hmac", "created_at"],
+            "default_sort": "-created_at",
+            "bookmarks": [
+                {
+                    "bookmark": "Промокоды · Активные",
+                    "sort": "-created_at",
+                    "filter": {"_and": [{"disabled": {"_eq": False}}, {"_or": [{"expires_at": {"_null": True}}, {"expires_at": {"_gte": "$NOW"}}]}]},
+                    "color": "#10B981",
+                },
+                {"bookmark": "Промокоды · Истекшие", "sort": "expires_at", "filter": {"_and": [{"expires_at": {"_nnull": True}}, {"expires_at": {"_lt": "$NOW"}}]}, "color": "#EF4444"},
+                {"bookmark": "Промокоды · Отключенные", "sort": "-created_at", "filter": {"disabled": {"_eq": True}}, "color": "#F59E0B"},
+            ],
+        },
+        "promo_batches": {
+            "default_fields": ["id", "title", "notes", "created_at", "created_by_id"],
+            "default_sort": "-created_at",
+            "bookmarks": [{"bookmark": "Партии промо · Последние", "sort": "-created_at", "filter": None, "color": "#8B5CF6"}],
+        },
+        "promo_usages": {
+            "default_fields": ["id", "promo_code_id", "user_id", "used_at", "context"],
+            "default_sort": "-used_at",
+            "bookmarks": [{"bookmark": "Промо usage · Последние", "sort": "-used_at", "filter": None, "color": "#8B5CF6"}],
+        },
+        "processed_payments": {
+            "default_fields": ["id", "payment_id", "user_id", "amount", "amount_external", "amount_from_balance", "status", "processed_at"],
+            "default_sort": "-processed_at",
+            "bookmarks": [
+                {"bookmark": "Платежи · Крупные", "sort": "-amount", "filter": {"amount": {"_gt": 0}}, "color": "#10B981"},
+                {"bookmark": "Платежи · Неуспешные", "sort": "-processed_at", "filter": {"status": {"_neq": "succeeded"}}, "color": "#EF4444"},
+            ],
+        },
+        "in_app_notifications": {
+            "default_fields": ["id", "title", "is_active", "start_at", "end_at", "max_per_user", "max_per_session", "auto_hide_seconds", "created_at"],
+            "default_sort": "-created_at",
+            "bookmarks": [
+                {"bookmark": "Уведомления · Активные", "sort": "-created_at", "filter": {"_and": [{"is_active": {"_eq": True}}, {"_or": [{"end_at": {"_null": True}}, {"end_at": {"_gte": "$NOW"}}]}]}, "color": "#10B981"},
+                {"bookmark": "Уведомления · Неактивные", "sort": "-created_at", "filter": {"is_active": {"_eq": False}}, "color": "#EF4444"},
+            ],
+        },
+        "prize_wheel_config": {
+            "default_fields": ["id", "prize_type", "prize_name", "prize_value", "probability", "is_active", "requires_admin", "updated_at"],
+            "default_sort": "-updated_at",
+            "bookmarks": [
+                {"bookmark": "Призы · Активные", "sort": "-updated_at", "filter": {"is_active": {"_eq": True}}, "color": "#10B981"},
+                {"bookmark": "Призы · Требуют админа", "sort": "-updated_at", "filter": {"requires_admin": {"_eq": True}}, "color": "#F59E0B"},
+            ],
+        },
+        "prize_wheel_history": {
+            "default_fields": ["id", "user_id", "prize_name", "prize_type", "prize_value", "is_claimed", "is_rejected", "admin_notified", "created_at"],
+            "default_sort": "-created_at",
+            "bookmarks": [
+                {"bookmark": "История призов · Не обработаны", "sort": "-created_at", "filter": {"_and": [{"is_claimed": {"_eq": False}}, {"is_rejected": {"_eq": False}}]}, "color": "#F59E0B"},
+                {"bookmark": "История призов · Отклонены", "sort": "-created_at", "filter": {"is_rejected": {"_eq": True}}, "color": "#EF4444"},
+            ],
+        },
+        "error_reports": {
+            "default_fields": ["id", "created_at", "triage_due_at", "triage_severity", "triage_status", "triage_owner", "type", "code", "route", "user_id", "message"],
+            "default_sort": "-created_at",
+            "bookmarks": [
+                {"bookmark": "Ошибки · Новые", "sort": "-created_at", "filter": {"triage_status": {"_eq": "new"}}, "color": "#EF4444"},
+                {"bookmark": "Ошибки · Просрочен triage", "sort": "triage_due_at", "filter": {"_and": [{"triage_status": {"_eq": "new"}}, {"triage_due_at": {"_nnull": True}}, {"triage_due_at": {"_lte": "$NOW"}}]}, "color": "#DC2626"},
+                {"bookmark": "Ошибки · В работе", "sort": "-created_at", "filter": {"triage_status": {"_eq": "in_progress"}}, "color": "#F59E0B"},
+            ],
+        },
+        "partner_withdrawals": {
+            "default_fields": ["id", "owner_id", "amount_rub", "method", "status", "error", "created_at", "updated_at"],
+            "default_sort": "-created_at",
+            "bookmarks": [
+                {"bookmark": "Партнерка · Выводы в ожидании", "sort": "-created_at", "filter": {"status": {"_in": ["created", "processing"]}}, "color": "#F59E0B"},
+                {"bookmark": "Партнерка · Выводы завершенные", "sort": "-updated_at", "filter": {"status": {"_eq": "success"}}, "color": "#10B981"},
+            ],
+        },
+        "partner_qr_codes": {
+            "default_fields": ["id", "owner_id", "title", "slug", "is_active", "views_count", "activations_count", "created_at", "updated_at"],
+            "default_sort": "-updated_at",
+            "bookmarks": [
+                {"bookmark": "Партнерка · Активные QR", "sort": "-updated_at", "filter": {"is_active": {"_eq": True}}, "color": "#10B981"},
+                {"bookmark": "Партнерка · Топ активаций", "sort": "-activations_count", "filter": None, "color": "#06B6D4"},
+            ],
+        },
+        "connections": {
+            "default_fields": ["id", "user_id", "at"],
+            "default_sort": "-at",
+            "bookmarks": [{"bookmark": "Подключения · Последние", "sort": "-at", "filter": None, "color": "#06B6D4"}],
+        },
+    }
+
+    target_roles: list[Dict[str, Any]] = []
+    if admin_role:
+        target_roles.append(admin_role)
+    if manager_role:
+        target_roles.append(manager_role)
+
+    for role in target_roles:
+        role_id = role["id"]
+        for collection, config in matrix.items():
+            if collection not in available_collections:
+                continue
+
+            default_fields = list(config["default_fields"])
+            default_sort = str(config["default_sort"])
+            bookmark_defs = list(config.get("bookmarks") or [])
+            keep_set = {str(item["bookmark"]) for item in bookmark_defs if item.get("bookmark")}
+            prune_legacy_role_bookmarks(role_id, collection, keep_set)
+
+            upsert_preset(
+                make_tabular(
+                    role_id=role_id,
+                    collection=collection,
+                    fields=default_fields,
+                    sort=default_sort,
+                )
+            )
+
+            for item in bookmark_defs:
+                layout = str(item.get("layout") or "tabular")
+                if layout == "cards":
+                    upsert_preset(
+                        make_cards(
+                            role_id=role_id,
+                            collection=collection,
+                            fields=list(item.get("fields") or default_fields),
+                            sort=str(item.get("sort") or default_sort),
+                            bookmark=str(item["bookmark"]),
+                            title="{{ username }}",
+                            subtitle="{{ full_name }}",
+                            color=item.get("color"),
+                        )
+                    )
+                    continue
+                upsert_preset(
+                    make_tabular(
+                        role_id=role_id,
+                        collection=collection,
+                        fields=default_fields,
+                        sort=str(item.get("sort") or default_sort),
+                        bookmark=str(item["bookmark"]),
+                        filter_query=item.get("filter"),
+                        color=item.get("color"),
+                    )
+                )
+
+    if viewer_role:
+        rid = viewer_role["id"]
+        viewer_defaults = [
+            make_tabular(
+                role_id=rid,
+                collection="users",
+                fields=["id", "username", "full_name", "registration_date", "expired_at", "is_blocked"],
+                sort="-registration_date",
+            ),
+            make_tabular(
+                role_id=rid,
+                collection="connections",
+                fields=["id", "user_id", "at"],
+                sort="-at",
+            ),
+        ]
+        viewer_bookmarks = [
+            make_tabular(
+                role_id=rid,
+                collection="connections",
+                fields=["id", "user_id", "at"],
+                sort="-at",
+                bookmark="Подключения · Последние",
+                color="#06B6D4",
+            )
+        ]
+        viewer_bookmark_keep: Dict[str, set[str]] = {
+            "users": set(),
+            "connections": {"Подключения · Последние"},
+        }
+        for payload in viewer_defaults:
+            collection = payload.get("collection")
+            if collection not in available_collections:
+                continue
+            prune_legacy_role_bookmarks(rid, str(collection), viewer_bookmark_keep.get(str(collection), set()))
+            upsert_preset(payload)
+        for payload in viewer_bookmarks:
+            collection = payload.get("collection")
+            if collection not in available_collections:
+                continue
+            upsert_preset(payload)
+
+
 def ensure_extension_enabled(client: DirectusClient, extension_name: str) -> None:
     # Extension enabling is stored in Directus metadata. We enable by extension ID.
     resp = client.get("/extensions")
@@ -3535,11 +4161,14 @@ def main() -> None:
         # Re-run baseline after all late-created collections to avoid skipped grants.
         ("ensure_permissions_baseline_post", lambda: ensure_permissions_baseline(client)),
         ("ensure_insights_dashboard", lambda: ensure_insights_dashboard(client)),
+        ("cleanup_user_presets_for_scope", lambda: cleanup_user_presets_for_scope(client, get_content_redesign_collections())),
         ("ensure_role_presets", lambda: ensure_role_presets(client)),
+        ("enable_extension_tvpn_content_ops", lambda: ensure_extension_enabled(client, "tvpn-content-ops")),
         ("verify_users_item_access", lambda: verify_users_item_access(client)),
         ("verify_users_family_section_visibility", lambda: verify_users_family_section_visibility(client)),
         ("verify_tariffs_form_visibility", lambda: verify_tariffs_form_visibility(client)),
         ("enable_extension_tvpn_home", lambda: ensure_extension_enabled(client, "tvpn-home")),
+        ("enable_extension_server_ops", lambda: ensure_extension_enabled(client, "server-ops")),
         ("enable_extension_id_link_editor", lambda: ensure_extension_enabled(client, "id-link-editor")),
     ]
 
@@ -3553,4 +4182,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

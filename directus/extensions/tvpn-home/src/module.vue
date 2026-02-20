@@ -1,60 +1,27 @@
-<template>
+﻿<template>
 	<private-view title="Главная">
 		<template #navigation>
-			<div class="nav">
-				<div class="nav__section">
-					<div class="nav__section-title">Обзор</div>
-					<router-link class="nav__item nav__item--active" :to="{ path: '/tvpn-home' }">
-						<v-icon name="space_dashboard" />
-						<span>Главная</span>
-					</router-link>
-					<router-link class="nav__item" :to="{ path: '/insights' }">
-						<v-icon name="timeline" />
-						<span>Аналитика</span>
-					</router-link>
+			<div class="nav nav--premium">
+				<div class="nav__brand">
+					<div class="nav__brand-logo">TVPN</div>
+					<div>
+						<div class="nav__brand-title">Control Room</div>
+						<div class="nav__brand-subtitle">Премиальная админка</div>
+					</div>
 				</div>
 
-				<div class="nav__section">
-					<div class="nav__section-title">Управление</div>
-					<router-link class="nav__item" :to="{ path: '/content/users' }">
-						<v-icon name="people" />
-						<span>Пользователи</span>
-					</router-link>
-					<router-link class="nav__item" :to="{ path: '/content/active_tariffs' }">
-						<v-icon name="subscriptions" />
-						<span>Активные тарифы</span>
-					</router-link>
-					<router-link class="nav__item" :to="{ path: '/content/tariffs' }">
-						<v-icon name="sell" />
-						<span>Тарифы</span>
-					</router-link>
-					<router-link class="nav__item" :to="{ path: '/content/processed_payments' }">
-						<v-icon name="payments" />
-						<span>Платежи</span>
-					</router-link>
-					<router-link class="nav__item" :to="{ path: '/content/error_reports' }">
-						<v-icon name="bug_report" />
-						<span>Логи ошибок</span>
-					</router-link>
-				</div>
-
-				<div class="nav__section">
-					<div class="nav__section-title">Промо и призы</div>
-					<router-link class="nav__item" :to="{ path: '/content/promo_codes' }">
-						<v-icon name="confirmation_number" />
-						<span>Промокоды</span>
-					</router-link>
-					<router-link class="nav__item" :to="{ path: '/content/promo_batches' }">
-						<v-icon name="inventory_2" />
-						<span>Партии промокодов</span>
-					</router-link>
-					<router-link class="nav__item" :to="{ path: '/content/prize_wheel_config' }">
-						<v-icon name="casino" />
-						<span>Настройки призов</span>
-					</router-link>
-					<router-link class="nav__item" :to="{ path: '/content/prize_wheel_history' }">
-						<v-icon name="history_toggle_off" />
-						<span>История призов</span>
+				<div v-for="section in navSections" :key="section.id" class="nav__section">
+					<div class="nav__section-title">{{ section.title }}</div>
+					<router-link
+						v-for="item in section.items"
+						:key="item.path"
+						class="nav__item"
+						:class="{ 'nav__item--active': isRouteActive(item.path) }"
+						:to="{ path: item.path }"
+					>
+						<span class="nav__item-icon"><v-icon :name="item.icon" /></span>
+						<span class="nav__item-label">{{ item.label }}</span>
+						<span v-if="navBadge(item)" class="nav__item-badge">{{ navBadge(item) }}</span>
 					</router-link>
 				</div>
 			</div>
@@ -71,15 +38,40 @@
 			<div class="page__main">
 				<div class="hero">
 					<div class="hero__left">
+						<div class="hero__kicker">TVPN Control Room</div>
 						<div class="hero__title">TVPN Admin</div>
 						<div class="hero__subtitle">
-							Быстрый обзор состояния проекта, метрики и быстрые переходы по ключевым разделам.
+							Премиальный обзор проекта: ключевые метрики, крупные графики и удобные админ-инструменты в одном экране.
+						</div>
+						<div class="hero__cta-row">
+							<router-link class="hero__cta hero__cta--primary" :to="{ path: '/content/users' }">
+								<v-icon name="manage_accounts" />
+								<span>Пользователи</span>
+							</router-link>
+							<router-link class="hero__cta hero__cta--ghost" :to="{ path: '/insights' }">
+								<v-icon name="query_stats" />
+								<span>Insights</span>
+							</router-link>
 						</div>
 					</div>
 					<div class="hero__right">
 						<div class="hero__meta">
 							<div class="hero__meta-label">Последнее обновление</div>
 							<div class="hero__meta-value">{{ lastUpdatedLabel }}</div>
+							<div class="hero__meta-stats">
+								<div class="hero__meta-stat">
+									<span>Подключения 7д</span>
+									<strong>{{ fmt(stats.connections7d) }}</strong>
+								</div>
+								<div class="hero__meta-stat">
+									<span>Регистрации 7д</span>
+									<strong>{{ fmt(stats.registrations7d) }}</strong>
+								</div>
+								<div class="hero__meta-stat">
+									<span>Платежи сегодня</span>
+									<strong>{{ fmtMoney(trends.paymentsSumToday) }}</strong>
+								</div>
+							</div>
 						</div>
 					</div>
 				</div>
@@ -171,7 +163,7 @@
 					</v-card>
 				</div>
 
-				<v-card class="panel">
+				<v-card v-if="false" class="panel panel--legacy">
 				<div class="panel__title">Динамика (30 дней)</div>
 				<div class="panel__subtitle">Спарклайны и быстрые суммы по ключевым событиям.</div>
 
@@ -367,7 +359,7 @@
 				</div>
 			</v-card>
 
-			<v-card class="panel">
+			<v-card v-if="false" class="panel panel--legacy">
 				<div class="panel__title">Тренды (12 месяцев)</div>
 				<div class="panel__subtitle">Годовой срез, чтобы видеть сезонность, рост и “волну” без шума.</div>
 
@@ -598,6 +590,90 @@
 				</div>
 			</v-card>
 
+			<v-card class="panel panel--chart-hub">
+				<div class="panel__head panel__head--chart">
+					<div>
+						<div class="panel__title">Операционный пульс (30 дней)</div>
+						<div class="panel__subtitle">Главный график за месяц с быстрым переключением метрики.</div>
+					</div>
+					<div class="segmented segmented--compact">
+						<button
+							v-for="opt in pulseOptions"
+							:key="opt.key"
+							type="button"
+							class="segmented__btn"
+							:class="{ 'segmented__btn--active': pulseMetric === opt.key }"
+							@click="pulseMetric = opt.key"
+						>
+							{{ opt.label }}
+						</button>
+					</div>
+				</div>
+				<div class="chart-hub__stats">
+					<div class="chart-hub__stat">
+						<div class="chart-hub__label">Сегодня</div>
+						<div class="chart-hub__value">{{ pulseChart.today }}</div>
+					</div>
+					<div class="chart-hub__stat">
+						<div class="chart-hub__label">7 дней</div>
+						<div class="chart-hub__value">{{ pulseChart.week }}</div>
+					</div>
+					<div class="chart-hub__stat">
+						<div class="chart-hub__label">Пик</div>
+						<div class="chart-hub__value">{{ pulseChart.peak }}</div>
+					</div>
+				</div>
+				<PremiumLineChart
+					:height="320"
+					:categories="pulseChart.categories"
+					:series="pulseChart.seriesForChart"
+					:value-formatter="pulseValueFormatter"
+					mode="30d"
+				/>
+			</v-card>
+
+			<v-card class="panel panel--chart-hub">
+				<div class="panel__head panel__head--chart">
+					<div>
+						<div class="panel__title">Годовой обзор (12 месяцев)</div>
+						<div class="panel__subtitle">Крупный график сезонности и роста по ключевым направлениям.</div>
+					</div>
+					<div class="segmented">
+						<button
+							v-for="opt in yearOptions"
+							:key="opt.key"
+							type="button"
+							class="segmented__btn"
+							:class="{ 'segmented__btn--active': yearMetric === opt.key }"
+							@click="yearMetric = opt.key"
+						>
+							{{ opt.label }}
+						</button>
+					</div>
+				</div>
+				<div class="chart-hub__stats">
+					<div class="chart-hub__stat">
+						<div class="chart-hub__label">{{ yearChart.leadLabel }}</div>
+						<div class="chart-hub__value">{{ yearChart.lead }}</div>
+					</div>
+					<div class="chart-hub__stat">
+						<div class="chart-hub__label">Среднее / мес</div>
+						<div class="chart-hub__value">{{ yearChart.avg }}</div>
+					</div>
+					<div class="chart-hub__stat">
+						<div class="chart-hub__label">Пик</div>
+						<div class="chart-hub__value">{{ yearChart.peak }}</div>
+					</div>
+				</div>
+				<PremiumLineChart
+					:height="340"
+					:categories="yearChart.categories"
+					:series="yearChart.seriesForChart"
+					:value-formatter="yearValueFormatter"
+					mode="12m"
+				/>
+			</v-card>
+
 			<v-card class="panel">
 				<div class="panel__title">События</div>
 				<div class="panel__subtitle">Последние изменения, чтобы видеть жизнь проекта.</div>
@@ -671,6 +747,133 @@
 						<div v-else class="events__empty">Нет данных</div>
 					</div>
 				</div>
+			</v-card>
+
+			<v-card class="panel panel--ops-accordion">
+				<div class="panel__title">Админ-инструменты</div>
+				<div class="panel__subtitle">Технические разделы свернуты по умолчанию и не перегружают главный экран.</div>
+				<v-expansion-panels multiple>
+					<v-expansion-panel>
+						<v-expansion-panel-title>Технические работы</v-expansion-panel-title>
+						<v-expansion-panel-text>
+							<v-notice v-if="settingsSaveError" type="danger">
+								{{ settingsSaveError }}
+							</v-notice>
+							<div class="settings">
+								<label class="settings__row">
+									<span>Режим техработ включён</span>
+									<input v-model="settings.maintenance_mode" class="settings__input" type="checkbox" />
+								</label>
+								<label class="settings__row settings__row--textarea">
+									<span>Текст для пользователей</span>
+									<textarea
+										v-model="settings.maintenance_message"
+										class="settings__input settings__input--textarea"
+										rows="3"
+										placeholder="Например: обновляем серверы, ориентировочно до 15:00 МСК"
+									/>
+								</label>
+								<v-button small :loading="settingsSaving" :disabled="settingsSaving" @click="saveSettings">Сохранить</v-button>
+							</div>
+						</v-expansion-panel-text>
+					</v-expansion-panel>
+					<v-expansion-panel>
+						<v-expansion-panel-title>Ops Console</v-expansion-panel-title>
+						<v-expansion-panel-text>
+							<v-notice v-if="opsError" type="danger">
+								{{ opsError }}
+							</v-notice>
+							<div class="ops-console">
+								<label class="ops-console__label">
+									<span>Команда</span>
+									<select v-model="opsCommandId" class="ops-console__select">
+										<option v-for="cmd in opsCommands" :key="cmd.id" :value="cmd.id">
+											{{ cmd.label }}
+										</option>
+									</select>
+								</label>
+								<div class="ops-console__actions">
+									<v-button small :loading="opsLoading" :disabled="opsLoading || !opsCommandId" @click="runOpsCommand">Выполнить</v-button>
+								</div>
+								<pre v-if="opsOutput" class="ops-console__output">{{ opsOutput }}</pre>
+							</div>
+						</v-expansion-panel-text>
+					</v-expansion-panel>
+					<v-expansion-panel>
+						<v-expansion-panel-title>Пороги алертов</v-expansion-panel-title>
+						<v-expansion-panel-text>
+							<v-notice v-if="settingsSaveError" type="danger">
+								{{ settingsSaveError }}
+							</v-notice>
+							<div class="settings">
+								<label class="settings__row">
+									<span>Алерты включены</span>
+									<input v-model="settings.alerts_enabled" class="settings__input" type="checkbox" />
+								</label>
+								<label class="settings__row">
+									<span>Всплеск регистраций (x)</span>
+									<input v-model.number="settings.reg_spike_factor" class="settings__input settings__input--num" type="number" step="0.1" min="1" />
+								</label>
+								<label class="settings__row">
+									<span>Мин. регистраций</span>
+									<input v-model.number="settings.reg_spike_min" class="settings__input settings__input--num" type="number" step="1" min="0" />
+								</label>
+								<label class="settings__row">
+									<span>Падение подключений (≤ %)</span>
+									<input v-model.number="settings.conn_drop_factor" class="settings__input settings__input--num" type="number" step="0.05" min="0" max="1" />
+								</label>
+								<label class="settings__row">
+									<span>Мин. среднее (7д)</span>
+									<input v-model.number="settings.conn_drop_min_avg" class="settings__input settings__input--num" type="number" step="1" min="0" />
+								</label>
+								<label class="settings__row">
+									<span>Аномалия платежей (x)</span>
+									<input v-model.number="settings.pay_spike_factor" class="settings__input settings__input--num" type="number" step="0.1" min="1" />
+								</label>
+								<label class="settings__row">
+									<span>Мин. сумма (день)</span>
+									<input v-model.number="settings.pay_spike_min_sum" class="settings__input settings__input--num" type="number" step="100" min="0" />
+								</label>
+								<label class="settings__row">
+									<span>Истекает (дни)</span>
+									<input v-model.number="settings.expiring_days" class="settings__input settings__input--num" type="number" step="1" min="1" max="90" />
+								</label>
+								<label class="settings__row">
+									<span>Блокировки (дни)</span>
+									<input v-model.number="settings.suspicious_block_days" class="settings__input settings__input--num" type="number" step="1" min="1" max="30" />
+								</label>
+								<v-button small :loading="settingsSaving" :disabled="settingsSaving" @click="saveSettings">Сохранить</v-button>
+							</div>
+						</v-expansion-panel-text>
+					</v-expansion-panel>
+					<v-expansion-panel>
+						<v-expansion-panel-title>Что где находится</v-expansion-panel-title>
+						<v-expansion-panel-text>
+							<div class="help">
+								<div class="help__row">
+									<div class="help__k">Пользователи</div>
+									<div class="help__v">Подписка/лимиты/баланс/блокировки, быстрый поиск и карточка.</div>
+								</div>
+								<div class="help__row">
+									<div class="help__k">Активные тарифы</div>
+									<div class="help__v">Ограничения, usage, мультипликатор, связанные статусы.</div>
+								</div>
+								<div class="help__row">
+									<div class="help__k">Промо</div>
+									<div class="help__v">Коды и использования; HMAC генерируется автоматически.</div>
+								</div>
+								<div class="help__row">
+									<div class="help__k">Колесо призов</div>
+									<div class="help__v">Конфиг и история; сумма вероятностей валидируется.</div>
+								</div>
+								<div class="help__row">
+									<div class="help__k">Платежи</div>
+									<div class="help__v">Processed payments + статусы, чтобы ловить аномалии.</div>
+								</div>
+							</div>
+						</v-expansion-panel-text>
+					</v-expansion-panel>
+				</v-expansion-panels>
 			</v-card>
 			</div>
 
@@ -808,7 +1011,7 @@
 					</div>
 				</v-card>
 
-				<v-card class="panel">
+				<v-card v-if="false" class="panel panel--legacy">
 					<div class="panel__title">Технические работы</div>
 					<div class="panel__subtitle">При включении фронтенд-пользователи увидят экран техработ вместо основного приложения.</div>
 
@@ -838,7 +1041,7 @@
 					</div>
 				</v-card>
 
-				<v-card class="panel">
+				<v-card v-if="false" class="panel panel--legacy">
 					<div class="panel__title">Ops Console</div>
 					<div class="panel__subtitle">Безопасные серверные операции из Directus (без полного shell-доступа).</div>
 
@@ -866,7 +1069,7 @@
 					</div>
 				</v-card>
 
-				<v-card class="panel">
+				<v-card v-if="false" class="panel panel--legacy">
 					<div class="panel__title">Пороги алертов</div>
 					<div class="panel__subtitle">Настраивается через `tvpn_admin_settings` (сохраняется в базе).</div>
 
@@ -926,7 +1129,7 @@
 					</div>
 				</v-card>
 
-				<v-card class="panel">
+				<v-card v-if="false" class="panel panel--legacy">
 					<div class="panel__title">Что где находится</div>
 					<div class="panel__subtitle">Короткие пояснения по разделам и параметрам.</div>
 
@@ -960,9 +1163,12 @@
 
 <script setup>
 import { computed, onMounted, ref } from 'vue';
+import { useRoute } from 'vue-router';
 import { useApi } from '@directus/extensions-sdk';
+import PremiumLineChart from './components/PremiumLineChart.vue';
 
 const api = useApi();
+const route = useRoute();
 
 const loading = ref(false);
 const error = ref('');
@@ -1047,6 +1253,161 @@ const stats = ref({
 
 const statsOk = computed(() => Object.values(stats.value).some((v) => typeof v === 'number'));
 const widgetsOk = ref(false);
+
+const navSections = computed(() => [
+	{
+		id: 'overview',
+		title: 'Обзор',
+		items: [
+			{ path: '/tvpn-home', icon: 'space_dashboard', label: 'Главная', badgeKey: null },
+			{ path: '/insights', icon: 'query_stats', label: 'Аналитика', badgeKey: null },
+		],
+	},
+	{
+		id: 'users',
+		title: 'Пользователи',
+		items: [
+			{ path: '/content/users', icon: 'people', label: 'Пользователи', badgeKey: 'users' },
+			{ path: '/content/active_tariffs', icon: 'subscriptions', label: 'Активные тарифы', badgeKey: 'activeTariffs' },
+			{ path: '/content/tariffs', icon: 'sell', label: 'Тарифы', badgeKey: null },
+		],
+	},
+	{
+		id: 'money',
+		title: 'Монетизация',
+		items: [
+			{ path: '/content/processed_payments', icon: 'payments', label: 'Платежи', badgeKey: 'payments' },
+			{ path: '/content/promo_codes', icon: 'confirmation_number', label: 'Промокоды', badgeKey: null },
+			{ path: '/content/promo_batches', icon: 'inventory_2', label: 'Партии промокодов', badgeKey: null },
+		],
+	},
+	{
+		id: 'system',
+		title: 'Система',
+		items: [
+			{ path: '/content/error_reports', icon: 'bug_report', label: 'Логи ошибок', badgeKey: 'blockedRecent' },
+			{ path: '/content/prize_wheel_config', icon: 'casino', label: 'Настройки призов', badgeKey: null },
+			{ path: '/content/prize_wheel_history', icon: 'history_toggle_off', label: 'История призов', badgeKey: null },
+		],
+	},
+]);
+
+function navBadge(item) {
+	if (!item?.badgeKey) return '';
+	if (item.badgeKey === 'users') return compactMetric(stats.value.totalUsers);
+	if (item.badgeKey === 'activeTariffs') return compactMetric(stats.value.activeTariffs);
+	if (item.badgeKey === 'payments') return compactMetric(stats.value.processedPayments);
+	if (item.badgeKey === 'blockedRecent') return compactMetric(quick.value.blockedRecent.length);
+	return '';
+}
+
+function isRouteActive(path) {
+	if (!path) return false;
+	if (path === '/tvpn-home') return route.path === '/tvpn-home';
+	return route.path === path || route.path.startsWith(`${path}/`);
+}
+
+const pulseOptions = [
+	{ key: 'connections', label: 'Подключения', color: '#22c55e' },
+	{ key: 'registrations', label: 'Регистрации', color: '#3b82f6' },
+	{ key: 'payments', label: 'Платежи', color: '#a855f7' },
+];
+const pulseMetric = ref('connections');
+
+const yearOptions = [
+	{ key: 'registrations', label: 'Регистрации', color: '#3b82f6' },
+	{ key: 'connections', label: 'Подключения', color: '#22c55e' },
+	{ key: 'payments', label: 'Платежи', color: '#a855f7' },
+	{ key: 'activeUsers', label: 'Активные пользователи', color: '#06b6d4' },
+];
+const yearMetric = ref('registrations');
+
+const pulseChart = computed(() => {
+	if (pulseMetric.value === 'registrations') {
+		const series = trends.value.registrations30d || [];
+		return {
+			categories: (trends.value.registrations30d_labels || []).map((x) => formatLabel(x, 'day')),
+			seriesForChart: [{ name: 'Регистрации', data: series, color: '#3b82f6' }],
+			today: fmt(trends.value.registrationsToday),
+			week: fmt(stats.value.registrations7d),
+			peak: fmt(maxInSeries(series)),
+			formatter: fmt,
+		};
+	}
+	if (pulseMetric.value === 'payments') {
+		const series = trends.value.paymentsSum30d || [];
+		return {
+			categories: (trends.value.paymentsSum30d_labels || []).map((x) => formatLabel(x, 'day')),
+			seriesForChart: [{ name: 'Платежи (сумма)', data: series, color: '#a855f7' }],
+			today: fmtMoney(trends.value.paymentsSumToday),
+			week: fmtMoney(sumInSeries(series, 7)),
+			peak: fmtMoney(maxInSeries(series)),
+			formatter: fmtMoney,
+		};
+	}
+	const series = trends.value.connections30d || [];
+	return {
+		categories: (trends.value.connections30d_labels || []).map((x) => formatLabel(x, 'day')),
+		seriesForChart: [{ name: 'Подключения', data: series, color: '#22c55e' }],
+		today: fmt(trends.value.connectionsToday),
+		week: fmt(stats.value.connections7d),
+		peak: fmt(maxInSeries(series)),
+		formatter: fmt,
+	};
+});
+
+const yearChart = computed(() => {
+	if (yearMetric.value === 'connections') {
+		return {
+			categories: (year.value.connections12m_labels || []).map((x) => formatLabel(x, 'month')),
+			seriesForChart: [{ name: 'Подключения', data: year.value.connections12m || [], color: '#22c55e' }],
+			leadLabel: 'Итого',
+			lead: fmt(Math.round(bigStats.value.connections12.sum)),
+			avg: fmt(Math.round(bigStats.value.connections12.avg)),
+			peak: fmt(Math.round(bigStats.value.connections12.max)),
+			formatter: fmt,
+		};
+	}
+	if (yearMetric.value === 'payments') {
+		return {
+			categories: (year.value.paymentsSum12m_labels || []).map((x) => formatLabel(x, 'month')),
+			seriesForChart: [{ name: 'Платежи (сумма)', data: year.value.paymentsSum12m || [], color: '#a855f7' }],
+			leadLabel: 'Итого',
+			lead: fmtMoney(Math.round(bigStats.value.paymentsSum12.sum)),
+			avg: fmtMoney(Math.round(bigStats.value.paymentsSum12.avg)),
+			peak: fmtMoney(Math.round(bigStats.value.paymentsSum12.max)),
+			formatter: fmtMoney,
+		};
+	}
+	if (yearMetric.value === 'activeUsers') {
+		return {
+			categories: (year.value.activeUsers12m_labels || []).map((x) => formatLabel(x, 'month')),
+			seriesForChart: [{ name: 'Активные пользователи', data: year.value.activeUsers12m || [], color: '#06b6d4' }],
+			leadLabel: 'Сейчас',
+			lead: fmt(Math.round(bigStats.value.activeUsers12.last)),
+			avg: fmt(Math.round(bigStats.value.activeUsers12.avg)),
+			peak: fmt(Math.round(bigStats.value.activeUsers12.max)),
+			formatter: fmt,
+		};
+	}
+	return {
+		categories: (year.value.registrations12m_labels || []).map((x) => formatLabel(x, 'month')),
+		seriesForChart: [{ name: 'Регистрации', data: year.value.registrations12m || [], color: '#3b82f6' }],
+		leadLabel: 'Итого',
+		lead: fmt(Math.round(bigStats.value.registrations12.sum)),
+		avg: fmt(Math.round(bigStats.value.registrations12.avg)),
+		peak: fmt(Math.round(bigStats.value.registrations12.max)),
+		formatter: fmt,
+	};
+});
+
+function pulseValueFormatter(value) {
+	return pulseChart.value.formatter(value);
+}
+
+function yearValueFormatter(value) {
+	return yearChart.value.formatter(value);
+}
 
 const chartModels = computed(() => {
 	// Build once per render so hover logic stays consistent.
@@ -1175,6 +1536,29 @@ function fmtMoney(value) {
 	if (!Number.isFinite(n)) return '—';
 	// Currency may differ by provider; keep it generic.
 	return `${n.toLocaleString('ru-RU')} ₽`;
+}
+
+function compactMetric(value) {
+	const n = Number(value);
+	if (!Number.isFinite(n) || n <= 0) return '';
+	if (Math.abs(n) >= 1000000) return `${(n / 1000000).toFixed(1)}M`;
+	if (Math.abs(n) >= 1000) return `${(n / 1000).toFixed(1)}K`;
+	return Math.round(n).toString();
+}
+
+function sumInSeries(series, take = 7) {
+	if (!Array.isArray(series) || !series.length) return 0;
+	const tail = series.slice(Math.max(0, series.length - take));
+	return tail.reduce((sum, raw) => {
+		const n = Number(raw);
+		return Number.isFinite(n) ? sum + n : sum;
+	}, 0);
+}
+
+function maxInSeries(series) {
+	if (!Array.isArray(series) || !series.length) return 0;
+	const nums = series.map((v) => Number(v)).filter((v) => Number.isFinite(v));
+	return nums.length ? Math.max(...nums) : 0;
 }
 
 function shortDate(value) {
@@ -2685,6 +3069,214 @@ onMounted(() => {
 	background: rgba(59, 130, 246, 0.14);
 }
 
+.nav--premium {
+	display: grid;
+	gap: 10px;
+}
+
+.nav__brand {
+	display: grid;
+	grid-template-columns: auto 1fr;
+	gap: 10px;
+	align-items: center;
+	padding: 10px;
+	border-radius: 12px;
+	border: 1px solid rgba(255, 255, 255, 0.08);
+	background: linear-gradient(135deg, rgba(59, 130, 246, 0.16), rgba(16, 185, 129, 0.08));
+}
+
+.nav__brand-logo {
+	width: 34px;
+	height: 34px;
+	border-radius: 10px;
+	display: grid;
+	place-items: center;
+	font-size: 11px;
+	font-weight: 800;
+	color: rgba(2, 8, 23, 0.95);
+	background: linear-gradient(120deg, rgba(125, 211, 252, 0.95), rgba(110, 231, 183, 0.95));
+}
+
+.nav__brand-title {
+	font-size: 13px;
+	font-weight: 700;
+}
+
+.nav__brand-subtitle {
+	font-size: 11px;
+	opacity: 0.7;
+}
+
+.nav--premium .nav__item {
+	display: grid;
+	grid-template-columns: 28px minmax(0, 1fr) auto;
+	gap: 10px;
+}
+
+.nav__item-icon {
+	display: grid;
+	place-items: center;
+	width: 28px;
+	height: 28px;
+	border-radius: 8px;
+	background: rgba(59, 130, 246, 0.15);
+}
+
+.nav__item-label {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.nav__item-badge {
+	font-size: 10px;
+	line-height: 1;
+	padding: 4px 6px;
+	border-radius: 999px;
+	border: 1px solid rgba(255, 255, 255, 0.12);
+	background: rgba(255, 255, 255, 0.06);
+	opacity: 0.9;
+}
+
+.panel__head {
+	display: flex;
+	justify-content: space-between;
+	gap: 12px;
+	align-items: flex-start;
+}
+
+.panel__head--chart {
+	align-items: center;
+}
+
+.panel--chart-hub {
+	border: 1px solid rgba(59, 130, 246, 0.22);
+	background: linear-gradient(165deg, rgba(59, 130, 246, 0.08), rgba(10, 20, 38, 0.85));
+}
+
+.segmented {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+	padding: 4px;
+	border-radius: 10px;
+	border: 1px solid rgba(255, 255, 255, 0.08);
+	background: rgba(255, 255, 255, 0.02);
+}
+
+.segmented--compact {
+	max-width: 360px;
+}
+
+.segmented__btn {
+	border: none;
+	outline: none;
+	padding: 7px 10px;
+	border-radius: 8px;
+	font-size: 12px;
+	background: transparent;
+	color: inherit;
+	opacity: 0.75;
+	cursor: pointer;
+}
+
+.segmented__btn:hover {
+	opacity: 1;
+	background: rgba(255, 255, 255, 0.06);
+}
+
+.segmented__btn--active {
+	opacity: 1;
+	background: linear-gradient(120deg, rgba(59, 130, 246, 0.35), rgba(16, 185, 129, 0.26));
+}
+
+.chart-hub__stats {
+	display: grid;
+	grid-template-columns: repeat(3, minmax(0, 1fr));
+	gap: 10px;
+}
+
+.chart-hub__stat {
+	padding: 10px;
+	border-radius: 10px;
+	border: 1px solid rgba(255, 255, 255, 0.08);
+	background: rgba(255, 255, 255, 0.03);
+}
+
+.chart-hub__label {
+	font-size: 11px;
+	opacity: 0.75;
+}
+
+.chart-hub__value {
+	margin-top: 3px;
+	font-size: 17px;
+	font-weight: 750;
+	letter-spacing: -0.01em;
+}
+
+.panel--ops-accordion :deep(.v-expansion-panel) {
+	border-radius: 10px;
+	overflow: hidden;
+	background: rgba(255, 255, 255, 0.02);
+	border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.hero__kicker {
+	display: inline-flex;
+	width: fit-content;
+	padding: 3px 10px;
+	border-radius: 999px;
+	font-size: 11px;
+	font-weight: 700;
+	letter-spacing: 0.07em;
+	text-transform: uppercase;
+	border: 1px solid rgba(255, 255, 255, 0.12);
+	background: rgba(59, 130, 246, 0.2);
+}
+
+.hero__cta-row {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin-top: 8px;
+}
+
+.hero__cta {
+	display: inline-flex;
+	gap: 8px;
+	align-items: center;
+	padding: 8px 12px;
+	border-radius: 10px;
+	text-decoration: none;
+	color: inherit;
+	font-size: 12px;
+	font-weight: 650;
+	border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.hero__cta--primary {
+	background: linear-gradient(120deg, rgba(59, 130, 246, 0.38), rgba(16, 185, 129, 0.28));
+}
+
+.hero__cta--ghost {
+	background: rgba(255, 255, 255, 0.04);
+}
+
+.hero__meta-stats {
+	margin-top: 10px;
+	display: grid;
+	gap: 6px;
+}
+
+.hero__meta-stat {
+	display: flex;
+	justify-content: space-between;
+	gap: 10px;
+	font-size: 12px;
+	opacity: 0.9;
+}
+
 @media (max-width: 1500px) {
 	.page {
 		grid-template-columns: minmax(0, 1fr) 340px;
@@ -2711,6 +3303,11 @@ onMounted(() => {
 
 	.big {
 		grid-template-columns: 1fr;
+	}
+
+	.panel__head--chart {
+		flex-direction: column;
+		align-items: flex-start;
 	}
 }
 
@@ -2759,6 +3356,22 @@ onMounted(() => {
 
 	.big__mini {
 		justify-items: start;
+	}
+
+	.chart-hub__stats {
+		grid-template-columns: 1fr;
+	}
+
+	.nav--premium {
+		display: flex;
+		gap: 10px;
+		overflow-x: auto;
+		padding-bottom: 4px;
+	}
+
+	.nav--premium .nav__brand,
+	.nav--premium .nav__section {
+		min-width: 240px;
 	}
 }
 </style>
