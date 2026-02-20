@@ -57,7 +57,7 @@ async def auth_telegram(payload: TelegramAuthRequest) -> TelegramAuthResponse:
         # - When we open Mini App from bot /start, we forward it via ?start=... and send here
         start_param = (payload.startParam or "").strip() or (getattr(user_data, "start_param", None) or "").strip()
 
-        referred_by = 0
+        referred_by = None
         utm = None
 
         # Combined UTM and numeric referral (format: <utm>-<referrer_id>)
@@ -104,7 +104,7 @@ async def auth_telegram(payload: TelegramAuthRequest) -> TelegramAuthResponse:
             )
             if not db_user:
                 logger.error(
-                    "Users.get_user вернул None для telegram_id=%s (registerIntent=%s, start_param=%s)",
+                    "Users.get_user вернул None для telegram_id={} (registerIntent={}, start_param={})",
                     user_data.user.id,
                     bool(payload.registerIntent),
                     start_param or "",
@@ -146,7 +146,7 @@ async def auth_telegram(payload: TelegramAuthRequest) -> TelegramAuthResponse:
         raise
     except Exception as e:
         logger.error(
-            "Критическая ошибка /auth/telegram (telegram_id=%s, registerIntent=%s): %s",
+            "Критическая ошибка /auth/telegram (telegram_id={}, registerIntent={}): {}",
             getattr(user_data.user, "id", None),
             bool(payload.registerIntent),
             e,

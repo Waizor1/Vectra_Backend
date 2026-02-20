@@ -1,5 +1,20 @@
 ## 2026-02-20
 
+- **fix(auth/referral-fk):** устранен крэш регистрации из-за `users.referred_by = 0` при FK-ограничении.
+  - **Симптом в прод-логах:** `insert or update on table "users" violates foreign key constraint "users_referred_by_foreign"` с `Key (referred_by)=(0) is not present`.
+  - Причина: в средах с self-FK на `users.referred_by -> users.id` значение `0` невалидно (должно быть `NULL`, если реферера нет).
+  - `bloobcat/db/users.py`:
+    - поле `referred_by` переведено в nullable (`null=True`, `default=None`);
+    - в `Users.get_user(...).update_or_create(defaults=...)` для новых пользователей явно выставляется `referred_by=None`;
+    - проверка возможности реф-привязки переведена с sentinel `0` на отсутствие значения (`not user.referred_by`).
+  - `bloobcat/routes/auth.py`:
+    - базовый `referred_by` в `/auth/telegram` теперь `None` (вместо `0`), чтобы не прокидывать невалидный sentinel.
+  - Миграция: `migrations/models/83_20260220173000_fix_users_referred_by_nullable_fk.py`:
+    - `DROP DEFAULT` для `users.referred_by`,
+    - backfill `0 -> NULL`,
+    - `DROP NOT NULL`.
+  - Эффект: создание нового пользователя не падает на FK при отсутствии реферера.
+
 - **fix(auth/registration-resilience):** снижена вероятность `Internal Server Error` на welcome-регистрации (`POST /auth/telegram`).
   - `bloobcat/db/users.py`:
     - `count_referrals()` переведен в non-blocking режим (ошибка логируется, но не валит регистрацию);

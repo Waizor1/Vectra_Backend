@@ -76,7 +76,7 @@ class Users(models.Model):
     expired_at = fields.DateField(null=True)
     is_registered = fields.BooleanField(default=False)
     balance = fields.IntField(default=0)
-    referred_by = fields.BigIntField(default=0)
+    referred_by = fields.BigIntField(null=True, default=None)
     is_admin = fields.BooleanField(default=False)
     is_partner = fields.BooleanField(default=False)
     custom_referral_percent = fields.IntField(default=0)
@@ -479,7 +479,7 @@ class Users(models.Model):
 
     @classmethod
     async def get_user(
-        cls, telegram_user: WebAppUser | User | None, referred_by: int = 0, utm: Optional[str] = None
+        cls, telegram_user: WebAppUser | User | None, referred_by: Optional[int] = None, utm: Optional[str] = None
     ):
         if not telegram_user:
             logger.error("get_user: telegram_user is None")
@@ -497,6 +497,9 @@ class Users(models.Model):
                         else ""
                     ),
                     familyurl=get_family_url(telegram_user.id),
+                    # `referred_by=0` became invalid after FK hardening in some environments.
+                    # Keep "no referrer" as NULL for new users.
+                    referred_by=None,
                 ),
             )
 
@@ -532,7 +535,7 @@ class Users(models.Model):
             can_set_referrer = (
                 bool(referred_by)
                 and int(referred_by) != int(user.id)
-                and int(getattr(user, "referred_by", 0) or 0) == 0
+                and not getattr(user, "referred_by", None)
                 and not bool(getattr(user, "is_registered", False))
             )
             if can_set_referrer:
