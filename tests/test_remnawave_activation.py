@@ -1,6 +1,7 @@
 """Регрессионные тесты для activation/registration path RemnaWave."""
 
 from bloobcat.routes.remnawave.activation_logic import should_trigger_registration
+from bloobcat.routes.remnawave.catcher import _extract_online_at
 from bloobcat.routes.remnawave.hwid_utils import (
     extract_hwid_from_device,
     parse_remnawave_devices,
@@ -173,3 +174,23 @@ def test_activation_no_online_at_no_registration():
         block_registration=False,
         is_antitwink_sanction=False,
     ) is False
+
+
+def test_extract_online_at_prefers_top_level():
+    data = {
+        "onlineAt": "2026-02-20T12:00:00Z",
+        "userTraffic": {
+            "onlineAt": "2026-02-20T11:00:00Z",
+            "firstConnectedAt": "2026-02-20T10:00:00Z",
+        },
+    }
+    assert _extract_online_at(data) == "2026-02-20T12:00:00Z"
+
+
+def test_extract_online_at_falls_back_to_first_connected_at():
+    data = {
+        "userTraffic": {
+            "firstConnectedAt": "2026-02-19T07:30:00Z",
+        }
+    }
+    assert _extract_online_at(data) == "2026-02-19T07:30:00Z"

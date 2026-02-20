@@ -53,9 +53,10 @@ async def command_start_handler(message: Message, command: CommandObject):
         reply_markup=await webapp_inline_button(button_text, url=launch_url),  # локализованный текст кнопки
     )
     
-    # Автоматическая установка админской клавиатуры для админов
+    # Автоматическая установка админской клавиатуры только для уже зарегистрированных админов.
+    # Важно: не создаем пользователя на /start, чтобы не надувать БД при DDoS-спаме.
     try:
-        user, _ = await Users.get_user(message.from_user)
+        user = await Users.get_or_none(id=message.from_user.id)
         if user and user.is_admin:
             from bloobcat.bot.routes.admin.admin_menu import set_admin_keyboard
             await set_admin_keyboard(message.bot, user.id)

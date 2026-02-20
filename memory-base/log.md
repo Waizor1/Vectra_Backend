@@ -1,3 +1,43 @@
+## 2026-02-20
+
+- **fix(auth/registration-policy):** внедрен безопасный режим отложенной регистрации пользователя.
+  - `bloobcat/routes/auth.py`:
+    - добавлен `registerIntent` в `POST /auth/telegram`;
+    - добавлен флаг ответа `requires_registration`;
+    - без `registerIntent` и без `start_param` пользователь **не создается** (возвращается `requires_registration=true`);
+    - при `start_param` (family/ref/qr) авто-регистрация сохранена.
+  - `bloobcat/funcs/validate.py`:
+    - отключено неявное создание пользователя на обычной валидации без `start_param`;
+    - для отсутствующего пользователя теперь `403 User not registered`.
+  - `bloobcat/bot/routes/start.py`:
+    - убрано создание пользователя через `Users.get_user()` на `/start`;
+    - админ-клавиатура ставится только для уже существующих админов (`get_or_none`).
+
+- **fix(remnawave/activation-sync):** восстановлен сбор факта подключений и триггер активаций.
+  - `bloobcat/routes/remnawave/catcher.py`:
+    - добавлен helper `_extract_online_at()` с fallback: `onlineAt -> userTraffic.onlineAt -> userTraffic.firstConnectedAt`;
+    - добавлен точечный `get_user_by_uuid` fallback для незарегистрированных пользователей без `connected_at`;
+    - добавлено диагностическое `INFO`-логирование формата ответа RemnaWave (`has_userTraffic`, `sample_onlineAt`).
+  - Эффект: снова заполняются `connected_at`/`connections`, срабатывает путь `is_registered` и `on_activated_key`.
+
+- **fix(db/connections):** защита от дублей в `connections`.
+  - `bloobcat/db/connections.py`:
+    - добавлен `Meta.unique_together = (("user_id", "at"),)`;
+    - `Connections.process()` теперь устойчив к race (`IntegrityError` -> безопасный `get`).
+  - Новая миграция: `migrations/models/82_20260220150000_connections_unique_user_at.py`:
+    - чистит исторические дубли;
+    - добавляет DB-constraint `UNIQUE (user_id, at)`.
+
+- **tests:** добавлены/обновлены регрессионные проверки.
+  - Новый файл: `tests/test_auth_registration_modes.py` (режимы регистрации `/auth/telegram`).
+  - Новый файл: `tests/test_connections_process.py` (обработка `IntegrityError` в `Connections.process`).
+  - Обновлены:
+    - `tests/test_resilience_hardening.py` (кейс `User not registered` + корректный tuple-return для `Users.get_user`);
+    - `tests/test_remnawave_activation.py` (fallback `firstConnectedAt` через `_extract_online_at`).
+  - Прогоны:
+    - `py -3.12 -m pytest tests/test_auth_registration_modes.py tests/test_resilience_hardening.py tests/test_remnawave_activation.py tests/test_connections_process.py -q` -> `33 passed`;
+    - `pnpm exec tsc --noEmit` (TelegramVPN) -> успешно.
+
 ## 2026-02-15
 
 - **fix(remnawave/updater):** восстановлена наблюдаемость ошибок воркера активации и anti-bot.

@@ -22,12 +22,16 @@ class TelegramAuthRequest(BaseModel):
     initData: str
     # Optional: forwarded start payload (e.g. from bot /start -> Mini App URL ?start=...).
     startParam: str | None = None
+    # Explicit user intent to create/ensure a DB user row.
+    # Backward-compatible default keeps old clients working.
+    registerIntent: bool = False
 
 
 class TelegramAuthResponse(BaseModel):
     accessToken: str
     expiresIn: int
     was_just_created: bool = False
+    requires_registration: bool = False
 
 
 @router.post("/telegram", response_model=TelegramAuthResponse)
@@ -92,13 +96,37 @@ async def auth_telegram(payload: TelegramAuthRequest) -> TelegramAuthResponse:
         else:
             utm = param
 
-    db_user, was_just_created = await Users.get_user(telegram_user=user_data.user, referred_by=referred_by, utm=utm)
-    if not db_user:
-        raise HTTPException(status_code=500, detail="User not found in database")
+    should_register = bool(payload.registerIntent) or bool(start_param)
+    if should_register:
+        db_user, was_just_created = await Users.get_user(
+            telegram_user=user_data.user, referred_by=referred_by, utm=utm
+        )
+        if not db_user:
+            raise HTTPException(status_code=500, detail="User not found in database")
 
-    token, ttl_seconds = create_access_token(db_user.id)
+        token, ttl_seconds = create_access_token(db_user.id)
+        return TelegramAuthResponse(
+            accessToken=token,
+            expiresIn=ttl_seconds,
+            was_just_created=was_just_created,
+            requires_registration=False,
+        )
+
+    # No explicit registration intent and no start_param:
+    # do not create a new DB row here. Return current auth state.
+    existing_user = await Users.get_or_none(id=user_data.user.id)
+    if existing_user:
+        token, ttl_seconds = create_access_token(existing_user.id)
+        return TelegramAuthResponse(
+            accessToken=token,
+            expiresIn=ttl_seconds,
+            was_just_created=False,
+            requires_registration=False,
+        )
+
     return TelegramAuthResponse(
-        accessToken=token,
-        expiresIn=ttl_seconds,
-        was_just_created=was_just_created,
+        accessToken="",
+        expiresIn=0,
+        was_just_created=False,
+        requires_registration=True,
     )

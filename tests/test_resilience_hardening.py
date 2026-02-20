@@ -2,6 +2,7 @@ import asyncio
 import types
 
 import pytest
+from fastapi import HTTPException
 from starlette.requests import Request
 
 from bloobcat.db.users import _get_remnawave_user_lock
@@ -130,7 +131,7 @@ async def test_validate_with_start_param_goes_through_get_user(monkeypatch):
 
     async def _get_user(**kwargs):
         called["get_user"] = True
-        return expected
+        return expected, False
 
     monkeypatch.setattr(validate_module, "safe_parse_webapp_init_data", lambda *_: parsed)
     monkeypatch.setattr(validate_module.Users, "get_or_none", _get_or_none)
@@ -139,3 +140,28 @@ async def test_validate_with_start_param_goes_through_get_user(monkeypatch):
     result = await validate_module.validate("init-data")
     assert called["get_user"] is True
     assert result is expected
+
+
+@pytest.mark.asyncio
+async def test_validate_without_start_param_missing_user_returns_not_registered(monkeypatch):
+    parsed = types.SimpleNamespace(
+        user=types.SimpleNamespace(id=4044),
+        start_param=None,
+    )
+
+    async def _get_or_none(**kwargs):
+        assert kwargs["id"] == 4044
+        return None
+
+    async def _should_not_call(*args, **kwargs):
+        raise AssertionError("Users.get_user should not be called without start_param")
+
+    monkeypatch.setattr(validate_module, "safe_parse_webapp_init_data", lambda *_: parsed)
+    monkeypatch.setattr(validate_module.Users, "get_or_none", _get_or_none)
+    monkeypatch.setattr(validate_module.Users, "get_user", _should_not_call)
+
+    with pytest.raises(HTTPException) as exc:
+        await validate_module.validate("init-data")
+
+    assert exc.value.status_code == 403
+    assert exc.value.detail == "User not registered"

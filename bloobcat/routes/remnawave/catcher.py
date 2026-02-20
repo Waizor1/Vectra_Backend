@@ -31,6 +31,16 @@ last_notification_expired = {}
 user_state_cache: Dict[str, Dict[str, Any]] = {}
 update_lock = asyncio.Lock()
 
+
+def _extract_online_at(remnawave_user: Dict[str, Any] | None) -> Optional[str]:
+    data = remnawave_user or {}
+    user_traffic = data.get("userTraffic") or {}
+    return (
+        data.get("onlineAt")
+        or user_traffic.get("onlineAt")
+        or user_traffic.get("firstConnectedAt")
+    )
+
 @router.get("/webhook")
 async def webhook(background_tasks: BackgroundTasks):
     """Обработчик вебхука для запуска обновления RemnaWave.
@@ -188,6 +198,14 @@ async def remnawave_updater():
                 await asyncio.sleep(retry_interval)
         
         logger.debug(f"Всего получено {len(remnawave_users)} пользователей из RemnaWave")
+        if remnawave_users:
+            first_user = remnawave_users[0] or {}
+            sample_online_at = _extract_online_at(first_user)
+            logger.info(
+                "RemnaWave API sample: has_userTraffic=%s, sample_onlineAt=%s",
+                "userTraffic" in first_user,
+                sample_online_at,
+            )
 
         # Анти-твинк: выключаем только в тестовом режиме
         anti_twink_enabled = not test_mode
@@ -293,11 +311,35 @@ async def remnawave_updater():
                     remnawave_updates = {}
 
                     # ----------------- Логика обработки подключений (onlineAt) -----------------
-                    # В новой панели onlineAt может быть перенесён в userTraffic.onlineAt
-                    online_at = remnawave_user.get("onlineAt") or (remnawave_user.get("userTraffic") or {}).get("onlineAt")
+                    # В новой панели onlineAt может быть перенесён в userTraffic.onlineAt / firstConnectedAt.
+                    online_at = _extract_online_at(remnawave_user)
                     logger.debug(
                         f"Пользователь {user.id}: onlineAt={online_at}, текущий connected_at={user.connected_at}"
                     )
+
+                    # Fallback: для еще не зарегистрированных пользователей без connected_at
+                    # пробуем точечный запрос по UUID, если list endpoint не вернул onlineAt.
+                    if not online_at and not user.is_registered and not user.connected_at:
+                        try:
+                            user_detail_response = await remnawave.users.get_user_by_uuid(user_uuid_str)
+                            user_detail = (
+                                user_detail_response.get("response")
+                                if isinstance(user_detail_response, dict)
+                                else {}
+                            ) or {}
+                            online_at = _extract_online_at(user_detail)
+                            if online_at:
+                                logger.info(
+                                    "Recovered onlineAt via individual fetch for user %s: %s",
+                                    user.id,
+                                    online_at,
+                                )
+                        except Exception as detail_err:
+                            logger.debug(
+                                "Could not fetch individual onlineAt for user %s: %s",
+                                user.id,
+                                detail_err,
+                            )
                     
                     if online_at:
                         new_connected_at = datetime.fromisoformat(online_at.replace('Z', '+00:00'))

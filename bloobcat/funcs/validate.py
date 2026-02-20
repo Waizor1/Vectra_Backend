@@ -198,8 +198,15 @@ async def validate(init_data: str = Depends(oauth2_scheme), request: Request = N
         init_start_param = (getattr(user, "start_param", None) or "").strip()
         effective_start_param = init_start_param or header_start_param
         existing_user = await Users.get_or_none(id=user.user.id)
-        if existing_user and existing_user.remnawave_uuid and not effective_start_param:
+        if existing_user and not effective_start_param:
             return existing_user
+
+        # Do not create a user implicitly on generic initData-only requests.
+        # User row is created only when:
+        # - explicit registration intent endpoint is called (/auth/telegram with registerIntent), or
+        # - a deep-link start_param is present (family/ref/qr flows).
+        if not existing_user and not effective_start_param:
+            raise HTTPException(status_code=403, detail="User not registered")
 
         logger.debug(
             "Проверка start_param для пользователя %s: init=%r, header=%r",
