@@ -1,4 +1,5 @@
 import asyncio
+import importlib
 import types
 
 import pytest
@@ -393,7 +394,8 @@ async def test_users_delete_calls_active_tariffs_fk_guard(monkeypatch):
         return 1
 
     monkeypatch.setattr("bloobcat.db.users.ensure_active_tariffs_fk_cascade", _guard)
-    monkeypatch.setattr("bloobcat.scheduler.cancel_user_tasks", _cancel)
+    scheduler_module = importlib.import_module("bloobcat.scheduler")
+    monkeypatch.setattr(scheduler_module, "cancel_user_tasks", _cancel, raising=False)
     monkeypatch.setattr("tortoise.models.Model.delete", _super_delete)
 
     user = Users()
@@ -420,7 +422,8 @@ async def test_users_delete_calls_guard_before_super_delete(monkeypatch):
         return 1
 
     monkeypatch.setattr("bloobcat.db.users.ensure_active_tariffs_fk_cascade", _guard)
-    monkeypatch.setattr("bloobcat.scheduler.cancel_user_tasks", _cancel)
+    scheduler_module = importlib.import_module("bloobcat.scheduler")
+    monkeypatch.setattr(scheduler_module, "cancel_user_tasks", _cancel, raising=False)
     monkeypatch.setattr("tortoise.models.Model.delete", _super_delete)
 
     user = Users()

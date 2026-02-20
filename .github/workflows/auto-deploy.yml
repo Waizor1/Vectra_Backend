@@ -18,6 +18,22 @@ jobs:
       cancel-in-progress: true
     
     steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: Install test dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt pytest
+
+    - name: Run backend tests
+      run: pytest tests -q
+
     - name: Setup SSH
       uses: webfactory/ssh-agent@v0.8.0
       with:
@@ -72,6 +88,30 @@ jobs:
         fi
 
         echo "🩺 Ждем готовности Directus..."
+        echo "🩺 Waiting for bloobcat health..."
+        BLOOBCAT_READY=0
+        for i in {1..90}; do
+          if command -v curl >/dev/null; then
+            if curl -sf "http://localhost:33083/health" >/dev/null; then
+              BLOOBCAT_READY=1
+              break
+            fi
+          else
+            if wget -qO- "http://localhost:33083/health" >/dev/null; then
+              BLOOBCAT_READY=1
+              break
+            fi
+          fi
+          sleep 2
+        done
+
+        if [ "\$BLOOBCAT_READY" -ne 1 ]; then
+          echo "❌ bloobcat did not become healthy in time"
+          docker compose \$COMPOSE_ARGS ps
+          docker compose \$COMPOSE_ARGS logs --tail=200 bloobcat || true
+          exit 1
+        fi
+
         DIRECTUS_READY=0
         for i in {1..60}; do
           if command -v curl >/dev/null; then

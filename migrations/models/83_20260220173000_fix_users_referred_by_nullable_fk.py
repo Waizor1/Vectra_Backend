@@ -6,12 +6,12 @@ async def upgrade(db: BaseDBAsyncClient) -> str:
     ALTER TABLE "users"
         ALTER COLUMN "referred_by" DROP DEFAULT;
 
+    ALTER TABLE "users"
+        ALTER COLUMN "referred_by" DROP NOT NULL;
+
     UPDATE "users"
     SET "referred_by" = NULL
     WHERE "referred_by" = 0;
-
-    ALTER TABLE "users"
-        ALTER COLUMN "referred_by" DROP NOT NULL;
     """
 
 
