@@ -9,6 +9,7 @@ from aiogram.types import BotCommand, MenuButtonWebApp, WebAppInfo
 from fastadmin import fastapi_app as admin_app # type: ignore
 from fastapi import FastAPI, Request # type: ignore
 from fastapi.middleware.cors import CORSMiddleware # type: ignore
+from tortoise import Tortoise
 from tortoise.contrib.fastapi import RegisterTortoise # type: ignore
 
 from bloobcat.bot import bot, router, setup_router
@@ -126,9 +127,25 @@ async def lifespan(fastapi_app: FastAPI):
             logger.error(f"Ошибка при инициализации базы данных: {str(e)}", exc_info=True)
             raise
 
-    # Extra schema guard for drifted environments.
-    await ensure_active_tariffs_fk_cascade()
-    await ensure_notification_marks_fk_cascade()
+    # Aerich может закрыть соединения после upgrade, поэтому перед self-heal
+    # поднимаем временное подключение Tortoise при необходимости.
+    guard_connection_initialized = False
+    try:
+        try:
+            Tortoise.get_connection("default")
+        except Exception:
+            logger.info("Инициализация временного Tortoise connection перед FK self-heal guard")
+            await Tortoise.init(config=TORTOISE_ORM)
+            guard_connection_initialized = True
+
+        ok_at = await ensure_active_tariffs_fk_cascade()
+        ok_nm = await ensure_notification_marks_fk_cascade()
+        if ok_at and ok_nm:
+            logger.info("FK self-heal guard выполнен")
+    finally:
+        if guard_connection_initialized:
+            await Tortoise.close_connections()
+            logger.info("Временное Tortoise connection после FK self-heal закрыто")
 
     try:
         await bot.set_chat_menu_button(

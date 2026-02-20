@@ -1,11 +1,11 @@
 from fastapi import APIRouter, BackgroundTasks
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, timezone
 from zoneinfo import ZoneInfo
 import asyncio
 import uuid
 from typing import Dict, Any, Optional
 
-from bloobcat.bot.notifications.admin import on_activated_key, send_admin_message, write_to
+from bloobcat.bot.notifications.admin import on_activated_key, send_admin_message, write_to, _safe_html
 from bloobcat.db.users import Users, normalize_date
 from bloobcat.db.connections import Connections
 from bloobcat.db.payments import ProcessedPayments
@@ -42,6 +42,15 @@ _last_run_status: Dict[str, Any] = {
 }
 
 
+def _eligible_users_for_checker(users: list[Any]) -> list[Any]:
+    """Возвращает пользователей, которых нужно обрабатывать в checker-проходе.
+
+    Важно: наличие remnawave_uuid достаточно для проверки activation/connections/HWID.
+    expired_at может быть пустым у части сценариев и не должен исключать пользователя из цикла.
+    """
+    return [u for u in users if getattr(u, "remnawave_uuid", None)]
+
+
 def _extract_online_at(remnawave_user: Dict[str, Any] | None) -> Optional[str]:
     data = remnawave_user or {}
     user_traffic = data.get("userTraffic") or {}
@@ -60,7 +69,10 @@ def _safe_parse_online_at(raw_online_at: Any) -> Optional[datetime]:
         value = str(raw_online_at).strip()
         if not value:
             return None
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed
     except Exception:
         return None
 
@@ -161,14 +173,14 @@ async def remnawave_updater():
                 await asyncio.sleep(retry_interval)
             
         # Проверка пользователей    
-        users_with_uuid = [u for u in users if u.remnawave_uuid and hasattr(u, 'expired_at') and u.expired_at]
+        users_with_uuid = _eligible_users_for_checker(users)
         logger.info(
-            "Checker input: total_users=%s users_with_uuid_and_expired=%s",
+            "Checker input: total_users=%s users_with_uuid=%s",
             len(users),
             len(users_with_uuid),
         )
         if not users_with_uuid:
-            logger.warning("Не найдено пользователей с UUID и датой истечения")
+            logger.warning("Не найдено пользователей с UUID")
             return
             
         logger.debug(f"Найдено {len(users_with_uuid)} пользователей с UUID и датой истечения")
@@ -473,17 +485,20 @@ async def remnawave_updater():
                                     try:
                                         referrer = await user.referrer()
                                         ref_text = (
-                                            f"{referrer.full_name} (ID: <code>{referrer.id}</code>)"
+                                            f"{_safe_html(referrer.full_name)} (ID: <code>{referrer.id}</code>)"
                                             if referrer
                                             else "Отсутствует"
                                         )
                                         hwid_preview = ", ".join(user_devices_hwid[:5]) if user_devices_hwid else "—"
+                                        user_name_safe = _safe_html(user.full_name)
+                                        user_username_safe = _safe_html(f"@{user.username}") if user.username else "нет юзернейма"
+                                        hwid_preview_safe = _safe_html(hwid_preview)
                                         text = f"""🚫 Отозван триал (дублирующий HWID)
 
-👤 Пользователь: {user.full_name} ({'@'+user.username if user.username else 'нет юзернейма'})
+👤 Пользователь: {user_name_safe} ({user_username_safe})
 🆔 ID: <code>{user.id}</code>
 👨‍👩‍👧‍👦 Реферер: {ref_text}
-🖥 HWID: {hwid_preview}
+🖥 HWID: {hwid_preview_safe}
 📅 expireAt → {msk_today}
 
 #trial #hwid #antitwink"""

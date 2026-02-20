@@ -69,18 +69,21 @@ async def on_activated_bot(
     user_id: int, name: str, referrer_id: int | None, referrer_name: str | None, utm: str | None = None
 ):
     try:
+        safe_name = _safe_html(name)
+        safe_referrer_name = _safe_html(referrer_name) if referrer_name else None
+        safe_utm = _safe_html(utm) if utm else None
         text = f"""Новая регистрация в боте!
 
-Пользователь: {name}
+Пользователь: {safe_name}
 ID пользователя: <code>{user_id}</code>"""
 
         if referrer_id:
-            text += f"\nРеферер: {referrer_name} (ID: <code>{referrer_id}</code>)"
+            text += f"\nРеферер: {safe_referrer_name} (ID: <code>{referrer_id}</code>)"
         else:
             text += "\nРеферер: Отсутствует"
             
-        if utm:
-            text += f"\nUTM: {utm}"
+        if safe_utm:
+            text += f"\nUTM: {safe_utm}"
             
         text += "\n\n#новый_пользователь"
         
@@ -107,18 +110,21 @@ async def on_activated_key(
     user_id: int, name: str, referrer_id: int | None, referrer_name: str | None, utm: str | None = None
 ):
     try:
+        safe_name = _safe_html(name)
+        safe_referrer_name = _safe_html(referrer_name) if referrer_name else None
+        safe_utm = _safe_html(utm) if utm else None
         text = f"""Активация ключа пользователем!
 
-Пользователь: {name}
+Пользователь: {safe_name}
 ID пользователя: <code>{user_id}</code>"""
 
         if referrer_name:
-            text += f"\nРеферер: {referrer_name} (ID: <code>{referrer_id}</code>)"
+            text += f"\nРеферер: {safe_referrer_name} (ID: <code>{referrer_id}</code>)"
         else:
             text += "\nРеферер: Отсутствует"
             
-        if utm:
-            text += f"\nUTM: {utm}"
+        if safe_utm:
+            text += f"\nUTM: {safe_utm}"
             
         text += "\n\n#активация #ключ"
             

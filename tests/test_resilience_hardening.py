@@ -279,8 +279,103 @@ async def test_ensure_active_tariffs_fk_cascade_skips_when_single_cascade(monkey
 
     conn = _Conn()
     monkeypatch.setattr(fk_guards.Tortoise, "get_connection", lambda _name: conn)
-    await fk_guards.ensure_active_tariffs_fk_cascade()
+    result = await fk_guards.ensure_active_tariffs_fk_cascade()
     assert conn.script_calls == 0
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_ensure_notification_marks_fk_cascade_repairs_non_cascade(monkeypatch):
+    class _Conn:
+        def __init__(self):
+            self.script_calls = 0
+
+        async def execute_query_dict(self, _query):
+            if "table_constraints" in _query and "notification_marks" in _query:
+                return [{"table_schema": "public", "constraint_name": "nm_user_fkey", "delete_rule": "NO ACTION"}]
+            if "pg_class" in _query and "notification_marks" in _query:
+                return [{"table_schema": "public"}]
+            return []
+
+        async def execute_script(self, _script):
+            self.script_calls += 1
+
+    conn = _Conn()
+    monkeypatch.setattr(fk_guards.Tortoise, "get_connection", lambda _name: conn)
+    result = await fk_guards.ensure_notification_marks_fk_cascade()
+    assert conn.script_calls == 1
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_ensure_notification_marks_fk_cascade_repairs_missing_constraint(monkeypatch):
+    class _Conn:
+        def __init__(self):
+            self.script_calls = 0
+
+        async def execute_query_dict(self, _query):
+            if "table_constraints" in _query and "notification_marks" in _query:
+                return []
+            if "pg_class" in _query and "notification_marks" in _query:
+                return [{"table_schema": "public"}]
+            return []
+
+        async def execute_script(self, _script):
+            self.script_calls += 1
+
+    conn = _Conn()
+    monkeypatch.setattr(fk_guards.Tortoise, "get_connection", lambda _name: conn)
+    result = await fk_guards.ensure_notification_marks_fk_cascade()
+    assert conn.script_calls == 1
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_ensure_notification_marks_fk_cascade_skips_when_single_cascade(monkeypatch):
+    class _Conn:
+        def __init__(self):
+            self.script_calls = 0
+
+        async def execute_query_dict(self, _query):
+            if "table_constraints" in _query and "notification_marks" in _query:
+                return [
+                    {
+                        "table_schema": "public",
+                        "constraint_name": "fk_notification_marks_user",
+                        "delete_rule": "CASCADE",
+                    }
+                ]
+            if "pg_class" in _query and "notification_marks" in _query:
+                return [{"table_schema": "public"}]
+            return []
+
+        async def execute_script(self, _script):
+            self.script_calls += 1
+
+    conn = _Conn()
+    monkeypatch.setattr(fk_guards.Tortoise, "get_connection", lambda _name: conn)
+    result = await fk_guards.ensure_notification_marks_fk_cascade()
+    assert conn.script_calls == 0
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_ensure_notification_marks_fk_cascade_returns_false_when_table_not_found(monkeypatch):
+    class _Conn:
+        async def execute_query_dict(self, _query):
+            if "table_constraints" in _query and "notification_marks" in _query:
+                return []
+            if "pg_class" in _query and "notification_marks" in _query:
+                return []
+            return []
+
+        async def execute_script(self, _script):
+            pass
+
+    conn = _Conn()
+    monkeypatch.setattr(fk_guards.Tortoise, "get_connection", lambda _name: conn)
+    result = await fk_guards.ensure_notification_marks_fk_cascade()
+    assert result is False
 
 
 @pytest.mark.asyncio

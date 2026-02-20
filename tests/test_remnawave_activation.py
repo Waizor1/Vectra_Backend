@@ -2,11 +2,13 @@
 
 from bloobcat.routes.remnawave.activation_logic import should_trigger_registration
 from bloobcat.routes.remnawave.catcher import _extract_online_at, _safe_parse_online_at
+from bloobcat.routes.remnawave.catcher import _eligible_users_for_checker
 from bloobcat.routes.remnawave.hwid_utils import (
     count_active_devices,
     extract_hwid_from_device,
     parse_remnawave_devices,
 )
+from types import SimpleNamespace
 
 
 # --- parse_remnawave_devices: разные форматы ответа RemnaWave ---
@@ -301,3 +303,19 @@ def test_safe_parse_online_at_invalid_format_returns_none():
 def test_safe_parse_online_at_valid_iso_returns_datetime():
     parsed = _safe_parse_online_at("2026-02-20T12:00:00Z")
     assert parsed is not None
+
+
+def test_safe_parse_online_at_naive_iso_is_normalized_to_utc():
+    parsed = _safe_parse_online_at("2026-02-20T12:00:00")
+    assert parsed is not None
+    assert parsed.tzinfo is not None
+
+
+def test_eligible_users_for_checker_includes_uuid_without_expired_at():
+    users = [
+        SimpleNamespace(id=1, remnawave_uuid="uuid-1", expired_at=None),
+        SimpleNamespace(id=2, remnawave_uuid=None, expired_at=None),
+        SimpleNamespace(id=3, remnawave_uuid="uuid-3", expired_at="2026-02-20"),
+    ]
+    eligible = _eligible_users_for_checker(users)
+    assert [u.id for u in eligible] == [1, 3]

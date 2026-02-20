@@ -13,6 +13,12 @@ services:
       - bloobcat-db-volume:/var/lib/postgresql/data
     networks:
       - bloobcat_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
 
   bloobcat:
     env_file:
@@ -33,6 +39,9 @@ services:
       - ./logs:/app/logs
     networks:
       - bloobcat_network
+    depends_on:
+      bloobcat_db:
+        condition: service_healthy
 
   pgadmin:
     image: dpage/pgadmin4
@@ -45,14 +54,16 @@ services:
     networks:
       - bloobcat_network
     depends_on:
-      - bloobcat_db
+      bloobcat_db:
+        condition: service_healthy
 
   directus:
     image: directus/directus:11.15.0
     container_name: bloobcat_directus
     restart: always
     depends_on:
-      - bloobcat_db
+      bloobcat_db:
+        condition: service_healthy
     environment:
       # Reduce first-run friction / compliance modal in UI
       ACCEPT_TERMS: "true"

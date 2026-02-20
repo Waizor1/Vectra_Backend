@@ -1,5 +1,70 @@
 ## 2026-02-20
 
+### DB-005: FK `active_tariffs -> users` — финальный хардening + миграция
+
+**Симптом (воспроизведен локально):**
+- Удаление пользователя через Directus падало с `INTERNAL_SERVER_ERROR`.
+- Error log: `violates foreign key constraint "fk_active_tariffs_user" Key (user_id)=(...) is still referenced from table "active_tariffs"`.
+
+**Root Cause Analysis (RCA):**
+1. FK `active_tariffs.user_id -> users.id` был создан с `NO ACTION` вместо `CASCADE`.
+2. Runtime guard в `bloobcat/__main__.py` проверял FK только по имени constraint, могли быть дублеты или иные имена в разных окружениях.
+3. Directus-удаление идет напрямую на уровне БД, а не через Python `Users.delete()`, поэтому не срабатывал runtime fail-safe.
+4. При drift схемы FK мог оставаться не-CASCADE, и cascade-удаления блокировались.
+
+**Что изменено:**
+
+1. **Новый модуль `bloobcat/db/fk_guards.py`** (schema-aware, constraint-agnostic):
+   - `ensure_active_tariffs_fk_cascade()`: проверяет FK по структуре (`active_tariffs.user_id -> users.id`), не по имени.
+   - Использует `information_schema.table_constraints` и `key_column_usage` для поиска FK.
+   - При обнаружении не-CASCADE constraint → автоматически пересоздает с `ON DELETE CASCADE`.
+   - Отдельный guard для `notification_marks.user_id -> users.id` (`ensure_notification_marks_fk_cascade()`).
+   - Оба guard'а возвращают `bool` (True = выполнен repair, False = early return).
+
+2. **`bloobcat/__main__.py`** (стартовый hardening):
+   - Вызов `ensure_active_tariffs_fk_cascade()` и `ensure_notification_marks_fk_cascade()` в `lifespan` перед запуском приложения.
+   - Инициализация временного Tortoise connection если нужно.
+   - Лог "FK self-heal guard выполнен" при успешном выполнении обоих guard'ов.
+
+3. **Миграция `84_20260220203000_harden_active_tariffs_fk_schema_safe.py`**:
+   - Schema-safe repair на уровне БД (SQL).
+   - Удаление дублеты FK (если есть) и создание единого CASCADE constraint.
+
+4. **`docker-compose.yml`** (порядок старта):
+   - Добавлен `healthcheck` для `bloobcat_db`.
+   - `depends_on: condition: service_healthy` для `bloobcat`, `directus` → гарантирует БД готова перед запуском.
+
+5. **`directus/extensions/endpoints/server-ops/index.js`** (ops-диагностика):
+   - Команда `fk_active_tariffs` теперь:
+     - Показывает все существующие FK на `active_tariffs.user_id`.
+     - Выводит `delete_rule` (ACTION/CASCADE/SET NULL).
+     - Использует schema-safe SQL (join через `constraint_column_usage`).
+
+**Тесты:** `tests/test_resilience_hardening.py`
+- `test_ensure_active_tariffs_fk_cascade_repairs_non_cascade`: проверяет repair при NO ACTION.
+- `test_ensure_active_tariffs_fk_cascade_repairs_missing_constraint`: миграция отсутствующего FK.
+- `test_ensure_active_tariffs_fk_cascade_skips_when_single_cascade`: skip если уже CASCADE.
+- `test_ensure_notification_marks_fk_cascade_*`: аналогичные тесты для notification_marks.
+- `test_users_delete_calls_fk_guard()`: проверяет вызов guard при `Users.delete()`.
+
+**Проверено:**
+- `py -3.12 -m pytest tests/test_resilience_hardening.py -q` → **11 passed**.
+- Локальное воспроизведение: удаление user → **успешно** (cascade срабатывает).
+- `ReadLints` по измененным файлам → без ошибок.
+
+**Residual risks:**
+- Если в окружении setup.py не запустился → FK остается в старом состоянии. Решение: миграция + runtime guard гарантируют repair при первом запуске.
+- Advisory lock убран (нестабилен), но в-process lock + идемпотентность хватает для high-concurrency.
+
+---
+
+- **fix(db/db-003-fk-guard-startup-order):** минимальный hardening старта для гарантированного self-heal `active_tariffs.user_id -> users.id`.
+  - **RCA-контекст:** после `Aerich upgrade` соединение Tortoise могло быть закрыто, из-за чего FK guard выполнялся без активного connection.
+  - **Исправление:**
+    - `bloobcat/__main__.py`: перед FK guard добавлена проверка/инициализация временного `Tortoise` connection (`Tortoise.init(config=TORTOISE_ORM)` при отсутствии `default`), после guard — аккуратное `Tortoise.close_connections()` только для временно созданного подключения;
+    - добавлен точечный стартовый лог `FK self-heal guard выполнен` для операционной видимости факта выполнения guard;
+    - `docker-compose.yml`: добавлен `healthcheck` для `bloobcat_db` и `depends_on: condition: service_healthy` для `bloobcat`, `pgadmin`, `directus`, чтобы снизить флаки порядка старта.
+
 - **fix(db/active-tariffs-fk-hardening):** закрыт повторяющийся падеж удаления `users` по FK `fk_active_tariffs_user`.
   - **Симптом:** удаление пользователя через Directus/GraphQL продолжало падать `violates foreign key constraint "fk_active_tariffs_user"` даже при наличии runtime-guard в `Users.delete()`.
   - **RCA:** удаление в Directus идет напрямую на уровне БД, а не через Python `Users.delete()`; при drift схемы в target schema FK на `active_tariffs.user_id` мог остаться не-CASCADE/дублированным.
@@ -883,19 +948,15 @@
   - Aerich записал миграцию `81_20260220_fix_notification_marks_cascade.py` как "applied", но SQL на проде не выполнился;
   - из-за этого удаление cascade'ом не работало.
 - Исправление:
-  - в `bloobcat/__main__.py` добавлена функция `ensure_notification_marks_fk_cascade()` (строки 153–198) по аналогии с `ensure_active_tariffs_fk_cascade()`;
+  - в `bloobcat/db/fk_guards.py` добавлена `ensure_notification_marks_fk_cascade()` по аналогии с `ensure_active_tariffs_fk_cascade()`;
   - функция при старте приложения проверяет constraint через `information_schema.table_constraints / key_column_usage`;
   - если constraint существует, но без `ON DELETE CASCADE` — автоматически пересоздаёт его с CASCADE (self-heal);
-  - функция вызывается в `lifespan` (строка 238) сразу после `ensure_active_tariffs_fk_cascade()`.
-- Пример SQL (что исправляется):
-  - было: `ALTER TABLE notification_marks ... ON DELETE NO ACTION`;
-  - стало: `ALTER TABLE notification_marks ... ON DELETE CASCADE`.
-- Верификация:
-  - `python -m py_compile bloobcat/__main__.py` — успешно;
-  - `ReadLints` по файлу — ошибок нет;
-  - при старте backend логирует: `[INFO] Self-healing FK constraint notification_marks_user_id_fkey with ON DELETE CASCADE` (если пересоздание произошло).
-- Файл:
-  - `TVPN_BACK_END/bloobcat/__main__.py`.
+  - функция вызывается в `lifespan` сразу после `ensure_active_tariffs_fk_cascade()`.
+- DB-003 (2026-02-20) — доработки после review:
+  - **notification_marks guard** сделан schema-aware + constraint-agnostic (как active_tariffs): добавлен `_resolve_notification_marks_schema()`, поиск FK по `table_name`/`column_name`/`ccu`, без завязки на имя constraint;
+  - **__main__**: лог "FK self-heal guard выполнен" выводится только когда оба guard'а вернули `True` (раньше был ложнопозитив при early return);
+  - **тесты**: `tests/test_resilience_hardening.py` — добавлены `test_ensure_notification_marks_fk_cascade_*` (repairs_non_cascade, repairs_missing_constraint, skips_when_single_cascade, returns_false_when_table_not_found);
+  - оба guard'а возвращают `bool` (True = ran, False = early return).
 
 ### 2026-02-20 — registration gate hardening (only family/ref/qr bypass)
 
