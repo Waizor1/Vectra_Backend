@@ -862,3 +862,20 @@
   - при старте backend логирует: `[INFO] Self-healing FK constraint notification_marks_user_id_fkey with ON DELETE CASCADE` (если пересоздание произошло).
 - Файл:
   - `TVPN_BACK_END/bloobcat/__main__.py`.
+
+### 2026-02-20 — registration gate hardening (only family/ref/qr bypass)
+
+- **fix**: ужесточена логика авто-регистрации, чтобы новый пользователь без валидного deep-link не создавался неявно.
+- Изменения:
+  - добавлен модуль `bloobcat/funcs/start_params.py` с единым whitelist-предикатом `is_registration_exception_start_param(...)`;
+  - в `bloobcat/routes/auth.py` `should_register` теперь true только при `registerIntent=true` или whitelist `start_param` (`family/ref/qr`);
+  - в `bloobcat/funcs/validate.py`:
+    - referer-fallback больше не читает `utm` как стартовый параметр;
+    - создание пользователя допускается только для whitelist `start_param`, иначе `403 User not registered`.
+- Эффект:
+  - обычное открытие без start-пейлоада больше не может случайно обойти welcome-регистрацию;
+  - deep-link сценарии `family/ref/qr` сохранены.
+- Тесты:
+  - `tests/test_auth_registration_modes.py`: добавлен кейс `campaign-abc` (не whitelist) -> `requires_registration=true`;
+  - `tests/test_resilience_hardening.py`: добавлен кейс `validate` с не-whitelist `start_param` -> `403 User not registered`;
+  - прогон: `py -3.12 -m pytest tests/test_auth_registration_modes.py tests/test_resilience_hardening.py -q` -> `13 passed`.

@@ -9,6 +9,7 @@ from bloobcat.db.partner_qr import PartnerQr
 from bloobcat.settings import telegram_settings
 from bloobcat.logger import get_logger
 from bloobcat.funcs.auth_tokens import decode_access_token
+from bloobcat.funcs.start_params import is_registration_exception_start_param
 import uuid
 
 logger = get_logger("validate")
@@ -33,7 +34,7 @@ def _extract_start_param_from_request(request: Request | None) -> str:
         referer = (request.headers.get("Referer") or "").strip()
         if referer:
             q = parse_qs(urlparse(referer).query)
-            for key in ("start", "start_param", "startParam", "utm"):
+            for key in ("start", "start_param", "startParam"):
                 values = q.get(key) or []
                 if values and str(values[0]).strip():
                     return str(values[0]).strip()
@@ -205,7 +206,7 @@ async def validate(init_data: str = Depends(oauth2_scheme), request: Request = N
         # User row is created only when:
         # - explicit registration intent endpoint is called (/auth/telegram with registerIntent), or
         # - a deep-link start_param is present (family/ref/qr flows).
-        if not existing_user and not effective_start_param:
+        if not existing_user and not is_registration_exception_start_param(effective_start_param):
             raise HTTPException(status_code=403, detail="User not registered")
 
         logger.debug(

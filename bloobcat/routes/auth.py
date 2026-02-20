@@ -9,6 +9,7 @@ from aiogram.utils.web_app import safe_parse_webapp_init_data
 from bloobcat.db.users import Users
 from bloobcat.db.partner_qr import PartnerQr
 from bloobcat.funcs.auth_tokens import create_access_token
+from bloobcat.funcs.start_params import is_registration_exception_start_param
 from bloobcat.settings import telegram_settings
 from bloobcat.logger import get_logger
 from tortoise.expressions import F
@@ -97,7 +98,7 @@ async def auth_telegram(payload: TelegramAuthRequest) -> TelegramAuthResponse:
             else:
                 utm = param
 
-        should_register = bool(payload.registerIntent) or bool(start_param)
+        should_register = bool(payload.registerIntent) or is_registration_exception_start_param(start_param)
         if should_register:
             db_user, was_just_created = await Users.get_user(
                 telegram_user=user_data.user, referred_by=referred_by, utm=utm

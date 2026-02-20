@@ -55,6 +55,29 @@ async def test_auth_telegram_with_start_param_creates_user(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_auth_telegram_with_unknown_start_param_still_requires_registration(monkeypatch):
+    parsed = types.SimpleNamespace(user=types.SimpleNamespace(id=224, username="u", first_name="B", last_name=None))
+
+    async def _get_or_none(**kwargs):
+        assert kwargs["id"] == 224
+        return None
+
+    async def _should_not_create(*args, **kwargs):
+        raise AssertionError("Users.get_user should not be called for non-whitelisted start_param")
+
+    monkeypatch.setattr(auth_module, "safe_parse_webapp_init_data", lambda *_: parsed)
+    monkeypatch.setattr(auth_module.Users, "get_or_none", _get_or_none)
+    monkeypatch.setattr(auth_module.Users, "get_user", _should_not_create)
+
+    payload = auth_module.TelegramAuthRequest(initData="ok", startParam="campaign-abc", registerIntent=False)
+    result = await auth_module.auth_telegram(payload)
+
+    assert result.requires_registration is True
+    assert result.accessToken == ""
+    assert result.expiresIn == 0
+
+
+@pytest.mark.asyncio
 async def test_auth_telegram_without_intent_uses_existing_user(monkeypatch):
     parsed = types.SimpleNamespace(user=types.SimpleNamespace(id=333, username="u", first_name="C", last_name=None))
     existing_user = types.SimpleNamespace(id=333)
