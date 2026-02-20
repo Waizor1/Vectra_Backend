@@ -129,5 +129,33 @@ jobs:
           docker compose \$COMPOSE_ARGS logs --tail=150 directus || true
         fi
 
+        echo "📦 Применяем тарифы (idempotent seed)..."
+        TARIFFS_SEED_OK=0
+        docker compose \$COMPOSE_ARGS exec -T bloobcat sh -lc '
+          attempt=1
+          max_attempts=3
+          while [ "\$attempt" -le "\$max_attempts" ]; do
+            echo "Tariffs seed attempt \$attempt/\$max_attempts"
+            if (python scripts/seed_tariffs.py || python3 scripts/seed_tariffs.py); then
+              exit 0
+            fi
+            rc=\$?
+            echo "⚠️  tariffs seed attempt failed (exit=\$rc)"
+            if [ "\$attempt" -lt "\$max_attempts" ]; then
+              echo "⚠️  retry in 5s..."
+              sleep 5
+            fi
+            attempt=\$((attempt + 1))
+          done
+          exit 1
+        ' && TARIFFS_SEED_OK=1 || true
+
+        if [ "\$TARIFFS_SEED_OK" -ne 1 ]; then
+          echo "❌ Tariffs seed failed after retries; abort deploy"
+          docker compose \$COMPOSE_ARGS ps
+          docker compose \$COMPOSE_ARGS logs --tail=150 bloobcat || true
+          exit 1
+        fi
+
         echo "✅ Деплой завершен"
         EOF
