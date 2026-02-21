@@ -2883,6 +2883,10 @@ onMounted(() => {
 	justify-self: stretch !important;
 }
 
+.panel--ops-accordion {
+	overflow: visible;
+}
+
 .panel > * {
 	width: 100%;
 	min-width: 0;
@@ -2925,6 +2929,9 @@ onMounted(() => {
 	border-radius: 12px;
 	border: 1px solid rgba(255, 255, 255, 0.08);
 	background: rgba(255, 255, 255, 0.03);
+	min-width: 0;
+	width: 100%;
+	box-sizing: border-box;
 }
 
 .ops-section__title {
@@ -2935,6 +2942,7 @@ onMounted(() => {
 .ops-section__subtitle {
 	font-size: 12px;
 	opacity: 0.75;
+	overflow-wrap: anywhere;
 }
 
 .ops-health {
@@ -3146,6 +3154,9 @@ onMounted(() => {
 .ops-console {
 	display: grid;
 	gap: 10px;
+	min-width: 0;
+	width: 100%;
+	box-sizing: border-box;
 }
 
 .ops-console__label {
@@ -3162,6 +3173,8 @@ onMounted(() => {
 	border: 1px solid rgba(255, 255, 255, 0.10);
 	background: rgba(255, 255, 255, 0.03);
 	color: inherit;
+	min-width: 0;
+	box-sizing: border-box;
 }
 
 .ops-console__actions {
@@ -3444,6 +3457,9 @@ onMounted(() => {
 	overflow: hidden;
 	background: rgba(255, 255, 255, 0.02);
 	border: 1px solid rgba(255, 255, 255, 0.06);
+	min-width: 0;
+	width: 100%;
+	box-sizing: border-box;
 }
 
 .panel--ops-accordion :deep(.v-expansion-panels) {
@@ -3459,12 +3475,16 @@ onMounted(() => {
 }
 
 .panel--ops-accordion :deep(.v-expansion-panel-text) {
-	overflow: hidden;
+	overflow: visible;
 }
 
 .panel--ops-accordion :deep(.v-expansion-panel-text__wrapper) {
 	padding: 0 14px 14px;
 	background: rgba(255, 255, 255, 0.01);
+	overflow: visible;
+	min-width: 0;
+	width: 100%;
+	box-sizing: border-box;
 }
 
 .hero__kicker {
