@@ -9,6 +9,7 @@ class PartnerWithdrawals(models.Model):
     method = fields.CharField(max_length=16)
     details = fields.CharField(max_length=255, null=True)
     status = fields.CharField(max_length=24, default="created")
+    paid_amount_rub = fields.IntField(null=True)
     error = fields.CharField(max_length=255, null=True)
     created_at = fields.DatetimeField(auto_now_add=True)
     updated_at = fields.DatetimeField(auto_now=True)

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -62,10 +62,32 @@ class PartnerWithdrawRequest(BaseModel):
 
 class PartnerWithdrawStatus(BaseModel):
     txId: str
-    status: str
+    status: Literal["created", "paid"]
     amountRub: int
+    paidAmountRub: Optional[int] = None
     createdAtMs: int
     error: Optional[str] = None
+
+
+_WITHDRAW_STATUS_CREATED = "created"
+_WITHDRAW_STATUS_PAID = "paid"
+_WITHDRAW_LEGACY_PAID = {"success"}
+_WITHDRAW_LEGACY_PENDING = {"processing"}
+
+
+def _normalize_withdraw_status(raw_status: Optional[str]) -> Literal["created", "paid"]:
+    status = (raw_status or "").strip().lower()
+    if status == _WITHDRAW_STATUS_PAID or status in _WITHDRAW_LEGACY_PAID:
+        return _WITHDRAW_STATUS_PAID
+    return _WITHDRAW_STATUS_CREATED
+
+
+def _resolve_paid_amount_rub(withdraw: PartnerWithdrawals, normalized_status: Literal["created", "paid"]) -> Optional[int]:
+    paid_raw = getattr(withdraw, "paid_amount_rub", None)
+    paid_amount = int(paid_raw) if paid_raw is not None else None
+    if normalized_status == _WITHDRAW_STATUS_PAID:
+        return paid_amount if paid_amount is not None else int(withdraw.amount_rub or 0)
+    return paid_amount
 
 
 def _slugify_title(title: str) -> str:
@@ -182,7 +204,7 @@ async def get_summary(user: Users = Depends(validate)) -> PartnerSummaryResponse
         )
 
     # Frozen: pending withdrawals.
-    pending_statuses = ["created", "processing"]
+    pending_statuses = [_WITHDRAW_STATUS_CREATED, *_WITHDRAW_LEGACY_PENDING]
     frozen_rows = await PartnerWithdrawals.filter(owner_id=user.id, status__in=pending_statuses).values_list("amount_rub", flat=True)
     frozen = int(sum(int(x or 0) for x in frozen_rows))
 
@@ -330,13 +352,16 @@ async def request_withdraw(payload: PartnerWithdrawRequest, user: Users = Depend
         amount_rub=amount,
         method=method,
         details=details,
-        status="created",
+        status=_WITHDRAW_STATUS_CREATED,
+        paid_amount_rub=None,
     )
     created_ms = int(withdraw.created_at.replace(tzinfo=timezone.utc).timestamp() * 1000)
+    normalized_status = _normalize_withdraw_status(withdraw.status)
     return PartnerWithdrawStatus(
         txId=str(withdraw.id),
-        status=withdraw.status,
+        status=normalized_status,
         amountRub=withdraw.amount_rub,
+        paidAmountRub=_resolve_paid_amount_rub(withdraw, normalized_status),
         createdAtMs=created_ms,
         error=withdraw.error,
     )
@@ -349,10 +374,12 @@ async def get_withdraw_status(tx_id: str, user: Users = Depends(validate)) -> Pa
     if not withdraw:
         raise HTTPException(status_code=404, detail="Withdrawal not found")
     created_ms = int(withdraw.created_at.replace(tzinfo=timezone.utc).timestamp() * 1000)
+    normalized_status = _normalize_withdraw_status(withdraw.status)
     return PartnerWithdrawStatus(
         txId=str(withdraw.id),
-        status=withdraw.status,
+        status=normalized_status,
         amountRub=withdraw.amount_rub,
+        paidAmountRub=_resolve_paid_amount_rub(withdraw, normalized_status),
         createdAtMs=created_ms,
         error=withdraw.error,
     )

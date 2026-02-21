@@ -701,6 +701,13 @@ def apply_field_notes_ru(client: DirectusClient) -> None:
             "status": "Статус обработки/зачисления платежа.",
             "processed_at": "Когда платеж был обработан и попал в систему.",
         },
+        "partner_withdrawals": {
+            "amount_rub": "Запрошенная сумма вывода (руб).",
+            "paid_amount_rub": "Фактически выплаченная сумма (руб).",
+            "status": "Статус заявки: created / paid.",
+            "created_at": "Дата создания заявки.",
+            "updated_at": "Дата последнего изменения заявки.",
+        },
         "error_reports": {
             "event_id": "Технический идентификатор события на клиенте.",
             "code": "Человекочитаемый код ошибки для поддержки.",
@@ -835,6 +842,13 @@ def apply_field_notes_ru(client: DirectusClient) -> None:
             "payment_id": "ID платежа",
             "user_id": "Пользователь",
         },
+        "partner_withdrawals": {
+            "amount_rub": "Сумма (₽)",
+            "paid_amount_rub": "Выплачено (₽)",
+            "status": "Статус",
+            "created_at": "Создано",
+            "updated_at": "Обновлено",
+        },
         "error_reports": {
             "event_id": "Event ID",
             "code": "Код ошибки",
@@ -919,6 +933,21 @@ def apply_field_notes_ru(client: DirectusClient) -> None:
     patch_field_meta(client, "error_reports", "triage_updated_at", {"interface": "datetime", "readonly": True})
     patch_field_meta(client, "error_reports", "created_at", {"interface": "datetime", "readonly": True})
     patch_field_meta(client, "error_reports", "reported_at", {"interface": "datetime"})
+    patch_field_meta(
+        client,
+        "partner_withdrawals",
+        "status",
+        {
+            "interface": "select-dropdown",
+            "options": {
+                "choices": [
+                    {"text": "Создана", "value": "created"},
+                    {"text": "Оплачена", "value": "paid"},
+                ]
+            },
+        },
+    )
+    patch_field_meta(client, "partner_withdrawals", "paid_amount_rub", {"interface": "input"})
 
 
 def ensure_admin_settings(client: DirectusClient) -> None:
@@ -2048,7 +2077,7 @@ def ensure_users_relations_ux(client: DirectusClient) -> None:
         ("promo_usages", "user_id", "promo_usages_list", "Использование промокодов", 70, "{{id}} — {{used_at}}"),
         ("notification_marks", "user_id", "notification_marks_list", "Логи уведомлений", 71, "{{id}} — {{type}} — {{sent_at}}"),
         ("family_devices", "user_id", "family_devices_list", "Устройства семьи", 72, "{{id}} — {{device_name}}"),
-        ("partner_withdrawals", "owner_id", "partner_withdrawals_list", "Выводы партнера", 73, "{{id}} — {{status}} — {{amount}}"),
+        ("partner_withdrawals", "owner_id", "partner_withdrawals_list", "Выводы партнера", 73, "{{id}} — {{status}} — {{amount_rub}}"),
         ("partner_earnings", "partner_id", "partner_earnings_list", "Начисления партнера", 74, "{{id}} — {{amount}} — {{created_at}}"),
         ("family_audit_logs", "owner_id", "family_audit_logs_owner", "Аудит семьи", 75, "{{id}} — {{action}} — {{created_at}}"),
         ("family_members", "owner_id", "family_members_owner_list", "Участники семьи (owner)", 76, "{{id}} — member {{member_id}} — {{status}} — {{allocated_devices}}"),
@@ -3927,11 +3956,11 @@ def ensure_role_presets(client: DirectusClient) -> None:
             ],
         },
         "partner_withdrawals": {
-            "default_fields": ["id", "owner_id", "amount_rub", "method", "status", "error", "created_at", "updated_at"],
+            "default_fields": ["id", "owner_id", "amount_rub", "paid_amount_rub", "method", "status", "error", "created_at", "updated_at"],
             "default_sort": "-created_at",
             "bookmarks": [
-                {"bookmark": "Партнерка · Выводы в ожидании", "sort": "-created_at", "filter": {"status": {"_in": ["created", "processing"]}}, "color": "#F59E0B"},
-                {"bookmark": "Партнерка · Выводы завершенные", "sort": "-updated_at", "filter": {"status": {"_eq": "success"}}, "color": "#10B981"},
+                {"bookmark": "Партнерка · Выводы в ожидании", "sort": "-created_at", "filter": {"status": {"_eq": "created"}}, "color": "#F59E0B"},
+                {"bookmark": "Партнерка · Выводы завершенные", "sort": "-updated_at", "filter": {"status": {"_eq": "paid"}}, "color": "#10B981"},
             ],
         },
         "partner_qr_codes": {
