@@ -87,16 +87,55 @@ jobs:
 
         # Prefer prod override when present (Caddy/TLS, etc.)
         if [ -f docker-compose.prod.yml ]; then
-          docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
-          # Directus doesn't always reload app extensions on volume changes.
-          # Restart ensures new /directus/extensions/* dist bundles are picked up.
-          docker compose -f docker-compose.yml -f docker-compose.prod.yml restart directus || true
           COMPOSE_ARGS="-f docker-compose.yml -f docker-compose.prod.yml"
         else
-          docker compose -f docker-compose.yml up -d --build
-          docker compose -f docker-compose.yml restart directus || true
           COMPOSE_ARGS="-f docker-compose.yml"
         fi
+
+        echo "рџ›°пёЏ  Pre-pulling python:3.12-slim (best-effort)..."
+        PULL_OK=0
+        for attempt in 1 2 3; do
+          echo "docker pull attempt \$attempt/3"
+          if docker pull python:3.12-slim; then
+            PULL_OK=1
+            break
+          fi
+          rc=\$?
+          echo "вљ пёЏ  docker pull failed (exit=\$rc)"
+          if [ "\$attempt" -lt 3 ]; then
+            echo "вљ пёЏ  retry in 15s..."
+            sleep 15
+          fi
+        done
+        if [ "\$PULL_OK" -ne 1 ]; then
+          echo "вљ пёЏ  python:3.12-slim pre-pull failed after retries; continuing with compose build"
+        fi
+
+        echo "рџЏ—пёЏ  Running docker compose up --build with retries..."
+        DEPLOY_OK=0
+        for attempt in 1 2 3; do
+          echo "compose deploy attempt \$attempt/3"
+          if DOCKER_CLIENT_TIMEOUT=240 COMPOSE_HTTP_TIMEOUT=240 docker compose \$COMPOSE_ARGS up -d --build; then
+            DEPLOY_OK=1
+            break
+          fi
+          rc=\$?
+          echo "вљ пёЏ  compose deploy attempt failed (exit=\$rc)"
+          if [ "\$attempt" -lt 3 ]; then
+            echo "вљ пёЏ  retry in 20s..."
+            sleep 20
+          fi
+        done
+        if [ "\$DEPLOY_OK" -ne 1 ]; then
+          echo "вќЊ docker compose up -d --build failed after retries"
+          docker compose \$COMPOSE_ARGS ps || true
+          docker compose \$COMPOSE_ARGS logs --tail=200 bloobcat || true
+          exit 1
+        fi
+
+        # Directus doesn't always reload app extensions on volume changes.
+        # Restart ensures new /directus/extensions/* dist bundles are picked up.
+        docker compose \$COMPOSE_ARGS restart directus || true
 
         echo "🩺 Ждем готовности Directus..."
         echo "🩺 Waiting for bloobcat health..."
