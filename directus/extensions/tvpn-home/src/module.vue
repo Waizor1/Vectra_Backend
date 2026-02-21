@@ -3446,10 +3446,6 @@ onMounted(() => {
 	border: 1px solid rgba(255, 255, 255, 0.06);
 }
 
-.panel--ops-accordion {
-	overflow: visible;
-}
-
 .panel--ops-accordion :deep(.v-expansion-panels) {
 	display: grid;
 	gap: 10px;
@@ -3463,11 +3459,12 @@ onMounted(() => {
 }
 
 .panel--ops-accordion :deep(.v-expansion-panel-text) {
-	overflow: visible;
+	overflow: hidden;
 }
 
 .panel--ops-accordion :deep(.v-expansion-panel-text__wrapper) {
 	padding: 0 14px 14px;
+	background: rgba(255, 255, 255, 0.01);
 }
 
 .hero__kicker {
