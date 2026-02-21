@@ -9,17 +9,26 @@ from bloobcat.db.remnawave_retry_jobs import RemnaWaveRetryJobs
 from bloobcat.db.tariff import Tariffs
 from bloobcat.db.users import Users
 from bloobcat.logger import get_logger
-from bloobcat.routes.remnawave.lte_utils import set_lte_squad_status
-from bloobcat.routes.remnawave.client import RemnaWaveClient
 from bloobcat.settings import remnawave_settings
 from tortoise.exceptions import IntegrityError
 
 logger = get_logger("admin_integration")
 
+# Keep this symbol patchable in tests, while resolving the real class lazily.
+RemnaWaveClient: Any = None
+
 DELETE_RETRY_JOB_TYPE = "remnawave_user_delete"
 DELETE_RETRY_MAX_ATTEMPTS = 8
 DELETE_RETRY_BASE_DELAY_SECONDS = 60
 DELETE_RETRY_MAX_DELAY_SECONDS = 3600
+
+
+def _build_remnawave_client():
+    client_factory = RemnaWaveClient
+    if client_factory is None:
+        from bloobcat.routes.remnawave.client import RemnaWaveClient as client_factory
+
+    return client_factory(remnawave_settings.url, remnawave_settings.token.get_secret_value())
 
 
 def normalize_hwid_limit(value: Any) -> int:
@@ -135,7 +144,7 @@ async def _delete_remnawave_user_with_retry_policy(
     if not uuid_value:
         return {"ok": True, "deleted": False, "not_found": False, "queued_retry": False, "reason": "uuid_missing"}
 
-    client = RemnaWaveClient(remnawave_settings.url, remnawave_settings.token.get_secret_value())
+    client = _build_remnawave_client()
     try:
         await client.users.delete_user(uuid_value)
         logger.info("RemnaWave user deleted (%s): user_id=%s uuid=%s", source, user_id, uuid_value)
@@ -204,6 +213,8 @@ async def sync_user_lte(user_id: int, lte_gb_total: Optional[int]) -> None:
         try:
             should_enable = lte_gb_total_int > float(active_tariff.lte_gb_used or 0)
             if user.remnawave_uuid:
+                from bloobcat.routes.remnawave.lte_utils import set_lte_squad_status
+
                 await set_lte_squad_status(str(user.remnawave_uuid), enable=should_enable)
             await NotificationMarks.filter(user_id=user.id, type="lte_usage").delete()
         except Exception as exc:
@@ -214,6 +225,8 @@ async def sync_user_lte(user_id: int, lte_gb_total: Optional[int]) -> None:
     try:
         should_enable = lte_gb_total_int > 0
         if user.remnawave_uuid:
+            from bloobcat.routes.remnawave.lte_utils import set_lte_squad_status
+
             BYTES_IN_GB = 1024 ** 3
             MSK_TZ = timezone(timedelta(hours=3))
             marker_upper = (remnawave_settings.lte_node_marker or "").upper()
@@ -232,10 +245,7 @@ async def sync_user_lte(user_id: int, lte_gb_total: Optional[int]) -> None:
             start_str = start_dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
             end_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
-            client = RemnaWaveClient(
-                remnawave_settings.url,
-                remnawave_settings.token.get_secret_value()
-            )
+            client = _build_remnawave_client()
             try:
                 try:
                     resp = await client.users.get_user_usage_by_range(
@@ -300,6 +310,8 @@ async def sync_active_tariff_lte(
     try:
         should_enable = float(lte_gb_total or 0) > float(lte_gb_used or 0)
         if user.remnawave_uuid:
+            from bloobcat.routes.remnawave.lte_utils import set_lte_squad_status
+
             await set_lte_squad_status(str(user.remnawave_uuid), enable=should_enable)
         await NotificationMarks.filter(user_id=active_tariff.user_id, type="lte_usage").delete()
         logger.info(
@@ -344,7 +356,7 @@ async def sync_user_remnawave_fields(
     if not updates:
         return
 
-    client = RemnaWaveClient(remnawave_settings.url, remnawave_settings.token.get_secret_value())
+    client = _build_remnawave_client()
     try:
         await client.users.update_user(user.remnawave_uuid, **updates)
         logger.info("RemnaWave user update: user=%s payload=%s", user_id, updates)
