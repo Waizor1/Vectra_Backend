@@ -8,11 +8,11 @@ async def upgrade(db: BaseDBAsyncClient) -> str:
 
         UPDATE "partner_withdrawals"
         SET "status" = CASE
-                WHEN LOWER(COALESCE("status", "")) IN ('paid', 'success') THEN 'paid'
+                WHEN LOWER(COALESCE("status", '')) IN ('paid', 'success') THEN 'paid'
                 ELSE 'created'
             END,
             "paid_amount_rub" = CASE
-                WHEN LOWER(COALESCE("status", "")) IN ('paid', 'success')
+                WHEN LOWER(COALESCE("status", '')) IN ('paid', 'success')
                     THEN COALESCE("paid_amount_rub", "amount_rub")
                 ELSE "paid_amount_rub"
             END;
