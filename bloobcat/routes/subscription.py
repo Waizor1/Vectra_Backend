@@ -9,6 +9,7 @@ from bloobcat.db.tariff import Tariffs
 from bloobcat.db.active_tariff import ActiveTariffs
 from bloobcat.funcs.validate import validate
 from bloobcat.routes.payment import pay
+from bloobcat.settings import app_settings
 from bloobcat.logger import get_logger
 
 logger = get_logger("routes.subscription")
@@ -159,7 +160,8 @@ async def get_status(user: Users = Depends(validate)) -> SubscriptionStatusRespo
     end_at_ms = _end_at_ms(normalize_date(user.expired_at))
     is_active = bool(end_at_ms and end_at_ms > int(datetime.now(timezone.utc).timestamp() * 1000))
     devices_limit = await _resolve_devices_limit(user)
-    is_family_eligible = bool(is_active and devices_limit >= 10)
+    family_limit = max(1, int(getattr(app_settings, "family_devices_limit", 10) or 10))
+    is_family_eligible = bool(is_active and devices_limit >= family_limit)
     return SubscriptionStatusResponse(
         isActive=is_active,
         endAtMs=end_at_ms,

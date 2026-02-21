@@ -140,6 +140,14 @@ class Users(models.Model):
             or "not found" in lowered
         )
 
+    @staticmethod
+    def _normalize_hwid_limit_value(value: Any) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return 1
+        return max(1, parsed)
+
     async def _find_existing_remnawave_user(self, remnawave: Any, base_username: str) -> Optional[dict]:
         candidates: list[dict] = []
 
@@ -257,7 +265,12 @@ class Users(models.Model):
             try:
                 current_user = await Users.get_or_none(id=self.id) or self
                 if current_user.remnawave_uuid:
+                    normalized_existing_hwid_limit = self._normalize_hwid_limit_value(current_user.hwid_limit)
+                    if current_user.hwid_limit != normalized_existing_hwid_limit:
+                        current_user.hwid_limit = normalized_existing_hwid_limit
+                        await current_user.save(update_fields=["hwid_limit"])
                     self.remnawave_uuid = current_user.remnawave_uuid
+                    self.hwid_limit = normalized_existing_hwid_limit
                     logger.info(f"Пользователь {self.id} уже имеет UUID в RemnaWave: {self.remnawave_uuid}")
                     return False
 
@@ -291,8 +304,10 @@ class Users(models.Model):
                             f"Пользователь {self.id} уже использовал триал, дата истечения: {expire_at_date}"
                         )
 
-                    if current_user.hwid_limit is None:
-                        current_user.hwid_limit = 1
+                    normalized_hwid_limit = self._normalize_hwid_limit_value(current_user.hwid_limit)
+                    if current_user.hwid_limit != normalized_hwid_limit:
+                        current_user.hwid_limit = normalized_hwid_limit
+                    self.hwid_limit = normalized_hwid_limit
 
                     internal_squads = []
                     if remnawave_settings.default_internal_squad_uuid:
@@ -324,7 +339,7 @@ class Users(models.Model):
                             telegram_id=self.id,
                             email=current_user.email,
                             description=f"Telegram: {current_user.name()}",
-                            hwid_device_limit=current_user.hwid_limit,
+                            hwid_device_limit=normalized_hwid_limit,
                             active_internal_squads=active_internal_squads,
                             external_squad_uuid=remnawave_settings.default_external_squad_uuid,
                         )
@@ -336,8 +351,30 @@ class Users(models.Model):
                             )
                             if existing_remote_user and existing_remote_user.get("uuid"):
                                 current_user.remnawave_uuid = existing_remote_user["uuid"]
-                                await current_user.save(update_fields=["remnawave_uuid", "is_trial", "used_trial", "expired_at"])
+                                await current_user.save(
+                                    update_fields=[
+                                        "remnawave_uuid",
+                                        "is_trial",
+                                        "used_trial",
+                                        "expired_at",
+                                        "hwid_limit",
+                                    ]
+                                )
                                 self.remnawave_uuid = current_user.remnawave_uuid
+                                self.hwid_limit = current_user.hwid_limit
+                                try:
+                                    await remnawave.users.update_user(
+                                        current_user.remnawave_uuid,
+                                        hwidDeviceLimit=normalized_hwid_limit,
+                                        expireAt=expire_at_date,
+                                    )
+                                except Exception as sync_err:
+                                    logger.warning(
+                                        "Rebind sync failed for user=%s uuid=%s: %s",
+                                        self.id,
+                                        self.remnawave_uuid,
+                                        sync_err,
+                                    )
                                 logger.warning(
                                     "Вместо создания дубля выполнен rebind local user=%s к existing RemnaWave uuid=%s",
                                     self.id,
@@ -352,6 +389,7 @@ class Users(models.Model):
 
                     await current_user.save()
                     self.remnawave_uuid = current_user.remnawave_uuid
+                    self.hwid_limit = current_user.hwid_limit
                     logger.info(f"Пользователь {self.id} успешно создан в RemnaWave с UUID: {self.remnawave_uuid}")
                     return True
                 finally:
@@ -377,7 +415,12 @@ class Users(models.Model):
                 from datetime import date
 
                 current_user = await Users.get_or_none(id=self.id) or self
+                normalized_hwid_limit = self._normalize_hwid_limit_value(current_user.hwid_limit)
+                hwid_limit_changed = current_user.hwid_limit != normalized_hwid_limit
+                if hwid_limit_changed:
+                    current_user.hwid_limit = normalized_hwid_limit
                 self.remnawave_uuid = current_user.remnawave_uuid
+                self.hwid_limit = normalized_hwid_limit
 
                 remnawave = RemnaWaveClient(
                     remnawave_settings.url,
@@ -388,6 +431,8 @@ class Users(models.Model):
                         try:
                             payload = await remnawave.users.get_user_by_uuid(str(current_user.remnawave_uuid))
                             if self._extract_remnawave_user(payload):
+                                if hwid_limit_changed:
+                                    await current_user.save(update_fields=["hwid_limit"])
                                 self.remnawave_uuid = current_user.remnawave_uuid
                                 return True
                         except Exception as lookup_err:
@@ -401,8 +446,22 @@ class Users(models.Model):
                     )
                     if existing_remote_user and existing_remote_user.get("uuid"):
                         current_user.remnawave_uuid = existing_remote_user["uuid"]
-                        await current_user.save(update_fields=["remnawave_uuid"])
+                        await current_user.save(update_fields=["remnawave_uuid", "hwid_limit"])
                         self.remnawave_uuid = current_user.remnawave_uuid
+                        self.hwid_limit = normalized_hwid_limit
+                        try:
+                            await remnawave.users.update_user(
+                                current_user.remnawave_uuid,
+                                hwidDeviceLimit=normalized_hwid_limit,
+                                expireAt=(current_user.expired_at or date.today()),
+                            )
+                        except Exception as sync_err:
+                            logger.warning(
+                                "Rebind sync failed in recreate_remnawave_user for user=%s uuid=%s: %s",
+                                self.id,
+                                self.remnawave_uuid,
+                                sync_err,
+                            )
                         logger.info(
                             "Пользователь %s rebind к существующему RemnaWave UUID: %s",
                             self.id,
@@ -411,7 +470,7 @@ class Users(models.Model):
                         return True
 
                     expire_at_date = current_user.expired_at or date.today()
-                    hwid_limit = current_user.hwid_limit if current_user.hwid_limit is not None else 1
+                    hwid_limit = normalized_hwid_limit
 
                     internal_squads = []
                     if remnawave_settings.default_internal_squad_uuid:
@@ -454,8 +513,22 @@ class Users(models.Model):
                             )
                             if existing_remote_user and existing_remote_user.get("uuid"):
                                 current_user.remnawave_uuid = existing_remote_user["uuid"]
-                                await current_user.save(update_fields=["remnawave_uuid"])
+                                await current_user.save(update_fields=["remnawave_uuid", "hwid_limit"])
                                 self.remnawave_uuid = current_user.remnawave_uuid
+                                self.hwid_limit = normalized_hwid_limit
+                                try:
+                                    await remnawave.users.update_user(
+                                        current_user.remnawave_uuid,
+                                        hwidDeviceLimit=normalized_hwid_limit,
+                                        expireAt=expire_at_date,
+                                    )
+                                except Exception as sync_err:
+                                    logger.warning(
+                                        "Rebind sync failed in recreate_remnawave_user collision flow for user=%s uuid=%s: %s",
+                                        self.id,
+                                        self.remnawave_uuid,
+                                        sync_err,
+                                    )
                                 logger.info(
                                     "Пользователь %s rebind после коллизии username, RemnaWave UUID: %s",
                                     self.id,
@@ -468,8 +541,9 @@ class Users(models.Model):
                     if not current_user.remnawave_uuid:
                         raise ValueError(f"create_user не вернул uuid для пользователя {self.id}")
 
-                    await current_user.save(update_fields=["remnawave_uuid"])
+                    await current_user.save(update_fields=["remnawave_uuid", "hwid_limit"])
                     self.remnawave_uuid = current_user.remnawave_uuid
+                    self.hwid_limit = normalized_hwid_limit
                     logger.info(f"Пользователь {self.id} пересоздан в RemnaWave с UUID: {self.remnawave_uuid}")
                     return True
                 finally:
@@ -693,13 +767,42 @@ class Users(models.Model):
         # Удаляем пользователя в RemnaWave
         if self.remnawave_uuid:
             from bloobcat.routes.remnawave.client import RemnaWaveClient
+            from bloobcat.services.admin_integration import (
+                enqueue_remnawave_delete_retry,
+                is_remnawave_transient_error,
+            )
             from bloobcat.settings import remnawave_settings
             client = RemnaWaveClient(remnawave_settings.url, remnawave_settings.token.get_secret_value())
             try:
                 await client.users.delete_user(self.remnawave_uuid)
                 logger.info(f"Пользователь {self.id} удален из RemnaWave")
             except Exception as e:
-                logger.error(f"Ошибка при удалении пользователя {self.id} из RemnaWave: {e}")
+                error_text = str(e)
+                if self._is_remnawave_not_found_error(error_text):
+                    logger.info(
+                        "RemnaWave user already missing during delete: user=%s uuid=%s",
+                        self.id,
+                        self.remnawave_uuid,
+                    )
+                elif is_remnawave_transient_error(error_text):
+                    await enqueue_remnawave_delete_retry(
+                        user_id=int(self.id),
+                        remnawave_uuid=str(self.remnawave_uuid),
+                        last_error=error_text,
+                    )
+                    logger.warning(
+                        "Queued delete retry after transient RemnaWave error: user=%s uuid=%s error=%s",
+                        self.id,
+                        self.remnawave_uuid,
+                        error_text,
+                    )
+                else:
+                    logger.error(
+                        "Non-retryable RemnaWave delete error for user=%s uuid=%s: %s",
+                        self.id,
+                        self.remnawave_uuid,
+                        error_text,
+                    )
             finally:
                 await client.close()
         # Выполняем удаление из БД через оригинальный delete
@@ -1132,3 +1235,4 @@ class UsersModelAdmin(TortoiseModelAdmin):
             logger.warning(f"Пользователь с ID {pk} не найден при удалении через админку")
         # Возвращаем стандартный ответ админки
         await super().delete_model(pk)
+

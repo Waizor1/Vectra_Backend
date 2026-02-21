@@ -79,7 +79,7 @@ def _extract_online_at(remnawave_user: Dict[str, Any] | None) -> Optional[str]:
 
 
 def _safe_parse_online_at(raw_online_at: Any) -> Optional[datetime]:
-    """Парсит timestamp подключения и не роняет цикл на неожиданных форматах."""
+    """Parse connection timestamp without breaking the updater on bad input."""
     if not raw_online_at:
         return None
     try:
@@ -92,6 +92,16 @@ def _safe_parse_online_at(raw_online_at: Any) -> Optional[datetime]:
         return parsed
     except Exception:
         return None
+
+
+def _normalize_hwid_limit(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 1
+    return max(1, parsed)
 
 @router.get("/status")
 async def remnawave_status():
@@ -624,29 +634,56 @@ async def remnawave_updater():
                         remnawave_updates['expireAt'] = db_expire_at_date
 
                     # ----------------- Логика синхронизации `hwid_limit` (двусторонняя) -----------------
-                    remnawave_hwid_limit = remnawave_user.get('hwidDeviceLimit')
-                    # Используем актуальное значение hwid_limit и active_tariff_id из fresh_data_map
+                    remnawave_hwid_limit_raw = remnawave_user.get('hwidDeviceLimit')
+                    remnawave_hwid_limit = _normalize_hwid_limit(remnawave_hwid_limit_raw)
+                    normalized_db_hwid_limit = _normalize_hwid_limit(db_hwid_limit)
+                    remnawave_limit_invalid = (
+                        remnawave_hwid_limit_raw is not None
+                        and remnawave_hwid_limit is not None
+                        and remnawave_hwid_limit_raw != remnawave_hwid_limit
+                    )
 
                     hwid_changed = False
-                    if remnawave_hwid_limit is not None and isinstance(remnawave_hwid_limit, int):
-                        # Сценарий 1: в БД пусто, берем из RemnaWave
+                    if db_hwid_limit is not None and normalized_db_hwid_limit != db_hwid_limit:
+                        user.hwid_limit = normalized_db_hwid_limit
+                        db_hwid_limit = normalized_db_hwid_limit
+                        hwid_changed = True
+                        logger.warning(
+                            'Invalid local hwid_limit normalized: user=%s old=%s new=%s',
+                            user.id,
+                            fresh_data.get('hwid_limit', user.hwid_limit),
+                            normalized_db_hwid_limit,
+                        )
+
+                    if remnawave_hwid_limit is not None:
                         if db_hwid_limit is None:
-                            # ВАЖНО: если у пользователя есть активный тариф, НЕ переносим hwid_limit из панели в БД.
-                            # Источник истины для лимита в этом случае — тариф/покупка (иначе возможен race condition с webhook оплаты).
                             if db_active_tariff_id:
                                 logger.debug(
-                                    f"Пропуск синхронизации (RemnaWave -> БД) hwid_limit для {user.id}: active_tariff_id={db_active_tariff_id} присутствует"
+                                    'Skip RemnaWave->DB hwid sync for user=%s because active_tariff_id=%s',
+                                    user.id,
+                                    db_active_tariff_id,
                                 )
                             else:
                                 user.hwid_limit = remnawave_hwid_limit
+                                db_hwid_limit = remnawave_hwid_limit
                                 hwid_changed = True
-                                logger.info(f"Синхронизация (RemnaWave -> БД): hwid_limit для {user.id} установлен в {remnawave_hwid_limit}")
-                        # Сценарий 2: в БД есть значение и оно отличается, отправляем в RemnaWave
-                        elif db_hwid_limit != remnawave_hwid_limit:
-                            logger.debug(f"Обновление лимита устройств в RemnaWave для {user.id}: {remnawave_hwid_limit} -> {db_hwid_limit}")
-                            remnawave_updates['hwidDeviceLimit'] = db_hwid_limit
-                    
-                    # Добавляем пользователя в список для батчевого обновления, если hwid изменился
+                                logger.info(
+                                    'Synced hwid_limit RemnaWave->DB for user=%s to %s',
+                                    user.id,
+                                    remnawave_hwid_limit,
+                                )
+                                if remnawave_limit_invalid:
+                                    remnawave_updates['hwidDeviceLimit'] = remnawave_hwid_limit
+                        elif normalized_db_hwid_limit != remnawave_hwid_limit or remnawave_limit_invalid:
+                            logger.debug(
+                                'Syncing hwid limit to RemnaWave for user=%s: remote=%s local=%s',
+                                user.id,
+                                remnawave_hwid_limit_raw,
+                                normalized_db_hwid_limit,
+                            )
+                            remnawave_updates['hwidDeviceLimit'] = normalized_db_hwid_limit
+                    elif normalized_db_hwid_limit is not None:
+                        remnawave_updates['hwidDeviceLimit'] = normalized_db_hwid_limit
                     if hwid_changed:
                         if user.id not in users_hwid_limit_update_ids:
                             users_hwid_limit_updates.append(user)

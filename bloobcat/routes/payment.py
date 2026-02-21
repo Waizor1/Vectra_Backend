@@ -47,12 +47,13 @@ from bloobcat.bot.notifications.prize_wheel import notify_spin_awarded
 from bloobcat.db.tariff import Tariffs
 from bloobcat.db.users import Users, normalize_date
 from bloobcat.funcs.validate import validate
-from bloobcat.settings import yookassa_settings, remnawave_settings, telegram_settings
+from bloobcat.settings import app_settings, yookassa_settings, remnawave_settings, telegram_settings
 from bloobcat.db.payments import ProcessedPayments
 from bloobcat.db.partner_earnings import PartnerEarnings
 from bloobcat.db.partner_qr import PartnerQr
 from bloobcat.logger import get_payment_logger
 from bloobcat.db.active_tariff import ActiveTariffs
+from bloobcat.db.family_members import FamilyMembers
 from bloobcat.db.notifications import NotificationMarks
 from bloobcat.routes.remnawave.client import RemnaWaveClient
 from bloobcat.routes.remnawave.hwid_utils import cleanup_user_hwid_devices
@@ -103,26 +104,71 @@ def _calc_referrer_bonus_days(months: int | None, device_count: int | None) -> i
     return 7
 
 
-async def _is_active_family_subscription(user: Users) -> bool:
-    """Best-effort check: active subscription + effective devices limit == 10."""
-    try:
-        exp = normalize_date(user.expired_at)
-        if not exp or exp <= date.today():
-            return False
-        if not bool(getattr(user, "is_subscribed", False)):
-            # `is_subscribed` is used in some flows; keep it as a weak signal.
-            pass
+def _family_devices_limit() -> int:
+    return max(1, int(getattr(app_settings, "family_devices_limit", 10) or 10))
 
-        if int(getattr(user, "hwid_limit", 0) or 0) == 10:
-            return True
-        tariff_id = getattr(user, "active_tariff_id", None)
-        if tariff_id:
-            tariff = await ActiveTariffs.get_or_none(id=tariff_id)
-            if tariff and int(getattr(tariff, "hwid_limit", 0) or 0) == 10:
-                return True
-    except Exception:
+
+def _is_active_subscription(user: Users) -> bool:
+    exp = normalize_date(user.expired_at)
+    return bool(exp and exp >= date.today())
+
+
+async def _resolve_base_devices_limit(user: Users) -> int:
+    limit = 1
+    tariff_id = getattr(user, "active_tariff_id", None)
+    if tariff_id:
+        tariff = await ActiveTariffs.get_or_none(id=tariff_id)
+        if tariff:
+            limit = int(getattr(tariff, "hwid_limit", 0) or limit)
+    if getattr(user, "hwid_limit", None) is not None:
+        limit = int(getattr(user, "hwid_limit", 0) or limit)
+    return max(1, int(limit))
+
+
+async def _has_active_family_entitlement(user: Users) -> bool:
+    """Family entitlement for referral rules (no hardcoded device limits)."""
+    try:
+        member = await FamilyMembers.get_or_none(
+            member_id=user.id,
+            status="active",
+            allocated_devices__gt=0,
+        ).prefetch_related("owner")
+        if member:
+            owner_exp = normalize_date(member.owner.expired_at)
+            is_member_entitled = bool(owner_exp and owner_exp >= date.today())
+            logger.debug(
+                "referral_family_entitlement user=%s result=%s reason=family_member owner=%s",
+                user.id,
+                is_member_entitled,
+                getattr(member.owner, "id", None),
+            )
+            return is_member_entitled
+
+        if not _is_active_subscription(user):
+            logger.debug(
+                "referral_family_entitlement user=%s result=false reason=inactive_subscription_non_member",
+                user.id,
+            )
+            return False
+
+        family_limit = _family_devices_limit()
+        base_limit = await _resolve_base_devices_limit(user)
+        is_owner_entitled = base_limit >= family_limit
+        logger.debug(
+            "referral_family_entitlement user=%s result=%s reason=base_limit_check base_limit=%s family_limit=%s",
+            user.id,
+            is_owner_entitled,
+            base_limit,
+            family_limit,
+        )
+        return is_owner_entitled
+    except Exception as exc:
+        logger.warning(
+            "referral_family_entitlement user=%s result=false reason=error error=%s",
+            getattr(user, "id", None),
+            exc,
+        )
         return False
-    return False
 
 
 async def _notify_successful_purchase(
@@ -216,7 +262,16 @@ async def _apply_referral_first_payment_reward(
             )
             return {"applied": False}
 
-        referrer = await Users.using_db(conn).get(id=int(referred.referred_by))
+        referrer = await Users.filter(id=int(referred.referred_by)).using_db(conn).first()
+        if not referrer:
+            await ReferralRewards.filter(id=reward.id).using_db(conn).delete()
+            logger.warning(
+                "referral_reward_skip_missing_referrer user=%s payment=%s referrer=%s",
+                referred_user_id,
+                payment_id,
+                int(referred.referred_by),
+            )
+            return {"applied": False}
 
         friend_bonus_days = 7
         referrer_bonus_days = _calc_referrer_bonus_days(months=m, device_count=d)
@@ -224,7 +279,7 @@ async def _apply_referral_first_payment_reward(
         # Family subscriptions should not be extended by referral days.
         friend_applied_to_subscription = False
         try:
-            is_friend_family = await _is_active_family_subscription(referred)
+            is_friend_family = await _has_active_family_entitlement(referred)
         except Exception:
             is_friend_family = False
 
@@ -251,7 +306,7 @@ async def _apply_referral_first_payment_reward(
 
         applied_to_subscription = False
         try:
-            is_family = await _is_active_family_subscription(referrer)
+            is_family = await _has_active_family_entitlement(referrer)
             if not is_family and referrer_bonus_days > 0:
                 start_ref = max(normalize_date(referrer.expired_at) or today, today)
                 new_ref_expired_at = start_ref + timedelta(days=referrer_bonus_days)

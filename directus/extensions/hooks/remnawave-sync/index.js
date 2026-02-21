@@ -1,6 +1,6 @@
 const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj || {}, key);
 
-export default function registerHook({ action }) {
+export default function registerHook({ action, filter }) {
   const baseUrl = process.env.ADMIN_INTEGRATION_URL;
   const token = process.env.ADMIN_INTEGRATION_TOKEN;
 
@@ -73,18 +73,30 @@ export default function registerHook({ action }) {
     }
   });
 
-  action("items.delete", async (event) => {
-    const collection = event?.collection;
-    const keys = event?.keys || [];
-    if (collection !== "users" || !keys || keys.length === 0) {
-      return;
+  filter("items.delete", async (payload, meta) => {
+    const collection = meta?.collection;
+    if (collection !== "users") {
+      return payload;
     }
     if (!baseUrl || !token) {
-      return;
+      return payload;
     }
-    const ids = Array.isArray(keys) ? keys : [keys];
+
+    const ids = Array.isArray(payload)
+      ? payload
+      : Array.isArray(meta?.keys)
+        ? meta.keys
+        : payload != null
+          ? [payload]
+          : [];
+
     for (const userId of ids) {
-      await callBackend("DELETE", `/admin/integration/users/${userId}`);
+      try {
+        await callBackend("POST", `/admin/integration/users/${userId}/pre-delete`);
+      } catch (error) {
+        console.error("[remnawave-sync] pre-delete failed:", userId, error?.message || error);
+      }
     }
+    return payload;
   });
 };

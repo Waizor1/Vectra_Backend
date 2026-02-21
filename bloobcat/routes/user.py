@@ -20,6 +20,7 @@ from fastapi import FastAPI
 from starlette.background import BackgroundTask
 from bloobcat.routes.remnawave.hwid_utils import cleanup_user_hwid_devices, count_active_devices
 from bloobcat.db.active_tariff import ActiveTariffs
+from bloobcat.db.family_invites import FamilyInvites
 from bloobcat.db.family_members import FamilyMembers
 from bloobcat.db.tariff import Tariffs
 from bloobcat.db.notifications import NotificationMarks
@@ -27,6 +28,7 @@ from bloobcat.db.payments import ProcessedPayments
 from bloobcat.bot.bot import get_bot_username
 from bloobcat.bot.notifications.admin import cancel_subscription, notify_active_tariff_change, notify_lte_topup
 from bloobcat.utils.dates import add_months_safe
+from tortoise.expressions import F, Q
 
 logger = get_logger("routes.user")
 
@@ -42,6 +44,22 @@ def _round_rub(value: float) -> int:
     except Exception:
         return 0
     return int(dec.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
+def _normalize_devices_limit(value: Any) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 1
+    return max(1, parsed)
+
+
+def _family_devices_limit() -> int:
+    return max(1, int(getattr(app_settings, "family_devices_limit", 10) or 10))
+
+
+def _is_active_subscription(expired_at: date | None) -> bool:
+    return bool(expired_at and expired_at >= date.today())
 
 
 class UserUpdate(BaseModel):
@@ -99,6 +117,7 @@ async def check(user: Users = Depends(validate)) -> Dict[str, Any]:
         # - use owner's expiration as effective subscription period
         # - enforce allocated device quota in response
         family_allocated_devices: int | None = None
+        is_active_family_member = False
         family_membership = await FamilyMembers.get_or_none(
             member_id=user.id,
             status="active",
@@ -107,7 +126,8 @@ async def check(user: Users = Depends(validate)) -> Dict[str, Any]:
         if family_membership:
             owner = family_membership.owner
             owner_expired = normalize_date(owner.expired_at)
-            family_is_active = bool(owner_expired and owner_expired >= date.today())
+            family_is_active = _is_active_subscription(owner_expired)
+            is_active_family_member = family_is_active
             user_dict["family_member"] = {
                 "is_member": True,
                 "id": str(family_membership.id),
@@ -148,6 +168,7 @@ async def check(user: Users = Depends(validate)) -> Dict[str, Any]:
         devices_limit = 1  # 1. Значение по умолчанию
         source = "дефолту"
         active_tariff_data = None
+        owner_base_devices_limit = 1
 
         # 2. Пытаемся получить из тарифа
         devices_decrease_limit = max(
@@ -193,14 +214,24 @@ async def check(user: Users = Depends(validate)) -> Dict[str, Any]:
             devices_limit = user.hwid_limit
             source = "личной настройке в БД"
 
+        owner_base_devices_limit = max(1, int(devices_limit or 1))
+
         # For family owners, expose remaining personal quota after
         # allocations to active members.
+        owner_allocated_devices = 0
+        active_members_count = 0
         if family_allocated_devices is None:
-            owner_allocated = 0
-            for member in await FamilyMembers.filter(owner_id=user.id, status="active", allocated_devices__gt=0):
-                owner_allocated += int(member.allocated_devices or 0)
-            if owner_allocated > 0:
-                devices_limit = max(0, int(devices_limit or 0) - owner_allocated)
+            active_owner_members = await FamilyMembers.filter(
+                owner_id=user.id,
+                status="active",
+                allocated_devices__gt=0,
+            )
+            active_members_count = len(active_owner_members)
+            owner_allocated_devices = sum(
+                int(member.allocated_devices or 0) for member in active_owner_members
+            )
+            if owner_allocated_devices > 0:
+                devices_limit = max(0, int(devices_limit or 0) - owner_allocated_devices)
                 source = "семейному распределению (остаток владельца)"
 
         # Family membership quota has final priority for member-facing UX.
@@ -209,8 +240,58 @@ async def check(user: Users = Depends(validate)) -> Dict[str, Any]:
             source = "семейной квоте"
 
         logger.debug(f"Итоговый лимит устройств для пользователя {user.id} установлен по {source}: {devices_limit}")
-        user_dict["devices_limit"] = devices_limit
         user_dict["active_tariff"] = active_tariff_data
+
+        # `devices_limit` is an operational limit (owner remainder after allocations).
+        # `family_entitled` is business entitlement for family subscription rules.
+        family_limit = _family_devices_limit()
+        effective_expired_at = normalize_date(user.expired_at)
+        if family_membership:
+            effective_expired_at = normalize_date(family_membership.owner.expired_at)
+        is_effectively_active = _is_active_subscription(effective_expired_at)
+        is_active_family_owner = (
+            family_allocated_devices is None
+            and is_effectively_active
+            and owner_base_devices_limit >= family_limit
+        )
+        family_entitled = bool(is_active_family_member or is_active_family_owner)
+        if is_active_family_member:
+            subscription_context = "family_member"
+        elif is_active_family_owner:
+            subscription_context = "family_owner"
+        elif is_effectively_active:
+            subscription_context = "personal"
+        else:
+            subscription_context = "none"
+
+        normalized_devices_limit = _normalize_devices_limit(devices_limit)
+        if is_active_family_owner:
+            # For family owners this is an operational remainder after allocations.
+            # It can legitimately be zero when all family slots are distributed.
+            normalized_devices_limit = max(0, int(devices_limit or 0))
+        user_dict["devices_limit"] = normalized_devices_limit
+
+        user_dict["family_entitled"] = family_entitled
+        user_dict["subscription_context"] = subscription_context
+
+        if is_active_family_owner:
+            now_utc = datetime.now(timezone.utc)
+            active_invites_count = (
+                await FamilyInvites.filter(owner_id=user.id, revoked_at=None)
+                .filter(Q(expires_at__isnull=True) | Q(expires_at__gte=now_utc))
+                .filter(used_count__lt=F("max_uses"))
+                .count()
+            )
+            user_dict["family_owner"] = {
+                "is_owner": True,
+                "family_devices_total": int(family_limit),
+                "allocated_devices_total": int(owner_allocated_devices),
+                "owner_remaining_devices": max(0, int(family_limit) - int(owner_allocated_devices)),
+                "active_members_count": int(active_members_count),
+                "active_invites_count": int(active_invites_count),
+            }
+        else:
+            user_dict["family_owner"] = None
 
         logger.info(f"Успешно обработан запрос /user для пользователя {user.id}")
         response = JSONResponse(content=user_dict)
@@ -763,7 +844,7 @@ async def get_family_subscription(familyurl: str):
         source = "личной настройке в БД"
 
     logger.debug(f"Итоговый лимит устройств для пользователя {user.id} по семейной ссылке установлен по {source}: {devices_limit}")
-    user_dict["devices_limit"] = devices_limit
+    user_dict["devices_limit"] = _normalize_devices_limit(devices_limit)
     user_dict["active_tariff"] = active_tariff_data
 
     return user_dict

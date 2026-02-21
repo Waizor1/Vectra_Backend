@@ -10,6 +10,7 @@ from bloobcat.services.admin_integration import (
     sync_user_lte,
     sync_active_tariff_lte,
     sync_user_remnawave_fields,
+    prepare_user_delete_via_admin,
     delete_user_via_admin,
     compute_tariff_effective_pricing,
 )
@@ -59,11 +60,15 @@ async def sync_active_tariff(active_tariff_id: str, payload: ActiveTariffSyncPay
     return {"ok": True}
 
 
+@router.post("/users/{user_id}/pre-delete", dependencies=[Depends(require_admin_integration_token)])
+async def pre_delete_user(user_id: int):
+    result = await prepare_user_delete_via_admin(user_id)
+    return {"ok": True, "result": result}
+
+
 @router.delete("/users/{user_id}", dependencies=[Depends(require_admin_integration_token)])
 async def delete_user(user_id: int):
-    deleted = await delete_user_via_admin(user_id)
-    if not deleted:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    await delete_user_via_admin(user_id)
     return {"ok": True}
 
 

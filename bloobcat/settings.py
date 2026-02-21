@@ -101,6 +101,7 @@ class AppSettings(BaseSettings):
     # Колесо призов
     prize_wheel_spin_bonus_price: int = 50  # Стоимость одной крутки при оплате бонусным балансом (₽)
     devices_decrease_limit: int = 1  # Сколько раз можно уменьшить лимит устройств за период
+    family_devices_limit: int = 10  # Базовый лимит устройств family-подписки
     # Family alerts and anomaly protection
     family_alerts_enabled: bool = True
     family_alerts_webhook_url: str | None = None
