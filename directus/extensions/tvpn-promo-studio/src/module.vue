@@ -1,24 +1,34 @@
 <template>
   <private-view title="Promo Studio">
     <template #navigation>
-      <div class="nav">
-        <div class="nav__section-title">Promo Studio</div>
-        <router-link class="nav__item nav__item--active" :to="{ path: '/tvpn-promo-studio' }">
-          <v-icon name="workspace_premium" />
-          <span>Studio</span>
-        </router-link>
-        <router-link class="nav__item" :to="{ path: '/tvpn-home' }">
-          <v-icon name="home" />
-          <span>Главная</span>
-        </router-link>
-        <router-link class="nav__item" :to="{ path: '/content/promo_batches' }">
-          <v-icon name="inventory_2" />
-          <span>Кампании</span>
-        </router-link>
-        <router-link class="nav__item" :to="{ path: '/content/promo_codes' }">
-          <v-icon name="confirmation_number" />
-          <span>Промокоды</span>
-        </router-link>
+      <div class="nav nav--premium">
+        <div class="nav__brand">
+          <div class="nav__brand-logo">TVPN</div>
+          <div>
+            <div class="nav__brand-title">Promo Studio</div>
+            <div class="nav__brand-subtitle">Промокоды и аналитика</div>
+          </div>
+        </div>
+
+        <div class="nav__section">
+          <div class="nav__section-title">Навигация</div>
+          <router-link class="nav__item nav__item--active" :to="{ path: '/tvpn-promo-studio' }">
+            <span class="nav__item-icon"><v-icon name="workspace_premium" /></span>
+            <span class="nav__item-label">Studio</span>
+          </router-link>
+          <router-link class="nav__item" :to="{ path: '/tvpn-home' }">
+            <span class="nav__item-icon"><v-icon name="home" /></span>
+            <span class="nav__item-label">Главная</span>
+          </router-link>
+          <router-link class="nav__item" :to="{ path: '/content/promo_batches' }">
+            <span class="nav__item-icon"><v-icon name="inventory_2" /></span>
+            <span class="nav__item-label">Кампании</span>
+          </router-link>
+          <router-link class="nav__item" :to="{ path: '/content/promo_codes' }">
+            <span class="nav__item-icon"><v-icon name="confirmation_number" /></span>
+            <span class="nav__item-label">Промокоды</span>
+          </router-link>
+        </div>
       </div>
     </template>
 
@@ -29,24 +39,31 @@
       </v-button>
     </template>
 
-    <div class="studio">
-      <section class="hero panel-base">
-        <div class="hero__top">
-          <div class="hero__text">
+    <div class="page">
+      <div class="page__main">
+        <section class="hero">
+          <div class="hero__left">
+            <div class="hero__kicker">TVPN Control Room</div>
             <h1 class="hero__title">Promo Studio</h1>
             <p class="hero__subtitle">
-              Новый поток создания промокодов: без ручного ввода кода, с быстрой генерацией, копированием и
-              прозрачной аналитикой по активациям и доходу.
+              Премиальный рабочий стол промокодов: ручной ввод или генерация, быстрый выпуск и прозрачная аналитика по
+              активациям и доходу.
             </p>
+            <div class="hero__chips">
+              <span class="hero__chip">Ручной код или авто-генерация</span>
+              <span class="hero__chip">Аналитика кампаний</span>
+              <span class="hero__chip">Экспорт и копирование</span>
+            </div>
           </div>
-          <div class="hero__filters">
-            <label>
+
+          <div class="hero__right">
+            <label class="field field--compact">
               <span>Окно аналитики</span>
               <select v-model.number="filters.days" class="input input--select">
                 <option v-for="days in daysOptions" :key="days" :value="days">{{ days }} дней</option>
               </select>
             </label>
-            <label>
+            <label class="field field--compact">
               <span>Кампания</span>
               <select v-model="filters.campaign_id" class="input input--select">
                 <option value="">Все кампании</option>
@@ -56,316 +73,415 @@
               </select>
             </label>
           </div>
-        </div>
-        <div v-if="globalError" class="notice notice--error">{{ globalError }}</div>
+        </section>
+
+        <v-notice v-if="globalError" type="danger">
+          {{ globalError }}
+        </v-notice>
+
         <div class="kpi-grid">
-          <div class="kpi">
-            <div class="kpi__label">Коды</div>
-            <div class="kpi__value">{{ fmtInt(analytics.summary.codes_total) }}</div>
-            <div class="kpi__meta">Активных {{ fmtInt(analytics.summary.active_codes) }}</div>
-          </div>
-          <div class="kpi">
-            <div class="kpi__label">Активации</div>
-            <div class="kpi__value">{{ fmtInt(analytics.summary.activations_total) }}</div>
-            <div class="kpi__meta">Уникальных {{ fmtInt(analytics.summary.unique_users_total) }}</div>
-          </div>
-          <div class="kpi">
-            <div class="kpi__label">Доход</div>
-            <div class="kpi__value">{{ fmtMoney(analytics.summary.attributed_revenue) }} ₽</div>
-            <div class="kpi__meta">Платежей {{ fmtInt(analytics.summary.attributed_payments) }}</div>
-          </div>
-          <div class="kpi">
-            <div class="kpi__label">ARPU после активации</div>
-            <div class="kpi__value">{{ fmtMoney(analytics.summary.avg_revenue_per_user) }} ₽</div>
-            <div class="kpi__meta">На активацию {{ fmtMoney(analytics.summary.avg_revenue_per_activation) }} ₽</div>
-          </div>
+          <v-card class="kpi">
+            <div class="kpi__row">
+              <div class="kpi__icon kpi__icon--blue">
+                <v-icon name="confirmation_number" />
+              </div>
+              <div class="kpi__content">
+                <div class="kpi__label">Коды</div>
+                <div class="kpi__value">{{ fmtInt(analytics.summary.codes_total) }}</div>
+                <div class="kpi__meta">Активных {{ fmtInt(analytics.summary.active_codes) }}</div>
+              </div>
+            </div>
+          </v-card>
+
+          <v-card class="kpi">
+            <div class="kpi__row">
+              <div class="kpi__icon kpi__icon--green">
+                <v-icon name="bolt" />
+              </div>
+              <div class="kpi__content">
+                <div class="kpi__label">Активации</div>
+                <div class="kpi__value">{{ fmtInt(analytics.summary.activations_total) }}</div>
+                <div class="kpi__meta">Уникальных {{ fmtInt(analytics.summary.unique_users_total) }}</div>
+              </div>
+            </div>
+          </v-card>
+
+          <v-card class="kpi">
+            <div class="kpi__row">
+              <div class="kpi__icon kpi__icon--amber">
+                <v-icon name="payments" />
+              </div>
+              <div class="kpi__content">
+                <div class="kpi__label">Доход</div>
+                <div class="kpi__value">{{ fmtMoney(analytics.summary.attributed_revenue) }} ₽</div>
+                <div class="kpi__meta">Платежей {{ fmtInt(analytics.summary.attributed_payments) }}</div>
+              </div>
+            </div>
+          </v-card>
+
+          <v-card class="kpi">
+            <div class="kpi__row">
+              <div class="kpi__icon kpi__icon--purple">
+                <v-icon name="trending_up" />
+              </div>
+              <div class="kpi__content">
+                <div class="kpi__label">ARPU после активации</div>
+                <div class="kpi__value">{{ fmtMoney(analytics.summary.avg_revenue_per_user) }} ₽</div>
+                <div class="kpi__meta">На активацию {{ fmtMoney(analytics.summary.avg_revenue_per_activation) }} ₽</div>
+              </div>
+            </div>
+          </v-card>
         </div>
-      </section>
 
-      <section class="split">
-        <v-card class="panel-base panel">
-          <div class="panel__header">
-            <div>
-              <div class="panel__title">Создание промокода</div>
-              <div class="panel__subtitle">Простой flow: выбери кампанию → задай параметры → создай и скопируй</div>
-            </div>
-          </div>
-
-          <div class="flow">
-            <div class="flow__step">
-              <div class="flow__step-title">1. Кампания</div>
-              <div class="mode-switch">
-                <button
-                  type="button"
-                  class="mode-switch__btn"
-                  :class="{ 'mode-switch__btn--active': createForm.campaign_mode === 'existing' }"
-                  @click="createForm.campaign_mode = 'existing'"
-                >
-                  В существующую
-                </button>
-                <button
-                  type="button"
-                  class="mode-switch__btn"
-                  :class="{ 'mode-switch__btn--active': createForm.campaign_mode === 'new' }"
-                  @click="createForm.campaign_mode = 'new'"
-                >
-                  Новая кампания
-                </button>
-                <button
-                  type="button"
-                  class="mode-switch__btn"
-                  :class="{ 'mode-switch__btn--active': createForm.campaign_mode === 'none' }"
-                  @click="createForm.campaign_mode = 'none'"
-                >
-                  Без кампании
-                </button>
-              </div>
-
-              <div v-if="createForm.campaign_mode === 'existing'" class="fields fields--one">
-                <label>
-                  <span>Кампания</span>
-                  <select v-model="createForm.campaign_id" class="input input--select">
-                    <option value="">Выбери кампанию</option>
-                    <option v-for="campaign in campaignOptions" :key="campaign.id" :value="String(campaign.id)">
-                      {{ campaign.title }}
-                    </option>
-                  </select>
-                </label>
-              </div>
-
-              <div v-if="createForm.campaign_mode === 'new'" class="fields fields--one">
-                <label>
-                  <span>Название кампании</span>
-                  <input v-model.trim="createForm.campaign_title" class="input" placeholder="Например: Telegram Ads март" />
-                </label>
-                <label>
-                  <span>Заметка</span>
-                  <textarea
-                    v-model.trim="createForm.campaign_notes"
-                    class="input input--textarea"
-                    rows="2"
-                    placeholder="Источник трафика, гипотеза, комментарий"
-                  />
-                </label>
+        <section class="split">
+          <v-card class="panel panel--form">
+            <div class="panel__header">
+              <div>
+                <div class="panel__title">Создание промокода</div>
+                <div class="panel__subtitle">
+                  Выбери кампанию, задай параметры и выбери режим: генерация кода или ручной список.
+                </div>
               </div>
             </div>
 
-            <div class="flow__step">
-              <div class="flow__step-title">2. Параметры</div>
-              <div class="fields">
-                <label>
-                  <span>Название промокода (в админке)</span>
-                  <input v-model.trim="createForm.name" class="input" placeholder="Например: TG Welcome 30%" />
-                </label>
-                <label>
-                  <span>Префикс кода</span>
-                  <input v-model.trim="createForm.code_prefix" class="input" placeholder="TVPN" />
-                </label>
-                <label>
-                  <span>Сколько кодов создать</span>
-                  <input v-model.number="createForm.count" type="number" min="1" max="150" class="input" />
-                </label>
-                <label>
-                  <span>Лимит активаций (всего)</span>
-                  <input v-model.number="createForm.max_activations" type="number" min="1" class="input" />
-                </label>
-                <label>
-                  <span>Лимит на пользователя</span>
-                  <input v-model.number="createForm.per_user_limit" type="number" min="1" class="input" />
-                </label>
-                <label>
-                  <span>Дата окончания</span>
-                  <input v-model="createForm.expires_at" type="date" class="input" />
-                </label>
-              </div>
+            <div class="flow">
+              <div class="flow__step">
+                <div class="flow__step-title">1. Кампания</div>
+                <div class="segmented">
+                  <button
+                    type="button"
+                    class="segmented__btn"
+                    :class="{ 'segmented__btn--active': createForm.campaign_mode === 'existing' }"
+                    @click="createForm.campaign_mode = 'existing'"
+                  >
+                    В существующую
+                  </button>
+                  <button
+                    type="button"
+                    class="segmented__btn"
+                    :class="{ 'segmented__btn--active': createForm.campaign_mode === 'new' }"
+                    @click="createForm.campaign_mode = 'new'"
+                  >
+                    Новая кампания
+                  </button>
+                  <button
+                    type="button"
+                    class="segmented__btn"
+                    :class="{ 'segmented__btn--active': createForm.campaign_mode === 'none' }"
+                    @click="createForm.campaign_mode = 'none'"
+                  >
+                    Без кампании
+                  </button>
+                </div>
 
-              <div class="effects">
-                <div class="effects__title">Эффекты</div>
-                <div class="fields">
-                  <label>
-                    <span>Продлить на дней</span>
-                    <input v-model.number="createForm.extend_days" type="number" min="0" class="input" />
-                  </label>
-                  <label>
-                    <span>Скидка, %</span>
-                    <input v-model.number="createForm.discount_percent" type="number" min="0" max="100" class="input" />
-                  </label>
-                  <label>
-                    <span>Добавить устройств</span>
-                    <input v-model.number="createForm.add_hwid" type="number" min="0" class="input" />
+                <div v-if="createForm.campaign_mode === 'existing'" class="fields fields--one">
+                  <label class="field">
+                    <span>Кампания</span>
+                    <select v-model="createForm.campaign_id" class="input input--select">
+                      <option value="">Выбери кампанию</option>
+                      <option v-for="campaign in campaignOptions" :key="campaign.id" :value="String(campaign.id)">
+                        {{ campaign.title }}
+                      </option>
+                    </select>
                   </label>
                 </div>
-                <label>
-                  <span>Доп. JSON эффектов (опционально)</span>
-                  <textarea
-                    v-model.trim="createForm.effects_json"
-                    class="input input--textarea"
-                    rows="3"
-                    placeholder='{"one_time": true}'
-                  />
-                </label>
-              </div>
-            </div>
 
-            <div class="flow__step">
-              <div class="flow__step-title">3. Создание</div>
-              <div class="flow__actions">
-                <v-button kind="primary" :loading="createLoading" @click="createPromoCodes">
-                  <v-icon name="auto_awesome" left />
-                  Создать и сгенерировать коды
-                </v-button>
+                <div v-if="createForm.campaign_mode === 'new'" class="fields fields--one">
+                  <label class="field">
+                    <span>Название кампании</span>
+                    <input v-model.trim="createForm.campaign_title" class="input" placeholder="Например: Telegram Ads март" />
+                  </label>
+                  <label class="field field--textarea">
+                    <span>Заметка</span>
+                    <textarea
+                      v-model.trim="createForm.campaign_notes"
+                      class="input input--textarea"
+                      rows="2"
+                      placeholder="Источник трафика, гипотеза, комментарий"
+                    />
+                  </label>
+                </div>
               </div>
-              <div v-if="createError" class="notice notice--error">{{ createError }}</div>
-              <div v-if="createNotice" class="notice notice--ok">{{ createNotice }}</div>
-            </div>
-          </div>
 
-          <div v-if="createdCodes.length" class="created">
-            <div class="created__header">
-              <div class="created__title">Созданные коды</div>
-              <v-button x-small secondary @click="copyAllCodes">
-                <v-icon name="content_copy" left />
-                Копировать все
-              </v-button>
-            </div>
-            <div class="created__list">
-              <div v-for="row in createdCodes" :key="row.id" class="created__row">
-                <div class="created__main">
-                  <div class="created__code">{{ row.plain_code }}</div>
-                  <div class="created__meta">
-                    {{ row.name || ('promo #' + row.id) }} · id {{ row.id }} · лимит {{ row.max_activations }} / {{
-                      row.per_user_limit
-                    }}
+              <div class="flow__step">
+                <div class="flow__step-title">2. Параметры и код</div>
+                <div class="fields">
+                  <label class="field">
+                    <span>Название промокода (в админке)</span>
+                    <input v-model.trim="createForm.name" class="input" placeholder="Например: TG Welcome 30%" />
+                  </label>
+                  <label class="field">
+                    <span>Лимит активаций (всего)</span>
+                    <input v-model.number="createForm.max_activations" type="number" min="1" class="input" />
+                  </label>
+                  <label class="field">
+                    <span>Лимит на пользователя</span>
+                    <input v-model.number="createForm.per_user_limit" type="number" min="1" class="input" />
+                  </label>
+                  <label class="field">
+                    <span>Дата окончания</span>
+                    <input v-model="createForm.expires_at" type="date" class="input" />
+                  </label>
+                </div>
+
+                <div class="code-mode">
+                  <div class="code-mode__title">Формат кода</div>
+                  <div class="segmented segmented--compact">
+                    <button
+                      type="button"
+                      class="segmented__btn"
+                      :class="{ 'segmented__btn--active': createForm.code_mode === 'generate' }"
+                      @click="createForm.code_mode = 'generate'"
+                    >
+                      Генерировать
+                    </button>
+                    <button
+                      type="button"
+                      class="segmented__btn"
+                      :class="{ 'segmented__btn--active': createForm.code_mode === 'manual' }"
+                      @click="createForm.code_mode = 'manual'"
+                    >
+                      Ввести вручную
+                    </button>
                   </div>
                 </div>
-                <v-button x-small secondary @click="copyCode(row.plain_code)">Копировать</v-button>
+
+                <div v-if="createForm.code_mode === 'generate'" class="fields">
+                  <label class="field">
+                    <span>Префикс кода</span>
+                    <input v-model.trim="createForm.code_prefix" class="input" placeholder="TVPN" />
+                  </label>
+                  <label class="field">
+                    <span>Сколько кодов создать</span>
+                    <input v-model.number="createForm.count" type="number" min="1" max="150" class="input" />
+                  </label>
+                </div>
+
+                <div v-else class="manual">
+                  <label class="field field--textarea">
+                    <span>Список кодов (по одному в строке или через запятую)</span>
+                    <textarea
+                      v-model.trim="createForm.manual_codes"
+                      class="input input--textarea input--manual"
+                      rows="5"
+                      placeholder="WELCOME_2026&#10;TG_START_50&#10;VIP-ALPHA-01"
+                    />
+                  </label>
+                  <div class="manual__meta">
+                    <span>К созданию: {{ fmtInt(manualCodesState.codes.length) }}</span>
+                    <span v-if="manualCodesState.duplicates.length">
+                      Дубликатов: {{ fmtInt(manualCodesState.duplicates.length) }}
+                    </span>
+                    <span v-if="manualCodesState.invalid.length">
+                      Ошибочных: {{ fmtInt(manualCodesState.invalid.length) }}
+                    </span>
+                  </div>
+                  <div class="manual__hint">Формат: A-Z, 0-9, _, - и длина 4-64 символа.</div>
+                  <div v-if="manualCodesState.invalid.length" class="notice notice--warn">
+                    Некорректные коды: {{ manualCodesInvalidPreview }}
+                    <span v-if="manualCodesInvalidRemainder > 0"> (+{{ manualCodesInvalidRemainder }})</span>
+                  </div>
+                </div>
+
+                <div class="effects">
+                  <div class="effects__title">Эффекты</div>
+                  <div class="fields">
+                    <label class="field">
+                      <span>Продлить на дней</span>
+                      <input v-model.number="createForm.extend_days" type="number" min="0" class="input" />
+                    </label>
+                    <label class="field">
+                      <span>Скидка, %</span>
+                      <input v-model.number="createForm.discount_percent" type="number" min="0" max="100" class="input" />
+                    </label>
+                    <label class="field">
+                      <span>Добавить устройств</span>
+                      <input v-model.number="createForm.add_hwid" type="number" min="0" class="input" />
+                    </label>
+                  </div>
+                  <label class="field field--textarea">
+                    <span>Доп. JSON эффектов (опционально)</span>
+                    <textarea
+                      v-model.trim="createForm.effects_json"
+                      class="input input--textarea"
+                      rows="3"
+                      placeholder='{"one_time": true}'
+                    />
+                  </label>
+                </div>
+              </div>
+
+              <div class="flow__step">
+                <div class="flow__step-title">3. Создание</div>
+                <div class="flow__actions">
+                  <v-button kind="primary" :loading="createLoading" @click="createPromoCodes">
+                    <v-icon :name="createButtonIcon" left />
+                    {{ createButtonLabel }}
+                  </v-button>
+                </div>
+                <div v-if="createError" class="notice notice--error">{{ createError }}</div>
+                <div v-if="createNotice" class="notice notice--ok">{{ createNotice }}</div>
               </div>
             </div>
-          </div>
-        </v-card>
 
-        <v-card class="panel-base panel">
-          <div class="panel__header">
-            <div>
-              <div class="panel__title">Кампании: активации и доход</div>
-              <div class="panel__subtitle">Сравнение рекламных кампаний по результату</div>
-            </div>
-          </div>
-          <div v-if="analyticsLoading" class="empty">Загрузка аналитики...</div>
-          <div v-else-if="!analytics.campaigns.length" class="empty">Нет данных за выбранный период.</div>
-          <div v-else class="table-wrap">
-            <table class="table">
-              <thead>
-                <tr>
-                  <th>Кампания</th>
-                  <th>Коды</th>
-                  <th>Активации</th>
-                  <th>Пользователи</th>
-                  <th>Доход</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="row in analytics.campaigns" :key="`camp-${row.campaign_id || 'none'}`">
-                  <td>{{ row.campaign_title }}</td>
-                  <td>{{ fmtInt(row.codes_total) }}</td>
-                  <td>{{ fmtInt(row.activations) }}</td>
-                  <td>{{ fmtInt(row.unique_users) }}</td>
-                  <td>{{ fmtMoney(row.attributed_revenue) }} ₽</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </v-card>
-      </section>
-
-      <section class="split">
-        <v-card class="panel-base panel">
-          <div class="panel__header">
-            <div>
-              <div class="panel__title">Промокоды: лидеры</div>
-              <div class="panel__subtitle">Какие коды дали больше активаций и денег</div>
-            </div>
-          </div>
-          <div v-if="analyticsLoading" class="empty">Загрузка аналитики...</div>
-          <div v-else-if="!analytics.codes.length" class="empty">Нет данных за выбранный период.</div>
-          <div v-else class="table-wrap">
-            <table class="table">
-              <thead>
-                <tr>
-                  <th>Код</th>
-                  <th>Кампания</th>
-                  <th>Статус</th>
-                  <th>Активации</th>
-                  <th>Доход</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="row in analytics.codes" :key="`code-${row.promo_code_id}`">
-                  <td>
-                    <div class="cell-main">
-                      <span>{{ row.name || ('promo #' + row.promo_code_id) }}</span>
-                      <small>id {{ row.promo_code_id }}</small>
+            <div v-if="createdCodes.length" class="created">
+              <div class="created__header">
+                <div class="created__title">Созданные коды</div>
+                <v-button x-small secondary @click="copyAllCodes">
+                  <v-icon name="content_copy" left />
+                  Копировать все
+                </v-button>
+              </div>
+              <div class="created__list">
+                <div v-for="row in createdCodes" :key="row.id" class="created__row">
+                  <div class="created__main">
+                    <div class="created__code">{{ row.plain_code }}</div>
+                    <div class="created__meta">
+                      {{ row.name || ("promo #" + row.id) }} · id {{ row.id }} · лимит {{ row.max_activations }} /
+                      {{ row.per_user_limit }}
                     </div>
-                  </td>
-                  <td>{{ row.campaign_title }}</td>
-                  <td>
-                    <span class="badge" :class="`badge--${row.status || 'active'}`">{{ statusLabel(row.status) }}</span>
-                  </td>
-                  <td>{{ fmtInt(row.activations) }}</td>
-                  <td>{{ fmtMoney(row.attributed_revenue) }} ₽</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </v-card>
+                  </div>
+                  <v-button x-small secondary @click="copyCode(row.plain_code)">Копировать</v-button>
+                </div>
+              </div>
+            </div>
+          </v-card>
 
-        <v-card class="panel-base panel">
+          <v-card class="panel">
+            <div class="panel__header">
+              <div>
+                <div class="panel__title">Кампании: активации и доход</div>
+                <div class="panel__subtitle">Сравнение рекламных кампаний по результату</div>
+              </div>
+            </div>
+            <div v-if="analyticsLoading" class="empty">Загрузка аналитики...</div>
+            <div v-else-if="!analytics.campaigns.length" class="empty">Нет данных за выбранный период.</div>
+            <div v-else class="table-wrap">
+              <table class="table">
+                <thead>
+                  <tr>
+                    <th>Кампания</th>
+                    <th>Коды</th>
+                    <th>Активации</th>
+                    <th>Пользователи</th>
+                    <th>Доход</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="row in analytics.campaigns" :key="`camp-${row.campaign_id || 'none'}`">
+                    <td>{{ row.campaign_title }}</td>
+                    <td>{{ fmtInt(row.codes_total) }}</td>
+                    <td>{{ fmtInt(row.activations) }}</td>
+                    <td>{{ fmtInt(row.unique_users) }}</td>
+                    <td>{{ fmtMoney(row.attributed_revenue) }} ₽</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </v-card>
+        </section>
+
+        <section class="split">
+          <v-card class="panel">
+            <div class="panel__header">
+              <div>
+                <div class="panel__title">Промокоды: лидеры</div>
+                <div class="panel__subtitle">Какие коды дали больше активаций и денег</div>
+              </div>
+            </div>
+            <div v-if="analyticsLoading" class="empty">Загрузка аналитики...</div>
+            <div v-else-if="!analytics.codes.length" class="empty">Нет данных за выбранный период.</div>
+            <div v-else class="table-wrap">
+              <table class="table">
+                <thead>
+                  <tr>
+                    <th>Код</th>
+                    <th>Кампания</th>
+                    <th>Статус</th>
+                    <th>Активации</th>
+                    <th>Доход</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="row in analytics.codes" :key="`code-${row.promo_code_id}`">
+                    <td>
+                      <div class="cell-main">
+                        <span>{{ row.name || ("promo #" + row.promo_code_id) }}</span>
+                        <small>id {{ row.promo_code_id }}</small>
+                      </div>
+                    </td>
+                    <td>{{ row.campaign_title }}</td>
+                    <td>
+                      <span class="badge" :class="`badge--${row.status || 'active'}`">{{ statusLabel(row.status) }}</span>
+                    </td>
+                    <td>{{ fmtInt(row.activations) }}</td>
+                    <td>{{ fmtMoney(row.attributed_revenue) }} ₽</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </v-card>
+
+          <v-card class="panel">
+            <div class="panel__header">
+              <div>
+                <div class="panel__title">Динамика</div>
+                <div class="panel__subtitle">Активации и доход по дням</div>
+              </div>
+            </div>
+            <div v-if="analyticsLoading" class="empty">Загрузка аналитики...</div>
+            <div v-else-if="!analytics.timeline.length" class="empty">Нет данных за выбранный период.</div>
+            <div v-else class="timeline">
+              <div v-for="point in analytics.timeline" :key="`day-${point.day}`" class="timeline__row">
+                <div class="timeline__day">{{ point.day }}</div>
+                <div class="timeline__bars">
+                  <div class="timeline__bar timeline__bar--act" :style="{ width: activationBarWidth(point.activations) }" />
+                  <div class="timeline__bar timeline__bar--rev" :style="{ width: revenueBarWidth(point.attributed_revenue) }" />
+                </div>
+                <div class="timeline__meta">
+                  <span>{{ fmtInt(point.activations) }} акт.</span>
+                  <span>{{ fmtMoney(point.attributed_revenue) }} ₽</span>
+                </div>
+              </div>
+            </div>
+          </v-card>
+        </section>
+
+        <section class="panel panel--links">
           <div class="panel__header">
             <div>
-              <div class="panel__title">Динамика</div>
-              <div class="panel__subtitle">Активации и доход по дням</div>
+              <div class="panel__title">Raw-режим (без потери функциональности)</div>
+              <div class="panel__subtitle">Для тонкой ручной правки доступны исходные коллекции Directus</div>
             </div>
           </div>
-          <div v-if="analyticsLoading" class="empty">Загрузка аналитики...</div>
-          <div v-else-if="!analytics.timeline.length" class="empty">Нет данных за выбранный период.</div>
-          <div v-else class="timeline">
-            <div v-for="point in analytics.timeline" :key="`day-${point.day}`" class="timeline__row">
-              <div class="timeline__day">{{ point.day }}</div>
-              <div class="timeline__bars">
-                <div class="timeline__bar timeline__bar--act" :style="{ width: activationBarWidth(point.activations) }" />
-                <div class="timeline__bar timeline__bar--rev" :style="{ width: revenueBarWidth(point.attributed_revenue) }" />
+          <div class="control-links">
+            <router-link class="control-link" :to="{ path: '/content/promo_batches' }">
+              <div class="control-link__head">
+                <v-icon name="inventory_2" />
+                <span>Кампании</span>
               </div>
-              <div class="timeline__meta">
-                <span>{{ fmtInt(point.activations) }} акт.</span>
-                <span>{{ fmtMoney(point.attributed_revenue) }} ₽</span>
+              <div class="control-link__desc">Сегменты, источники, гипотезы и заметки по рекламным потокам.</div>
+              <div class="control-link__path">/content/promo_batches</div>
+            </router-link>
+            <router-link class="control-link" :to="{ path: '/content/promo_codes' }">
+              <div class="control-link__head">
+                <v-icon name="confirmation_number" />
+                <span>Промокоды</span>
               </div>
-            </div>
+              <div class="control-link__desc">Список кодов, статусы, лимиты и срок действия.</div>
+              <div class="control-link__path">/content/promo_codes</div>
+            </router-link>
+            <router-link class="control-link" :to="{ path: '/content/promo_usages' }">
+              <div class="control-link__head">
+                <v-icon name="history" />
+                <span>Использования</span>
+              </div>
+              <div class="control-link__desc">История активаций и пользовательский контекст.</div>
+              <div class="control-link__path">/content/promo_usages</div>
+            </router-link>
           </div>
-        </v-card>
-      </section>
-
-      <section class="panel-base panel panel--links">
-        <div class="panel__header">
-          <div>
-            <div class="panel__title">Raw-режим (без потери функциональности)</div>
-            <div class="panel__subtitle">Если нужно тонко править данные, доступны исходные коллекции Directus</div>
-          </div>
-        </div>
-        <div class="links-grid">
-          <router-link class="link-tile" :to="{ path: '/content/promo_batches' }">
-            <v-icon name="inventory_2" />
-            <span>Кампании</span>
-          </router-link>
-          <router-link class="link-tile" :to="{ path: '/content/promo_codes' }">
-            <v-icon name="confirmation_number" />
-            <span>Промокоды</span>
-          </router-link>
-          <router-link class="link-tile" :to="{ path: '/content/promo_usages' }">
-            <v-icon name="history" />
-            <span>Использования</span>
-          </router-link>
-        </div>
-      </section>
+        </section>
+      </div>
     </div>
   </private-view>
 </template>
@@ -377,6 +493,8 @@ import { useApi } from "@directus/extensions-sdk";
 const api = useApi();
 
 const daysOptions = [7, 14, 30, 60, 90, 180, 365];
+const MAX_CREATE_COUNT = 150;
+const MANUAL_CODE_REGEX = /^[A-Z0-9_-]{4,64}$/;
 
 const refreshLoading = ref(false);
 const analyticsLoading = ref(false);
@@ -424,8 +542,10 @@ const createForm = ref({
   campaign_title: "",
   campaign_notes: "",
   name: "",
+  code_mode: "generate",
   code_prefix: "TVPN",
   count: 1,
+  manual_codes: "",
   max_activations: 1,
   per_user_limit: 1,
   expires_at: "",
@@ -450,6 +570,17 @@ const timelineMaxActivations = computed(() =>
 );
 const timelineMaxRevenue = computed(() =>
   Math.max(1, ...analytics.value.timeline.map((row) => toNum(row.attributed_revenue)))
+);
+
+const isManualCodeMode = computed(() => createForm.value.code_mode === "manual");
+const createButtonLabel = computed(() =>
+  isManualCodeMode.value ? "Создать коды из списка" : "Создать и сгенерировать коды"
+);
+const createButtonIcon = computed(() => (isManualCodeMode.value ? "edit_note" : "auto_awesome"));
+const manualCodesState = computed(() => parseManualCodes(createForm.value.manual_codes));
+const manualCodesInvalidPreview = computed(() => manualCodesState.value.invalid.slice(0, 5).join(", "));
+const manualCodesInvalidRemainder = computed(() =>
+  Math.max(0, manualCodesState.value.invalid.length - 5)
 );
 
 function toNum(value) {
@@ -488,6 +619,42 @@ function parseError(err, fallback) {
   if (directusErr) return String(directusErr);
   if (err?.message) return String(err.message);
   return fallback;
+}
+
+function normalizeManualCode(value) {
+  return String(value ?? "").trim().toUpperCase();
+}
+
+function parseManualCodes(value) {
+  const chunks = String(value || "").split(/[\n,;]+/g);
+  const seen = new Set();
+  const duplicateSet = new Set();
+  const codes = [];
+  const invalid = [];
+
+  for (const chunk of chunks) {
+    const code = normalizeManualCode(chunk);
+    if (!code) continue;
+
+    if (!MANUAL_CODE_REGEX.test(code)) {
+      invalid.push(code);
+      continue;
+    }
+
+    if (seen.has(code)) {
+      duplicateSet.add(code);
+      continue;
+    }
+
+    seen.add(code);
+    codes.push(code);
+  }
+
+  return {
+    codes,
+    invalid,
+    duplicates: Array.from(duplicateSet),
+  };
 }
 
 async function loadBootstrap() {
@@ -584,14 +751,37 @@ async function createPromoCodes() {
     }
 
     const payload = {
-      count: Math.max(1, Math.min(150, Math.floor(toNum(createForm.value.count) || 1))),
+      code_mode: isManualCodeMode.value ? "manual" : "generate",
       max_activations: Math.max(1, Math.floor(toNum(createForm.value.max_activations) || 1)),
       per_user_limit: Math.max(1, Math.floor(toNum(createForm.value.per_user_limit) || 1)),
       expires_at: createForm.value.expires_at || null,
-      code_prefix: createForm.value.code_prefix || "TVPN",
       name: createForm.value.name || "",
       effects: buildEffects(),
     };
+
+    let manualDuplicates = 0;
+    if (payload.code_mode === "manual") {
+      const parsedManual = parseManualCodes(createForm.value.manual_codes);
+      manualDuplicates = parsedManual.duplicates.length;
+
+      if (parsedManual.invalid.length) {
+        const invalidPreview = parsedManual.invalid.slice(0, 5).join(", ");
+        const invalidRest = parsedManual.invalid.length > 5 ? ` (+${parsedManual.invalid.length - 5})` : "";
+        throw new Error(
+          `Некорректные коды: ${invalidPreview}${invalidRest}. Разрешены A-Z, 0-9, "_" и "-".`
+        );
+      }
+      if (!parsedManual.codes.length) {
+        throw new Error("Добавьте хотя бы один код для ручного режима");
+      }
+      if (parsedManual.codes.length > MAX_CREATE_COUNT) {
+        throw new Error(`За один запуск можно создать не больше ${MAX_CREATE_COUNT} кодов`);
+      }
+      payload.manual_codes = parsedManual.codes;
+    } else {
+      payload.count = Math.max(1, Math.min(MAX_CREATE_COUNT, Math.floor(toNum(createForm.value.count) || 1)));
+      payload.code_prefix = createForm.value.code_prefix || "TVPN";
+    }
 
     if (createForm.value.campaign_mode === "existing") {
       payload.campaign_id = Number.parseInt(createForm.value.campaign_id, 10);
@@ -612,7 +802,16 @@ async function createPromoCodes() {
       filters.value.campaign_id = campaignIdStr;
     }
 
-    createNotice.value = `Готово: создано ${fmtInt(data.created_count || createdCodes.value.length)} кодов.`;
+    const createdCount = toNum(data.created_count || createdCodes.value.length);
+    const skippedDuplicates = Math.max(manualDuplicates, toNum(data.skipped_duplicates));
+    createNotice.value =
+      payload.code_mode === "manual" && skippedDuplicates > 0
+        ? `Готово: создано ${fmtInt(createdCount)} кодов. Дубликаты пропущены: ${fmtInt(skippedDuplicates)}.`
+        : `Готово: создано ${fmtInt(createdCount)} кодов.`;
+
+    if (payload.code_mode === "manual") {
+      createForm.value.manual_codes = "";
+    }
 
     await loadBootstrap();
     await loadAnalytics();
@@ -655,113 +854,215 @@ onMounted(() => {
 </script>
 
 <style scoped>
-.studio {
-  --studio-ink: #10222b;
-  --studio-teal: #0e9f9a;
-  --studio-amber: #d18b2a;
-  --studio-border: rgba(15, 23, 42, 0.16);
-  --studio-soft: rgba(255, 255, 255, 0.78);
-  --studio-soft-2: rgba(255, 255, 255, 0.56);
-  --studio-bg: radial-gradient(circle at 8% 0%, rgba(14, 159, 154, 0.2), transparent 45%),
-    radial-gradient(circle at 100% 0%, rgba(209, 139, 42, 0.24), transparent 50%),
-    linear-gradient(180deg, rgba(247, 249, 250, 0.95), rgba(239, 243, 246, 0.96));
-  font-family: "Manrope", "Segoe UI", "Trebuchet MS", sans-serif;
-  color: var(--studio-ink);
+:deep(.private-view) {
+  width: 100%;
+}
+
+:deep(.private-view__main) {
+  max-width: none !important;
+  width: 100% !important;
+}
+
+:deep(.private-view__content) {
+  max-width: none !important;
+  width: 100% !important;
+  justify-content: stretch !important;
+  justify-items: stretch !important;
+  align-items: stretch !important;
+}
+
+:deep(.private-view__content > *) {
+  max-width: none !important;
+  width: 100% !important;
+}
+
+.page {
+  padding: 16px 20px;
+  width: 100%;
+  min-width: 0;
+  min-height: 100%;
+  display: grid;
+  background:
+    radial-gradient(circle at 2% -10%, rgba(59, 130, 246, 0.28), transparent 36%),
+    radial-gradient(circle at 105% 2%, rgba(16, 185, 129, 0.2), transparent 40%),
+    linear-gradient(180deg, rgba(5, 11, 24, 0.96), rgba(8, 17, 35, 0.98));
+  color: #e7edf8;
+  font-family: "Manrope", "Segoe UI", sans-serif;
+}
+
+.page__main {
   display: grid;
   gap: 12px;
-  padding: 14px 18px;
-  background: var(--studio-bg);
-  min-height: 100%;
+  min-width: 0;
 }
 
-.panel-base {
-  border-radius: 16px;
-  border: 1px solid var(--studio-border);
-  background: linear-gradient(165deg, var(--studio-soft), var(--studio-soft-2));
-  backdrop-filter: blur(10px);
-  animation: panel-in 0.28s ease both;
-}
-
-@keyframes panel-in {
-  from {
-    opacity: 0;
-    transform: translateY(8px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+.page__main > * {
+  width: 100%;
+  min-width: 0;
 }
 
 .hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 360px);
+  gap: 14px;
   padding: 16px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: linear-gradient(140deg, rgba(59, 130, 246, 0.14), rgba(16, 185, 129, 0.08));
 }
 
-.hero__top {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 12px;
-  align-items: end;
+.hero__kicker {
+  display: inline-flex;
+  width: fit-content;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(59, 130, 246, 0.2);
 }
 
 .hero__title {
-  margin: 0;
-  font-size: 28px;
-  line-height: 1.1;
+  margin: 8px 0 0;
+  font-size: 26px;
+  line-height: 1.12;
   letter-spacing: 0.01em;
 }
 
 .hero__subtitle {
   margin: 8px 0 0;
-  max-width: 920px;
-  opacity: 0.84;
+  max-width: 800px;
+  opacity: 0.86;
+  font-size: 13px;
+  line-height: 1.42;
 }
 
-.hero__filters {
+.hero__chips {
+  margin-top: 10px;
   display: flex;
-  gap: 10px;
   flex-wrap: wrap;
+  gap: 8px;
 }
 
-.hero__filters label {
+.hero__chip {
+  font-size: 11px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.06);
+  opacity: 0.9;
+}
+
+.hero__right {
   display: grid;
-  gap: 4px;
+  gap: 10px;
+  align-content: start;
+}
+
+.field {
+  display: grid;
+  gap: 6px;
   font-size: 12px;
-  opacity: 0.88;
+  opacity: 0.94;
+}
+
+.field--compact {
+  gap: 5px;
+}
+
+.field--textarea {
+  grid-column: 1 / -1;
+}
+
+.input {
+  width: 100%;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.05);
+  color: inherit;
+  padding: 9px 10px;
+}
+
+.input:focus-visible {
+  outline: 2px solid rgba(59, 130, 246, 0.44);
+  outline-offset: 1px;
+}
+
+.input--select {
+  appearance: none;
+}
+
+.input--textarea {
+  resize: vertical;
+  min-height: 68px;
+}
+
+.input--manual {
+  font-family: "JetBrains Mono", "Consolas", monospace;
+  letter-spacing: 0.01em;
 }
 
 .kpi-grid {
-  margin-top: 12px;
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
-  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 12px;
 }
 
 .kpi {
+  padding: 14px;
   border-radius: 12px;
-  border: 1px solid rgba(16, 34, 43, 0.12);
-  padding: 10px 12px;
-  background: rgba(255, 255, 255, 0.66);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.kpi__row {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.kpi__icon {
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+}
+
+.kpi__icon--blue {
+  background: rgba(59, 130, 246, 0.18);
+}
+
+.kpi__icon--green {
+  background: rgba(16, 185, 129, 0.16);
+}
+
+.kpi__icon--amber {
+  background: rgba(245, 158, 11, 0.2);
+}
+
+.kpi__icon--purple {
+  background: rgba(139, 92, 246, 0.18);
 }
 
 .kpi__label {
   font-size: 12px;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  opacity: 0.66;
+  opacity: 0.78;
 }
 
 .kpi__value {
-  margin-top: 4px;
-  font-size: 24px;
+  margin-top: 2px;
+  font-size: 21px;
   font-weight: 800;
-  color: #114f60;
+  line-height: 1.1;
 }
 
 .kpi__meta {
   margin-top: 3px;
   font-size: 12px;
-  opacity: 0.8;
+  opacity: 0.75;
 }
 
 .split {
@@ -771,26 +1072,44 @@ onMounted(() => {
 }
 
 .panel {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
   padding: 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+  width: 100%;
+  max-width: none !important;
+  box-sizing: border-box;
+}
+
+.panel > * {
+  width: 100%;
+  min-width: 0;
+}
+
+.panel--form {
+  background: linear-gradient(165deg, rgba(59, 130, 246, 0.06), rgba(255, 255, 255, 0.02));
 }
 
 .panel__header {
   display: flex;
-  align-items: center;
   justify-content: space-between;
-  gap: 10px;
-  margin-bottom: 10px;
+  align-items: flex-start;
+  gap: 12px;
 }
 
 .panel__title {
+  font-weight: 700;
   font-size: 17px;
-  font-weight: 770;
 }
 
 .panel__subtitle {
-  margin-top: 2px;
+  margin-top: 4px;
   font-size: 12px;
-  opacity: 0.72;
+  opacity: 0.75;
+  line-height: 1.35;
 }
 
 .flow {
@@ -799,36 +1118,54 @@ onMounted(() => {
 }
 
 .flow__step {
-  border: 1px solid rgba(16, 34, 43, 0.12);
+  display: grid;
+  gap: 10px;
+  padding: 11px;
   border-radius: 12px;
-  padding: 10px;
-  background: rgba(255, 255, 255, 0.58);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(2, 8, 23, 0.34);
 }
 
 .flow__step-title {
   font-size: 13px;
-  font-weight: 720;
-  margin-bottom: 8px;
+  font-weight: 700;
 }
 
-.mode-switch {
+.segmented {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 6px;
+  padding: 4px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.02);
 }
 
-.mode-switch__btn {
-  border: 1px solid rgba(16, 34, 43, 0.22);
-  background: rgba(255, 255, 255, 0.65);
-  border-radius: 999px;
-  padding: 6px 10px;
-  cursor: pointer;
+.segmented--compact {
+  width: fit-content;
+  max-width: 100%;
+}
+
+.segmented__btn {
+  border: none;
+  outline: none;
+  padding: 7px 10px;
+  border-radius: 8px;
   font-size: 12px;
+  background: transparent;
+  color: inherit;
+  opacity: 0.78;
+  cursor: pointer;
 }
 
-.mode-switch__btn--active {
-  border-color: rgba(14, 159, 154, 0.75);
-  background: rgba(14, 159, 154, 0.14);
+.segmented__btn:hover {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.segmented__btn--active {
+  opacity: 1;
+  background: linear-gradient(120deg, rgba(59, 130, 246, 0.35), rgba(16, 185, 129, 0.26));
 }
 
 .fields {
@@ -839,44 +1176,50 @@ onMounted(() => {
 
 .fields--one {
   grid-template-columns: 1fr;
-  margin-top: 8px;
 }
 
-.fields label {
+.code-mode {
   display: grid;
-  gap: 5px;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.code-mode__title {
   font-size: 12px;
-  opacity: 0.92;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  opacity: 0.7;
 }
 
-.input {
-  width: 100%;
-  border-radius: 10px;
-  border: 1px solid rgba(16, 34, 43, 0.22);
-  background: rgba(255, 255, 255, 0.82);
-  color: inherit;
-  padding: 8px 10px;
+.manual {
+  display: grid;
+  gap: 8px;
 }
 
-.input--select {
-  appearance: none;
+.manual__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 12px;
+  opacity: 0.85;
 }
 
-.input--textarea {
-  resize: vertical;
+.manual__hint {
+  font-size: 12px;
+  opacity: 0.74;
 }
 
 .effects {
-  margin-top: 10px;
   display: grid;
   gap: 10px;
+  margin-top: 4px;
 }
 
 .effects__title {
   font-size: 12px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  opacity: 0.62;
+  opacity: 0.66;
 }
 
 .flow__actions {
@@ -886,9 +1229,9 @@ onMounted(() => {
 }
 
 .created {
-  margin-top: 12px;
-  border-top: 1px solid rgba(16, 34, 43, 0.14);
+  margin-top: 2px;
   padding-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
   display: grid;
   gap: 8px;
 }
@@ -918,41 +1261,50 @@ onMounted(() => {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  border: 1px solid rgba(16, 34, 43, 0.14);
+  border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 10px;
   padding: 8px;
-  background: rgba(255, 255, 255, 0.7);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.created__main {
+  min-width: 0;
 }
 
 .created__code {
-  font-family: "Consolas", "JetBrains Mono", monospace;
+  font-family: "JetBrains Mono", "Consolas", monospace;
   font-weight: 700;
   letter-spacing: 0.03em;
 }
 
 .created__meta {
+  margin-top: 2px;
   font-size: 12px;
   opacity: 0.75;
-  margin-top: 2px;
 }
 
 .notice {
   border-radius: 10px;
   padding: 8px 10px;
   font-size: 12px;
-  margin-top: 8px;
 }
 
 .notice--ok {
-  background: rgba(10, 138, 104, 0.12);
-  border: 1px solid rgba(10, 138, 104, 0.34);
-  color: #0a7d5f;
+  background: rgba(16, 185, 129, 0.14);
+  border: 1px solid rgba(16, 185, 129, 0.42);
+  color: #7bf1ca;
+}
+
+.notice--warn {
+  background: rgba(245, 158, 11, 0.16);
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  color: #fdd280;
 }
 
 .notice--error {
-  background: rgba(185, 28, 28, 0.1);
-  border: 1px solid rgba(185, 28, 28, 0.34);
-  color: #991b1b;
+  background: rgba(239, 68, 68, 0.13);
+  border: 1px solid rgba(239, 68, 68, 0.36);
+  color: #ffb4b4;
 }
 
 .table-wrap {
@@ -969,7 +1321,7 @@ onMounted(() => {
 .table td {
   text-align: left;
   padding: 8px 6px;
-  border-bottom: 1px solid rgba(16, 34, 43, 0.12);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   white-space: nowrap;
 }
 
@@ -977,7 +1329,11 @@ onMounted(() => {
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  opacity: 0.65;
+  opacity: 0.68;
+}
+
+.table tbody tr:hover {
+  background: rgba(59, 130, 246, 0.07);
 }
 
 .cell-main {
@@ -998,21 +1354,21 @@ onMounted(() => {
 }
 
 .badge--active {
-  background: rgba(10, 138, 104, 0.12);
-  color: #0a7d5f;
-  border-color: rgba(10, 138, 104, 0.34);
+  background: rgba(16, 185, 129, 0.14);
+  color: #7bf1ca;
+  border-color: rgba(16, 185, 129, 0.4);
 }
 
 .badge--expired {
-  background: rgba(209, 139, 42, 0.14);
-  color: #9c5f0f;
-  border-color: rgba(209, 139, 42, 0.38);
+  background: rgba(245, 158, 11, 0.16);
+  color: #fdd280;
+  border-color: rgba(245, 158, 11, 0.38);
 }
 
 .badge--disabled {
-  background: rgba(148, 163, 184, 0.18);
-  color: #334155;
-  border-color: rgba(100, 116, 139, 0.45);
+  background: rgba(148, 163, 184, 0.16);
+  color: #dbe8ff;
+  border-color: rgba(148, 163, 184, 0.38);
 }
 
 .timeline {
@@ -1029,11 +1385,10 @@ onMounted(() => {
 
 .timeline__day {
   font-size: 12px;
-  opacity: 0.75;
+  opacity: 0.76;
 }
 
 .timeline__bars {
-  position: relative;
   display: grid;
   gap: 3px;
 }
@@ -1045,11 +1400,11 @@ onMounted(() => {
 }
 
 .timeline__bar--act {
-  background: linear-gradient(90deg, rgba(14, 159, 154, 0.88), rgba(12, 121, 120, 0.9));
+  background: linear-gradient(90deg, rgba(16, 185, 129, 0.88), rgba(6, 95, 70, 0.9));
 }
 
 .timeline__bar--rev {
-  background: linear-gradient(90deg, rgba(209, 139, 42, 0.88), rgba(164, 102, 19, 0.92));
+  background: linear-gradient(90deg, rgba(245, 158, 11, 0.88), rgba(180, 83, 9, 0.9));
 }
 
 .timeline__meta {
@@ -1067,42 +1422,62 @@ onMounted(() => {
 }
 
 .panel--links {
-  display: grid;
   gap: 10px;
 }
 
-.links-grid {
+.control-links {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 10px;
 }
 
-.link-tile {
+.control-link {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(59, 130, 246, 0.24);
+  background: linear-gradient(150deg, rgba(59, 130, 246, 0.12), rgba(255, 255, 255, 0.03));
+  text-decoration: none;
+  color: inherit;
+}
+
+.control-link:hover {
+  background: linear-gradient(150deg, rgba(59, 130, 246, 0.18), rgba(255, 255, 255, 0.05));
+}
+
+.control-link__head {
   display: flex;
   align-items: center;
   gap: 8px;
-  text-decoration: none;
-  color: inherit;
-  border: 1px solid rgba(16, 34, 43, 0.15);
-  border-radius: 10px;
-  padding: 10px;
-  background: rgba(255, 255, 255, 0.64);
+  font-weight: 700;
 }
 
-.link-tile:hover {
-  border-color: rgba(14, 159, 154, 0.45);
-  background: rgba(14, 159, 154, 0.08);
+.control-link__desc {
+  font-size: 12px;
+  opacity: 0.82;
+  line-height: 1.35;
+}
+
+.control-link__path {
+  font-size: 11px;
+  opacity: 0.68;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
 }
 
 .nav {
   padding: 10px;
 }
 
+.nav__section {
+  margin-bottom: 12px;
+}
+
 .nav__section-title {
   font-size: 11px;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
-  opacity: 0.65;
+  opacity: 0.6;
   margin: 8px 8px 6px;
 }
 
@@ -1117,21 +1492,90 @@ onMounted(() => {
 }
 
 .nav__item:hover {
-  background: rgba(14, 159, 154, 0.1);
+  background: rgba(255, 255, 255, 0.05);
 }
 
 .nav__item--active {
-  background: rgba(14, 159, 154, 0.18);
+  background: rgba(59, 130, 246, 0.14);
 }
 
-@media (max-width: 1200px) {
+.nav--premium {
+  display: grid;
+  gap: 10px;
+}
+
+.nav__brand {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 10px;
+  align-items: center;
+  padding: 10px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: linear-gradient(135deg, rgba(59, 130, 246, 0.16), rgba(16, 185, 129, 0.08));
+}
+
+.nav__brand-logo {
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  font-weight: 800;
+  color: rgba(2, 8, 23, 0.95);
+  background: linear-gradient(120deg, rgba(125, 211, 252, 0.95), rgba(110, 231, 183, 0.95));
+}
+
+.nav__brand-title {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.nav__brand-subtitle {
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+.nav--premium .nav__item {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  gap: 10px;
+}
+
+.nav__item-icon {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: rgba(59, 130, 246, 0.15);
+}
+
+.nav__item-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 1400px) {
   .split {
     grid-template-columns: 1fr;
   }
 }
 
+@media (max-width: 980px) {
+  .hero {
+    grid-template-columns: 1fr;
+  }
+}
+
 @media (max-width: 860px) {
-  .hero__top {
+  .page {
+    padding: 12px;
+  }
+
+  .kpi-grid {
     grid-template-columns: 1fr;
   }
 
@@ -1147,6 +1591,28 @@ onMounted(() => {
   .timeline__meta {
     min-width: 0;
     justify-content: flex-start;
+  }
+
+  .control-links {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 720px) {
+  .hero__title {
+    font-size: 22px;
+  }
+
+  .nav--premium {
+    display: flex;
+    gap: 10px;
+    overflow-x: auto;
+    padding-bottom: 4px;
+  }
+
+  .nav--premium .nav__brand,
+  .nav--premium .nav__section {
+    min-width: 240px;
   }
 }
 </style>

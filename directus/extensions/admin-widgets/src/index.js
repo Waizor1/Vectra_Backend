@@ -51,6 +51,8 @@ const normalizeRange = async (database, table, column, min, max, clampToDbMin = 
 const PROMO_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const PROMO_CODE_GENERATED_PART_LEN = 8;
 const PROMO_CODE_DEFAULT_LIMIT = 25;
+const PROMO_CODE_CREATE_MAX_COUNT = 150;
+const PROMO_CODE_MANUAL_REGEX = /^[A-Z0-9_-]{4,64}$/;
 
 const normalizePromoDate = (value) => {
   if (value === null || value === undefined || value === "") return null;
@@ -83,6 +85,44 @@ const sanitizePromoPrefix = (value) => {
 const sanitizePromoName = (value) => {
   const raw = String(value ?? "").trim().replace(/\s+/g, " ");
   return raw.slice(0, 255);
+};
+
+const normalizeManualPromoCode = (value) => String(value ?? "").trim().toUpperCase();
+
+const parseManualPromoCodes = (value, maxCount = PROMO_CODE_CREATE_MAX_COUNT) => {
+  const chunks = Array.isArray(value)
+    ? value.flatMap((item) => String(item ?? "").split(/[\n,;]+/g))
+    : String(value ?? "").split(/[\n,;]+/g);
+
+  const codes = [];
+  const invalid = [];
+  const seen = new Set();
+  const duplicateSet = new Set();
+
+  for (const chunk of chunks) {
+    const code = normalizeManualPromoCode(chunk);
+    if (!code) continue;
+
+    if (!PROMO_CODE_MANUAL_REGEX.test(code)) {
+      invalid.push(code);
+      continue;
+    }
+
+    if (seen.has(code)) {
+      duplicateSet.add(code);
+      continue;
+    }
+
+    seen.add(code);
+    codes.push(code);
+  }
+
+  return {
+    codes,
+    invalid,
+    duplicates: Array.from(duplicateSet),
+    tooMany: codes.length > maxCount,
+  };
 };
 
 const randomPromoChunk = (len) => {
@@ -738,7 +778,39 @@ export default function registerEndpoint(router, { database }) {
       }
 
       const payload = req.body && typeof req.body === "object" ? req.body : {};
-      const count = toInt(payload.count, 1, 1, 150);
+      const codeModeRaw = String(payload.code_mode ?? "generate").trim().toLowerCase();
+      const codeMode = codeModeRaw === "manual" ? "manual" : "generate";
+      const manualParsed = codeMode === "manual" ? parseManualPromoCodes(payload.manual_codes) : null;
+
+      if (codeMode === "manual") {
+        if (manualParsed.invalid.length) {
+          const invalidPreview = manualParsed.invalid.slice(0, 8).join(", ");
+          const moreInvalid = manualParsed.invalid.length > 8 ? ` (+${manualParsed.invalid.length - 8})` : "";
+          res.status(400).json({
+            error: "manual_codes contains invalid values",
+            details: `Разрешены A-Z, 0-9, '_' и '-'; длина 4-64. Примеры некорректных: ${invalidPreview}${moreInvalid}`,
+          });
+          return;
+        }
+
+        if (!manualParsed || !manualParsed.codes.length) {
+          res.status(400).json({ error: "manual_codes is empty", details: "Укажите хотя бы один промокод" });
+          return;
+        }
+
+        if (manualParsed.tooMany) {
+          res.status(400).json({
+            error: "manual_codes limit exceeded",
+            details: `За один запуск можно создать максимум ${PROMO_CODE_CREATE_MAX_COUNT} кодов`,
+          });
+          return;
+        }
+      }
+
+      const count =
+        codeMode === "manual"
+          ? manualParsed.codes.length
+          : toInt(payload.count, 1, 1, PROMO_CODE_CREATE_MAX_COUNT);
       const maxActivations = toInt(payload.max_activations, 1, 1, 5_000_000);
       const perUserLimit = toInt(payload.per_user_limit, 1, 1, 10_000);
       const disabled = payload.disabled === true;
@@ -792,12 +864,15 @@ export default function registerEndpoint(router, { database }) {
         requestedName || sanitizePromoName(batchTitle) || (count === 1 ? "Promo" : "Promo batch");
 
       const created = [];
+      const manualCodes = codeMode === "manual" ? manualParsed.codes : [];
 
       await database.transaction(async (trx) => {
         for (let idx = 0; idx < count; idx += 1) {
+          const manualCode = codeMode === "manual" ? manualCodes[idx] : null;
           let inserted = null;
-          for (let attempt = 0; attempt < 8; attempt += 1) {
-            const plainCode = buildPromoCode(codePrefix);
+          const attemptsLimit = codeMode === "manual" ? 1 : 8;
+          for (let attempt = 0; attempt < attemptsLimit; attempt += 1) {
+            const plainCode = manualCode || buildPromoCode(codePrefix);
             const codeHmac = crypto
               .createHmac("sha256", secret)
               .update(plainCode)
@@ -850,9 +925,15 @@ export default function registerEndpoint(router, { database }) {
                 message.toLowerCase().includes("unique") ||
                 message.toLowerCase().includes("duplicate");
               if (!uniqueConflict) throw dbErr;
+              if (codeMode === "manual") {
+                throw new Error(`Промокод "${manualCode}" уже существует`);
+              }
             }
           }
           if (!inserted) {
+            if (codeMode === "manual") {
+              throw new Error(`Не удалось создать промокод "${manualCode}"`);
+            }
             throw new Error("Could not generate a unique promo code after several attempts");
           }
           created.push(inserted);
@@ -861,7 +942,9 @@ export default function registerEndpoint(router, { database }) {
 
       res.json({
         success: true,
+        mode: codeMode,
         created_count: created.length,
+        skipped_duplicates: codeMode === "manual" ? manualParsed.duplicates.length : 0,
         campaign: batchId
           ? {
               id: batchId,
@@ -871,7 +954,12 @@ export default function registerEndpoint(router, { database }) {
         created,
       });
     } catch (err) {
-      res.status(500).json({ error: "Failed to create promo codes", details: String(err?.message || err) });
+      const message = String(err?.message || err);
+      if (message.includes("Промокод \"")) {
+        res.status(409).json({ error: "manual promo code conflict", details: message });
+        return;
+      }
+      res.status(500).json({ error: "Failed to create promo codes", details: message });
     }
   });
 
