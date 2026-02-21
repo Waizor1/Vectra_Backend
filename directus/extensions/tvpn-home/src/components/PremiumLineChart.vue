@@ -9,7 +9,7 @@
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import * as echarts from 'echarts/core';
 import { LineChart } from 'echarts/charts';
 import { GridComponent, TooltipComponent } from 'echarts/components';
@@ -51,6 +51,8 @@ const props = defineProps({
 const chartEl = ref(null);
 let chart = null;
 let resizeObserver = null;
+let resizeFrame = null;
+let delayedResizeTimer = null;
 
 const heightStyle = computed(() => (typeof props.height === 'number' ? `${props.height}px` : String(props.height)));
 
@@ -194,6 +196,7 @@ function optionForData() {
 function renderChart() {
 	if (!chart) return;
 	chart.setOption(optionForData(), true);
+	queueResize();
 }
 
 function ensureChart() {
@@ -204,25 +207,66 @@ function ensureChart() {
 	renderChart();
 }
 
+function queueResize() {
+	if (!chart) return;
+	if (resizeFrame !== null) cancelAnimationFrame(resizeFrame);
+	resizeFrame = requestAnimationFrame(() => {
+		resizeFrame = null;
+		if (!chart) return;
+		chart.resize({ animation: { duration: 0 } });
+	});
+}
+
+function queueStabilizedResize() {
+	if (delayedResizeTimer) clearTimeout(delayedResizeTimer);
+	delayedResizeTimer = setTimeout(() => {
+		delayedResizeTimer = null;
+		queueResize();
+	}, 120);
+}
+
 onMounted(() => {
 	ensureChart();
+	queueResize();
+	queueStabilizedResize();
 	if (typeof ResizeObserver !== 'undefined' && chartEl.value) {
 		resizeObserver = new ResizeObserver(() => {
-			if (chart) chart.resize();
+			queueResize();
+			queueStabilizedResize();
 		});
 		resizeObserver.observe(chartEl.value);
+		if (chartEl.value.parentElement) {
+			resizeObserver.observe(chartEl.value.parentElement);
+		}
+	}
+	if (typeof window !== 'undefined') {
+		window.addEventListener('resize', queueResize, { passive: true });
 	}
 });
 
 watch(
 	() => [props.categories, props.series, props.mode, props.height],
-	() => {
+	async () => {
 		ensureChart();
+		await nextTick();
+		queueResize();
+		queueStabilizedResize();
 	},
 	{ deep: true }
 );
 
 onBeforeUnmount(() => {
+	if (typeof window !== 'undefined') {
+		window.removeEventListener('resize', queueResize);
+	}
+	if (resizeFrame !== null) {
+		cancelAnimationFrame(resizeFrame);
+		resizeFrame = null;
+	}
+	if (delayedResizeTimer) {
+		clearTimeout(delayedResizeTimer);
+		delayedResizeTimer = null;
+	}
 	if (resizeObserver) {
 		resizeObserver.disconnect();
 		resizeObserver = null;
@@ -238,6 +282,7 @@ onBeforeUnmount(() => {
 .chart {
 	display: grid;
 	gap: 8px;
+	min-width: 0;
 }
 
 .chart__head {
@@ -258,6 +303,7 @@ onBeforeUnmount(() => {
 
 .chart__canvas {
 	width: 100%;
+	min-width: 0;
 	border-radius: 16px;
 	background: radial-gradient(circle at 0 0, rgba(120, 174, 255, 0.14), rgba(6, 14, 28, 0.72) 56%), linear-gradient(180deg, rgba(7, 16, 32, 0.98), rgba(7, 14, 30, 0.88));
 	border: 1px solid rgba(147, 188, 255, 0.22);

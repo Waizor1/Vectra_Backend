@@ -751,29 +751,113 @@
 
 			<v-card class="panel panel--ops-accordion">
 				<div class="panel__title">Админ-инструменты</div>
-				<div class="panel__subtitle">Технические разделы свернуты по умолчанию и не перегружают главный экран.</div>
+				<div class="panel__subtitle">Единый продвинутый модуль управления состоянием проекта и ключевыми параметрами.</div>
+				<div class="ops-toolbar">
+					<div class="ops-toolbar__meta">
+						Один refresh: ~{{ refreshRequestEstimate }} API-запросов (оптимизировано для меньшей burst-нагрузки).
+					</div>
+					<v-button x-small secondary :loading="loading" :disabled="loading" @click="refresh">
+						<v-icon name="refresh" left />
+						Обновить данные
+					</v-button>
+				</div>
 				<v-expansion-panels multiple>
 					<v-expansion-panel>
-						<v-expansion-panel-title>Технические работы</v-expansion-panel-title>
+						<v-expansion-panel-title>Control Center</v-expansion-panel-title>
 						<v-expansion-panel-text>
 							<v-notice v-if="settingsSaveError" type="danger">
 								{{ settingsSaveError }}
 							</v-notice>
-							<div class="settings">
-								<label class="settings__row">
-									<span>Режим техработ включён</span>
-									<input v-model="settings.maintenance_mode" class="settings__input" type="checkbox" />
-								</label>
-								<label class="settings__row settings__row--textarea">
-									<span>Текст для пользователей</span>
-									<textarea
-										v-model="settings.maintenance_message"
-										class="settings__input settings__input--textarea"
-										rows="3"
-										placeholder="Например: обновляем серверы, ориентировочно до 15:00 МСК"
-									/>
-								</label>
-								<v-button small :loading="settingsSaving" :disabled="settingsSaving" @click="saveSettings">Сохранить</v-button>
+							<div class="ops-stack">
+								<div class="ops-health">
+									<div class="ops-health__item">
+										<div class="ops-health__label">Техработы</div>
+										<div class="ops-badge" :class="settings.maintenance_mode ? 'ops-badge--warn' : 'ops-badge--ok'">
+											{{ settings.maintenance_mode ? 'Включены' : 'Выключены' }}
+										</div>
+									</div>
+									<div class="ops-health__item">
+										<div class="ops-health__label">Алерты</div>
+										<div class="ops-badge" :class="settings.alerts_enabled ? 'ops-badge--ok' : 'ops-badge--muted'">
+											{{ settings.alerts_enabled ? 'Активны' : 'Отключены' }}
+										</div>
+									</div>
+									<div class="ops-health__item">
+										<div class="ops-health__label">Истечения (окно)</div>
+										<div class="ops-health__value">{{ settings.expiring_days }} дн</div>
+									</div>
+									<div class="ops-health__item">
+										<div class="ops-health__label">Блокировки (окно)</div>
+										<div class="ops-health__value">{{ settings.suspicious_block_days }} дн</div>
+									</div>
+								</div>
+
+								<div class="ops-section">
+									<div class="ops-section__title">Режим обслуживания</div>
+									<div class="ops-section__subtitle">Управление техработами и сообщением для клиентов приложения.</div>
+									<div class="settings settings--wide">
+										<label class="settings__row">
+											<span>Режим техработ включён</span>
+											<input v-model="settings.maintenance_mode" class="settings__input" type="checkbox" />
+										</label>
+										<label class="settings__row settings__row--textarea">
+											<span>Текст для пользователей</span>
+											<textarea
+												v-model="settings.maintenance_message"
+												class="settings__input settings__input--textarea"
+												rows="3"
+												placeholder="Например: обновляем серверы, ориентировочно до 15:00 МСК"
+											/>
+										</label>
+									</div>
+								</div>
+
+								<div class="ops-section">
+									<div class="ops-section__title">Пороги мониторинга и очереди</div>
+									<div class="ops-section__subtitle">Чувствительность алертов и окна выборок для оперативных виджетов.</div>
+									<div class="settings settings--wide">
+										<label class="settings__row">
+											<span>Алерты включены</span>
+											<input v-model="settings.alerts_enabled" class="settings__input" type="checkbox" />
+										</label>
+										<label class="settings__row">
+											<span>Всплеск регистраций (x)</span>
+											<input v-model.number="settings.reg_spike_factor" class="settings__input settings__input--num" type="number" step="0.1" min="1" />
+										</label>
+										<label class="settings__row">
+											<span>Мин. регистраций</span>
+											<input v-model.number="settings.reg_spike_min" class="settings__input settings__input--num" type="number" step="1" min="0" />
+										</label>
+										<label class="settings__row">
+											<span>Падение подключений (≤ %)</span>
+											<input v-model.number="settings.conn_drop_factor" class="settings__input settings__input--num" type="number" step="0.05" min="0" max="1" />
+										</label>
+										<label class="settings__row">
+											<span>Мин. среднее (7д)</span>
+											<input v-model.number="settings.conn_drop_min_avg" class="settings__input settings__input--num" type="number" step="1" min="0" />
+										</label>
+										<label class="settings__row">
+											<span>Аномалия платежей (x)</span>
+											<input v-model.number="settings.pay_spike_factor" class="settings__input settings__input--num" type="number" step="0.1" min="1" />
+										</label>
+										<label class="settings__row">
+											<span>Мин. сумма (день)</span>
+											<input v-model.number="settings.pay_spike_min_sum" class="settings__input settings__input--num" type="number" step="100" min="0" />
+										</label>
+										<label class="settings__row">
+											<span>Истекает (дни)</span>
+											<input v-model.number="settings.expiring_days" class="settings__input settings__input--num" type="number" step="1" min="1" max="90" />
+										</label>
+										<label class="settings__row">
+											<span>Блокировки (дни)</span>
+											<input v-model.number="settings.suspicious_block_days" class="settings__input settings__input--num" type="number" step="1" min="1" max="30" />
+										</label>
+									</div>
+								</div>
+
+								<div class="settings__actions">
+									<v-button small :loading="settingsSaving" :disabled="settingsSaving" @click="saveSettings">Сохранить параметры</v-button>
+								</div>
 							</div>
 						</v-expansion-panel-text>
 					</v-expansion-panel>
@@ -783,92 +867,73 @@
 							<v-notice v-if="opsError" type="danger">
 								{{ opsError }}
 							</v-notice>
-							<div class="ops-console">
-								<label class="ops-console__label">
-									<span>Команда</span>
-									<select v-model="opsCommandId" class="ops-console__select">
-										<option v-for="cmd in opsCommands" :key="cmd.id" :value="cmd.id">
-											{{ cmd.label }}
-										</option>
-									</select>
-								</label>
-								<div class="ops-console__actions">
-									<v-button small :loading="opsLoading" :disabled="opsLoading || !opsCommandId" @click="runOpsCommand">Выполнить</v-button>
+							<div class="ops-section">
+								<div class="ops-section__title">Безопасные серверные команды</div>
+								<div class="ops-section__subtitle">Только whitelisted операции без shell-доступа и с проверкой прав Directus.</div>
+								<div class="ops-console">
+									<label class="ops-console__label">
+										<span>Команда</span>
+										<select v-model="opsCommandId" class="ops-console__select">
+											<option v-for="cmd in opsCommands" :key="cmd.id" :value="cmd.id">
+												{{ cmd.label }}
+											</option>
+										</select>
+									</label>
+									<div class="ops-console__actions">
+										<v-button small :loading="opsLoading" :disabled="opsLoading || !opsCommandId" @click="runOpsCommand">Выполнить</v-button>
+									</div>
+									<pre v-if="opsOutput" class="ops-console__output">{{ opsOutput }}</pre>
 								</div>
-								<pre v-if="opsOutput" class="ops-console__output">{{ opsOutput }}</pre>
 							</div>
 						</v-expansion-panel-text>
 					</v-expansion-panel>
 					<v-expansion-panel>
-						<v-expansion-panel-title>Пороги алертов</v-expansion-panel-title>
+						<v-expansion-panel-title>Управление основными параметрами</v-expansion-panel-title>
 						<v-expansion-panel-text>
-							<v-notice v-if="settingsSaveError" type="danger">
-								{{ settingsSaveError }}
-							</v-notice>
-							<div class="settings">
-								<label class="settings__row">
-									<span>Алерты включены</span>
-									<input v-model="settings.alerts_enabled" class="settings__input" type="checkbox" />
-								</label>
-								<label class="settings__row">
-									<span>Всплеск регистраций (x)</span>
-									<input v-model.number="settings.reg_spike_factor" class="settings__input settings__input--num" type="number" step="0.1" min="1" />
-								</label>
-								<label class="settings__row">
-									<span>Мин. регистраций</span>
-									<input v-model.number="settings.reg_spike_min" class="settings__input settings__input--num" type="number" step="1" min="0" />
-								</label>
-								<label class="settings__row">
-									<span>Падение подключений (≤ %)</span>
-									<input v-model.number="settings.conn_drop_factor" class="settings__input settings__input--num" type="number" step="0.05" min="0" max="1" />
-								</label>
-								<label class="settings__row">
-									<span>Мин. среднее (7д)</span>
-									<input v-model.number="settings.conn_drop_min_avg" class="settings__input settings__input--num" type="number" step="1" min="0" />
-								</label>
-								<label class="settings__row">
-									<span>Аномалия платежей (x)</span>
-									<input v-model.number="settings.pay_spike_factor" class="settings__input settings__input--num" type="number" step="0.1" min="1" />
-								</label>
-								<label class="settings__row">
-									<span>Мин. сумма (день)</span>
-									<input v-model.number="settings.pay_spike_min_sum" class="settings__input settings__input--num" type="number" step="100" min="0" />
-								</label>
-								<label class="settings__row">
-									<span>Истекает (дни)</span>
-									<input v-model.number="settings.expiring_days" class="settings__input settings__input--num" type="number" step="1" min="1" max="90" />
-								</label>
-								<label class="settings__row">
-									<span>Блокировки (дни)</span>
-									<input v-model.number="settings.suspicious_block_days" class="settings__input settings__input--num" type="number" step="1" min="1" max="30" />
-								</label>
-								<v-button small :loading="settingsSaving" :disabled="settingsSaving" @click="saveSettings">Сохранить</v-button>
+							<div class="ops-section">
+								<div class="ops-section__title">Launchpad ключевых сущностей</div>
+								<div class="ops-section__subtitle">
+									Основные параметры проекта доступны из этого модуля, но ручное управление в `/content/*` остаётся.
+								</div>
+								<div class="control-links">
+									<router-link v-for="item in controlLinks" :key="item.path" class="control-link" :to="{ path: item.path }">
+										<div class="control-link__head">
+											<v-icon :name="item.icon" />
+											<span>{{ item.title }}</span>
+										</div>
+										<div class="control-link__desc">{{ item.desc }}</div>
+										<div class="control-link__path">{{ item.path }}</div>
+									</router-link>
+								</div>
 							</div>
 						</v-expansion-panel-text>
 					</v-expansion-panel>
 					<v-expansion-panel>
 						<v-expansion-panel-title>Что где находится</v-expansion-panel-title>
 						<v-expansion-panel-text>
-							<div class="help">
-								<div class="help__row">
-									<div class="help__k">Пользователи</div>
-									<div class="help__v">Подписка/лимиты/баланс/блокировки, быстрый поиск и карточка.</div>
-								</div>
-								<div class="help__row">
-									<div class="help__k">Активные тарифы</div>
-									<div class="help__v">Ограничения, usage, мультипликатор, связанные статусы.</div>
-								</div>
-								<div class="help__row">
-									<div class="help__k">Промо</div>
-									<div class="help__v">Коды и использования; HMAC генерируется автоматически.</div>
-								</div>
-								<div class="help__row">
-									<div class="help__k">Колесо призов</div>
-									<div class="help__v">Конфиг и история; сумма вероятностей валидируется.</div>
-								</div>
-								<div class="help__row">
-									<div class="help__k">Платежи</div>
-									<div class="help__v">Processed payments + статусы, чтобы ловить аномалии.</div>
+							<div class="ops-section">
+								<div class="ops-section__title">Короткая карта разделов</div>
+								<div class="help">
+									<div class="help__row">
+										<div class="help__k">Пользователи</div>
+										<div class="help__v">Подписка/лимиты/баланс/блокировки, быстрый поиск и карточка.</div>
+									</div>
+									<div class="help__row">
+										<div class="help__k">Активные тарифы</div>
+										<div class="help__v">Ограничения, usage, мультипликатор, связанные статусы.</div>
+									</div>
+									<div class="help__row">
+										<div class="help__k">Промо</div>
+										<div class="help__v">Коды и использования; HMAC генерируется автоматически.</div>
+									</div>
+									<div class="help__row">
+										<div class="help__k">Колесо призов</div>
+										<div class="help__v">Конфиг и история; сумма вероятностей валидируется.</div>
+									</div>
+									<div class="help__row">
+										<div class="help__k">Платежи</div>
+										<div class="help__v">Processed payments + статусы, чтобы ловить аномалии.</div>
+									</div>
 								</div>
 							</div>
 						</v-expansion-panel-text>
@@ -1199,6 +1264,58 @@ const opsCommands = [
 	{ id: 'fk_active_tariffs', label: 'Проверить fk_active_tariffs_user' },
 	{ id: 'fix_fk_active_tariffs', label: 'Исправить fk_active_tariffs_user (CASCADE)' },
 	{ id: 'family_quick_health', label: 'Family quick health (counts)' },
+];
+const refreshRequestEstimate = 19;
+
+const controlLinks = [
+	{
+		path: '/content/tariffs',
+		icon: 'sell',
+		title: 'Тарифы',
+		desc: 'Цена, длительности, семейные варианты и базовые параметры монетизации.',
+	},
+	{
+		path: '/content/active_tariffs',
+		icon: 'subscriptions',
+		title: 'Активные тарифы',
+		desc: 'Оперативное управление статусами, лимитами usage и клиентскими привязками.',
+	},
+	{
+		path: '/content/promo_codes',
+		icon: 'confirmation_number',
+		title: 'Промокоды',
+		desc: 'Запуск акций, ограничение выдачи и контроль актуальных промо-кампаний.',
+	},
+	{
+		path: '/content/prize_wheel_config',
+		icon: 'casino',
+		title: 'Колесо призов',
+		desc: 'Настройка призового конфига и вероятностей с серверной валидацией.',
+	},
+	{
+		path: '/content/users',
+		icon: 'people',
+		title: 'Пользователи',
+		desc: 'Подписка, блокировки, баланс и персональные параметры в карточке пользователя.',
+	},
+	{
+		path: '/content/processed_payments',
+		icon: 'payments',
+		title: 'Платежи',
+		desc: 'Контроль статусов и суммы операций, быстрая проверка проблемных транзакций.',
+	},
+	{
+		path: '/content/error_reports',
+		icon: 'bug_report',
+		title: 'Ошибки',
+		desc: 'Триаж инцидентов и контроль технического состояния проекта.',
+	},
+	{
+		path: '/content/promo_usages',
+		icon: 'bolt',
+		title: 'Promo usage',
+		desc: 'Проверка фактического использования промокодов и связей с пользователями.',
+	},
 ];
 
 const trends = ref({
@@ -1794,16 +1911,6 @@ async function fetchCount(collection, params = {}) {
 	return Number.isFinite(n) ? n : null;
 }
 
-async function checkWidgets() {
-	try {
-		await api.get('/admin-widgets/total-users', { params: { period_x_field: 'day' } });
-		await api.get('/admin-widgets/payments', { params: { period_x_field: 'day' } });
-		widgetsOk.value = true;
-	} catch {
-		widgetsOk.value = false;
-	}
-}
-
 async function fetchWidgetSeries(endpoint, n = 30, opts = {}) {
 	const period = opts.period_x_field || 'day';
 	const params = { period_x_field: period };
@@ -1820,21 +1927,6 @@ async function fetchWidgetSeries(endpoint, n = 30, opts = {}) {
 	const labels = tail.map((row) => String(row?.date ?? ''));
 	const today = series.length ? series[series.length - 1] : null;
 	return { series, labels, today, period };
-}
-
-async function fetchWidgetSumLastN(endpoint, n = 7) {
-	const res = await api.get(`/admin-widgets/${endpoint}`, { params: { period_x_field: 'day' } });
-	const results = Array.isArray(res?.data?.results) ? res.data.results : [];
-	const tail = results.slice(Math.max(0, results.length - n));
-	let sum = 0;
-	let any = false;
-	for (const row of tail) {
-		const v = Number(row?.count);
-		if (!Number.isFinite(v)) continue;
-		sum += v;
-		any = true;
-	}
-	return any ? sum : null;
 }
 
 async function fetchPaymentsSumSeries(n = 30, opts = {}) {
@@ -1972,8 +2064,6 @@ async function refresh() {
 			fetchCount('active_tariffs'),
 			fetchCount('users', { 'filter[is_blocked][_eq]': 'true' }),
 			fetchCount('processed_payments'),
-			fetchWidgetSumLastN('connections', 7),
-			fetchWidgetSumLastN('registered-users', 7),
 			fetchWidgetSeries('connections', 30),
 			fetchWidgetSeries('registered-users', 30),
 			fetchWidgetSeries('active-users', 30),
@@ -2026,8 +2116,6 @@ async function refresh() {
 			activeTariffs,
 			blockedUsers,
 			processedPayments,
-			connections7d,
-			registrations7d,
 			connections30,
 			registrations30,
 			activeUsers30,
@@ -2044,6 +2132,9 @@ async function refresh() {
 			topBalance,
 			blockedRecent,
 		] = values;
+
+		const connections7d = Array.isArray(connections30?.series) && connections30.series.length ? sumInSeries(connections30.series, 7) : null;
+		const registrations7d = Array.isArray(registrations30?.series) && registrations30.series.length ? sumInSeries(registrations30.series, 7) : null;
 
 		stats.value = { totalUsers, activeTariffs, blockedUsers, processedPayments, connections7d, registrations7d };
 		trends.value = {
@@ -2079,8 +2170,8 @@ async function refresh() {
 			topBalance: Array.isArray(topBalance) ? topBalance : [],
 			blockedRecent: Array.isArray(blockedRecent) ? blockedRecent : [],
 		};
+		widgetsOk.value = [connections30, registrations30, activeUsers30, totalUsers30, payments30].some((widget) => Array.isArray(widget?.series) && widget.series.length > 0);
 		lastUpdated.value = new Date().toISOString();
-		await checkWidgets();
 
 		const anyCore = [totalUsers, activeTariffs, blockedUsers, processedPayments].some((v) => typeof v === 'number');
 		if (!anyCore) {
@@ -2809,6 +2900,139 @@ onMounted(() => {
 	margin-bottom: 10px;
 }
 
+.ops-toolbar {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 10px;
+	margin-bottom: 10px;
+}
+
+.ops-toolbar__meta {
+	font-size: 12px;
+	opacity: 0.74;
+}
+
+.ops-stack {
+	display: grid;
+	gap: 12px;
+}
+
+.ops-section {
+	display: grid;
+	gap: 10px;
+	padding: 12px;
+	border-radius: 12px;
+	border: 1px solid rgba(255, 255, 255, 0.08);
+	background: rgba(255, 255, 255, 0.03);
+}
+
+.ops-section__title {
+	font-weight: 700;
+	letter-spacing: 0.01em;
+}
+
+.ops-section__subtitle {
+	font-size: 12px;
+	opacity: 0.75;
+}
+
+.ops-health {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+	gap: 10px;
+}
+
+.ops-health__item {
+	padding: 10px;
+	border-radius: 10px;
+	border: 1px solid rgba(255, 255, 255, 0.08);
+	background: rgba(2, 6, 23, 0.32);
+	display: grid;
+	gap: 6px;
+}
+
+.ops-health__label {
+	font-size: 11px;
+	opacity: 0.75;
+}
+
+.ops-health__value {
+	font-size: 13px;
+	font-weight: 700;
+}
+
+.ops-badge {
+	width: fit-content;
+	padding: 4px 8px;
+	border-radius: 999px;
+	font-size: 11px;
+	font-weight: 700;
+	border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.ops-badge--ok {
+	background: rgba(16, 185, 129, 0.16);
+}
+
+.ops-badge--warn {
+	background: rgba(245, 158, 11, 0.22);
+}
+
+.ops-badge--muted {
+	background: rgba(148, 163, 184, 0.18);
+}
+
+.control-links {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+	gap: 10px;
+}
+
+.control-link {
+	display: grid;
+	gap: 6px;
+	padding: 10px;
+	border-radius: 10px;
+	border: 1px solid rgba(59, 130, 246, 0.24);
+	background: linear-gradient(150deg, rgba(59, 130, 246, 0.12), rgba(255, 255, 255, 0.03));
+	text-decoration: none;
+	color: inherit;
+	min-width: 0;
+}
+
+.control-link:hover {
+	background: linear-gradient(150deg, rgba(59, 130, 246, 0.18), rgba(255, 255, 255, 0.05));
+}
+
+.control-link__head {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-weight: 700;
+}
+
+.control-link__desc {
+	font-size: 12px;
+	opacity: 0.82;
+	line-height: 1.35;
+}
+
+.control-link__path {
+	font-size: 11px;
+	opacity: 0.68;
+	font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+}
+
+.settings--wide {
+	gap: 9px;
+}
+
+.settings__actions {
+	display: flex;
+	justify-content: flex-start;
+}
+
 .actions {
 	display: grid;
 	grid-template-columns: 1fr;
@@ -3222,6 +3446,30 @@ onMounted(() => {
 	border: 1px solid rgba(255, 255, 255, 0.06);
 }
 
+.panel--ops-accordion {
+	overflow: visible;
+}
+
+.panel--ops-accordion :deep(.v-expansion-panels) {
+	display: grid;
+	gap: 10px;
+	align-content: start;
+}
+
+.panel--ops-accordion :deep(.v-expansion-panel-title) {
+	min-height: 52px;
+	padding: 11px 14px;
+	font-weight: 700;
+}
+
+.panel--ops-accordion :deep(.v-expansion-panel-text) {
+	overflow: visible;
+}
+
+.panel--ops-accordion :deep(.v-expansion-panel-text__wrapper) {
+	padding: 0 14px 14px;
+}
+
 .hero__kicker {
 	display: inline-flex;
 	width: fit-content;
@@ -3359,6 +3607,19 @@ onMounted(() => {
 	}
 
 	.chart-hub__stats {
+		grid-template-columns: 1fr;
+	}
+
+	.ops-toolbar {
+		flex-direction: column;
+		align-items: flex-start;
+	}
+
+	.ops-health {
+		grid-template-columns: 1fr;
+	}
+
+	.control-links {
 		grid-template-columns: 1fr;
 	}
 
