@@ -6,7 +6,7 @@ from bloobcat.bot.notifications.subscription.renewal import (
     notify_subscription_cancelled_after_failures,
 )
 from bloobcat.logger import get_logger
-from bloobcat.settings import app_settings
+from bloobcat.settings import app_settings, payment_settings
 
 logger = get_logger("tasks.cleanup_missed_cancellations")
 
@@ -17,6 +17,9 @@ async def cleanup_missed_cancellations_once() -> int:
     Returns number of cancelled users.
     """
     logger.info("Running cleanup for missed subscription cancellations...")
+    if str(getattr(payment_settings, "auto_renewal_mode", "") or "").strip().lower() != "yookassa":
+        logger.info("Cleanup missed cancellations skipped: auto-renewal is disabled")
+        return 0
 
     users_to_cancel = await Users.filter(
         is_subscribed=True,
@@ -60,5 +63,4 @@ async def run_cleanup_missed_cancellations_scheduler(interval_seconds: int = 360
         except Exception as e:
             logger.error(f"Error in cleanup missed cancellations scheduler: {e}")
         await asyncio.sleep(interval_seconds)
-
 

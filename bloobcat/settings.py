@@ -21,9 +21,75 @@ class TelegramSettings(BaseSettings):
 class YookassaSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="YOOKASSA_")
 
-    shop_id: str
-    secret_key: SecretStr
-    webhook_secret: str
+    shop_id: str | None = None
+    secret_key: SecretStr | None = None
+    webhook_secret: str | None = None
+
+    @field_validator("shop_id", "secret_key", "webhook_secret", mode="before")
+    @classmethod
+    def normalize_optional_text(cls, value):
+        if value is None:
+            return None
+        cleaned = str(value).strip()
+        return cleaned or None
+
+
+class PaymentSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="PAYMENT_")
+
+    provider: str = "platega"
+    auto_renewal_mode: str = "disabled"
+
+    @field_validator("provider", "auto_renewal_mode", mode="before")
+    @classmethod
+    def normalize_mode(cls, value):
+        return str(value or "").strip().lower()
+
+    @field_validator("provider")
+    @classmethod
+    def validate_provider(cls, value):
+        if value not in {"yookassa", "platega"}:
+            raise ValueError("PAYMENT_PROVIDER must be one of: yookassa, platega")
+        return value
+
+    @field_validator("auto_renewal_mode")
+    @classmethod
+    def validate_auto_renewal_mode(cls, value):
+        if value not in {"yookassa", "disabled"}:
+            raise ValueError(
+                "PAYMENT_AUTO_RENEWAL_MODE must be one of: yookassa, disabled"
+            )
+        return value
+
+
+class PlategaSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="PLATEGA_")
+
+    merchant_id: str | None = None
+    secret_key: SecretStr | None = None
+    base_url: str = "https://app.platega.io"
+    payment_method: int | None = None
+
+    @field_validator("merchant_id", "secret_key", mode="before")
+    @classmethod
+    def normalize_optional_text(cls, value):
+        if value is None:
+            return None
+        cleaned = str(value).strip()
+        return cleaned or None
+
+    @field_validator("base_url", mode="before")
+    @classmethod
+    def normalize_base_url(cls, value):
+        cleaned = str(value or "").strip()
+        return cleaned or "https://app.platega.io"
+
+    @field_validator("payment_method", mode="before")
+    @classmethod
+    def normalize_payment_method(cls, value):
+        if value in (None, ""):
+            return None
+        return int(value)
 
 
 class RemnaWaveSettings(BaseSettings):
@@ -66,6 +132,8 @@ class AdminSettings(BaseSettings):
 
 telegram_settings = TelegramSettings()
 yookassa_settings = YookassaSettings()
+payment_settings = PaymentSettings()
+platega_settings = PlategaSettings()
 remnawave_settings = RemnaWaveSettings()
 script_settings = ScriptSettings()
 admin_settings = AdminSettings()

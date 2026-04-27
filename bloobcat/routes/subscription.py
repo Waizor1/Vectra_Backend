@@ -9,12 +9,18 @@ from bloobcat.db.tariff import Tariffs
 from bloobcat.db.active_tariff import ActiveTariffs
 from bloobcat.funcs.validate import validate
 from bloobcat.routes.payment import pay
-from bloobcat.settings import app_settings
+from bloobcat.settings import app_settings, payment_settings
 from bloobcat.logger import get_logger
 
 logger = get_logger("routes.subscription")
 
 router = APIRouter(prefix="/subscription", tags=["subscription"])
+
+
+def _auto_renewal_enabled_for_user(user: Users) -> bool:
+    return bool(user.renew_id) and str(
+        getattr(payment_settings, "auto_renewal_mode", "") or ""
+    ).strip().lower() == "yookassa"
 
 
 class SubscriptionStatusResponse(BaseModel):
@@ -167,7 +173,7 @@ async def get_status(user: Users = Depends(validate)) -> SubscriptionStatusRespo
         endAtMs=end_at_ms,
         devicesLimit=devices_limit,
         isFamilyEligible=is_family_eligible,
-        autoRenewEnabled=bool(user.renew_id),
+        autoRenewEnabled=_auto_renewal_enabled_for_user(user),
     )
 
 

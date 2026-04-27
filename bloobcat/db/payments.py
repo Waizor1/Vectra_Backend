@@ -5,6 +5,10 @@ from tortoise.contrib.pydantic import pydantic_model_creator # type: ignore
 class ProcessedPayments(models.Model):
     id = fields.IntField(pk=True)
     payment_id = fields.CharField(max_length=100, unique=True)
+    provider = fields.CharField(max_length=32, default="yookassa")
+    client_request_id = fields.CharField(max_length=100, null=True)
+    payment_url = fields.TextField(null=True)
+    provider_payload = fields.TextField(null=True)
     user_id = fields.BigIntField()
     amount = fields.DecimalField(max_digits=10, decimal_places=2)
     # Разбивка суммы платежа:
@@ -19,4 +23,4 @@ class ProcessedPayments(models.Model):
         table = "processed_payments"
 
 
-ProcessedPayment_Pydantic = pydantic_model_creator(ProcessedPayments, name="ProcessedPayment") 
+ProcessedPayment_Pydantic = pydantic_model_creator(ProcessedPayments, name="ProcessedPayment")

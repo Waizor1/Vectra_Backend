@@ -14,7 +14,7 @@ from bloobcat.bot.notifications.trial.expiring import notify_expiring_trial
 from bloobcat.bot.notifications.trial.pre_expiring_3d import notify_trial_three_days_left
 from bloobcat.tasks.referral_prompts import run_referral_prompts_scheduler
 from bloobcat.logger import get_logger
-from bloobcat.settings import app_settings
+from bloobcat.settings import app_settings, payment_settings
 from bloobcat.tasks.remnawave_updater import run_remnawave_scheduler
 from bloobcat.tasks.retry_trial_notifications import run_retry_trial_notifications_scheduler
 from bloobcat.tasks.retry_trial_extensions import run_retry_trial_extensions_scheduler
@@ -37,6 +37,12 @@ logger = get_logger("scheduler")
 MOSCOW = ZoneInfo("Europe/Moscow")
 # Global mapping of user_id to scheduled asyncio tasks for cancellation
 scheduled_tasks = {}
+
+
+def _auto_renewal_enabled_for_user(user: Users) -> bool:
+    return bool(user.renew_id) and str(
+        getattr(payment_settings, "auto_renewal_mode", "") or ""
+    ).strip().lower() == "yookassa"
 
 # Rate limiting для trial extension notifications
 _last_trial_notification_time = None
@@ -182,14 +188,14 @@ def cancel_user_tasks(user_id: int):
 # State-validation wrappers before executing tasks
 async def _exec_auto_payment(user_id: int, planned_expired: date, days_before: int):
     user = await Users.get_or_none(id=user_id)
-    if not user or normalize_date(user.expired_at) != planned_expired or not user.renew_id:
+    if not user or normalize_date(user.expired_at) != planned_expired or not _auto_renewal_enabled_for_user(user):
         logger.debug(f"Skipping auto payment for user {user_id}")
         return
     await create_auto_payment(user, disable_on_fail=(days_before == 0))
 
 async def _exec_notify_expiring(user_id: int, planned_expired: date, days_before: int):
     user = await Users.get_or_none(id=user_id)
-    if not user or normalize_date(user.expired_at) != planned_expired or user.renew_id:
+    if not user or normalize_date(user.expired_at) != planned_expired or _auto_renewal_enabled_for_user(user):
         logger.debug(f"Skipping notify expiring for user {user_id}")
         return
     # Idempotency via notification marks
@@ -205,7 +211,7 @@ async def _exec_cancel_if_unpaid(user_id: int, planned_expired: date):
     """Checks if a subscription was renewed, and if not, cancels it."""
     user = await Users.get_or_none(id=user_id)
     # If user does not exist, or subscription was renewed (expired_at changed), or auto-renewal was cancelled, do nothing.
-    if not user or normalize_date(user.expired_at) != planned_expired or not user.renew_id:
+    if not user or normalize_date(user.expired_at) != planned_expired or not _auto_renewal_enabled_for_user(user):
         logger.debug(f"Skipping cancel_if_unpaid for user {user_id}. Conditions not met.")
         return
 
@@ -220,7 +226,7 @@ async def _exec_cancel_if_unpaid(user_id: int, planned_expired: date):
 
 async def _exec_notify_expired(user_id: int, planned_expired: date):
     user = await Users.get_or_none(id=user_id)
-    if not user or normalize_date(user.expired_at) != planned_expired or user.renew_id:
+    if not user or normalize_date(user.expired_at) != planned_expired or _auto_renewal_enabled_for_user(user):
         logger.debug(f"Skipping notify expired for user {user_id}")
         return
     await on_disabled(user)
@@ -401,7 +407,7 @@ async def schedule_user_tasks(user):
         # Base time at midnight of expiration day
         base = datetime.combine(user.expired_at, time.min).replace(tzinfo=MOSCOW)
 
-        if user.renew_id:
+        if _auto_renewal_enabled_for_user(user):
             # Logic for users WITH auto-renewal
             # 4, 3 and 2 days before: autopay attempt at midnight.
             # Check which payment attempts are needed to avoid multiple simultaneous payments

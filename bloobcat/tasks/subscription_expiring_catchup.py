@@ -6,6 +6,7 @@ from bloobcat.db.users import Users
 from bloobcat.db.notifications import NotificationMarks
 from bloobcat.bot.notifications.subscription.expiration import notify_expiring_subscription
 from bloobcat.logger import get_logger
+from bloobcat.settings import payment_settings
 
 MOSCOW = ZoneInfo("Europe/Moscow")
 logger = get_logger("tasks.subscription_expiring_catchup")
@@ -24,11 +25,16 @@ async def _send_for_target_days(offset_days: int, now_msk: datetime) -> int:
     """
     target_date = (now_msk.date() + timedelta(days=offset_days))
     key_prefix = f"{offset_days}d:{target_date}"
-    # only users without auto-renewal
+    filters = {
+        "is_subscribed": True,
+        "expired_at": target_date,
+    }
+    # only users without active auto-renewal; when global auto-renewal is disabled,
+    # existing YooKassa renew_id values are kept for rollback but must not suppress reminders.
+    if str(getattr(payment_settings, "auto_renewal_mode", "") or "").strip().lower() == "yookassa":
+        filters["renew_id__isnull"] = True
     users = await Users.filter(
-        is_subscribed=True,
-        renew_id__isnull=True,
-        expired_at=target_date,
+        **filters,
     )
     sent = 0
     for user in users:
@@ -76,5 +82,4 @@ async def run_subscription_expiring_catchup_scheduler(interval_seconds: int = 60
         except Exception as e:
             logger.error(f"Error in subscription expiring catch-up scheduler: {e}")
         await asyncio.sleep(interval_seconds)
-
 
