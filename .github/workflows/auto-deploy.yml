@@ -45,16 +45,35 @@ jobs:
     - name: Run backend tests
       run: python -m pytest tests -q
 
+    - name: Detect deploy target
+      id: deploy_target
+      shell: bash
+      env:
+        SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        SERVER_HOST: ${{ secrets.SERVER_HOST }}
+        SERVER_USER: ${{ secrets.SERVER_USER }}
+        PROJECT_PATH: ${{ secrets.PROJECT_PATH }}
+      run: |
+        if [ -n "$SSH_PRIVATE_KEY" ] && [ -n "$SERVER_HOST" ] && [ -n "$SERVER_USER" ] && [ -n "$PROJECT_PATH" ]; then
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "enabled=false" >> "$GITHUB_OUTPUT"
+          echo "::notice::Backend SSH deploy secrets are not configured; tests passed and deploy steps will be skipped."
+        fi
+
     - name: Setup SSH
+      if: steps.deploy_target.outputs.enabled == 'true'
       uses: webfactory/ssh-agent@v0.8.0
       with:
         ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
     - name: Add server to known hosts
+      if: steps.deploy_target.outputs.enabled == 'true'
       run: |
         ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts
 
     - name: Deploy to server
+      if: steps.deploy_target.outputs.enabled == 'true'
       env:
         SERVER_HOST: ${{ secrets.SERVER_HOST }}
         SERVER_USER: ${{ secrets.SERVER_USER }}
