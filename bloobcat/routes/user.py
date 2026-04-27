@@ -14,7 +14,7 @@ from yookassa import Payment
 from bloobcat.db.users import User_Pydantic, Users, normalize_date
 from bloobcat.funcs.validate import validate
 from bloobcat.routes.remnawave.client import RemnaWaveClient
-from bloobcat.settings import remnawave_settings, app_settings
+from bloobcat.settings import app_settings, payment_settings, remnawave_settings
 from bloobcat.logger import get_logger
 from fastapi import FastAPI
 from starlette.background import BackgroundTask
@@ -60,6 +60,12 @@ def _family_devices_limit() -> int:
 
 def _is_active_subscription(expired_at: date | None) -> bool:
     return bool(expired_at and expired_at >= date.today())
+
+
+def _auto_renewal_enabled_for_user(user: Users) -> bool:
+    return bool(user.renew_id) and str(
+        getattr(payment_settings, "auto_renewal_mode", "") or ""
+    ).strip().lower() == "yookassa"
 
 
 class UserUpdate(BaseModel):
@@ -654,7 +660,7 @@ async def change_active_tariff_devices(payload: ChangeDevicesRequest, user: User
                 new_price=pending_device_update["price"],
                 old_expired_at=old_expired_at,
                 new_expired_at=user.expired_at,
-                auto_renew_enabled=bool(user.renew_id),
+                auto_renew_enabled=_auto_renewal_enabled_for_user(user),
             )
         except Exception as e:
             logger.error(f"Ошибка отправки уведомления об изменении активного тарифа: {e}")
@@ -754,7 +760,7 @@ async def change_active_tariff_devices(payload: ChangeDevicesRequest, user: User
                     new_price=active_tariff.price,
                     old_expired_at=old_expired_at,
                     new_expired_at=user.expired_at,
-                    auto_renew_enabled=bool(user.renew_id),
+                    auto_renew_enabled=_auto_renewal_enabled_for_user(user),
                 )
             except Exception as e:
                 logger.error(f"Ошибка отправки уведомления об изменении активного тарифа: {e}")

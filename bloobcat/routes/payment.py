@@ -4,12 +4,15 @@ from decimal import Decimal, ROUND_HALF_UP
 import json
 import asyncio
 import random
+import hmac
 from functools import partial
+from types import SimpleNamespace
 from urllib.parse import urlparse
 import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Header, Request # type: ignore
+from pydantic import BaseModel
 from yookassa import Configuration, Payment, Webhook
 from yookassa.domain.notification import WebhookNotification, WebhookNotificationEventType
 from urllib3.exceptions import ConnectTimeoutError, ReadTimeoutError
@@ -47,7 +50,14 @@ from bloobcat.bot.notifications.prize_wheel import notify_spin_awarded
 from bloobcat.db.tariff import Tariffs
 from bloobcat.db.users import Users, normalize_date
 from bloobcat.funcs.validate import validate
-from bloobcat.settings import app_settings, yookassa_settings, remnawave_settings, telegram_settings
+from bloobcat.settings import (
+    app_settings,
+    payment_settings,
+    platega_settings,
+    remnawave_settings,
+    telegram_settings,
+    yookassa_settings,
+)
 from bloobcat.db.payments import ProcessedPayments
 from bloobcat.db.partner_earnings import PartnerEarnings
 from bloobcat.db.partner_qr import PartnerQr
@@ -62,12 +72,155 @@ from bloobcat.services.discounts import (
     apply_personal_discount,
     consume_discount_if_needed,
 )
+from bloobcat.services.platega import (
+    PLATEGA_PROVIDER,
+    PLATEGA_STATUS_CANCELED,
+    PLATEGA_STATUS_CHARGEBACK,
+    PLATEGA_STATUS_CHARGEBACKED,
+    PLATEGA_STATUS_CONFIRMED,
+    PlategaAPIError,
+    PlategaClient,
+    PlategaConfigError,
+    map_platega_status_to_internal,
+    normalize_platega_status,
+    parse_platega_payload,
+)
 from bloobcat.utils.dates import add_months_safe
 from bloobcat.db.referral_rewards import ReferralRewards
 
-# Инициализируем клиент ЮKассы
-Configuration.account_id = yookassa_settings.shop_id
-Configuration.secret_key = yookassa_settings.secret_key.get_secret_value()
+
+PAYMENT_PROVIDER_YOOKASSA = "yookassa"
+PAYMENT_PROVIDER_PLATEGA = PLATEGA_PROVIDER
+PAYMENT_CURRENCY_RUB = "RUB"
+CLIENT_REQUEST_ID_MAX_LENGTH = 100
+
+
+def _configure_yookassa_if_available() -> bool:
+    shop_id = str(getattr(yookassa_settings, "shop_id", "") or "").strip()
+    secret_key = (
+        yookassa_settings.secret_key.get_secret_value()
+        if getattr(yookassa_settings, "secret_key", None)
+        else ""
+    ).strip()
+    if not shop_id or not secret_key:
+        return False
+    Configuration.account_id = shop_id
+    Configuration.secret_key = secret_key
+    return True
+
+
+def _active_payment_provider() -> str:
+    provider = str(getattr(payment_settings, "provider", "") or "").strip().lower()
+    if provider == PAYMENT_PROVIDER_YOOKASSA:
+        return PAYMENT_PROVIDER_YOOKASSA
+    return PAYMENT_PROVIDER_PLATEGA
+
+
+def _auto_renewal_uses_yookassa() -> bool:
+    mode = str(getattr(payment_settings, "auto_renewal_mode", "") or "").strip().lower()
+    return mode == PAYMENT_PROVIDER_YOOKASSA
+
+
+def _provider_payload_json(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def _load_provider_payload(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, dict):
+        return dict(raw)
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(str(raw))
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _metadata_from_processed_payment(row: ProcessedPayments | None) -> dict[str, Any]:
+    if not row:
+        return {}
+    provider_payload = _load_provider_payload(getattr(row, "provider_payload", None))
+    metadata = provider_payload.get("metadata")
+    if isinstance(metadata, dict):
+        return dict(metadata)
+    return {}
+
+
+def _parse_platega_metadata_from_payload(payload: Any) -> dict[str, Any]:
+    parsed = parse_platega_payload(payload)
+    metadata = parsed.get("metadata")
+    if isinstance(metadata, dict):
+        return dict(metadata)
+    return parsed
+
+
+def _round_amount_for_compare(value: Any) -> Decimal:
+    try:
+        amount = Decimal(str(value))
+    except Exception:
+        amount = Decimal("0")
+    return amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
+def _validate_platega_amount_currency(
+    *,
+    provider_amount: Any,
+    provider_currency: Any,
+    metadata: dict[str, Any],
+) -> None:
+    expected_currency = str(
+        metadata.get("expected_currency") or PAYMENT_CURRENCY_RUB
+    ).strip().upper()
+    received_currency = str(provider_currency or "").strip().upper()
+    if received_currency and received_currency != expected_currency:
+        raise HTTPException(status_code=400, detail="Payment currency mismatch")
+
+    expected_amount = metadata.get("expected_amount")
+    if expected_amount is None:
+        return
+    if _round_amount_for_compare(provider_amount) != _round_amount_for_compare(
+        expected_amount
+    ):
+        raise HTTPException(status_code=400, detail="Payment amount mismatch")
+
+
+def _platega_payment_stub(
+    *,
+    payment_id: str,
+    amount: float,
+    metadata: dict[str, Any],
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=str(payment_id),
+        amount=SimpleNamespace(value=str(amount), currency=PAYMENT_CURRENCY_RUB),
+        status="succeeded",
+        metadata=metadata,
+        payment_method=None,
+    )
+
+
+def _normalize_client_request_id(client_request_id: str | None) -> str | None:
+    if client_request_id is None:
+        return None
+    normalized = str(client_request_id).strip()
+    if not normalized:
+        return None
+    if len(normalized) > CLIENT_REQUEST_ID_MAX_LENGTH:
+        raise HTTPException(status_code=400, detail="Некорректный client_request_id")
+    return normalized
+
+
+class CreatePaymentRequest(BaseModel):
+    email: str
+    device_count: int = 1
+    lte_gb: int = 0
+    client_request_id: str | None = None
+
+
+# YooKassa remains available only as an operator-controlled rollback path.
+# Platega-first deployments can boot without YooKassa credentials.
+_configure_yookassa_if_available()
 
 router = APIRouter(prefix="/pay", tags=["pay"])
 # NOTE: YooKassa webhook URL is sometimes configured without "/pay" prefix.
@@ -343,6 +496,10 @@ async def _upsert_processed_payment(
     amount_external: float,
     amount_from_balance: float,
     status: str,
+    provider: str = PAYMENT_PROVIDER_YOOKASSA,
+    client_request_id: str | None = None,
+    payment_url: str | None = None,
+    provider_payload: str | None = None,
 ) -> ProcessedPayments:
     """
     Idempotent write to `processed_payments`.
@@ -355,18 +512,32 @@ async def _upsert_processed_payment(
         existing.amount_external = float(amount_external)
         existing.amount_from_balance = float(amount_from_balance)
         existing.status = str(status)
-        await existing.save(
-            update_fields=[
-                "user_id",
-                "amount",
-                "amount_external",
-                "amount_from_balance",
-                "status",
-            ]
-        )
+        existing.provider = str(provider or PAYMENT_PROVIDER_YOOKASSA)
+        update_fields = [
+            "user_id",
+            "amount",
+            "amount_external",
+            "amount_from_balance",
+            "status",
+            "provider",
+        ]
+        if client_request_id is not None:
+            existing.client_request_id = str(client_request_id)
+            update_fields.append("client_request_id")
+        if payment_url is not None:
+            existing.payment_url = str(payment_url)
+            update_fields.append("payment_url")
+        if provider_payload is not None:
+            existing.provider_payload = str(provider_payload)
+            update_fields.append("provider_payload")
+        await existing.save(update_fields=update_fields)
         return existing
     return await ProcessedPayments.create(
         payment_id=payment_id,
+        provider=str(provider or PAYMENT_PROVIDER_YOOKASSA),
+        client_request_id=client_request_id,
+        payment_url=payment_url,
+        provider_payload=provider_payload,
         user_id=int(user_id),
         amount=float(amount),
         amount_external=float(amount_external),
@@ -635,7 +806,13 @@ async def _fetch_today_lte_usage_gb(user_uuid: str) -> float | None:
         await client.close()
 
 
-async def _apply_succeeded_payment_fallback(yk_payment, user: Users, meta: dict) -> bool:
+async def _apply_succeeded_payment_fallback(
+    yk_payment,
+    user: Users,
+    meta: dict,
+    *,
+    provider: str = PAYMENT_PROVIDER_YOOKASSA,
+) -> bool:
     """
     Fallback processor used by `/pay/status/{payment_id}` when webhook delivery fails.
     It applies the subscription update and creates ProcessedPayments record (idempotent).
@@ -746,7 +923,7 @@ async def _apply_succeeded_payment_fallback(yk_payment, user: Users, meta: dict)
         user.lte_gb_total = lte_gb
 
     is_auto_payment = _meta_bool(meta.get("is_auto"), False)
-    if not is_auto_payment:
+    if not is_auto_payment and provider == PAYMENT_PROVIDER_YOOKASSA and _auto_renewal_uses_yookassa():
         payment_method = getattr(yk_payment, "payment_method", None)
         saved_method_id = getattr(payment_method, "id", None) if payment_method else None
         saved_flag = _meta_bool(getattr(payment_method, "saved", None), False) if payment_method else False
@@ -792,6 +969,17 @@ async def _apply_succeeded_payment_fallback(yk_payment, user: Users, meta: dict)
         amount_external=float(amount_external),
         amount_from_balance=float(amount_from_balance),
         status="succeeded",
+        provider=provider,
+        client_request_id=(
+            str(meta.get("client_request_id"))
+            if meta.get("client_request_id") is not None
+            else None
+        ),
+        provider_payload=(
+            _provider_payload_json({"metadata": meta})
+            if provider == PAYMENT_PROVIDER_PLATEGA
+            else None
+        ),
     )
 
     # Apply referral rewards / partner cashback that normally happen in webhook.
@@ -881,7 +1069,7 @@ async def _apply_succeeded_payment_fallback(yk_payment, user: Users, meta: dict)
             referrer=referrer.name() if referrer else None,
             amount=int(_round_rub(total_amount)),
             months=months,
-            method="yookassa_fallback",
+            method=f"{provider}_fallback",
             payment_id=pid,
             is_auto=is_auto_payment,
             utm=user.utm if hasattr(user, "utm") else None,
@@ -898,6 +1086,177 @@ async def _apply_succeeded_payment_fallback(yk_payment, user: Users, meta: dict)
         )
 
     return True
+
+
+def _platega_amount_currency_from_body(body: dict[str, Any]) -> tuple[float, str | None]:
+    payment_details = body.get("paymentDetails")
+    if not isinstance(payment_details, dict):
+        payment_details = {}
+    raw_amount = body.get("amount")
+    if raw_amount is None:
+        raw_amount = payment_details.get("amount")
+    try:
+        amount = float(raw_amount or 0)
+    except (TypeError, ValueError):
+        amount = 0.0
+    raw_currency = body.get("currency")
+    if raw_currency is None:
+        raw_currency = payment_details.get("currency")
+    currency = str(raw_currency).strip().upper() if raw_currency is not None else None
+    return amount, currency
+
+
+async def _apply_confirmed_platega_payment(
+    *,
+    payment_id: str,
+    user: Users,
+    metadata: dict[str, Any],
+    amount_external: float,
+) -> bool:
+    existing = await ProcessedPayments.get_or_none(payment_id=payment_id)
+    if existing and str(existing.status or "").strip().lower() == "succeeded":
+        return True
+
+    amount_from_balance = _round_rub(metadata.get("amount_from_balance", 0))
+    await _upsert_processed_payment(
+        payment_id=payment_id,
+        user_id=int(user.id),
+        amount=float(amount_external) + float(amount_from_balance),
+        amount_external=float(amount_external),
+        amount_from_balance=float(amount_from_balance),
+        status="pending",
+        provider=PAYMENT_PROVIDER_PLATEGA,
+        client_request_id=(
+            str(metadata.get("client_request_id"))
+            if metadata.get("client_request_id") is not None
+            else None
+        ),
+        provider_payload=_provider_payload_json(
+            {
+                "metadata": metadata,
+                "provider_status": PLATEGA_STATUS_CONFIRMED,
+            }
+        ),
+    )
+    return await _apply_succeeded_payment_fallback(
+        _platega_payment_stub(
+            payment_id=payment_id,
+            amount=float(amount_external),
+            metadata=metadata,
+        ),
+        user,
+        metadata,
+        provider=PAYMENT_PROVIDER_PLATEGA,
+    )
+
+
+async def _get_platega_payment_status_response(
+    *,
+    payment_id: str,
+    user: Users,
+    processed: ProcessedPayments | None,
+) -> dict[str, Any]:
+    try:
+        status_result = await PlategaClient(timeout_seconds=15.0).get_transaction_status(
+            payment_id
+        )
+    except PlategaConfigError:
+        raise HTTPException(status_code=503, detail="Payment provider is not configured")
+    except PlategaAPIError as exc:
+        logger.error(
+            "Ошибка при получении статуса платежа Platega",
+            extra={
+                "payment_id": payment_id,
+                "user_id": user.id,
+                "status_code": exc.status_code,
+            },
+        )
+        raise HTTPException(
+            status_code=503, detail="Payment status service unavailable"
+        )
+
+    provider_status = normalize_platega_status(status_result.status)
+    internal_status = map_platega_status_to_internal(provider_status)
+    metadata = _parse_platega_metadata_from_payload(status_result.payload)
+    if not metadata:
+        metadata = _metadata_from_processed_payment(processed)
+
+    raw_meta_user_id = metadata.get("user_id")
+    meta_user_id: int | None = None
+    if raw_meta_user_id is not None and str(raw_meta_user_id).strip():
+        try:
+            meta_user_id = int(raw_meta_user_id)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=404, detail="Payment not found")
+    if meta_user_id is not None and meta_user_id != int(user.id):
+        raise HTTPException(status_code=404, detail="Payment not found")
+    if meta_user_id is None and processed is None:
+        raise HTTPException(status_code=404, detail="Payment not found")
+
+    if provider_status == PLATEGA_STATUS_CONFIRMED:
+        _validate_platega_amount_currency(
+            provider_amount=status_result.amount,
+            provider_currency=status_result.currency,
+            metadata=metadata,
+        )
+        processed_status = (
+            str(getattr(processed, "status", "") or "").strip().lower()
+            if processed
+            else ""
+        )
+        if not processed or processed_status == "pending":
+            applied = await _apply_confirmed_platega_payment(
+                payment_id=payment_id,
+                user=user,
+                metadata=metadata,
+                amount_external=float(status_result.amount or 0),
+            )
+            if applied:
+                processed = await ProcessedPayments.get_or_none(payment_id=payment_id)
+    elif provider_status in {
+        PLATEGA_STATUS_CANCELED,
+        PLATEGA_STATUS_CHARGEBACK,
+        PLATEGA_STATUS_CHARGEBACKED,
+    } and processed:
+        next_status = "canceled" if provider_status == PLATEGA_STATUS_CANCELED else "refunded"
+        await _upsert_processed_payment(
+            payment_id=payment_id,
+            user_id=int(user.id),
+            amount=float(status_result.amount or processed.amount or 0),
+            amount_external=float(status_result.amount or processed.amount_external or 0),
+            amount_from_balance=float(processed.amount_from_balance or 0),
+            status=next_status,
+            provider=PAYMENT_PROVIDER_PLATEGA,
+            provider_payload=_provider_payload_json(
+                {
+                    "metadata": metadata,
+                    "provider_status": provider_status,
+                }
+            ),
+        )
+        processed = await ProcessedPayments.get_or_none(payment_id=payment_id)
+
+    processed_status = (
+        str(getattr(processed, "status", "") or "").strip().lower() if processed else ""
+    )
+    amount_value = None
+    if status_result.amount is not None:
+        amount_value = str(status_result.amount)
+    return {
+        "payment_id": payment_id,
+        "provider": PAYMENT_PROVIDER_PLATEGA,
+        "provider_status": provider_status,
+        # Backward-compatible field for older frontend code.
+        "yookassa_status": internal_status,
+        "is_final": internal_status in ("succeeded", "canceled", "refunded"),
+        "is_paid": internal_status == "succeeded",
+        "amount": amount_value,
+        "currency": status_result.currency,
+        "processed": bool(processed),
+        "processed_status": processed_status or None,
+        "entitlements_ready": bool(internal_status == "succeeded" and processed_status == "succeeded"),
+    }
+
 
 @router.get("/tariffs")
 async def get_tariffs():
@@ -928,6 +1287,21 @@ async def get_payment_status(
     if processed and int(processed.user_id) != int(user.id):
         # Don't leak existence of foreign payment IDs.
         raise HTTPException(status_code=404, detail="Payment not found")
+
+    processed_provider = (
+        str(getattr(processed, "provider", "") or "").strip().lower()
+        if processed
+        else ""
+    )
+    if processed_provider == PAYMENT_PROVIDER_PLATEGA:
+        return await _get_platega_payment_status_response(
+            payment_id=payment_id,
+            user=user,
+            processed=processed,
+        )
+
+    if not _configure_yookassa_if_available():
+        raise HTTPException(status_code=503, detail="Payment provider is not configured")
 
     try:
         yk_payment = await asyncio.wait_for(
@@ -991,6 +1365,8 @@ async def get_payment_status(
 
     return {
         "payment_id": payment_id,
+        "provider": PAYMENT_PROVIDER_YOOKASSA,
+        "provider_status": status,
         "yookassa_status": status,
         "is_final": status in ("succeeded", "canceled"),
         "is_paid": status == "succeeded",
@@ -1002,10 +1378,159 @@ async def get_payment_status(
 
 
 
+@router.post("/webhook/platega")
+@webhook_router.post("/webhook/platega")
+async def platega_webhook(request: Request):
+    expected_merchant_id = str(platega_settings.merchant_id or "").strip()
+    expected_secret = (
+        platega_settings.secret_key.get_secret_value()
+        if platega_settings.secret_key
+        else ""
+    ).strip()
+    if not expected_merchant_id or not expected_secret:
+        logger.error("Platega webhook received but provider is not configured")
+        raise HTTPException(status_code=503, detail="Payment provider is not configured")
+
+    merchant_id = str(request.headers.get("X-MerchantId") or "").strip()
+    secret = str(request.headers.get("X-Secret") or "").strip()
+    if not hmac.compare_digest(merchant_id, expected_merchant_id) or not hmac.compare_digest(
+        secret, expected_secret
+    ):
+        logger.error("Получен webhook Platega с неверными заголовками авторизации")
+        raise HTTPException(status_code=403, detail="Invalid Platega credentials")
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Invalid callback payload")
+
+    payment_id = str(body.get("id") or body.get("transactionId") or "").strip()
+    if not payment_id:
+        raise HTTPException(status_code=400, detail="Missing transaction id")
+
+    provider_status = normalize_platega_status(body.get("status"))
+    amount_external, currency = _platega_amount_currency_from_body(body)
+    processed = await ProcessedPayments.get_or_none(payment_id=payment_id)
+    metadata = _parse_platega_metadata_from_payload(body.get("payload"))
+    if not metadata:
+        metadata = _metadata_from_processed_payment(processed)
+
+    try:
+        user_id = int(metadata.get("user_id") or (processed.user_id if processed else 0))
+    except (TypeError, ValueError):
+        user_id = 0
+    if not user_id:
+        logger.error(
+            "Некорректные метаданные в webhook Platega",
+            extra={"payment_id": payment_id, "provider_status": provider_status},
+        )
+        return {"status": "error", "message": "Invalid metadata"}
+    if processed and int(processed.user_id) != int(user_id):
+        logger.error(
+            "Platega webhook user mismatch",
+            extra={"payment_id": payment_id, "provider_status": provider_status},
+        )
+        raise HTTPException(status_code=400, detail="Payment metadata mismatch")
+
+    user = await Users.get_or_none(id=user_id)
+    if not user:
+        logger.error(
+            "Пользователь из webhook Platega не найден",
+            extra={"payment_id": payment_id, "user_id": user_id},
+        )
+        return {"status": "error", "message": "User not found"}
+
+    amount_from_balance = _round_rub(metadata.get("amount_from_balance", 0))
+    provider_payload = _provider_payload_json(
+        {
+            "metadata": metadata,
+            "provider_status": provider_status,
+            "payment_method": body.get("paymentMethod"),
+        }
+    )
+
+    if provider_status == PLATEGA_STATUS_CONFIRMED:
+        _validate_platega_amount_currency(
+            provider_amount=amount_external,
+            provider_currency=currency,
+            metadata=metadata,
+        )
+        await _apply_confirmed_platega_payment(
+            payment_id=payment_id,
+            user=user,
+            metadata=metadata,
+            amount_external=float(amount_external),
+        )
+        return {"status": "ok"}
+
+    if provider_status == PLATEGA_STATUS_CANCELED:
+        already_canceled = bool(
+            processed and str(processed.status or "").strip().lower() == "canceled"
+        )
+        await _upsert_processed_payment(
+            payment_id=payment_id,
+            user_id=user_id,
+            amount=float(amount_external) + float(amount_from_balance),
+            amount_external=float(amount_external),
+            amount_from_balance=float(amount_from_balance),
+            status="canceled",
+            provider=PAYMENT_PROVIDER_PLATEGA,
+            client_request_id=(
+                str(metadata.get("client_request_id"))
+                if metadata.get("client_request_id") is not None
+                else None
+            ),
+            provider_payload=provider_payload,
+        )
+        if not already_canceled and not _meta_bool(metadata.get("is_auto"), False):
+            try:
+                await notify_payment_canceled_yookassa(user=user)
+            except Exception as notify_exc:
+                logger.error(
+                    "Ошибка при отправке уведомления об отмене Platega-платежа: %s",
+                    notify_exc,
+                    extra={"payment_id": payment_id, "user_id": user_id},
+                )
+        return {"status": "ok"}
+
+    if provider_status in {PLATEGA_STATUS_CHARGEBACK, PLATEGA_STATUS_CHARGEBACKED}:
+        user.is_subscribed = False
+        user.renew_id = None
+        await user.save()
+        await _upsert_processed_payment(
+            payment_id=payment_id,
+            user_id=user_id,
+            amount=float(amount_external) + float(amount_from_balance),
+            amount_external=float(amount_external),
+            amount_from_balance=float(amount_from_balance),
+            status="refunded",
+            provider=PAYMENT_PROVIDER_PLATEGA,
+            client_request_id=(
+                str(metadata.get("client_request_id"))
+                if metadata.get("client_request_id") is not None
+                else None
+            ),
+            provider_payload=provider_payload,
+        )
+        return {"status": "ok"}
+
+    logger.warning(
+        "Unknown Platega webhook status",
+        extra={"payment_id": payment_id, "provider_status": provider_status},
+    )
+    return {"status": "ok"}
+
+
 @router.post("/webhook/yookassa/{secret}")
 @webhook_router.post("/webhook/yookassa/{secret}")
 async def yookassa_webhook(request: Request, secret: str):
-    if secret != yookassa_settings.webhook_secret:
+    expected_secret = str(getattr(yookassa_settings, "webhook_secret", "") or "").strip()
+    if not expected_secret:
+        logger.error("YooKassa webhook received but YooKassa is not configured")
+        raise HTTPException(status_code=503, detail="Payment provider is not configured")
+    if secret != expected_secret:
         logger.error("Получен webhook с неверным секретным ключом")
         raise HTTPException(status_code=403, detail="Invalid secret")
     
@@ -2019,18 +2544,36 @@ async def yookassa_webhook(request: Request, secret: str):
         )
         raise HTTPException(status_code=500, detail="Internal server error")
 
+@router.post("/{tariff_id}")
+async def pay_post(
+    tariff_id: int,
+    payload: CreatePaymentRequest,
+    user: Users = Depends(validate),
+):
+    return await pay(
+        tariff_id=tariff_id,
+        email=payload.email,
+        device_count=int(payload.device_count),
+        lte_gb=int(payload.lte_gb),
+        client_request_id=payload.client_request_id,
+        user=user,
+    )
+
+
 @router.get("/{tariff_id}")
 async def pay(
     tariff_id: int,
     email: str,
     device_count: int = 1,
     lte_gb: int = 0,
+    client_request_id: str | None = None,
     user: Users = Depends(validate),
 ):
     tariff = await Tariffs.get_or_none(id=tariff_id)
     if tariff is None or not bool(getattr(tariff, "is_active", True)):
         raise HTTPException(status_code=404, detail="Tariff not found")
     await tariff.sync_effective_pricing_fields()
+    normalized_client_request_id = _normalize_client_request_id(client_request_id)
 
     # Проверяем количество устройств
     if device_count < 1:
@@ -2324,7 +2867,11 @@ async def pay(
         except Exception:
             pass
 
-        return {"status": "success", "message": "Оплачено с бонусного баланса"}
+        return {
+            "status": "success",
+            "message": "Оплачено с бонусного баланса",
+            "provider": "balance",
+        }
 
     else:
         # Логика частичной оплаты
@@ -2351,12 +2898,121 @@ async def pay(
             "lte_price_per_gb": lte_price_per_gb,
             "lte_cost": lte_cost,
         }
+        if normalized_client_request_id is not None:
+            metadata["client_request_id"] = normalized_client_request_id
 
         # Build return_url safely:
         # Always return to bot chat (not Mini App). Status is delivered by bot message.
         return_url = await _resolve_payment_return_url()
+        metadata["expected_amount"] = float(amount_to_pay)
+        metadata["expected_currency"] = PAYMENT_CURRENCY_RUB
+        metadata["payment_provider"] = _active_payment_provider()
+
+        if _active_payment_provider() == PAYMENT_PROVIDER_PLATEGA:
+            if normalized_client_request_id is not None:
+                existing_payment = (
+                    await ProcessedPayments.filter(
+                        provider=PAYMENT_PROVIDER_PLATEGA,
+                        user_id=int(user.id),
+                        client_request_id=normalized_client_request_id,
+                    )
+                    .order_by("-processed_at")
+                    .first()
+                )
+                if existing_payment:
+                    existing_status = str(
+                        getattr(existing_payment, "status", "") or ""
+                    ).strip().lower()
+                    existing_url = str(
+                        getattr(existing_payment, "payment_url", "") or ""
+                    ).strip()
+                    if existing_status == "pending" and existing_url:
+                        return {
+                            "redirect_to": existing_url,
+                            "payment_id": existing_payment.payment_id,
+                            "provider": PAYMENT_PROVIDER_PLATEGA,
+                        }
+                    if existing_status == "succeeded":
+                        return {
+                            "status": "success",
+                            "message": "Платёж уже обработан",
+                            "already_processed": True,
+                            "payment_id": existing_payment.payment_id,
+                            "provider": PAYMENT_PROVIDER_PLATEGA,
+                        }
+                    raise HTTPException(
+                        status_code=409, detail="Платёж уже обрабатывается"
+                    )
+
+            platega_payload = _provider_payload_json({"metadata": metadata})
+            try:
+                platega_payment = await PlategaClient().create_transaction(
+                    amount=float(amount_to_pay),
+                    currency=PAYMENT_CURRENCY_RUB,
+                    description=f"Оплата подписки пользователя {user.id} (Тариф: {tariff.name})",
+                    return_url=return_url,
+                    failed_url=return_url,
+                    payload=platega_payload,
+                )
+            except PlategaConfigError:
+                logger.error("Platega selected but credentials are not configured")
+                raise HTTPException(
+                    status_code=503,
+                    detail="Сервис оплаты временно недоступен. Пожалуйста, попробуйте позже.",
+                )
+            except PlategaAPIError as platega_error:
+                logger.error(
+                    "Ошибка при создании платежа Platega",
+                    extra={
+                        "user_id": user.id,
+                        "tariff_id": tariff_id,
+                        "amount": amount_to_pay,
+                        "status_code": platega_error.status_code,
+                    },
+                )
+                raise HTTPException(
+                    status_code=503,
+                    detail="Сервис оплаты временно недоступен. Пожалуйста, попробуйте позже.",
+                )
+
+            await _upsert_processed_payment(
+                payment_id=platega_payment.transaction_id,
+                user_id=user.id,
+                amount=float(amount_to_pay) + float(amount_from_balance),
+                amount_external=float(amount_to_pay),
+                amount_from_balance=float(amount_from_balance),
+                status="pending",
+                provider=PAYMENT_PROVIDER_PLATEGA,
+                client_request_id=normalized_client_request_id,
+                payment_url=platega_payment.redirect_url,
+                provider_payload=_provider_payload_json(
+                    {
+                        "metadata": metadata,
+                        "provider_status": platega_payment.status,
+                        "provider_response": {
+                            "transactionId": platega_payment.transaction_id,
+                            "status": platega_payment.status,
+                            "redirect": platega_payment.redirect_url,
+                        },
+                    }
+                ),
+            )
+            return {
+                "redirect_to": platega_payment.redirect_url,
+                "payment_id": platega_payment.transaction_id,
+                "provider": PAYMENT_PROVIDER_PLATEGA,
+            }
 
         # Обернуть синхронный вызов YooKassa в async с таймаутом
+        if not _configure_yookassa_if_available():
+            logger.error(
+                "YooKassa payment requested but provider credentials are not configured",
+                extra={"user_id": user.id, "tariff_id": tariff_id},
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Сервис оплаты временно недоступен. Пожалуйста, попробуйте позже.",
+            )
         try:
             payment_data = {
                 "amount": {
@@ -2455,7 +3111,11 @@ async def pay(
                 extra={'user_id': user.id, 'tariff_id': tariff_id},
             )
 
-        return {"redirect_to": payment.confirmation.confirmation_url, "payment_id": payment.id}
+        return {
+            "redirect_to": payment.confirmation.confirmation_url,
+            "payment_id": payment.id,
+            "provider": PAYMENT_PROVIDER_YOOKASSA,
+        }
 
 async def create_auto_payment(user: Users, disable_on_fail: bool = True) -> bool:
     """
@@ -2463,6 +3123,13 @@ async def create_auto_payment(user: Users, disable_on_fail: bool = True) -> bool
     Returns:
         bool: True если платеж успешно создан, False в случае ошибки
     """
+    if not _auto_renewal_uses_yookassa():
+        logger.info(
+            "Auto-renewal is disabled by PAYMENT_AUTO_RENEWAL_MODE; skipping user=%s",
+            user.id,
+        )
+        return False
+
     # Вычисляем will_retry один раз для всех уведомлений об ошибках
     user_expired_at = normalize_date(user.expired_at)
     will_retry = user_expired_at is not None and (user_expired_at - date.today()).days >= 0
@@ -2668,6 +3335,17 @@ async def create_auto_payment(user: Users, disable_on_fail: bool = True) -> bool
             }
 
             # Создаем автоплатеж Yookassa с таймаутом
+            if not _configure_yookassa_if_available():
+                logger.error(
+                    "YooKassa auto-payment requested but provider credentials are not configured",
+                    extra={"user_id": user.id, "tariff_id": active_tariff.id},
+                )
+                await notify_auto_renewal_failure(
+                    user,
+                    reason="Сервис оплаты не настроен",
+                    will_retry=will_retry,
+                )
+                return False
             try:
                 payment_data = {
                     "amount": {

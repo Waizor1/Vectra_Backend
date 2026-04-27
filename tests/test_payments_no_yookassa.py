@@ -1,4 +1,5 @@
 import asyncio
+import os
 import sys
 import types
 from pathlib import Path
@@ -11,6 +12,19 @@ from tortoise import Tortoise
 
 def install_stubs() -> None:
     """РџРѕРґРјРµРЅСЏРµС‚ РІРЅРµС€РЅРёРµ Р·Р°РІРёСЃРёРјРѕСЃС‚Рё (YooKassa, СѓРІРµРґРѕРјР»РµРЅРёСЏ, RemnaWave, scheduler)."""
+    os.environ.setdefault("TELEGRAM_TOKEN", "123456:test-token")
+    os.environ.setdefault("TELEGRAM_WEBHOOK_SECRET", "test-webhook-secret")
+    os.environ.setdefault("TELEGRAM_WEBAPP_URL", "https://t.me/test_bot/app")
+    os.environ.setdefault("TELEGRAM_MINIAPP_URL", "https://example.com/")
+    os.environ.setdefault("REMNAWAVE_URL", "https://remnawave.example")
+    os.environ.setdefault("REMNAWAVE_TOKEN", "test-remnawave-token")
+    os.environ.setdefault("SCRIPT_DB", "sqlite://:memory:")
+    os.environ.setdefault("SCRIPT_DEV", "false")
+    os.environ.setdefault("SCRIPT_API_URL", "https://api.example.com")
+    os.environ.setdefault("ADMIN_TELEGRAM_ID", "1")
+    os.environ.setdefault("ADMIN_LOGIN", "admin")
+    os.environ.setdefault("ADMIN_PASSWORD", "password")
+
     # yookassa stubs
     yk_module = types.ModuleType("yookassa")
 
@@ -397,11 +411,14 @@ async def test_pay_from_balance_sets_active_tariff_without_discount_and_consumes
 
 
 @pytest.mark.asyncio
-async def test_create_auto_payment_from_balance_no_double_discount():
+async def test_create_auto_payment_from_balance_no_double_discount(monkeypatch):
     from bloobcat.db.users import Users
     from bloobcat.db.active_tariff import ActiveTariffs
     from bloobcat.db.discounts import PersonalDiscount
     from bloobcat.routes.payment import create_auto_payment
+    from bloobcat.settings import payment_settings
+
+    monkeypatch.setattr(payment_settings, "auto_renewal_mode", "yookassa", raising=False)
 
     # Arrange: РїРѕР»СЊР·РѕРІР°С‚РµР»СЊ СѓР¶Рµ РёРјРµРµС‚ Р°РєС‚РёРІРЅС‹Р№ С‚Р°СЂРёС„ (РєР°Рє РїРѕСЃР»Рµ РїСЂРµРґС‹РґСѓС‰РµРіРѕ С‚РµСЃС‚Р°)
     user = await Users.create(id=456, username="auto", full_name="Auto User", balance=10_000, is_registered=True)
@@ -590,3 +607,157 @@ async def test_friend_bonus_does_not_extend_for_family_member_with_expired_perso
 
     referrer_after = await Users.get(id=referrer.id)
     assert int(referrer_after.referral_bonus_days_total or 0) == 7
+
+
+@pytest.mark.asyncio
+async def test_platega_create_payment_returns_redirect_and_reuses_client_request_id(monkeypatch):
+    from bloobcat.db.payments import ProcessedPayments
+    from bloobcat.db.tariff import Tariffs
+    from bloobcat.db.users import Users
+    import bloobcat.routes.payment as payment_route
+    from bloobcat.services.platega import PlategaCreateResult
+    from bloobcat.settings import payment_settings
+
+    monkeypatch.setattr(payment_settings, "provider", "platega", raising=False)
+    monkeypatch.setattr(payment_settings, "auto_renewal_mode", "disabled", raising=False)
+
+    user = await Users.create(
+        id=1201,
+        username="platega",
+        full_name="Platega User",
+        balance=0,
+        is_registered=True,
+    )
+    tariff = await Tariffs.create(
+        id=21,
+        name="1m",
+        months=1,
+        base_price=1000,
+        progressive_multiplier=1,
+        order=1,
+    )
+    calls: list[dict] = []
+
+    class FakePlategaClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def create_transaction(self, **kwargs):
+            calls.append(kwargs)
+            return PlategaCreateResult(
+                transaction_id="platega_tx_1",
+                status="PENDING",
+                redirect_url="https://pay.example/platega_tx_1",
+                raw={},
+            )
+
+    monkeypatch.setattr(payment_route, "PlategaClient", FakePlategaClient)
+
+    result = await payment_route.pay(
+        tariff_id=tariff.id,
+        email="platega@example.com",
+        device_count=1,
+        client_request_id="req-1",
+        user=user,
+    )
+    retry = await payment_route.pay(
+        tariff_id=tariff.id,
+        email="platega@example.com",
+        device_count=1,
+        client_request_id="req-1",
+        user=user,
+    )
+
+    assert result == retry
+    assert result["provider"] == "platega"
+    assert result["payment_id"] == "platega_tx_1"
+    assert result["redirect_to"] == "https://pay.example/platega_tx_1"
+    assert len(calls) == 1
+    assert calls[0]["currency"] == "RUB"
+    row = await ProcessedPayments.get(payment_id="platega_tx_1")
+    assert row.provider == "platega"
+    assert row.client_request_id == "req-1"
+    assert row.payment_url == "https://pay.example/platega_tx_1"
+    assert row.status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_platega_status_confirmed_applies_subscription_without_renew_id(monkeypatch):
+    from bloobcat.db.payments import ProcessedPayments
+    from bloobcat.db.tariff import Tariffs
+    from bloobcat.db.users import Users
+    import bloobcat.routes.payment as payment_route
+    from bloobcat.services.platega import PlategaStatusResult
+    from bloobcat.settings import payment_settings
+
+    monkeypatch.setattr(payment_settings, "provider", "platega", raising=False)
+    monkeypatch.setattr(payment_settings, "auto_renewal_mode", "disabled", raising=False)
+
+    user = await Users.create(
+        id=1301,
+        username="platega-status",
+        full_name="Platega Status",
+        balance=0,
+        is_registered=True,
+        renew_id=None,
+    )
+    tariff = await Tariffs.create(
+        id=22,
+        name="1m",
+        months=1,
+        base_price=1000,
+        progressive_multiplier=1,
+        order=1,
+    )
+    metadata = {
+        "user_id": user.id,
+        "month": 1,
+        "amount_from_balance": 0,
+        "tariff_id": tariff.id,
+        "device_count": 1,
+        "expected_amount": 1000,
+        "expected_currency": "RUB",
+        "client_request_id": "req-confirm",
+    }
+    await ProcessedPayments.create(
+        payment_id="platega_tx_confirm",
+        provider="platega",
+        client_request_id="req-confirm",
+        payment_url="https://pay.example/platega_tx_confirm",
+        provider_payload=payment_route._provider_payload_json({"metadata": metadata}),
+        user_id=user.id,
+        amount=1000,
+        amount_external=1000,
+        amount_from_balance=0,
+        status="pending",
+    )
+
+    class FakePlategaClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def get_transaction_status(self, transaction_id: str):
+            assert transaction_id == "platega_tx_confirm"
+            return PlategaStatusResult(
+                transaction_id=transaction_id,
+                status="CONFIRMED",
+                amount=1000,
+                currency="RUB",
+                payload=payment_route._provider_payload_json({"metadata": metadata}),
+                raw={},
+            )
+
+    monkeypatch.setattr(payment_route, "PlategaClient", FakePlategaClient)
+
+    result = await payment_route.get_payment_status("platega_tx_confirm", user=user)
+
+    assert result["provider"] == "platega"
+    assert result["provider_status"] == "CONFIRMED"
+    assert result["yookassa_status"] == "succeeded"
+    assert result["is_paid"] is True
+
+    user_after = await Users.get(id=user.id)
+    assert user_after.expired_at is not None
+    assert user_after.renew_id is None
+    row = await ProcessedPayments.get(payment_id="platega_tx_confirm")
+    assert row.status == "succeeded"
