@@ -317,6 +317,54 @@ jobs:
           cleanup_stale_fixed_name_container "directus" "false"
         fi
 
+        # Stable reset hosts can have fixed-name containers from a previous
+        # compose project but keep the same named volumes. Remove only the
+        # containers so Docker Compose can recreate them; never remove volumes
+        # outside the explicit destructive reinstall mode above.
+        container_exists_exact() {
+          container_name="$1"
+          matched_name="$(docker ps -a --filter "name=^/${container_name}$" --format '{{.Names}}')"
+          [ "$matched_name" = "$container_name" ]
+        }
+
+        inspect_container_compose_project_label() {
+          container_name="$1"
+          container_label="$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.project" }}' "$container_name" 2>/dev/null || true)"
+          if [ "$container_label" = "<no value>" ] || [ "$container_label" = "<nil>" ]; then
+            container_label=""
+          fi
+          printf '%s' "$container_label"
+        }
+
+        cleanup_stale_fixed_name_container() {
+          container_name="$1"
+          allow_unlabeled="$2"
+
+          if ! container_exists_exact "$container_name"; then
+            echo "ℹ️  No stale fixed-name container found: $container_name"
+            return 0
+          fi
+
+          container_project_label="$(inspect_container_compose_project_label "$container_name")"
+          if [ -n "$container_project_label" ] && [ "$container_project_label" != "$COMPOSE_PROJECT_NAME_RESOLVED" ]; then
+            echo "⏭️  Skipping fixed-name container owned by another compose project: $container_name (project='$container_project_label')"
+            return 0
+          fi
+
+          if [ -z "$container_project_label" ] && [ "$allow_unlabeled" != "true" ]; then
+            echo "⏭️  Skipping unlabeled fixed-name container due alias safety guard: $container_name"
+            return 0
+          fi
+
+          echo "🧽 Removing stale fixed-name container before compose up: $container_name"
+          docker rm -f "$container_name"
+        }
+
+        cleanup_stale_fixed_name_container "bloobcat_db" "true"
+        cleanup_stale_fixed_name_container "bloobcat" "true"
+        cleanup_stale_fixed_name_container "bloobcat_directus" "true"
+        cleanup_stale_fixed_name_container "directus" "false"
+
         echo "🗄️  Starting DB service first with retries..."
         DB_DEPLOY_OK=0
         for attempt in 1 2 3; do
