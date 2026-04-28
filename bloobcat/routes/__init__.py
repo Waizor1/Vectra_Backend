@@ -16,6 +16,7 @@ from .referrals import router as referrals_router
 from .subscription import router as subscription_router
 from .error_reports import router as error_reports_router
 from .notifications import router as notifications_router
+from .welcome_vpn import router as welcome_vpn_router
 
 main_router = APIRouter()
 
@@ -36,6 +37,7 @@ main_router.include_router(discounts_router)
 main_router.include_router(captain_lookup_router)
 main_router.include_router(admin_integration_router)
 main_router.include_router(notifications_router)
+main_router.include_router(welcome_vpn_router)
 
 # Флаг для отслеживания, был ли уже включен маршрутизатор бота
 _bot_router_included = False

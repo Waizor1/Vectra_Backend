@@ -3,20 +3,8 @@
 }
 
 # API domain (backend)
-api.waiz-store.ru {
+api-app.vectra-pro.net {
   encode gzip
-
-  # Convenience: opening the bare domain in a browser should show the admin UI.
-  # This affects ONLY "/" and won't interfere with the backend API routes.
-  @root path /
-  redir @root https://admin.waiz-store.ru/admin/tvpn-home permanent
 
   reverse_proxy bloobcat:33083
 }
-
-# Admin domain (Directus)
-admin.waiz-store.ru {
-  encode gzip
-  reverse_proxy directus:8055
-}
-

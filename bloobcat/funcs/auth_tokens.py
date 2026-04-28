@@ -6,7 +6,7 @@ import jwt
 from bloobcat.settings import auth_settings
 
 
-def create_access_token(user_id: int) -> Tuple[str, int]:
+def create_access_token(user_id: int, *, token_version: int = 0) -> Tuple[str, int]:
     ttl_seconds = int(auth_settings.access_token_ttl_seconds or 0)
     if ttl_seconds <= 0:
         ttl_seconds = 86400
@@ -16,6 +16,7 @@ def create_access_token(user_id: int) -> Tuple[str, int]:
         "iat": int(now.timestamp()),
         "exp": int((now + timedelta(seconds=ttl_seconds)).timestamp()),
         "typ": "access",
+        "ver": int(token_version or 0),
     }
     token = jwt.encode(
         payload,

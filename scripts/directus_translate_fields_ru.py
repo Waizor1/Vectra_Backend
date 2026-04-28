@@ -133,8 +133,6 @@ def main() -> None:
         "promo_batches",
         "promo_codes",
         "promo_usages",
-        "prize_wheel_config",
-        "prize_wheel_history",
         "connections",
         "processed_payments",
         "notification_marks",

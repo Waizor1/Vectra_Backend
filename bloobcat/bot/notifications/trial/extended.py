@@ -16,22 +16,28 @@ async def notify_trial_extended(user, days: int):
     """
     max_retries = 3
     base_delay = 1.0  # базовая задержка для exponential backoff
-    
+
     for attempt in range(max_retries):
         try:
             logger.debug(f"[{user.id}] Starting notify_trial_extended for {days} days (attempt {attempt + 1}/{max_retries})")
-            
+
             # Получаем локаль пользователя
             locale = get_user_locale(user)
-            
+
             # Формируем сообщение
             if locale == "en":
-                message_text = f"Great news! Your free trial has been extended for {days} more day{'s' if days != 1 else ''}!\n\nEnjoy your extended access and feel free to explore all features."
+                message_text = (
+                    f"{user.full_name}, your trial access has been extended.\n\n"
+                    f"Additional period: {days} day{'s' if days != 1 else ''}."
+                )
                 button_text = "Open App"
             else:
-                message_text = f"Отличные новости! Ваш бесплатный период продлён ещё на {days} {'день' if days == 1 else 'дней'}!\n\nНаслаждайтесь расширенным доступом и изучайте все возможности."
+                message_text = (
+                    f"{user.full_name}, пробный доступ продлён.\n\n"
+                    f"Дополнительный срок: {days} {'день' if days == 1 else 'дня' if days in (2, 3, 4) else 'дней'}."
+                )
                 button_text = "Открыть приложение"
-            
+
             # Создаём кнопку с таймаутом (оптимизировано до 5 секунд)
             try:
                 keyboard = await asyncio.wait_for(
@@ -45,7 +51,7 @@ async def notify_trial_extended(user, days: int):
             except Exception as e:
                 logger.warning(f"[{user.id}] Failed to create keyboard: {e}, sending without keyboard")
                 keyboard = None
-            
+
             # Отправляем сообщение с оптимизированным таймаутом (15 секунд)
             try:
                 await asyncio.wait_for(
@@ -57,17 +63,17 @@ async def notify_trial_extended(user, days: int):
                     ),
                     timeout=15.0
                 )
-                
+
                 logger.info(f"[{user.id}] Trial extension notification sent successfully")
                 # Сбрасываем счетчик неудач при успешной отправке
                 await reset_user_failed_count(user.id)
                 return True
-                
+
             except TelegramRetryAfter as e:
                 # ОПТИМИЗИРОВАНО: Правильная обработка retry_after из Telegram API
                 retry_after = e.retry_after
                 logger.warning(f"[{user.id}] Telegram rate limit hit, retry after {retry_after}s (attempt {attempt + 1})")
-                
+
                 if attempt < max_retries - 1:  # не последняя попытка
                     # Добавляем jitter для распределения нагрузки
                     jitter = random.uniform(0.1, 0.5)
@@ -78,17 +84,17 @@ async def notify_trial_extended(user, days: int):
                 else:
                     logger.error(f"[{user.id}] Exhausted retries after Telegram rate limits")
                     raise
-                    
+
             except TelegramBadRequest as e:
                 logger.error(f"[{user.id}] Bad request error: {e}")
                 await handle_telegram_bad_request(user.id, e)
                 return False
-                
+
             except TelegramForbiddenError as e:
                 logger.warning(f"[{user.id}] User blocked the bot: {e}")
                 await handle_telegram_forbidden_error(user.id, e)
                 return False
-                
+
             except asyncio.TimeoutError:
                 logger.debug(f"[{user.id}] Message sending timed out after 15s (attempt {attempt + 1})")
                 if attempt < max_retries - 1:
@@ -99,7 +105,7 @@ async def notify_trial_extended(user, days: int):
                     continue
                 else:
                     raise
-                    
+
             except Exception as e:
                 logger.error(f"[{user.id}] Unexpected error sending message: {e}")
                 if attempt < max_retries - 1:
@@ -109,11 +115,11 @@ async def notify_trial_extended(user, days: int):
                     continue
                 else:
                     raise
-                    
+
         except Exception as e:
             logger.error(f"[{user.id}] Critical error in notify_trial_extended: {e}")
             return False
-    
+
     # Если мы дошли сюда, все попытки исчерпаны
     logger.error(f"[{user.id}] Failed to send trial extension notification after {max_retries} attempts")
-    return False 
+    return False

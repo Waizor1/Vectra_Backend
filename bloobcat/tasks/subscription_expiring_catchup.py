@@ -7,6 +7,7 @@ from bloobcat.db.notifications import NotificationMarks
 from bloobcat.bot.notifications.subscription.expiration import notify_expiring_subscription
 from bloobcat.logger import get_logger
 from bloobcat.settings import payment_settings
+from bloobcat.tasks.quiet_hours import MORNING_DELIVERY_TIME
 
 MOSCOW = ZoneInfo("Europe/Moscow")
 logger = get_logger("tasks.subscription_expiring_catchup")
@@ -27,15 +28,13 @@ async def _send_for_target_days(offset_days: int, now_msk: datetime) -> int:
     key_prefix = f"{offset_days}d:{target_date}"
     filters = {
         "is_subscribed": True,
+        "is_blocked": False,
         "expired_at": target_date,
     }
-    # only users without active auto-renewal; when global auto-renewal is disabled,
-    # existing YooKassa renew_id values are kept for rollback but must not suppress reminders.
-    if str(getattr(payment_settings, "auto_renewal_mode", "") or "").strip().lower() == "yookassa":
+    if payment_settings.auto_renewal_mode == "yookassa":
+        # In YooKassa mode these reminders are only for users without auto-renewal.
         filters["renew_id__isnull"] = True
-    users = await Users.filter(
-        **filters,
-    )
+    users = await Users.filter(**filters)
     sent = 0
     for user in users:
         exists = await NotificationMarks.filter(
@@ -44,13 +43,14 @@ async def _send_for_target_days(offset_days: int, now_msk: datetime) -> int:
         if exists:
             continue
         try:
-            await notify_expiring_subscription(user)
-            await NotificationMarks.create(
-                user_id=user.id,
-                type="subscription_expiring",
-                key=key_prefix,
-            )
-            sent += 1
+            sent_ok = await notify_expiring_subscription(user)
+            if sent_ok:
+                await NotificationMarks.create(
+                    user_id=user.id,
+                    type="subscription_expiring",
+                    key=key_prefix,
+                )
+                sent += 1
         except Exception as e:
             logger.error(f"Failed subscription expiring notify for user {user.id}: {e}")
     return sent
@@ -60,8 +60,8 @@ async def subscription_expiring_catchup_once(now_msk: datetime | None = None) ->
     if now_msk is None:
         now_msk = datetime.now(MOSCOW)
     total_sent = 0
-    # 3d/2d at midnight window
-    if _in_window(now_msk, time(0, 0), hours=1):
+    # 3d/2d after quiet hours
+    if _in_window(now_msk, MORNING_DELIVERY_TIME, hours=1):
         total_sent += await _send_for_target_days(3, now_msk)
         total_sent += await _send_for_target_days(2, now_msk)
     # 1d at noon window
@@ -82,4 +82,3 @@ async def run_subscription_expiring_catchup_scheduler(interval_seconds: int = 60
         except Exception as e:
             logger.error(f"Error in subscription expiring catch-up scheduler: {e}")
         await asyncio.sleep(interval_seconds)
-

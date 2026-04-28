@@ -744,7 +744,7 @@ export default function registerEndpoint(router, { database }) {
       const disabled = payload.disabled === true;
       const expiresAt = normalizePromoDate(payload.expires_at);
       const effects = normalizePlainObject(payload.effects, 20_000);
-      const codePrefix = sanitizePromoPrefix(payload.code_prefix || "TVPN");
+      const codePrefix = sanitizePromoPrefix(payload.code_prefix || "VECTRA");
       const requestedName = sanitizePromoName(payload.name);
 
       let batchId = null;

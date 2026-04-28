@@ -1,3 +1,331 @@
+## 2026-03-06
+
+### test(warnings): continuity closure after deprecation-warning remediation
+
+- Scope (exact changed files in tests):
+  - `tests/_sqlite_datetime_compat.py`
+  - `tests/test_user_recreate_cleanup.py`
+  - `tests/test_family_freeze_resume.py`
+  - `tests/test_payment_idempotency_race.py`
+  - `tests/test_payments_no_yookassa.py`
+  - `tests/test_user_family_summary.py`
+- Goal and achieved warning reduction:
+  - goal: remove backend pytest deprecation-warning noise introduced by SQLite datetime parsing paths and keep suites strict-clean;
+  - baseline -> current: `114 warnings` (previous full-suite baseline) -> `0 warnings observed` on full suite with default warnings mode.
+- Verification commands and concise results:
+  - `py -3.12 -m pytest tests/test_user_recreate_cleanup.py tests/test_family_freeze_resume.py tests/test_payment_idempotency_race.py tests/test_payments_no_yookassa.py tests/test_user_family_summary.py -q -W error::DeprecationWarning` -> `48 passed`.
+  - `py -3.12 -m pytest tests -q -W default` -> `203 passed`, `0 warnings observed`.
+  - `py -3.12 -m pytest tests -q -W error::DeprecationWarning` -> `203 passed`.
+  - `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "scripts/predeploy.ps1"` -> `PASS`.
+- Versioning decision:
+  - no bump (test-only remediation; no runtime/user-visible behavior change).
+- Residual risks/notes:
+  - strict-clean state depends on preserving test bootstrap compatibility helper usage in warning-sensitive suites;
+  - future dependency upgrades (Python/stdlib/ORM) can reintroduce warnings and should be revalidated with both default and strict warning gates.
+
+## 2026-03-04
+
+### chore(version/backend): governance remediation minor bump for Directus fail-closed hotfix
+
+- Scope: `pyproject.toml` (required policy bump) and `memory-base/log.md` continuity entry only.
+- Version policy action: backend `0.27.0 -> 0.28.0` for runtime-visible backend hotfix train.
+- Key invariants:
+  - no migrations;
+  - no runtime logic changes;
+  - no unrelated file edits.
+- Verification commands:
+  - `py -3.12 -m pytest tests/test_directus_postgres_reliability_artifacts.py -q`
+  - `py -3.12 -c "import tomllib, pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))['tool']['poetry']['version'])"`
+
+## 2026-03-04
+
+### fix(deploy/post-setup-gate): remove fragile heredoc self-heal shell and switch to dedicated script
+
+- Incident from production deploy log:
+  - post-super-setup verify correctly detected FK drift (`NO ACTION` on three critical FKs);
+  - fallback self-heal step crashed before execution with shell parse error:
+    - `sh: 45: Syntax error: end of file unexpected (expecting ")")`.
+- Root cause: inline Python heredoc embedded inside grouped shell condition in workflow remote script (`if ( ... <<'PY' || ... )`) remained parser-fragile in container `sh`.
+- Implemented hard fix:
+  - added `scripts/self_heal_runtime_state.py` that initializes Tortoise and runs:
+    - `ensure_active_tariffs_fk_cascade()`
+    - `ensure_notification_marks_fk_cascade()`
+    - `ensure_users_referred_by_fk_set_null()`
+  - workflow post-super-setup gate now calls script directly:
+    - `python scripts/self_heal_runtime_state.py || python3 scripts/self_heal_runtime_state.py`
+  - removed inline heredoc Python block from workflow gate.
+- Regression coverage updates:
+  - updated workflow artifact assertions to require script invocation marker;
+  - added script artifact test verifying all 3 FK guards and Tortoise init/close lifecycle.
+- Backend version bump (runtime/deploy-visible policy):
+  - `pyproject.toml` `0.25.0 -> 0.26.0`.
+- Validation:
+  - `py -3.12 -c "import pathlib, yaml; yaml.safe_load(pathlib.Path('.github/workflows/auto-deploy.yml').read_text(encoding='utf-8')); print('YAML OK')"` -> `YAML OK`
+  - `py -3.12 -m py_compile scripts/self_heal_runtime_state.py tests/test_directus_postgres_reliability_artifacts.py` -> OK
+  - `py -3.12 -m pytest tests/test_directus_postgres_reliability_artifacts.py tests/test_runtime_state_verification.py -q` -> `32 passed`
+
+## 2026-03-04
+
+### ci(deploy/yaml): fix invalid workflow syntax in post-setup self-heal block
+
+- Fixed YAML parse error in `.github/workflows/auto-deploy.yml` (reported at line 784): embedded Python heredoc body had zero indentation in workflow file and broke YAML block-scalar structure.
+- Restored consistent indentation for the heredoc payload and closing `PY` marker inside the remote deploy script.
+- Validation:
+  - `py -3.12 -c "import pathlib, yaml; yaml.safe_load(pathlib.Path('.github/workflows/auto-deploy.yml').read_text(encoding='utf-8')); print('YAML OK')"` -> `YAML OK`
+  - `py -3.12 -m pytest tests/test_directus_postgres_reliability_artifacts.py -q` -> `21 passed`
+
+## 2026-03-04
+
+### ci(deploy/directus-fk): post-super-setup runtime gate with auto self-heal and fail-closed abort
+
+- Incident class confirmed on VPS: `scripts/apply_migrations.py` passed, but after `scripts/directus_super_setup.py` FK rules drifted back to `NO ACTION`, causing runtime verify failures and blocking Directus user delete.
+- Hardened deploy workflow in `.github/workflows/auto-deploy.yml`:
+  - added blocking post-super-setup gate: `verify_runtime_state.py`;
+  - on first failure, runs automatic FK self-heal in `bloobcat` container via `bloobcat.db.fk_guards`:
+    - `ensure_active_tariffs_fk_cascade()`
+    - `ensure_notification_marks_fk_cascade()`
+    - `ensure_users_referred_by_fk_set_null()`;
+  - re-runs `verify_runtime_state.py`;
+  - aborts deploy (`exit 1`) if drift remains after self-heal.
+- Added regression coverage in `tests/test_directus_postgres_reliability_artifacts.py`:
+  - verifies new post-super-setup gate markers;
+  - verifies self-heal invocation markers and re-verify order;
+  - verifies fail-closed abort path exists before tariffs seed.
+- Version bump per runtime-visible backend policy:
+  - `pyproject.toml` `0.24.0 -> 0.25.0`.
+- Verification:
+  - `py -3.12 -m py_compile tests/test_directus_postgres_reliability_artifacts.py` -> OK
+  - `py -3.12 -m pytest tests/test_directus_postgres_reliability_artifacts.py -q` -> `21 passed`
+
+## 2026-03-04
+
+### fix(directus/users-delete): fail-safe pre-delete cleanup + relation action alignment
+
+- Incident: Directus delete for `users` regressed again with FK blocker
+  `fk_active_tariffs_user` (`active_tariffs.user_id -> users.id`).
+- Root cause class: Directus path deletes users directly in DB and bypasses Python `Users.delete()` guards; any relation/FK drift can re-break deletion.
+- Implemented permanent resilience in two layers:
+  - `directus/extensions/hooks/remnawave-sync/index.js`
+    - added deterministic `normalizeUserIds(...)`;
+    - added `applyDeleteSafetyCleanup(...)` executed in `filter("items.delete")` for `users` before delete;
+    - cleanup now proactively removes blocker rows in `active_tariffs` and `notification_marks`, and nullifies `users.referred_by` for children (with table/column existence guards).
+  - `scripts/directus_super_setup.py`
+    - aligned users-related relation metadata to cascade intent: `one_deselect_action="delete"` for business O2M blocks tied to user lifecycle;
+    - kept `users.referred_by` relation on `one_deselect_action="nullify"` (expected `SET NULL` behavior).
+- Regression coverage:
+  - `tests/test_directus_postgres_reliability_artifacts.py` extended with checks that:
+    - `directus_super_setup.py` uses delete action for cascade-bound user relations;
+    - `remnawave-sync` hook contains pre-delete cleanup for FK blockers.
+- Versioning policy (runtime-visible backend fix): `pyproject.toml` bumped `0.23.0 -> 0.24.0`.
+- Verification:
+  - `py -3.12 -m py_compile scripts/directus_super_setup.py tests/test_directus_postgres_reliability_artifacts.py` -> OK
+  - `node --check directus/extensions/hooks/remnawave-sync/index.js` -> OK
+  - `py -3.12 -m pytest tests/test_directus_postgres_reliability_artifacts.py -q` -> `19 passed`
+  - `py -3.12 -m pytest tests/test_runtime_state_verification.py -q` -> `10 passed`
+- Next ops step on server:
+  - run deploy so updated hook/setup/version are applied, then re-check Directus user deletion and `scripts/verify_runtime_state.py`.
+
+## 2026-03-03
+
+### fix(db/fk-runtime): add deterministic reconcile migration for runtime FK invariants
+
+- Problem observed on fresh redeploy: `scripts/apply_migrations.py` completed Aerich upgrade but failed fail-closed runtime verification with FK drift:
+  - `active_tariffs.user_id -> users.id` expected `ON DELETE CASCADE`, found `NO ACTION`;
+  - `notification_marks.user_id -> users.id` expected `ON DELETE CASCADE`, found `NO ACTION`;
+  - `users.referred_by -> users.id` expected `ON DELETE SET NULL`, found `NO ACTION`.
+- Implemented permanent fix:
+  - added migration `migrations/models/92_20260304011000_reconcile_runtime_fk_invariants.py`:
+    - resolves target runtime schema deterministically (prefers `public`);
+    - cleans orphan links for `users.referred_by` and `notification_marks.user_id`;
+    - rebuilds FK constraints to canonical runtime rules:
+      - `fk_active_tariffs_user` -> `ON DELETE CASCADE`
+      - `fk_notification_marks_user` -> `ON DELETE CASCADE`
+      - `users_referred_by_foreign` -> `ON DELETE SET NULL`
+    - keeps downgrade path deterministic (`NO ACTION`) for rollback symmetry.
+- Versioning policy applied (runtime-visible backend change):
+  - `pyproject.toml` bumped `0.22.0 -> 0.23.0`.
+- Verification commands to run on server:
+  - `docker compose -f docker-compose.yml -f docker-compose.prod.yml exec -T bloobcat python scripts/apply_migrations.py`
+  - `docker compose -f docker-compose.yml -f docker-compose.prod.yml exec -T bloobcat python scripts/verify_runtime_state.py`
+  - `curl -fsS http://localhost:33083/health`
+  - `curl -fsS http://localhost:8055/server/health`
+- Known risk:
+  - migration targets one effective runtime schema (expected production model); multi-schema shadow copies may still require manual cleanup if present.
+- Next step:
+  - trigger backend auto-deploy (`push` to `main`) so migration `92_*` is applied on VPS before next runtime-verify gate.
+
+## 2026-03-02
+
+### fix(runtime-verifier): parser false-negative for casted ANY/ARRAY predicate
+
+- Fixed false-negative in runtime index predicate parser for casted `ANY/ARRAY` form.
+- Touched files:
+  - `scripts/verify_runtime_state.py`
+  - `tests/test_runtime_state_verification.py`
+- Verification commands/results:
+  - `py -3.12 -m pytest tests/test_runtime_state_verification.py -q` -> `10 passed`
+  - `py -3.12 -m py_compile scripts/verify_runtime_state.py tests/test_runtime_state_verification.py` -> `OK`
+- Residual risk:
+  - environment-coupled imports may still require env stubs in some contexts.
+
+## 2026-03-02
+
+### fix(payments/replay): claim-false replay hardening continuity
+
+- Fixed strict GO remediation scope for payment replay reliability:
+  - hardened claim-false replay path;
+  - aligned webhook/fallback handling parity;
+  - tightened lease safety around replay ownership/processing windows.
+- Exact changed files (implementation wave):
+  - `bloobcat/routes/payment.py`
+  - `tests/test_payment_idempotency_race.py`
+  - `pyproject.toml`
+  - `memory-base/log.md`
+- Latest verification commands/results:
+  - `py -3.12 -m pytest tests/test_payment_idempotency_race.py tests/test_payments_no_yookassa.py -q` -> `23 passed`
+  - `py -3.12 -m pytest tests/test_runtime_state_verification.py tests/test_remnawave_client_retry_policy.py tests/test_resilience_hardening.py tests/test_admin_integration_delete_retry.py tests/test_remnawave_activation.py -q` -> `91 passed`
+  - `py -3.12 -m py_compile bloobcat/routes/payment.py bloobcat/tasks/payment_reconcile.py` -> `OK`
+- Residual risks:
+  - test bootstrap remains environment-coupled in some paths;
+  - optional follow-up: add explicit concurrency/performance evidence artifacts.
+
+## 2026-03-02
+
+### chore(stabilization/backend): finalize backend stabilization wave continuity
+
+- Consolidated finalized stabilization scope:
+  - FK hardening finalized, including `users.referred_by` nullable/`SET NULL`-safe guard path and migration continuity.
+  - RemnaWave A025 path stabilized with non-retry handling and classifier alignment.
+  - Retry-job pipeline hardened: dedup + claim/lease safety, including migration `91_20260301143000_remnawave_retry_jobs_active_unique.py`.
+  - Runtime verifier flow aligned with `apply_migrations` integration.
+  - Deploy workflow finalized with explicit migration + runtime-verify gate before release completion.
+- Verification summary references (this stabilization session):
+  - `tests/test_admin_integration_delete_retry.py` -> `18 passed`.
+  - `tests/test_remnawave_activation.py tests/test_hwid_antitwink.py tests/test_connections_process.py tests/test_resilience_hardening.py` -> `49 passed`.
+  - `tests/test_auth_registration_modes.py tests/test_resilience_hardening.py tests/test_remnawave_activation.py tests/test_connections_process.py` -> `33 passed`.
+  - `tests/test_directus_postgres_reliability_artifacts.py` -> `16 passed`.
+- Release governance: backend version bumped from `0.19.0` to `0.20.0` (minor) per runtime-visible backend policy.
+
+## 2026-03-01
+
+### fix(remnawave-retry): atomic active-job dedup for delete enqueue
+
+- Blocker addressed with DB + app safeguards against non-atomic enqueue races for RemnaWave delete retry jobs.
+- Implemented scope:
+  - `migrations/models/91_20260301143000_remnawave_retry_jobs_active_unique.py`
+    - deduplicates existing active rows per `(job_type, user_id)` (keeps highest-priority active row, moves extras to `dead_letter`);
+    - replaces partial unique index to enforce at most one active job for `status IN ('pending', 'processing')`.
+  - `bloobcat/services/admin_integration.py`
+    - `enqueue_remnawave_delete_retry` now checks both active statuses (`pending`/`processing`) before create;
+    - updates existing active job `remnawave_uuid/last_error` when needed;
+    - on `IntegrityError` race, re-reads active job and applies the same update path to avoid duplicates and preserve latest error/uuid.
+  - `tests/test_admin_integration_delete_retry.py`
+    - added dedup test for existing `processing` job;
+    - added race fallback test (`create -> IntegrityError -> re-read active job update`).
+- Verification commands/results:
+  - `py -3.12 -m pytest tests/test_admin_integration_delete_retry.py -q` -> `18 passed`.
+  - `py -3.12 -m compileall bloobcat/services/admin_integration.py migrations/models/91_20260301143000_remnawave_retry_jobs_active_unique.py` -> OK.
+- Residual risks:
+  - Migration dedup policy keeps one active row per key by priority/order; historical duplicate rows are moved to `dead_letter` (non-destructive), which may slightly alter retry chronology for already-duplicated data.
+
+### fix(db/directus-delete): notification_marks FK schema-safe hardening continuity
+
+- Root cause: удаление пользователя через Directus падало на FK `fk_notification_marks_user` (delete rule drift/non-cascade в целевой схеме).
+- Implemented scope (runtime-visible backend fix):
+  - `migrations/models/89_20260301120000_harden_notification_marks_fk_schema_safe.py` — schema-safe repair FK `notification_marks.user_id -> users.id` до `ON DELETE CASCADE`, с дедупликацией конфликтующих constraint-ов.
+  - `directus/extensions/endpoints/server-ops/index.js` — добавлены/усилены ops-команды для диагностики и ремонта FK, cleanup orphan-данных, и generic error response без утечки SQL/internal details.
+- Verification commands/results:
+  - `py -3.12 -c "import tomllib, pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))['tool']['poetry']['version'])"` -> `0.19.0`.
+  - sanity-read обновлённого `memory-base/log.md` и root `memory-base/log.md` -> формат секций/буллетов сохранён.
+- Residual risks/notes:
+  - SQL-ветки в ops/migration опираются на single-schema assumption (рабочая схема Postgres должна совпадать с ожидаемой deploy-конфигурацией).
+  - Есть узкое concurrency window между orphan-cleanup и повторной FK-проверкой при внешних конкурентных delete/write операциях.
+  - Deploy gate remains fail-closed: при ошибках DB repair/ops проверок релиз не должен считаться безопасно завершённым.
+
+### docs(deploy): lock non-destructive baseline after successful deploy
+
+- Confirmed successful backend deploy run: `22546902029`.
+- Operational baseline fixed to `PRERELEASE_FULL_REINSTALL=false`.
+- Default policy: no reset/reinstall by default in routine deploy flow.
+- Prerelease full reinstall remains incident-driven opt-in only (explicit temporary enablement, then revert to baseline).
+
+### docs(deploy/security): review-finding remediation final state sync
+
+- Убрана инструкция с выводом plaintext-значения `POSTGRES_PASSWORD` из `.env`; для проверки оставлен только non-disclosing presence-check.
+- Финальное состояние fix-пакета зафиксировано как: backend version `0.18.0`, targeted test result `16 passed`.
+
+### fix(deploy/db-fk): deterministic FK SQL payload + fail-closed DB guard
+
+- Root cause: FK repair step using `DO $$ ... $$` was vulnerable to escaping/interpolation corruption in deploy shell context, which could break SQL execution in the FK fix stage.
+- Implemented solution: switched to deterministic FK repair payload with explicit dollar-quote tag `$tvpn_fk$` to avoid accidental mutation of SQL body during workflow execution.
+- Fail-open remediation: missing `bloobcat_db` in deploy context is now treated as blocking (`fail-closed`) instead of continuing with a partial/unsafe path.
+- Verification commands/results:
+  - `python -m pytest tests/test_directus_postgres_reliability_artifacts.py -q` -> `16 passed`.
+
+### chore(version/backend): bump for prerelease deploy-flow runtime changes
+
+- Bumped backend version in `TVPN_BACK_END/pyproject.toml` from `0.17.0` to `0.18.0` because current changes alter runtime deploy behavior/workflow scripts for prerelease operations.
+
+### docs/workflow(deploy): align prerelease toggle strict semantics
+
+- Aligned prerelease toggle behavior between workflow concurrency cancellation and runtime gate.
+- `PRERELEASE_FULL_REINSTALL` now enables prerelease mode only when value is exact literal `true`; legacy truthy aliases (`1/yes/on`) and other variants are no longer accepted.
+- Updated deploy troubleshooting docs to remove truthy alias claims and match strict toggle semantics.
+
+### docs(deploy): prerelease full reinstall continuity notes
+
+- Reason: documented temporary prerelease full reinstall mode as incident-only opt-in (not routine validation usage), with mandatory rollback to baseline immediately after incident handling.
+- Key files changed:
+  - `TVPN_BACK_END/memory-base/deploy-troubleshooting.md`
+  - `TVPN_BACK_END/memory-base/log.md`
+- Verification commands used:
+  - `python -c "import re, pathlib, sys; p=pathlib.Path('TVPN_BACK_END/.github/workflows/auto-deploy.yml'); txt=p.read_text(encoding='utf-8'); pats=[r'PRERELEASE_FULL_REINSTALL', r'PRERELEASE FULL REINSTALL MODE', r'Running prerelease full reinstall', r'down -v --remove-orphans']; [sys.stdout.buffer.write((f'{i+1}:{line}\n').encode('utf-8','backslashreplace')) for pat in pats for i,line in enumerate(txt.splitlines()) if re.search(pat,line)]"`
+  - `rg` unavailable in current shell environment; workflow conditions/markers were validated via direct file review (`.github/workflows/auto-deploy.yml`) and pattern scan above.
+
+### chore(version/backend): minor bump for governance gate
+
+- Bumped backend version in `TVPN_BACK_END/pyproject.toml` from `0.15.0` to `0.16.0` to satisfy runtime/deploy-visible change policy.
+- Removed unintended workspace artifact `TVPN_BACK_END/NUL`.
+
+### test(deploy/db): targeted reliability artifact verification + regression tests
+
+- Objective: final static/command-level verification for Directus/Postgres reliability fix package.
+- Added regression tests: `tests/test_directus_postgres_reliability_artifacts.py` covering:
+  - required `POSTGRES_PASSWORD` authority in `docker-compose.yml`;
+  - `.env.example` non-interpolated `SCRIPT_DB` and authority declaration;
+  - safety guards/invariants in `scripts/db/reconcile_postgres_auth.sh` and `scripts/db/destructive_reset_once.sh`;
+  - `auto-deploy.yml` reconcile-first order and evidence-gated destructive fallback sequence;
+  - docs sanity for `memory-base/deploy-troubleshooting.md`.
+- Verification commands/results:
+  - `sh -n scripts/db/reconcile_postgres_auth.sh && sh -n scripts/db/destructive_reset_once.sh` -> OK
+  - `POSTGRES_PASSWORD= docker compose -f docker-compose.yml config` -> expected fail with required-var marker
+  - `POSTGRES_PASSWORD=verifier docker compose -f docker-compose.yml config` -> OK
+  - `sh scripts/db/reconcile_postgres_auth.sh` (without env) -> expected guard fail (exit 2)
+  - `COMPOSE_PROJECT_NAME=tvpn_test sh scripts/db/destructive_reset_once.sh` -> expected opt-in guard fail (exit 10)
+  - `DRY_RUN=true sh scripts/db/destructive_reset_once.sh` -> expected project-scope guard fail (exit 10)
+  - `DRY_RUN=true COMPOSE_PROJECT_NAME=tvpn_test COMPOSE_FILES=missing.yml sh scripts/db/destructive_reset_once.sh` -> expected compose-file guard fail (exit 12)
+  - `python -m pytest tests/test_directus_postgres_reliability_artifacts.py -q` -> 6 passed
+- Tooling availability notes:
+  - `shellcheck` not installed in current environment (static shell lint skipped).
+  - `yamllint` not installed (workflow YAML validated via Python `yaml.safe_load` + regression assertions).
+
+### fix(subscription-overlay): rollback-safe family freeze resume on mutation failure
+
+- Scope: targeted fix in `bloobcat/services/subscription_overlay.py` and regression coverage in `tests/test_family_freeze_resume.py`.
+- Problem: `resume_frozen_base_if_due()` caught exceptions **inside** `in_transaction()`, allowing transaction commit with partial state changes (e.g., old active tariff deleted before restore create failure).
+- Implementation:
+  - moved exception handling outside transaction boundary so mutation failures bubble out of transaction context and trigger DB rollback;
+  - preserved bool contract (`True` on success, `False` for operational failures);
+  - after rollback, persisted diagnostics in a separate DB write (`last_resume_error`) and incremented `resume_attempt_count` once per failed attempt.
+- Added regression test `test_resume_failure_rolls_back_partial_mutations`:
+  - monkeypatches `ActiveTariffs.create` to raise after old tariff delete point;
+  - asserts function returns `False`;
+  - verifies old active tariff remains, user linkage/state is unchanged, freeze remains active/not applied, and error diagnostics are stored.
+- Verification:
+  - `py -3.12 -m pytest tests/test_family_freeze_resume.py -q` -> 2 passed
+  - `py -3.12 -m pytest tests -q` -> 98 passed
+  - `py -3.12 -m compileall bloobcat` -> OK
+
 ## 2026-02-20
 
 ### fix(deploy/ci/directus-user-delete): CI hardening + forced FK CASCADE repair in deploy
@@ -1019,3 +1347,481 @@
   - `python -m py_compile scripts/directus_super_setup.py` ? OK
   - `npm run build` ? `directus/extensions/admin-widgets` ? OK
   - `npm run build` ? `directus/extensions/tvpn-content-ops` ? OK
+
+## 2026-03-03
+
+### Governance gate: runtime-visible payment/status hardening continuity
+
+- Minor backend version bump applied per policy:
+  - `pyproject.toml`: `0.21.0 -> 0.22.0`.
+- Captured invariant set for completed runtime changes:
+  - strict Standard vs Family day-counter separation remains authoritative;
+  - base purchase while family is active updates frozen base days only, not family expiry;
+  - family renewal is additive and must never shorten paid period;
+  - `/pay/status` ownership checks are fail-closed;
+  - metadata-less `/pay/status` allow-path is valid only when an owned processed row exists;
+  - fast fallback remains bounded with `skip_remnawave_sync` and short RemnaWave timeout.
+- Verification evidence (continuity record, not re-run in this docs/version batch):
+  - backend target suites -> PASS
+
+## 2026-03-06
+
+### Payment create idempotency for first-click fetch retries
+
+- **fix**: `/pay` now accepts a client-provided request identifier and uses it as the YooKassa idempotency key.
+  - `bloobcat/routes/payment.py`:
+    - added `client_request_id` input handling with fail-closed validation for empty/oversized/invalid values;
+    - when present, the normalized request id is copied into payment metadata and used as the YooKassa `idempotence_key`;
+    - legacy behavior remains as fallback for callers that do not send the new field.
+  - version:
+    - `pyproject.toml`: `0.32.0 -> 0.33.0`.
+- Verification:
+  - `py -3.12 -m pytest tests/test_payments_no_yookassa.py -q` -> `11 passed`
+  - `py -3.12 -m py_compile bloobcat/routes/payment.py` -> `PASS`
+- Cross-check:
+  - `pnpm --dir TelegramVPN exec vitest run src/pages/Welcome/WelcomePage.test.tsx src/hooks/useTvpnUserSync.test.ts src/pages/Subscription/SubscriptionPage.pendingPayment.test.tsx` (workdir `..`) -> `49 passed`
+- Residual risk:
+  - idempotent reuse now depends on the client re-sending the same `client_request_id`; callers that do not adopt it still fall back to the old random-key behavior.
+
+### 2026-03-06
+
+### Deploy unblock: pay() YooKassa idempotency test monkeypatch parity
+
+- **fix**: hardened `tests/test_payments_no_yookassa.py` so the partial-payment idempotency test patches the same `Payment.create` resolution paths as the already-passing auto-payment partial test.
+- Root cause:
+  - `test_pay_partial_uses_client_request_id_as_yookassa_idempotence_key` only patched `payment_module.Payment.create`;
+  - under the local test stub/import layout, `pay()` could still resolve the default stub from function globals and return `test_payment_id`.
+- Change:
+  - patched both `payment_module.Payment.create` and `pay.__globals__["Payment"].create` in the failing test.
+- Verification:
+  - `py -3.12 -m pytest tests/test_payments_no_yookassa.py::test_pay_partial_uses_client_request_id_as_yookassa_idempotence_key -q` -> `1 passed`
+  - `py -3.12 -m pytest tests/test_payments_no_yookassa.py -q` -> `11 passed`
+  - `py -3.12 -m pytest tests -q` -> `212 passed`
+- Notes:
+  - runtime `/pay` behavior did not change in this batch; this was a deploy-blocking test harness fix only.
+
+### 2026-03-06
+
+### Directus users delete: family_invites pre-delete cleanup
+
+- **fix**: Directus-side deletion of `users` now removes dependent `family_invites` rows before the actual delete executes.
+- Root cause:
+  - the remnawave-sync `items.delete` cleanup transaction already handled `active_tariffs`, `notification_marks`, `subscription_freezes`, and `users.referred_by`;
+  - it did not clean `family_invites.owner_id`, so deleting a user from Directus could fail on `family_invites_owner_id_fkey` before backend `pre-delete` logic had a chance to run.
+- Change:
+  - `directus/extensions/hooks/remnawave-sync/index.js`:
+    - added schema checks for `family_invites.owner_id`;
+    - deletes matching `family_invites` rows inside the same cleanup transaction.
+  - `directus/extensions/remnawave-sync/src/index.js` and `directus/extensions/remnawave-sync/dist/index.js`:
+    - kept the shipped extension variants aligned with the runtime hook.
+  - `tests/test_directus_postgres_reliability_artifacts.py`:
+    - added artifact assertions for `family_invites` cleanup;
+    - extended the proxy transaction/oversized-id coverage to include `family_invites`.
+  - version:
+    - `pyproject.toml`: `0.33.0 -> 0.34.0`.
+- Verification:
+  - `py -3.12 -m pytest tests/test_directus_postgres_reliability_artifacts.py -q` -> `25 passed`
+  - `node --check directus/extensions/hooks/remnawave-sync/index.js` -> `PASS`
+  - `node --check directus/extensions/remnawave-sync/src/index.js` -> `PASS`
+  - `node --check directus/extensions/remnawave-sync/dist/index.js` -> `PASS`
+- Residual risk:
+  - this closes the current `family_invites.owner_id` blocker; any future Directus-managed tables referencing `users` still need to be added to the same pre-delete cleanup matrix.
+
+### Directus super-setup deploy blocker: remove false `bloobcat_db` missing branch
+
+- **fix**: the auto-deploy workflow no longer aborts FK repair because of a redundant `docker compose config --services` probe.
+- Root cause:
+  - the workflow had already started and queried `bloobcat_db`, but the later FK repair block re-checked service presence with `docker compose $COMPOSE_ARGS config --services | grep -qx "bloobcat_db"`;
+  - inside the remote deploy script this check could false-negative and trigger the `Required DB service 'bloobcat_db' not found in compose config` abort before any real `compose_exec bloobcat_db psql ...` call.
+- Change:
+  - `auto-deploy.yml`:
+    - removed the `HAS_DB_SERVICE` / `config --services` gate from the FK repair block;
+    - FK repair now runs directly through `compose_exec bloobcat_db` and still fails closed via `FK_FIX_OK`.
+  - `tests/test_directus_postgres_reliability_artifacts.py`:
+    - replaced the old artifact assertions with checks that require direct `compose_exec bloobcat_db` usage and forbid the removed missing-service branch.
+- Verification:
+  - `py -3.12 -m pytest tests/test_directus_postgres_reliability_artifacts.py -q` -> `25 passed`
+- Residual risk:
+  - a separate log anomaly still showed `GITHUB_EVENT_NAME` as `unknown`; it did not block this deploy path, but should be investigated later if prerelease reinstall gating behaves unexpectedly.
+
+### Auto-deploy follow-up: fix remote-script syntax regression
+
+- **fix**: restored valid shell structure in the remote deploy script and made the FK repair heredoc safe inside YAML.
+- Root cause:
+  - the previous workflow patch dropped the `else/fi` that closes the `FULL_REINSTALL_ACTIVE` decision block;
+  - the nested FK SQL payload still depended on an indented heredoc terminator, which can break when the script is transported through YAML and SSH.
+- Change:
+  - `auto-deploy.yml`:
+    - restored `else ... fi` around `FULL_REINSTALL_ACTIVE`;
+    - changed the FK repair payload to `<<-'FK_REPAIR_SQL_PAYLOAD'` and kept the direct `compose_exec bloobcat_db` repair path.
+  - `tests/test_directus_postgres_reliability_artifacts.py`:
+    - updated the artifact assertion to expect the new `<<-` heredoc contract.
+- Verification:
+  - `bash -n TVPN_BACK_END/.tmp-remote-deploy-script.sh` -> `PASS`
+  - `py -3.12 -m pytest tests/test_directus_postgres_reliability_artifacts.py -q` -> `25 passed`
+- Residual risk:
+  - the separate `GITHUB_EVENT_NAME=unknown` symptom is still unaddressed here.
+
+### 2026-04-06
+
+### Quiet hours notifications and YooKassa live rollout
+
+- **fix**: introduced Moscow quiet-hours delivery for planned and retry Telegram user notifications while keeping subscription and trial state transitions on their original schedule.
+- Scope:
+  - `bloobcat/scheduler.py`
+  - `bloobcat/tasks/quiet_hours.py`
+  - `bloobcat/tasks/quiet_hours_notifications.py`
+  - `bloobcat/tasks/subscription_expiring_catchup.py`
+  - `bloobcat/tasks/retry_trial_notifications.py`
+  - `bloobcat/tasks/retry_trial_extension_notifications.py`
+  - `bloobcat/tasks/retry_trial_endings.py`
+  - `bloobcat/tasks/cleanup_missed_cancellations.py`
+  - `bloobcat/tasks/winback_discounts.py`
+  - `bloobcat/bot/notifications/subscription/expiration.py`
+  - `bloobcat/bot/notifications/trial/expiring.py`
+  - `tests/test_quiet_hours_notifications.py`
+  - `pyproject.toml`
+- Runtime decisions:
+  - added a dedicated quiet-hours helper layer for `00:00-08:00` Moscow time and normalized affected user-facing ETAs to the first allowed `08:00` slot;
+  - moved subscription-expiring `3d/2d`, expired-subscription notice, and trial 1-day marketing reminder to the morning window, while keeping noon reminders unchanged;
+  - split “change state now / notify user later” for trial endings and auto-renew cancellation after failed charges by reusing `notification_marks` as pending delivery storage instead of adding a new table;
+  - night retry passes for missed trial `2h/24h` notifications and missed trial-extension notifications now skip sending and wait for the next post-quiet-hours retry;
+  - winback offer creation still happens on the nightly schedule, but user-facing offer delivery is deferred with a pending mark when the run lands inside quiet hours;
+  - subscription-expiring copy now uses calendar-day difference instead of seconds-to-midnight math, so the text remains correct after shifting `3d/2d` reminders to the morning;
+  - trial “1 day left” copy no longer promises a hard `00:00` send time;
+  - version: `0.53.0 -> 0.54.0`.
+- Verification:
+  - `py -3.12 -m pytest TVPN_BACK_END/tests/test_quiet_hours_notifications.py -q` -> `15 passed`
+  - `py -3.12 -m pytest TVPN_BACK_END/tests -q` -> `281 passed, 1 warning`
+  - `py -3.12 -m compileall TVPN_BACK_END` -> `PASS`
+- Production rollout:
+  - pushed commit `aa4dd2f` to `origin/main`;
+  - production backend repo `/root/TVPN_BACK_END` now runs commit `aa4dd2f`;
+  - rotated production `YOOKASSA_SECRET_KEY` from test to live in server-side `.env` only; the value was not written to git, docs, or logs;
+  - `docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --force-recreate bloobcat` -> `PASS`;
+  - `curl -fsS http://localhost:33083/health` -> `PASS` (`version=0.54.0`);
+  - `curl -fsS https://api.stratavpn.com/health` -> `PASS` (`version=0.54.0`);
+  - `curl -sS -o /dev/null -w '%{http_code}' https://api.stratavpn.com/pay/webhook/yookassa/s3cr3t` -> `405` on `GET`, confirming the webhook path still resolves as a POST-only route;
+  - runtime check inside the `bloobcat` container confirms that the live YooKassa secret is loaded.
+- Notes:
+  - no DB migration or schema change was introduced in this batch;
+  - local ignored `.env` was intentionally left unchanged.
+
+### 2026-04-06
+
+### YooKassa shop ID rotation to 1314424
+
+- **ops**: updated production `YOOKASSA_SHOP_ID` on the backend VPS from the previous shop ID to `1314424`.
+- Runtime notes:
+  - the first automated substitution accidentally dropped the `YOOKASSA_SHOP_ID=` line from `/root/TVPN_BACK_END/.env`, which caused `YookassaSettings.shop_id` startup validation to fail;
+  - the env line was restored manually, the container was force-recreated, and runtime config was rechecked inside the running `bloobcat` container.
+- Verification:
+  - backend VPS `.env` now contains `YOOKASSA_SHOP_ID=1314424`
+  - `docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --force-recreate bloobcat` -> `PASS`
+  - `curl -fsS http://localhost:33083/health` -> `PASS` (`version=0.54.0`)
+  - `curl -fsS https://api.stratavpn.com/health` -> `PASS` (`version=0.54.0`)
+  - `docker compose ... exec -T bloobcat python ...` runtime check -> `PASS` (`shop_id=1314424`, live YooKassa secret still loaded)
+- Outcome:
+  - production backend is healthy again after the temporary restart loop
+  - YooKassa runtime now uses the new production shop ID `1314424`
+
+### 2026-04-09
+
+### Family quota reservations include owner devices and active invites
+
+- **fix**: unified family quota calculations across `/family/*` and `/user`, so owner-connected devices and active invite reservations are counted immediately instead of only after invite acceptance.
+- Scope:
+  - `bloobcat/routes/family_quota.py`
+  - `bloobcat/routes/family_invites.py`
+  - `bloobcat/routes/user.py`
+  - `tests/test_user_family_summary.py`
+  - `tests/test_family_membership_admin_logs.py`
+  - `tests/test_user_recreate_cleanup.py`
+  - `pyproject.toml`
+- Runtime decisions:
+  - added a shared family quota helper that computes:
+    - `reservedDevices = ownerConnectedDevices + memberAllocatedDevices + inviteReservedDevices`
+    - `availableDevices = max(0, familyLimit - reservedDevices)`
+    - `ownerQuotaLimit = max(0, familyLimit - memberAllocatedDevices - inviteReservedDevices)`
+  - `create_invite` now rejects requests when the new invite would overflow the reserved family capacity, not just the member allocation sum;
+  - owner effective RemnaWave HWID limit is resynced after invite creation and invite revoke so owner quota reflects active invite reservations immediately;
+  - `/user` for active family owners now returns `family_owner.active_invites_devices_total`, and both `devices_limit` and `family_owner.owner_remaining_devices` now mean the owner's remaining quota after active members and active invites;
+  - full-suite validation exposed test pollution from `tests/test_user_family_summary.py`, where a stubbed `bloobcat.services.subscription_overlay` module stayed in `sys.modules`; module teardown now restores the original module so later tests load the real overlay implementation again;
+  - backend version bumped `0.55.0 -> 0.56.0`.
+- Verification:
+  - `py -3.12 -m py_compile TVPN_BACK_END/bloobcat/routes/family_quota.py TVPN_BACK_END/bloobcat/routes/family_invites.py TVPN_BACK_END/bloobcat/routes/user.py TVPN_BACK_END/tests/test_user_family_summary.py TVPN_BACK_END/tests/test_family_membership_admin_logs.py` -> PASS
+  - `py -3.12 -m pytest TVPN_BACK_END/tests/test_user_family_summary.py -q` -> PASS
+  - `py -3.12 -m pytest TVPN_BACK_END/tests/test_family_membership_admin_logs.py -q` -> PASS
+  - `py -3.12 -m pytest TVPN_BACK_END/tests/test_user_recreate_cleanup.py -q` -> PASS (`3 passed, 1 warning`)
+  - `py -3.12 -m pytest TVPN_BACK_END/tests -q` -> PASS (`288 passed, 1 warning`)
+  - `py -3.12 -m compileall -q TVPN_BACK_END` -> PASS
+- Notes:
+  - no DB schema change or migration was needed; the change stays within route logic, API payload semantics, and tests.
+
+### 2026-04-09
+
+### Production rollout for family quota backend `0.56.0`
+
+- **ops**: rolled the backend family quota changes to production on `72.56.235.167`.
+- Runtime notes:
+  - uploaded runtime files only:
+    - `bloobcat/routes/family_quota.py`
+    - `bloobcat/routes/family_invites.py`
+    - `bloobcat/routes/user.py`
+    - `pyproject.toml`
+  - created backups under `/root/TVPN_BACK_END/.deploy-backups/20260409-0248/`;
+  - rebuilt and restarted only the `bloobcat` service via `docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build bloobcat`;
+  - no database migration or Directus restart was needed.
+- Verification:
+  - backend VPS `docker compose -f docker-compose.yml -f docker-compose.prod.yml ps bloobcat` -> `PASS`
+  - backend VPS `curl -fsS http://127.0.0.1:33083/health` -> `PASS` (`version=0.56.0`)
+  - external `curl.exe -sS https://api.stratavpn.com/health` -> `PASS` (`version=0.56.0`)
+
+### 2026-04-09
+
+### Auto-payment evening reminders before scheduled auto-renew attempts
+
+- **feat**: added user-facing Telegram reminders on the evening before each scheduled auto-renew attempt while keeping the actual billing schedule unchanged.
+- Scope:
+  - `bloobcat/routes/payment.py`
+  - `bloobcat/bot/notifications/subscription/expiration.py`
+  - `bloobcat/tasks/auto_payment_reminders.py`
+  - `bloobcat/scheduler.py`
+  - `bloobcat/db/users.py`
+  - `tests/test_quiet_hours_notifications.py`
+  - `tests/test_payments_no_yookassa.py`
+  - `pyproject.toml`
+- Runtime decisions:
+  - added `AutoPaymentPreview` and `build_auto_payment_preview(...)` so reminder copy and the real `create_auto_payment(...)` path share the same source of truth for:
+    - `months`
+    - `device_count`
+    - `total_amount`
+    - `amount_external`
+    - `amount_from_balance`
+    - `discount_percent`
+    - `lte_gb_total`
+    - `lte_cost`
+  - `notify_auto_payment(...)` now accepts optional explicit quote fields for reminder messages and keeps legacy fallback behavior for older call sites;
+  - scheduled reminder tasks for every active auto-renew attempt (`4d`, `3d`, `2d`) at `20:00 MSK` on the previous evening;
+  - added `NotificationMarks` type `auto_payment_reminder` and an evening catch-up dispatcher (`600s`) that retries only inside the same `20:00-23:59 MSK` window and skips stale sends after midnight;
+  - fixed the unrelated but real `notify_expiring_subscription` bug where `user_expired_at` was referenced before definition;
+  - fixed a stale-freeze recreate edge case by allowing full scrub fallback only for the new-user recreate path, while preserving strict `created_at` boundary behavior in the generic helper;
+  - backend version bump: `0.56.0 -> 0.57.0`.
+- Verification:
+  - `py -3.12 -m pytest TVPN_BACK_END/tests/test_quiet_hours_notifications.py -q` -> `PASS` (`19 passed, 1 warning`)
+  - `py -3.12 -m pytest TVPN_BACK_END/tests/test_payments_no_yookassa.py -q` -> `PASS` (`25 passed, 1 warning`)
+  - `py -3.12 -m pytest TVPN_BACK_END/tests/test_user_recreate_cleanup.py -q` -> `PASS` (`3 passed, 1 warning`)
+  - `py -3.12 -m pytest TVPN_BACK_END/tests -q` -> `PASS` (`299 passed, 1 warning`)
+  - `py -3.12 -m compileall TVPN_BACK_END` -> `PASS`
+- Notes:
+  - no migration was needed;
+  - no public API contract changed;
+  - this entry covers local implementation and validation only, not production rollout.
+
+### 2026-04-09
+
+### Rescue app link in expiring and ended access notifications
+
+- **feat**: appended the external rescue URL `https://app.stratavpn.com` to targeted subscription/trial Telegram notifications so users can reach the service even if Telegram is unavailable without VPN.
+- Scope:
+  - `bloobcat/bot/notifications/rescue_link.py`
+  - `bloobcat/bot/notifications/subscription/expiration.py`
+  - `bloobcat/bot/notifications/subscription/key.py`
+  - `bloobcat/bot/notifications/trial/expiring.py`
+  - `bloobcat/bot/notifications/trial/end.py`
+  - `bloobcat/bot/notifications/trial/pre_expiring_3d.py`
+  - `tests/test_payments_no_yookassa.py`
+  - `pyproject.toml`
+- Runtime decisions:
+  - introduced a shared rescue-link helper with fixed RU/EN copy and the fixed external host instead of reusing `telegram_settings.webapp_url` or `miniapp_url`;
+  - appended the rescue paragraph only to the targeted user-facing notifications:
+    - subscription expiring (`7d`, `3d`, `1d`)
+    - subscription expired
+    - trial expiring tonight
+    - trial ended
+    - trial marketing reminder (`notify_trial_three_days_left`)
+  - kept existing inline buttons and routes unchanged;
+  - preserved `parse_mode="HTML"` in the trial marketing reminder and verified the appended plain-text URL remains safe under HTML mode;
+  - backend version bump: `0.57.0 -> 0.58.0`.
+- Verification:
+  - `py -3.12 -m pytest TVPN_BACK_END/tests/test_payments_no_yookassa.py -q` -> `PASS` (`33 passed, 1 warning`)
+  - `py -3.12 -m pytest TVPN_BACK_END/tests -q` -> `PASS` (`307 passed, 1 warning`)
+  - `py -3.12 -m compileall TVPN_BACK_END` -> `PASS`
+- Notes:
+  - no migration, env change, or public API change was needed;
+  - scheduler and quiet-hours behavior remained untouched because only notification copy changed.
+
+### 2026-04-09
+
+### Family invite join-flow: authenticated preview modes and safe member switching
+
+- **fix**: strengthened family invite handling so the backend is now the source of truth for self-invite rejection, owner-blocked joins, same-family idempotency, and member-to-member family transitions.
+- Scope:
+  - `bloobcat/routes/family_invites.py`
+  - `tests/test_family_invite_join_flow.py`
+  - `pyproject.toml`
+- Runtime decisions:
+  - added `_InviteJoinContext` plus the shared `_resolve_invite_join_context(...)` helper to derive one of the fixed join modes:
+    - `self_invite`
+    - `owner_blocked`
+    - `already_in_same_family`
+    - `join_ready`
+    - `switch_family_ready`
+    - `switch_family_cleanup_required`
+  - kept the existing public `GET /family/invites/{token}` validator for token existence/expiry and added a new authenticated preview route `GET /family/invites/{token}/preview` that returns:
+    - invite owner
+    - invite allocation
+    - current family owner
+    - current family allocation
+    - connected device count
+    - required device cleanup count
+    - resolved join mode
+  - `POST /family/invites/{token}/accept` now:
+    - rejects self-invite
+    - rejects a family owner joining another family
+    - returns an idempotent success for same-family accepts
+    - rejects over-limit transitions with `Device cleanup required`
+    - allows active member-to-member switching when device count fits the new invite allocation
+  - successful member switching now:
+    - removes the old membership
+    - creates or reactivates the new membership
+    - resyncs the old owner, new owner, and member HWID limits
+    - records audit entries and keeps notification hooks intact
+  - failure cleanup now restores the previous member state as far as possible, including the old membership and prior limit, without introducing a new DB schema or migration;
+  - backend version bumped `0.58.0 -> 0.59.0`.
+- Verification:
+  - `py -3.12 -m pytest TVPN_BACK_END/tests/test_family_invite_join_flow.py -q` -> PASS (`6 passed`)
+  - `py -3.12 -m pytest TVPN_BACK_END/tests -q` -> PASS (`313 passed, 1 warning`)
+  - `py -3.12 -m compileall TVPN_BACK_END` -> PASS
+- Residual risk:
+  - the transition path is now regression-tested and includes explicit rollback logic, but it still spans multiple side effects without a single transaction boundary; the strongest remaining check is a production smoke for a real cross-family member switch.
+
+### 2026-04-16
+
+### User-aware subscription plans for promo discounts
+
+- **feat/fix**: made `/subscription/plans` user-aware so the frontend can render promo-backed payable prices immediately after redeem, without duplicating discount rules in the client.
+- Scope:
+  - `bloobcat/routes/subscription.py`
+  - `tests/test_subscription_plans_discount_pricing.py`
+  - `pyproject.toml`
+- Runtime decisions:
+  - `/subscription/plans` now requires the same authenticated user context as the rest of the subscription surface and passes that user into plan-building;
+  - each returned plan now keeps:
+    - `priceRub` as the current payable amount for this user;
+    - `originalPriceRub` only when a personal promo discount actually reduces the payable amount;
+    - `personalDiscountPercent` only when such a discount applies;
+  - tariff value badge `discountText` remains based on the original tariff card price relative to the one-month plan, not on the discounted payable amount, so promo discounts do not distort the plan-comparison badge;
+  - reading `/subscription/plans` applies `apply_personal_discount(...)` in read-only mode and does not consume `remaining_uses`;
+  - backend version bumped `0.59.0 -> 0.60.0`.
+- Verification:
+  - `rtk .venv/bin/python -m pytest tests/test_subscription_plans_discount_pricing.py -q` -> `PASS` (`4 passed`)
+  - `rtk .venv/bin/python -m py_compile bloobcat/routes/subscription.py bloobcat/routes/promo.py` -> `PASS`
+- Residual risk:
+  - callers that used `/subscription/plans` without a valid authenticated user context must now satisfy the same auth contract as the rest of the subscription API;
+  - manual product smoke is still needed to verify parity between the refreshed card prices and the next payment step in the live Mini App flow.
+
+### 2026-04-16
+
+### Subscription pricing test override hardening
+
+- **test/ci**: hardened the new subscription pricing test harness after the first production CI run failed before deploy on the full backend suite.
+- Scope:
+  - `tests/test_subscription_plans_discount_pricing.py`
+  - `memory-base/log.md`
+- Decisions:
+  - `_build_app_for_user(...)` now overrides the exact `validate` dependency objects referenced inside `bloobcat.routes.subscription` and `bloobcat.routes.promo`, instead of importing `validate` from `bloobcat.funcs.validate` separately;
+  - this avoids object-identity drift in the full test process where older tests temporarily replace `bloobcat.funcs.validate` inside `sys.modules`;
+  - runtime subscription logic and HTTP auth contract were left unchanged; only the test harness was corrected.
+- Verification:
+  - `rtk .venv/bin/python -m pytest tests/test_subscription_plans_discount_pricing.py -q` -> `PASS` (`4 passed`)
+  - `rtk .venv/bin/python -m pytest tests -q` -> `PASS` (`317 passed`)
+- Residual risk:
+  - the backend deploy workflow still needs a second push/run because the first CI attempt failed before the SSH deploy stage;
+  - the new tests now match the existing router-bound dependency pattern, but any future test that hot-swaps route modules through `sys.modules` should keep object identity in mind when using `dependency_overrides`.
+
+### 2026-04-21
+
+### Winback markdown retry regression hardening
+
+- **fix**: removed Markdown-dependent formatting from the winback offer notification so user names with Telegram markdown metacharacters no longer trigger terminal `TelegramBadRequest` parse failures and infinite retry churn for pending winback marks.
+- Scope:
+  - `bloobcat/bot/notifications/winback/discount_offer.py`
+  - `tests/test_payments_no_yookassa.py`
+  - `tests/test_quiet_hours_notifications.py`
+  - `pyproject.toml`
+- Runtime decisions:
+  - `notify_winback_discount_offer(...)` now sends plain text without `parse_mode="Markdown"` and no longer injects Markdown-only emphasis into the English offer body;
+  - the existing retry contract remains intact: generic `False` delivery results still keep the pending winback mark for later retry, while blocked/missing-user cleanup behavior remains unchanged;
+  - backend version bumped `0.64.0 -> 0.65.0`.
+- Verification:
+  - `rtk env PYTHONPATH=. '/Users/waizor/Projects/active/vpn/Strata Project/Strata_Backend/.venv/bin/python' -m pytest tests/test_payments_no_yookassa.py -q` -> `PASS` (`34 passed`)
+  - `rtk env PYTHONPATH=. '/Users/waizor/Projects/active/vpn/Strata Project/Strata_Backend/.venv/bin/python' -m pytest tests/test_quiet_hours_notifications.py -q` -> `PASS` (`26 passed`)
+  - `rtk env PYTHONPATH=. '/Users/waizor/Projects/active/vpn/Strata Project/Strata_Backend/.venv/bin/python' -m py_compile bloobcat/bot/notifications/winback/discount_offer.py` -> `PASS`
+  - `rtk env PYTHONPATH=. '/Users/waizor/Projects/active/vpn/Strata Project/Strata_Backend/.venv/bin/python' -m pytest tests -q` -> `PASS` (`340 passed`)
+- Residual risk:
+  - this batch intentionally hardens only the winback notification path called out by Codex review; other Telegram messages that still rely on Markdown formatting are unchanged;
+  - final production confirmation still requires the merge-to-`main` deploy path and post-deploy smoke on the live winback/Directus flows.
+
+## 2026-04-24 (Vectra brand naming pass)
+
+- **fix/brand**: replaced legacy Strata/Triad/Bloop/Bloob user-facing naming with `Vectra` / `Vectra Connect` across backend-facing user copy and admin surfaces.
+- Scope:
+  - Telegram `/start` text;
+  - trial/family/subscription/referral notification copy;
+  - welcome-VPN payload title, server remark, bot/support fallback URLs and announce text;
+  - family/referral/partner bot-name fallbacks;
+  - Directus `admin-widgets`, `tvpn-home`, `tvpn-promo-studio` source + rebuilt dist bundles;
+  - pgAdmin display name, migration/readme/docstrings and promo-code default prefix (`VECTRA`);
+  - backend version `0.72.0 -> 0.73.0`.
+- Compatibility decisions:
+  - Python package, service/container names and import paths containing `bloobcat` remain unchanged to preserve runtime contracts;
+  - production `*.stratavpn.com` domains and rescue-link URLs remain unchanged until DNS/deploy/bot aliases are formally migrated.
+- Verification:
+  - active-source old-brand scan -> `PASS` for exact legacy product names;
+  - Directus builds: `admin-widgets`, `tvpn-home`, `tvpn-promo-studio` -> `PASS`;
+  - `PYTHONPATH=Vectra_Backend Vectra_Backend/.venv/bin/python -m py_compile <touched backend python files>` -> `PASS`;
+  - `PYTHONPATH=Vectra_Backend Vectra_Backend/.venv/bin/python -m pytest Vectra_Backend/tests/test_user_family_summary.py Vectra_Backend/tests/test_payments_no_yookassa.py -q` -> `PASS` (`40` tests).
+
+### 2026-04-25
+
+### LTE re-enabled for tariff constructor defaults
+
+- **fix/subscription**: restored LTE availability as the default for the new tariff constructor after it had been disabled in tariff seed/config.
+- Scope:
+  - `bloobcat/db/tariff.py`
+  - `bloobcat/services/subscription_limits.py`
+  - `bloobcat/services/admin_integration.py`
+  - `bloobcat/settings.py`
+  - `scripts/seed_tariffs.py`
+  - `migrations/models/96_20260425143000_reenable_lte_for_tariff_builder.py`
+  - `directus/extensions/tvpn-tariff-studio/**`
+  - `directus/extensions/remnawave-sync/**`
+  - `tests/test_subscription_plans_discount_pricing.py`
+  - backend version `0.74.0 -> 0.75.0`
+- Runtime decisions:
+  - default `Tariffs` rows now have `lte_enabled=True` and `lte_price_per_gb=1.5`;
+  - seed for `1/3/6/12` month tariffs now creates LTE-enabled offers with max `500 GB` and step `1 GB`;
+  - migration `96_20260425143000_reenable_lte_for_tariff_builder.py` re-enables LTE for existing duration tariffs and restores missing LTE price/max/step defaults;
+  - Directus Tariff Studio treats LTE as enabled by default and supports fractional LTE price input (`step=0.1`);
+  - `remnawave-sync` now carries computed `lte_enabled` and `lte_price_per_gb` back into Directus payloads alongside derived pricing internals.
+- Verification:
+  - `PYTHONPATH=Vectra_Backend Vectra_Backend/.venv/bin/python -m py_compile Vectra_Backend/bloobcat/settings.py Vectra_Backend/bloobcat/services/subscription_limits.py Vectra_Backend/bloobcat/db/tariff.py Vectra_Backend/bloobcat/services/admin_integration.py Vectra_Backend/scripts/seed_tariffs.py Vectra_Backend/migrations/models/96_20260425143000_reenable_lte_for_tariff_builder.py` -> `PASS`
+  - `/opt/homebrew/opt/node@24/bin/node --check Vectra_Backend/directus/extensions/remnawave-sync/src/index.js && /opt/homebrew/opt/node@24/bin/node --check Vectra_Backend/directus/extensions/remnawave-sync/dist/index.js && /opt/homebrew/opt/node@24/bin/node --check Vectra_Backend/directus/extensions/hooks/remnawave-sync/index.js && /opt/homebrew/opt/node@24/bin/node --check Vectra_Backend/directus/extensions/tvpn-tariff-studio/src/index.js && /opt/homebrew/opt/node@24/bin/node --check Vectra_Backend/directus/extensions/tvpn-tariff-studio/dist/index.js` -> `PASS`
+  - `cd Vectra_Backend/directus/extensions/tvpn-tariff-studio && PATH=/opt/homebrew/opt/node@24/bin:$PATH npm ci && PATH=/opt/homebrew/opt/node@24/bin:$PATH npm run build` -> `PASS` (audit findings inherited from Directus extension toolchain); `node_modules` removed after build.
+  - `PYTHONPATH=Vectra_Backend Vectra_Backend/.venv/bin/python -m pytest Vectra_Backend/tests/test_subscription_plans_discount_pricing.py Vectra_Backend/tests/test_payments_no_yookassa.py Vectra_Backend/tests/test_lte_usage_limiter.py -q` -> `PASS` (`43 passed`)
+- Residual risk:
+  - existing active subscribers are not force-granted new `lte_gb_total` quota by this patch; do that separately if required, because it must be paired with RemnaWave LTE-squad reconciliation.
+
+### Subscription quote user-facing copy cleanup
+
+- **fix(subscription)**: removed backend wording from the public `/subscription/quote` copy returned to the Mini App.
+- Scope:
+  - `bloobcat/routes/subscription.py`
+  - `tests/test_subscription_plans_discount_pricing.py`
+  - backend version `0.76.0 -> 0.77.0`
+- Runtime decision:
+  - quote copy is now `Стоимость обновлена и будет проверена перед оплатой`, keeping source-of-truth validation while avoiding admin/developer wording in the customer UI.
+- Verification:
+  - `PYTHONPATH=Vectra_Backend Vectra_Backend/.venv/bin/python -m py_compile Vectra_Backend/bloobcat/routes/subscription.py` -> `PASS`
+  - `PYTHONPATH=Vectra_Backend Vectra_Backend/.venv/bin/python -m pytest Vectra_Backend/tests/test_subscription_plans_discount_pricing.py -q` -> `PASS` (`7 passed`)

@@ -9,6 +9,7 @@ from bloobcat.db.payments import ProcessedPayments
 from bloobcat.db.users import Users, normalize_date
 from bloobcat.logger import get_logger
 from bloobcat.routes.remnawave.client import RemnaWaveClient
+from bloobcat.routes.remnawave.happ_crypto import normalize_happ_crypto_link
 from bloobcat.settings import remnawave_settings
 
 from .schemas import (
@@ -249,7 +250,7 @@ class CaptainUserLookupRepository:
             ),
             hwid_limit=payload.get("hwidDeviceLimit"),
             traffic_limit_bytes=payload.get("trafficLimitBytes"),
-            subscription_url=subscription_url,
+            subscription_url=normalize_happ_crypto_link(subscription_url) if subscription_url else None,
             telegram_id=payload.get("telegramId"),
             email=payload.get("email"),
             active_internal_squads=active_squads,

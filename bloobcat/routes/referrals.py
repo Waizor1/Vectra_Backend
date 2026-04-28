@@ -1,67 +1,100 @@
-from typing import Any, Dict
-from urllib.parse import quote
+from typing import Any, Dict, Literal
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from bloobcat.db.users import Users
 from bloobcat.funcs.validate import validate
-from bloobcat.bot.bot import get_bot_username
 from bloobcat.logger import get_logger
-from bloobcat.settings import telegram_settings
+from bloobcat.services.referral_gamification import (
+    build_referral_status,
+    open_referral_chest,
+)
 
 logger = get_logger("routes.referrals")
 
 router = APIRouter(prefix="/referrals", tags=["referrals"])
 
 
+class ReferralLevelInfo(BaseModel):
+    key: Literal["start", "bronze", "silver", "gold", "platinum", "diamond"] | str
+    name: str
+    threshold: int
+    cashbackPercent: int
+
+
+class ReferralNextLevelInfo(ReferralLevelInfo):
+    friendsLeft: int
+
+
+class ReferralLevelRow(ReferralLevelInfo):
+    chestRewardLabel: str
+    reached: bool
+
+
+class ReferralPendingChest(BaseModel):
+    id: int
+    levelKey: str
+    levelName: str
+    title: str
+
+
+class ReferralRewardHistoryItem(BaseModel):
+    type: Literal["cashback", "chest"]
+    title: str
+    valueLabel: str
+    createdAt: str
+
+
 class ReferralStatusResponse(BaseModel):
     referralLink: str
     friendsCount: int
+    invitedCount: int
+    paidFriendsCount: int
+    totalCashbackRub: int
+    availableBalanceRub: int
+    currentLevel: ReferralLevelInfo
+    nextLevel: ReferralNextLevelInfo | None
+    levels: list[ReferralLevelRow]
+    pendingChests: list[ReferralPendingChest]
+    lastRewards: list[ReferralRewardHistoryItem]
     totalBonusDays: int
+    # Legacy numeric level for older clients. New UI uses currentLevel instead.
     level: int
 
 
-def _calc_level(count: int) -> int:
-    if count <= 0:
-        return 0
-    if 1 <= count <= 4:
-        return 1
-    if 5 <= count <= 9:
-        return 2
-    return 3
+class ReferralChestRewardResponse(BaseModel):
+    id: int
+    levelKey: str
+    levelName: str
+    type: Literal["balance", "discount_percent"] | str
+    value: int
+    valueLabel: str
+    title: str
 
 
-async def _build_referral_link(user_id: int) -> str:
-    # Keep deep-link behavior aligned with partner routes:
-    # open Mini App directly via configured TELEGRAM_WEBAPP_URL.
-    webapp_url = (getattr(telegram_settings, "webapp_url", None) or "").strip()
-    if webapp_url and webapp_url.lower().startswith("https://"):
-        sep = "&" if "?" in webapp_url else "?"
-        return f"{webapp_url.rstrip('/')}{sep}startapp={quote(str(user_id), safe='')}"
-
-    try:
-        bot_name = await get_bot_username()
-    except Exception:
-        bot_name = "TriadVPN_bot"
-    return f"https://t.me/{bot_name}?start={user_id}"
+class ReferralChestOpenResponse(BaseModel):
+    reward: ReferralChestRewardResponse
+    status: ReferralStatusResponse
 
 
 @router.get("/status", response_model=ReferralStatusResponse)
 async def get_status(user: Users = Depends(validate)) -> ReferralStatusResponse:
-    # Keep consistent with partner dashboard counters:
-    # count all invited users by referred_by, regardless of activation stage.
-    friends_count = await Users.filter(referred_by=user.id).count()
-    level = _calc_level(friends_count)
-    # Total earned referral bonus days (not money).
-    # This value is accumulated when a referred user makes their first payment.
-    total_bonus = int(getattr(user, "referral_bonus_days_total", 0) or 0)
-    referral_link = await _build_referral_link(int(user.id))
-    return ReferralStatusResponse(
-        referralLink=referral_link,
-        friendsCount=friends_count,
-        totalBonusDays=total_bonus,
-        level=level,
+    return ReferralStatusResponse(**(await build_referral_status(user)))
+
+
+@router.post("/chests/{chest_id}/open", response_model=ReferralChestOpenResponse)
+async def open_chest(
+    chest_id: int,
+    user: Users = Depends(validate),
+) -> ReferralChestOpenResponse:
+    reward = await open_referral_chest(user=user, chest_id=int(chest_id))
+    if reward is None:
+        raise HTTPException(status_code=404, detail="Referral chest not found or already opened")
+    status = await build_referral_status(user, ensure_chests=True)
+    return ReferralChestOpenResponse(
+        reward=ReferralChestRewardResponse(**reward),
+        status=ReferralStatusResponse(**status),
     )
 
 

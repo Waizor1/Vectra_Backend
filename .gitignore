@@ -203,4 +203,10 @@ Network Trash Folder
 Temporary Items
 .apdisk
 
+# Load test generated artifacts (ignore only JSON payloads)
+/scripts/loadtest/artifacts/*.json
+
+# Local/remote database backup dumps from destructive-reset safety scripts
+/backups/
+
 

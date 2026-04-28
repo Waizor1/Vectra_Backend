@@ -28,6 +28,8 @@ TORTOISE_ORM = {
                 "bloobcat.db.referral_rewards",
                 "bloobcat.db.in_app_notifications",
                 "bloobcat.db.remnawave_retry_jobs",
+                "bloobcat.db.subscription_freezes",
+                "bloobcat.db.auth",
             ],
             "default_connection": "default",
         },

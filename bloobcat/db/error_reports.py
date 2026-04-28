@@ -3,7 +3,7 @@ from tortoise.contrib.pydantic import pydantic_model_creator
 
 
 class ErrorReports(models.Model):
-    id = fields.UUIDField(pk=True)
+    id = fields.UUIDField(primary_key=True)
     user_id = fields.BigIntField(null=True)
     event_id = fields.CharField(max_length=64)
     code = fields.CharField(max_length=128)

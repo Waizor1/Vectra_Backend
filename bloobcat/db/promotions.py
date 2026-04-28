@@ -6,13 +6,13 @@ from datetime import datetime, date
 from typing import Any, Dict, Optional
 
 from fastadmin import TortoiseModelAdmin, register, WidgetType
-from pydantic import BaseModel as FastAdminBaseModel, Field, validator
+from pydantic import BaseModel as FastAdminBaseModel, Field, field_validator, model_validator
 from tortoise import fields, models
 
 
 class PromoBatch(models.Model):
     """Группа промокодов для удобства управления и аудита."""
-    id = fields.IntField(pk=True)
+    id = fields.IntField(primary_key=True)
     title = fields.CharField(max_length=255, description="Название партии/кампании")
     notes = fields.TextField(null=True, description="Заметки/описание партии")
     created_at = fields.DatetimeField(auto_now_add=True)
@@ -33,7 +33,7 @@ class PromoCode(models.Model):
     Эффекты кодируются в JSON, чтобы можно было добавлять новые типы без миграций.
     """
 
-    id = fields.IntField(pk=True)
+    id = fields.IntField(primary_key=True)
     batch: fields.ForeignKeyNullableRelation[PromoBatch] = fields.ForeignKeyField(
         "models.PromoBatch", related_name="codes", null=True, on_delete=fields.SET_NULL
     )
@@ -75,7 +75,7 @@ class PromoCode(models.Model):
 class PromoUsage(models.Model):
     """Факт использования промокода конкретным пользователем с произвольным контекстом."""
 
-    id = fields.IntField(pk=True)
+    id = fields.IntField(primary_key=True)
     promo_code: fields.ForeignKeyRelation[PromoCode] = fields.ForeignKeyField(
         "models.PromoCode", related_name="usages", on_delete=fields.CASCADE
     )
@@ -104,25 +104,24 @@ class PromoCodeCreateSchema(FastAdminBaseModel):
     disabled: bool = Field(False, description="Отключен")
     code_hmac: Optional[str] = Field(None, description="HMAC хеш (генерируется автоматически)")
     
-    @validator('raw_code')
-    def validate_raw_code(cls, v):
+    @field_validator("raw_code")
+    @classmethod
+    def validate_raw_code(cls, v: str) -> str:
         if not v or len(v.strip()) < 3:
             raise ValueError("Промокод должен содержать минимум 3 символа")
         return v.strip()
     
-    @validator('code_hmac', always=True)
-    def generate_code_hmac(cls, v, values):
-        """Автоматически генерируем HMAC из raw_code"""
-        if 'raw_code' in values:
-            from bloobcat.settings import promo_settings
-            
-            if not promo_settings.hmac_secret:
-                raise ValueError("PROMO_HMAC_SECRET не настроен")
-            
-            secret = promo_settings.hmac_secret.get_secret_value().encode()
-            raw_code = values['raw_code']
-            return hmac.new(secret, raw_code.encode(), hashlib.sha256).hexdigest()
-        return v
+    @model_validator(mode="after")
+    def generate_code_hmac(self):
+        """Автоматически генерируем HMAC из raw_code."""
+        from bloobcat.settings import promo_settings
+
+        if not promo_settings.hmac_secret:
+            raise ValueError("PROMO_HMAC_SECRET не настроен")
+
+        secret = promo_settings.hmac_secret.get_secret_value().encode()
+        self.code_hmac = hmac.new(secret, self.raw_code.encode(), hashlib.sha256).hexdigest()
+        return self
 
 
 class PromoCodeUpdateSchema(FastAdminBaseModel):

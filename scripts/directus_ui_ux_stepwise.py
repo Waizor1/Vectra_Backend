@@ -35,7 +35,6 @@ def main() -> None:
     group_defs = [
         {"collection": "grp_main", "label": "Основное", "icon": "dashboard", "sort": 1},
         {"collection": "grp_promo", "label": "Промо", "icon": "confirmation_number", "sort": 2},
-        {"collection": "grp_prizes", "label": "Колесо призов", "icon": "casino", "sort": 3},
         {"collection": "grp_analytics", "label": "Аналитика", "icon": "timeline", "sort": 4},
         {"collection": "grp_payments", "label": "Платежи", "icon": "payments", "sort": 5},
         {"collection": "grp_service", "label": "Служебное", "icon": "build", "sort": 6},
@@ -108,20 +107,6 @@ def main() -> None:
             "note": "История использования промокодов",
             "sort": 3,
             "translations": [{"language": "ru-RU", "translation": "Использование промокодов"}],
-        },
-        "prize_wheel_config": {
-            "group": "grp_prizes",
-            "icon": "casino",
-            "note": "Настройки призов и вероятностей",
-            "sort": 1,
-            "translations": [{"language": "ru-RU", "translation": "Настройки призов"}],
-        },
-        "prize_wheel_history": {
-            "group": "grp_prizes",
-            "icon": "history_toggle_off",
-            "note": "История выпадения призов",
-            "sort": 2,
-            "translations": [{"language": "ru-RU", "translation": "История призов"}],
         },
         "connections": {
             "group": "grp_analytics",
@@ -203,10 +188,6 @@ def main() -> None:
             "code_hmac": "Можно указать сырой код — хук преобразует в HMAC.",
             "effects": "JSON с эффектами промокода.",
         },
-        "prize_wheel_config": {
-            "probability": "Вероятность от 0 до 1. Сумма активных призов ≤ 1.",
-            "prize_value": "Для subscription указывать число дней.",
-        },
     }
     field_translations = {
         "users": {
@@ -229,12 +210,6 @@ def main() -> None:
             "effects": "Эффекты",
             "disabled": "Отключен",
             "batch_id": "Партия",
-        },
-        "prize_wheel_config": {
-            "prize_type": "Тип приза",
-            "prize_name": "Название",
-            "prize_value": "Значение",
-            "probability": "Вероятность",
         },
         "connections": {
             "at": "Дата подключения",

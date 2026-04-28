@@ -33,6 +33,23 @@ async def apply_personal_discount(user_id: int, base_price: int, months: Optiona
     return final_price, int(discount_obj.id), int(percent)
 
 
+async def is_discount_available_if_needed(discount_id: Optional[int]) -> bool:
+    """Read-only probe for whether a discount can still be applied to a payment."""
+    if not discount_id:
+        return False
+    obj = await PersonalDiscount.get_or_none(id=discount_id)
+    if not obj:
+        return False
+    return bool(
+        PersonalDiscount._is_active_row(
+            int(obj.percent or 0),
+            bool(obj.is_permanent),
+            int(obj.remaining_uses or 0),
+            obj.expires_at,
+        )
+    )
+
+
 async def consume_discount_if_needed(discount_id: Optional[int]) -> bool:
     """Пытается списать разовую скидку. Возвращает True, если списание произошло."""
     if not discount_id:
@@ -51,4 +68,3 @@ async def consume_discount_if_needed(discount_id: Optional[int]) -> bool:
 
 
     
-

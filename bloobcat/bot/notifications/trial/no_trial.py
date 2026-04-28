@@ -9,7 +9,7 @@ from bloobcat.bot.error_handler import handle_telegram_forbidden_error, handle_t
 
 logger = get_logger("notifications.trial.no_trial")
 
-async def notify_no_trial_taken(user, hours_passed: int):
+async def notify_no_trial_taken(user, hours_passed: int) -> bool:
     lang = get_user_locale(user)
     logger.info(f"Подготовка уведомления пользователю {user.id}, не взявшему пробную подписку (прошло {hours_passed} ч.)")
     has_payments = await ProcessedPayments.filter(
@@ -18,34 +18,37 @@ async def notify_no_trial_taken(user, hours_passed: int):
     ).exists()
     if has_payments:
         logger.info(f"Пользователь {user.id} имеет платежи, уведомление не отправляется")
-        return
+        return False
     logger.info(f"Отправка уведомления пользователю {user.id}, не взявшему пробную подписку (прошло {hours_passed} ч.)")
-    
+
     trial_duration_days = app_settings.trial_days
 
     if lang == 'ru':
         text = (
-            f"Привет, {user.full_name}! Еще не воспользовались бесплатным доступом к VPN?\n"
-            f"Активируйте {trial_duration_days}-дневный пробный период прямо сейчас и оцените все преимущества TVPN.\n"
-            "Если возникнут вопросы, обратитесь в поддержку TVPN."
+            f"{user.full_name}, {trial_duration_days}-дневный пробный доступ ещё не активирован.\n\n"
+            "Вы можете включить его в любой момент."
         )
-        button = await webapp_inline_button("Подключить VPN", "/second")
+        button = await webapp_inline_button("Активировать доступ", "/second")
     else:
         text = (
             f"Hi {user.full_name}! Haven't tried our free VPN access yet?\n"
-            f"Activate a {trial_duration_days}-day trial now and experience all benefits of TVPN.\n"
-            "Have questions? Contact TVPN support."
+            f"Activate a {trial_duration_days}-day trial now and experience all benefits of Vectra Connect.\n"
+            "Have questions? Contact Vectra Connect support."
         )
         button = await webapp_inline_button("Connect VPN", "/second")
     try:
         await bot.send_message(user.id, text, reply_markup=button)
         logger.info(f"Уведомление о невзятой пробной подписке успешно отправлено пользователю {user.id}")
         await reset_user_failed_count(user.id)
+        return True
     except TelegramForbiddenError as e:
         logger.warning(f"User {user.id} blocked the bot: {e}")
         await handle_telegram_forbidden_error(user.id, e)
+        return False
     except TelegramBadRequest as e:
         logger.error(f"Bad request error for user {user.id}: {e}")
         await handle_telegram_bad_request(user.id, e)
+        return False
     except Exception as e:
-        logger.error(f"Ошибка при отправке уведомления о невзятой пробной подписке пользователю {user.id}: {e}") 
+        logger.error(f"Ошибка при отправке уведомления о невзятой пробной подписке пользователю {user.id}: {e}")
+        return False

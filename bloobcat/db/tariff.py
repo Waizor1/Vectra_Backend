@@ -16,8 +16,13 @@ class Tariffs(models.Model):
     family_plan_enabled = fields.BooleanField(default=True, description="Показывать семейный вариант плана для этого тарифа")
     final_price_default = fields.IntField(null=True, description="Финальная цена карточки для devices_limit_default устройств. Если заполнено, используется как источник цены")
     final_price_family = fields.IntField(null=True, description="Финальная цена семейной карточки для devices_limit_family устройств (обычно для 12 месяцев)")
-    lte_enabled = fields.BooleanField(default=False, description="Доступ к LTE серверам")
-    lte_price_per_gb = fields.FloatField(default=0.0, description="Цена за 1 GB LTE трафика")
+    lte_enabled = fields.BooleanField(default=True, description="Доступ к LTE серверам")
+    lte_price_per_gb = fields.FloatField(default=1.5, description="Цена за 1 GB LTE трафика")
+    lte_min_gb = fields.IntField(default=0, description="Минимальный объём LTE в конструкторе, GB")
+    lte_max_gb = fields.IntField(default=500, description="Максимальный объём LTE в конструкторе, GB")
+    lte_step_gb = fields.IntField(default=1, description="Шаг выбора LTE в конструкторе, GB")
+    storefront_badge = fields.CharField(max_length=64, null=True, description="Бейдж на витрине конструктора")
+    storefront_hint = fields.CharField(max_length=255, null=True, description="Подсказка на витрине конструктора")
 
     @staticmethod
     def _sanitize_multiplier(value: float) -> float:
@@ -248,6 +253,10 @@ class UsersModelAdmin(TortoiseModelAdmin):
         "devices_limit_family",
         "lte_enabled",
         "lte_price_per_gb",
+        "lte_min_gb",
+        "lte_max_gb",
+        "lte_step_gb",
+        "storefront_badge",
     )
     list_editable = (
         "order",
@@ -261,6 +270,10 @@ class UsersModelAdmin(TortoiseModelAdmin):
         "devices_limit_family",
         "lte_enabled",
         "lte_price_per_gb",
+        "lte_min_gb",
+        "lte_max_gb",
+        "lte_step_gb",
+        "storefront_badge",
     )
     ordering = ("order",)
     verbose_name = "Тарифы"

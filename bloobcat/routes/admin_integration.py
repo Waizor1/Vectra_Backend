@@ -13,6 +13,10 @@ from bloobcat.services.admin_integration import (
     prepare_user_delete_via_admin,
     delete_user_via_admin,
     compute_tariff_effective_pricing,
+    preview_tariff_quote_rows,
+    HwidPurgePreconditionError,
+    preview_hwid_purge,
+    purge_hwid_everywhere,
 )
 from bloobcat.settings import admin_integration_settings
 from bloobcat.db.users import Users
@@ -47,6 +51,24 @@ class TariffPricingComputePayload(BaseModel):
     patch: dict = {}
 
 
+class HwidPreviewPayload(BaseModel):
+    hwid: str
+
+
+class HwidPurgeActorPayload(BaseModel):
+    directus_user_id: Optional[str] = None
+    directus_role_id: Optional[str] = None
+    email: Optional[str] = None
+    name: Optional[str] = None
+    is_admin: Optional[bool] = None
+
+
+class HwidPurgePayload(BaseModel):
+    hwid: str
+    reason: Optional[str] = None
+    actor: Optional[HwidPurgeActorPayload] = None
+
+
 @router.post("/users/{user_id}/sync", dependencies=[Depends(require_admin_integration_token)])
 async def sync_user(user_id: int, payload: UserSyncPayload):
     await sync_user_lte(user_id, payload.lte_gb_total)
@@ -74,11 +96,43 @@ async def delete_user(user_id: int):
 
 @router.post("/tariffs/compute-pricing", dependencies=[Depends(require_admin_integration_token)])
 async def compute_tariff_pricing(payload: TariffPricingComputePayload):
-    computed = await compute_tariff_effective_pricing(
+    result = await compute_tariff_effective_pricing(
         tariff_id=payload.tariff_id,
         patch=payload.patch or {},
     )
-    return {"ok": True, "computed": computed}
+    return result
+
+
+@router.post("/tariffs/quote-preview", dependencies=[Depends(require_admin_integration_token)])
+async def preview_tariff_pricing(payload: TariffPricingComputePayload):
+    return await preview_tariff_quote_rows(
+        tariff_id=payload.tariff_id,
+        patch=payload.patch or {},
+    )
+
+
+@router.post("/hwid/preview", dependencies=[Depends(require_admin_integration_token)])
+async def preview_hwid(payload: HwidPreviewPayload):
+    try:
+        preview = await preview_hwid_purge(payload.hwid)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return {"ok": True, "preview": preview}
+
+
+@router.post("/hwid/purge", dependencies=[Depends(require_admin_integration_token)])
+async def purge_hwid(payload: HwidPurgePayload):
+    try:
+        result = await purge_hwid_everywhere(
+            payload.hwid,
+            reason=payload.reason,
+            actor=payload.actor.model_dump(exclude_none=True) if payload.actor else None,
+        )
+    except HwidPurgePreconditionError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return {"ok": bool(result.get("ok")), "result": result}
 
 
 @router.post("/family/{owner_id}/unblock-invites", dependencies=[Depends(require_admin_integration_token)])

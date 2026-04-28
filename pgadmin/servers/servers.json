@@ -1,7 +1,7 @@
 {
     "Servers": {
         "1": {
-            "Name": "Bloobcat Database",
+            "Name": "Vectra Database",
             "Group": "Servers",
             "Host": "bloobcat_db",
             "Port": 5432,

@@ -39,6 +39,41 @@ function injectTvpnHomeFullWidthLayoutFix() {
 				justify-items: stretch !important;
 				align-items: stretch !important;
 			}
+			@media (max-width: 980px) {
+				html.${ACTIVE_CLASS} .private-view__navigation {
+					display: none !important;
+					width: 0 !important;
+					min-width: 0 !important;
+					max-width: 0 !important;
+					padding: 0 !important;
+					margin: 0 !important;
+					border: 0 !important;
+					overflow: hidden !important;
+				}
+				/* Directus mobile slide-over nav (module bar + module navigation). */
+				html.${ACTIVE_CLASS} #dialog-outlet .container.left .module-bar,
+				html.${ACTIVE_CLASS} #dialog-outlet .container.left .module-nav.mobile-nav,
+				html.${ACTIVE_CLASS} #dialog-outlet .container.left .v-overlay,
+				html.${ACTIVE_CLASS} #dialog-outlet .container.left .overlay {
+					display: none !important;
+				}
+				html.${ACTIVE_CLASS} #dialog-outlet .container.left {
+					width: 0 !important;
+					min-width: 0 !important;
+					max-width: 0 !important;
+					pointer-events: none !important;
+				}
+				/* Hide mobile sidebar toggles to avoid opening hidden overlays. */
+				html.${ACTIVE_CLASS} .v-icon.nav-toggle,
+				html.${ACTIVE_CLASS} .v-icon.sidebar-toggle {
+					display: none !important;
+				}
+				html.${ACTIVE_CLASS} .private-view__main,
+				html.${ACTIVE_CLASS} .private-view__content {
+					max-width: none !important;
+					width: 100% !important;
+				}
+			}
 		`;
 		document.head.appendChild(style);
 	}

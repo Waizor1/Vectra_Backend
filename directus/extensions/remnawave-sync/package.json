@@ -2,11 +2,13 @@
   "name": "remnawave-sync",
   "version": "1.0.0",
   "type": "module",
-  "keywords": ["directus-extension"],
+  "keywords": [
+    "directus-extension"
+  ],
   "directus:extension": {
     "type": "hook",
     "path": "dist/index.js",
     "source": "src/index.js",
-    "host": "^11.15.0"
+    "host": "^11.17.3"
   }
 }

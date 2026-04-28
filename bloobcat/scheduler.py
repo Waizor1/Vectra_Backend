@@ -21,6 +21,18 @@ from bloobcat.tasks.retry_trial_extensions import run_retry_trial_extensions_sch
 from bloobcat.tasks.retry_trial_endings import run_retry_trial_endings_scheduler
 from bloobcat.tasks.retry_trial_extension_notifications import run_retry_trial_extension_notifications_scheduler
 from bloobcat.tasks.cleanup_missed_cancellations import run_cleanup_missed_cancellations_scheduler
+from bloobcat.tasks.quiet_hours import (
+    PENDING_SUBSCRIPTION_CANCELLED_MARK_TYPE,
+    PENDING_TRIAL_ENDED_MARK_TYPE,
+    SUBSCRIPTION_CANCELLED_AFTER_FAILURES_MARK_TYPE,
+    SUBSCRIPTION_EXPIRED_MARK_TYPE,
+    ensure_notification_mark,
+    is_quiet_hours,
+    normalize_user_notification_eta,
+)
+from bloobcat.tasks.quiet_hours_notifications import (
+    run_quiet_hours_notifications_scheduler,
+)
 from bloobcat.tasks.trial_expiring_catchup import run_trial_expiring_catchup_scheduler
 from bloobcat.tasks.subscription_expiring_catchup import run_subscription_expiring_catchup_scheduler
 from bloobcat.tasks.winback_discounts import run_winback_discounts_scheduler
@@ -31,18 +43,18 @@ from bloobcat.tasks.lte_usage_limiter import (
 )
 from bloobcat.tasks.payment_reconcile import run_payment_reconcile_scheduler
 from bloobcat.tasks.remnawave_delete_retry import run_remnawave_delete_retry_scheduler
+from bloobcat.tasks.subscription_resume import run_subscription_resume_scheduler
+from bloobcat.tasks.auto_payment_reminders import (
+    build_auto_payment_reminder_eta,
+    run_auto_payment_reminders_scheduler,
+    send_auto_payment_reminder_if_needed,
+)
 
 logger = get_logger("scheduler")
 
 MOSCOW = ZoneInfo("Europe/Moscow")
 # Global mapping of user_id to scheduled asyncio tasks for cancellation
 scheduled_tasks = {}
-
-
-def _auto_renewal_enabled_for_user(user: Users) -> bool:
-    return bool(user.renew_id) and str(
-        getattr(payment_settings, "auto_renewal_mode", "") or ""
-    ).strip().lower() == "yookassa"
 
 # Rate limiting для trial extension notifications
 _last_trial_notification_time = None
@@ -187,15 +199,25 @@ def cancel_user_tasks(user_id: int):
 
 # State-validation wrappers before executing tasks
 async def _exec_auto_payment(user_id: int, planned_expired: date, days_before: int):
+    if payment_settings.auto_renewal_mode != "yookassa":
+        logger.debug("Skipping auto payment for user %s: auto-renewal disabled", user_id)
+        return
     user = await Users.get_or_none(id=user_id)
-    if not user or normalize_date(user.expired_at) != planned_expired or not _auto_renewal_enabled_for_user(user):
+    if not user or normalize_date(user.expired_at) != planned_expired or not user.renew_id:
         logger.debug(f"Skipping auto payment for user {user_id}")
         return
     await create_auto_payment(user, disable_on_fail=(days_before == 0))
 
+
+async def _exec_notify_auto_payment_reminder(
+    user_id: int, planned_expired: date, days_before: int
+):
+    await send_auto_payment_reminder_if_needed(user_id, planned_expired, days_before)
+
+
 async def _exec_notify_expiring(user_id: int, planned_expired: date, days_before: int):
     user = await Users.get_or_none(id=user_id)
-    if not user or normalize_date(user.expired_at) != planned_expired or _auto_renewal_enabled_for_user(user):
+    if not user or normalize_date(user.expired_at) != planned_expired or user.renew_id:
         logger.debug(f"Skipping notify expiring for user {user_id}")
         return
     # Idempotency via notification marks
@@ -204,14 +226,21 @@ async def _exec_notify_expiring(user_id: int, planned_expired: date, days_before
     if already:
         logger.debug(f"Skipping duplicate subscription expiring for user {user_id}, key={key}")
         return
-    await notify_expiring_subscription(user)
-    await NotificationMarks.create(user_id=user.id, type="subscription_expiring", key=key)
+    sent_ok = await notify_expiring_subscription(user)
+    if sent_ok:
+        await NotificationMarks.create(user_id=user.id, type="subscription_expiring", key=key)
 
 async def _exec_cancel_if_unpaid(user_id: int, planned_expired: date):
     """Checks if a subscription was renewed, and if not, cancels it."""
+    if payment_settings.auto_renewal_mode != "yookassa":
+        logger.debug(
+            "Skipping cancel_if_unpaid for user %s: auto-renewal disabled",
+            user_id,
+        )
+        return
     user = await Users.get_or_none(id=user_id)
     # If user does not exist, or subscription was renewed (expired_at changed), or auto-renewal was cancelled, do nothing.
-    if not user or normalize_date(user.expired_at) != planned_expired or not _auto_renewal_enabled_for_user(user):
+    if not user or normalize_date(user.expired_at) != planned_expired or not user.renew_id:
         logger.debug(f"Skipping cancel_if_unpaid for user {user_id}. Conditions not met.")
         return
 
@@ -221,15 +250,69 @@ async def _exec_cancel_if_unpaid(user_id: int, planned_expired: date):
     user.renew_id = None
     await user.save()
 
+    notification_key = str(planned_expired)
+    if user.is_blocked:
+        logger.info(
+            f"Subscription cancelled for blocked user {user.id} without notification"
+        )
+        return
+
+    if is_quiet_hours():
+        await ensure_notification_mark(
+            user_id=user.id,
+            mark_type=PENDING_SUBSCRIPTION_CANCELLED_MARK_TYPE,
+            key=notification_key,
+        )
+        logger.info(
+            f"Deferred cancellation notification for user {user.id} until quiet hours end"
+        )
+        return
+
     # Notify user about cancellation
-    await notify_subscription_cancelled_after_failures(user)
+    sent_ok = await notify_subscription_cancelled_after_failures(user)
+    if sent_ok:
+        await ensure_notification_mark(
+            user_id=user.id,
+            mark_type=SUBSCRIPTION_CANCELLED_AFTER_FAILURES_MARK_TYPE,
+            key=notification_key,
+        )
+        return
+
+    refreshed_user = await Users.get_or_none(id=user.id)
+    if refreshed_user and not refreshed_user.is_blocked:
+        await ensure_notification_mark(
+            user_id=user.id,
+            mark_type=PENDING_SUBSCRIPTION_CANCELLED_MARK_TYPE,
+            key=notification_key,
+        )
+        logger.warning(
+            f"Cancellation notification delivery not confirmed for user {user.id}; queued for retry"
+        )
 
 async def _exec_notify_expired(user_id: int, planned_expired: date):
     user = await Users.get_or_none(id=user_id)
-    if not user or normalize_date(user.expired_at) != planned_expired or _auto_renewal_enabled_for_user(user):
+    if not user or normalize_date(user.expired_at) != planned_expired or user.renew_id:
         logger.debug(f"Skipping notify expired for user {user_id}")
         return
-    await on_disabled(user)
+    key = str(planned_expired)
+    already = await NotificationMarks.filter(
+        user_id=user.id,
+        type=SUBSCRIPTION_EXPIRED_MARK_TYPE,
+        key=key,
+    ).exists()
+    if already:
+        logger.debug(f"Skipping duplicate expired notify for user {user_id}, key={key}")
+        return
+    if user.is_blocked:
+        logger.info(f"Skipping expired notification for blocked user {user.id}")
+        return
+    sent_ok = await on_disabled(user)
+    if sent_ok:
+        await ensure_notification_mark(
+            user_id=user.id,
+            mark_type=SUBSCRIPTION_EXPIRED_MARK_TYPE,
+            key=key,
+        )
 
 
 async def _exec_extend_trial(user_id: int, planned_expired: date):
@@ -253,12 +336,20 @@ async def _exec_extend_trial(user_id: int, planned_expired: date):
         already_notified = await NotificationMarks.filter(user_id=user.id, type="trial_extension_notified", key=key).exists()
         if not already_notified:
             # Fire-and-forget notify; dedicated periodic task will also retry
-            try:
-                extension_days = app_settings.trial_days // 2
-                await notify_trial_extended(user, extension_days)
-                await NotificationMarks.create(user_id=user.id, type="trial_extension_notified", key=key)
-            except Exception as e:
-                logger.warning(f"[{user_id}] Failed to send missing trial extension notification for key={key}: {e}")
+            if is_quiet_hours():
+                logger.info(
+                    f"[{user_id}] Delaying missing trial extension notification for key={key} until quiet hours end"
+                )
+            else:
+                try:
+                    extension_days = app_settings.trial_days // 2
+                    sent_ok = await notify_trial_extended(user, extension_days)
+                    if sent_ok:
+                        await NotificationMarks.create(
+                            user_id=user.id, type="trial_extension_notified", key=key
+                        )
+                except Exception as e:
+                    logger.warning(f"[{user_id}] Failed to send missing trial extension notification for key={key}: {e}")
         return
 
     logger.debug(f"[{user_id}] Attempting to extend trial. Current expired_at: {user.expired_at}")
@@ -289,6 +380,11 @@ async def _exec_extend_trial(user_id: int, planned_expired: date):
             await asyncio.sleep(wait_time)
     
     # Отправляем уведомление с таймаутом (было 120с, стало 600с = 10 минут)
+    if is_quiet_hours():
+        logger.info(
+            f"[{user_id}] Trial extension applied for key={key}; notification deferred until quiet hours end"
+        )
+        return
     try:
         notification_result = await asyncio.wait_for(
             notify_trial_extended(user, extension_days),
@@ -355,10 +451,36 @@ async def _exec_notify_trial_end(user_id: int, planned_expired: date):
     if already:
         logger.debug(f"Skipping duplicate trial end notify for user {user_id}, key={key}")
         return
-    await notify_trial_ended(user)
-    await NotificationMarks.create(user_id=user.id, type="trial_ended", key=key)
     user.is_trial = False
     await user.save()
+    if user.is_blocked:
+        logger.info(f"Trial ended for blocked user {user.id} without notification")
+        return
+    if is_quiet_hours():
+        await ensure_notification_mark(
+            user_id=user.id,
+            mark_type=PENDING_TRIAL_ENDED_MARK_TYPE,
+            key=key,
+        )
+        logger.info(
+            f"Deferred trial-ended notification for user {user.id} until quiet hours end"
+        )
+        return
+    sent_ok = await notify_trial_ended(user)
+    if sent_ok:
+        await ensure_notification_mark(user_id=user.id, mark_type="trial_ended", key=key)
+        return
+
+    refreshed_user = await Users.get_or_none(id=user.id)
+    if refreshed_user and not refreshed_user.is_blocked:
+        await ensure_notification_mark(
+            user_id=user.id,
+            mark_type=PENDING_TRIAL_ENDED_MARK_TYPE,
+            key=key,
+        )
+        logger.warning(
+            f"Trial-ended notification delivery not confirmed for user {user.id}; queued for retry"
+        )
 
 ## referral prompt per-user function removed; handled by periodic task
 
@@ -373,22 +495,30 @@ async def _exec_notify_expiring_trial(user_id: int, planned_expired: date):
     if already:
         logger.debug(f"Skipping duplicate trial expiring for user {user_id}, key={key}")
         return
-    await notify_expiring_trial(user)
-    await NotificationMarks.create(user_id=user.id, type="trial_expiring", key=key)
+    if user.is_blocked:
+        logger.info(f"Skipping trial expiring notification for blocked user {user.id}")
+        return
+    sent_ok = await notify_expiring_trial(user)
+    if sent_ok:
+        await NotificationMarks.create(user_id=user.id, type="trial_expiring", key=key)
 
-async def _exec_notify_trial_3_days_left(user_id: int, planned_expired: date):
+async def _exec_notify_trial_1_day_left(user_id: int, planned_expired: date):
     user = await Users.get_or_none(id=user_id)
     if not user or not user.is_trial or normalize_date(user.expired_at) != planned_expired:
-        logger.debug(f"Skipping 3-day trial notify for user {user_id}")
+        logger.debug(f"Skipping 1-day trial marketing notify for user {user_id}")
         return
     # Idempotency via notification marks
-    key = f"3d:{planned_expired}"
+    key = f"1d:{planned_expired}"
     already = await NotificationMarks.filter(user_id=user.id, type="trial_pre_expiring", key=key).exists()
     if already:
-        logger.debug(f"Skipping duplicate 3-day trial notify for user {user_id}, key={key}")
+        logger.debug(f"Skipping duplicate 1-day trial marketing notify for user {user_id}, key={key}")
         return
-    await notify_trial_three_days_left(user)
-    await NotificationMarks.create(user_id=user.id, type="trial_pre_expiring", key=key)
+    if user.is_blocked:
+        logger.info(f"Skipping trial marketing notification for blocked user {user.id}")
+        return
+    sent_ok = await notify_trial_three_days_left(user)
+    if sent_ok:
+        await NotificationMarks.create(user_id=user.id, type="trial_pre_expiring", key=key)
 
 async def schedule_user_tasks(user):
     """Schedule subscription, trial, and referral tasks for a user."""
@@ -407,11 +537,26 @@ async def schedule_user_tasks(user):
         # Base time at midnight of expiration day
         base = datetime.combine(user.expired_at, time.min).replace(tzinfo=MOSCOW)
 
-        if _auto_renewal_enabled_for_user(user):
+        if user.renew_id and payment_settings.auto_renewal_mode == "yookassa":
             # Logic for users WITH auto-renewal
             # 4, 3 and 2 days before: autopay attempt at midnight.
             # Check which payment attempts are needed to avoid multiple simultaneous payments
             current_time = datetime.now(MOSCOW)  # Get fresh current time for accurate comparison
+            for days_before in (4, 3, 2):
+                reminder_eta = build_auto_payment_reminder_eta(
+                    planned_expired=user.expired_at,
+                    days_before=days_before,
+                )
+                reminder_task = schedule_coro(
+                    reminder_eta,
+                    _exec_notify_auto_payment_reminder,
+                    user.id,
+                    user.expired_at,
+                    days_before,
+                    skip_if_past=True,
+                )
+                scheduled_tasks[user.id].append(reminder_task)
+
             payment_attempts_needed = []
             for days_before in (4, 3, 2):
                 eta = base - timedelta(days=days_before)
@@ -439,9 +584,9 @@ async def schedule_user_tasks(user):
             scheduled_tasks[user.id].append(task)
         else:
             # Logic for users WITHOUT auto-renewal: send expiration reminders
-            # 3 and 2 days before: expiration reminder at midnight
+            # 3 and 2 days before: expiration reminder after quiet hours if needed
             for days_before in (3, 2):
-                eta = base - timedelta(days=days_before)
+                eta = normalize_user_notification_eta(base - timedelta(days=days_before))
                 # Skip expiration reminders if time has already passed
                 task = schedule_coro(eta, _exec_notify_expiring, user.id, user.expired_at, days_before, skip_if_past=True)
                 scheduled_tasks[user.id].append(task)
@@ -452,20 +597,20 @@ async def schedule_user_tasks(user):
             task = schedule_coro(reminder_time, _exec_notify_expiring, user.id, user.expired_at, 1, skip_if_past=True)
             scheduled_tasks[user.id].append(task)
 
-            # On expiration day: send notification that subscription has expired.
+            # On expiration day: send notification that subscription has expired after quiet hours.
             # This will be skipped for auto-renewal users by the check inside _exec_notify_expired.
             # Skip expired notifications if time has already passed
-            task = schedule_coro(base, _exec_notify_expired, user.id, user.expired_at, skip_if_past=True)
+            expired_eta = normalize_user_notification_eta(base)
+            task = schedule_coro(expired_eta, _exec_notify_expired, user.id, user.expired_at, skip_if_past=True)
             scheduled_tasks[user.id].append(task)
 
     # Trial tasks
     # Only for users with trial assigned and not subscribed
     if user.is_trial and not user.is_subscribed and user.expired_at:
         exp_dt = datetime.combine(user.expired_at, time.min).replace(tzinfo=MOSCOW)
-        # 3 days before at 12:00 MSK
-        three_days_before = exp_dt - timedelta(days=3)
-        three_days_eta = datetime.combine(three_days_before.date(), time(hour=12, minute=0)).replace(tzinfo=MOSCOW)
-        task = schedule_coro(three_days_eta, _exec_notify_trial_3_days_left, user.id, user.expired_at, skip_if_past=True)
+        # Marketing notification exactly 1 day before trial end, but not during quiet hours
+        one_day_before_eta = normalize_user_notification_eta(exp_dt - timedelta(days=1))
+        task = schedule_coro(one_day_before_eta, _exec_notify_trial_1_day_left, user.id, user.expired_at, skip_if_past=True)
         scheduled_tasks[user.id].append(task)
         # 2h/24h moved to periodic batch (retry_trial_notifications)
         # Notification about expiring trial - at 12:00 the day before
@@ -623,9 +768,13 @@ async def schedule_all_tasks():
     asyncio.create_task(run_retry_trial_endings_scheduler())
     # Start periodic cleanup of missed cancellations
     asyncio.create_task(run_cleanup_missed_cancellations_scheduler())
+    # Start evening catch-up for missed auto-payment reminders
+    asyncio.create_task(run_auto_payment_reminders_scheduler())
+    # Start pending quiet-hours delivery and morning catch-ups for user notifications
+    asyncio.create_task(run_quiet_hours_notifications_scheduler())
     # Start trial expiring catch-up (12:00 day-before)
     asyncio.create_task(run_trial_expiring_catchup_scheduler())
-    # Start subscription expiring catch-up (3/2 days at 00:00, 1 day at 12:00)
+    # Start subscription expiring catch-up (3/2 days at 08:00, 1 day at 12:00)
     asyncio.create_task(run_subscription_expiring_catchup_scheduler())
     # Start periodic referral prompts (7d, 14d, then every 30d)
     asyncio.create_task(run_referral_prompts_scheduler())
@@ -637,6 +786,8 @@ async def schedule_all_tasks():
     asyncio.create_task(run_payment_reconcile_scheduler())
     # Retry RemnaWave user deletes that failed with transient errors.
     asyncio.create_task(run_remnawave_delete_retry_scheduler())
+    # Safety net: resume frozen base subscriptions after family ends.
+    asyncio.create_task(run_subscription_resume_scheduler())
     # Start automatic statistics scheduler
     from bloobcat.statistics.scheduler import statistics_scheduler
     asyncio.create_task(statistics_scheduler()) 

@@ -8,17 +8,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from tortoise.expressions import F
 from tortoise import connections
-from urllib.parse import quote
 
 from bloobcat.db.users import Users
 from bloobcat.db.partner_qr import PartnerQr
 from bloobcat.db.partner_withdrawals import PartnerWithdrawals
 from bloobcat.db.partner_earnings import PartnerEarnings
 from bloobcat.db.payments import ProcessedPayments
+from bloobcat.funcs.referral_attribution import build_partner_link
 from bloobcat.funcs.validate import validate
-from bloobcat.bot.bot import get_bot_username
 from bloobcat.logger import get_logger
-from bloobcat.settings import telegram_settings
 
 logger = get_logger("routes.partner")
 
@@ -90,6 +88,12 @@ def _resolve_paid_amount_rub(withdraw: PartnerWithdrawals, normalized_status: Li
     return paid_amount
 
 
+def _sql_param(index: int, *, dialect: str | None) -> str:
+    if (dialect or "").strip().lower() == "sqlite":
+        return "?"
+    return f"${index}"
+
+
 def _slugify_title(title: str) -> str:
     s = title.strip().lower()
     out = []
@@ -114,7 +118,7 @@ async def _build_qr_link(title: str) -> str:
     try:
         bot_name = await get_bot_username()
     except Exception:
-        bot_name = "TriadVPN_bot"
+        bot_name = "VectraConnect_bot"
     payload = f"qr_{slug}"
     webapp_url = (getattr(telegram_settings, "webapp_url", None) or "").strip()
     if webapp_url and webapp_url.lower().startswith("https://"):
@@ -141,21 +145,6 @@ def _require_partner(user: Users) -> None:
         raise HTTPException(status_code=403, detail="Partner access required")
 
 
-async def _build_referral_link(user: Users) -> str:
-    # Prefer direct Mini App deep link to reduce drop-off:
-    # open app instantly with startapp payload (no extra bot-button tap).
-    webapp_url = (getattr(telegram_settings, "webapp_url", None) or "").strip()
-    if webapp_url and webapp_url.lower().startswith("https://"):
-        sep = "&" if "?" in webapp_url else "?"
-        return f"{webapp_url.rstrip('/')}{sep}startapp={quote(str(user.id), safe='')}"
-
-    try:
-        bot_name = await get_bot_username()
-    except Exception:
-        bot_name = "TriadVPN_bot"
-    return f"https://t.me/{bot_name}?start={user.id}"
-
-
 @router.get("/balance", response_model=PartnerBalanceResponse)
 async def get_balance(user: Users = Depends(validate)) -> PartnerBalanceResponse:
     _require_partner(user)
@@ -167,7 +156,7 @@ async def get_status(user: Users = Depends(validate)) -> PartnerStatusResponse:
     # This endpoint is intentionally accessible for non-partners too
     # (so the Mini App can show a clear "not activated" state).
     cashback = int(user.referral_percent()) if hasattr(user, "referral_percent") else int(getattr(user, "custom_referral_percent", 0) or 0)
-    referral_link = await _build_referral_link(user)
+    referral_link = await build_partner_link(int(user.id))
     return PartnerStatusResponse(
         isPartner=bool(getattr(user, "is_partner", False)),
         cashbackPercent=max(0, cashback),
@@ -189,7 +178,7 @@ class PartnerSummaryResponse(BaseModel):
 @router.get("/summary", response_model=PartnerSummaryResponse)
 async def get_summary(user: Users = Depends(validate)) -> PartnerSummaryResponse:
     cashback = int(user.referral_percent()) if hasattr(user, "referral_percent") else int(getattr(user, "custom_referral_percent", 0) or 0)
-    referral_link = await _build_referral_link(user)
+    referral_link = await build_partner_link(int(user.id))
 
     if not getattr(user, "is_partner", False):
         return PartnerSummaryResponse(
@@ -216,12 +205,16 @@ async def get_summary(user: Users = Depends(validate)) -> PartnerSummaryResponse
     subscribed_count = 0
     try:
         conn = connections.get("default")
+        dialect = getattr(getattr(conn, "capabilities", None), "dialect", None)
+        ref_param = _sql_param(1, dialect=dialect)
         rows = await conn.execute_query_dict(
             """
             SELECT COUNT(DISTINCT p.user_id) AS cnt
             FROM processed_payments p
             JOIN users u ON u.id = p.user_id
-            WHERE u.referred_by = $1
+            WHERE u.referred_by = """
+            + ref_param
+            + """
               AND p.status = 'succeeded'
             """,
             [int(user.id)],
@@ -276,7 +269,7 @@ async def create_qr_code(payload: PartnerQrCreateRequest, user: Users = Depends(
     try:
         bot_name = await get_bot_username()
     except Exception:
-        bot_name = "TriadVPN_bot"
+        bot_name = "VectraConnect_bot"
     token = str(qr.id).replace("-", "")
     start_payload = f"qr_{token}"
     webapp_url = (getattr(telegram_settings, "webapp_url", None) or "").strip()

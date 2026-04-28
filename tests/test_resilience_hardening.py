@@ -380,11 +380,201 @@ async def test_ensure_notification_marks_fk_cascade_returns_false_when_table_not
 
 
 @pytest.mark.asyncio
-async def test_users_delete_calls_active_tariffs_fk_guard(monkeypatch):
-    calls = {"guard": 0, "cancel": 0, "super_delete": 0}
+async def test_ensure_promo_usages_fk_cascade_repairs_non_cascade(monkeypatch):
+    class _Conn:
+        def __init__(self):
+            self.script_calls = 0
 
-    async def _guard():
-        calls["guard"] += 1
+        async def execute_query_dict(self, _query):
+            if "table_constraints" in _query and "promo_usages" in _query:
+                return [{"table_schema": "public", "constraint_name": "pu_user_fkey", "delete_rule": "NO ACTION"}]
+            if "pg_class" in _query and "promo_usages" in _query:
+                return [{"table_schema": "public"}]
+            return []
+
+        async def execute_script(self, _script):
+            self.script_calls += 1
+
+    conn = _Conn()
+    monkeypatch.setattr(fk_guards.Tortoise, "get_connection", lambda _name: conn)
+    result = await fk_guards.ensure_promo_usages_fk_cascade()
+    assert conn.script_calls == 1
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_ensure_promo_usages_fk_cascade_repairs_missing_constraint(monkeypatch):
+    class _Conn:
+        def __init__(self):
+            self.script_calls = 0
+
+        async def execute_query_dict(self, _query):
+            if "table_constraints" in _query and "promo_usages" in _query:
+                return []
+            if "pg_class" in _query and "promo_usages" in _query:
+                return [{"table_schema": "public"}]
+            return []
+
+        async def execute_script(self, _script):
+            self.script_calls += 1
+
+    conn = _Conn()
+    monkeypatch.setattr(fk_guards.Tortoise, "get_connection", lambda _name: conn)
+    result = await fk_guards.ensure_promo_usages_fk_cascade()
+    assert conn.script_calls == 1
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_ensure_promo_usages_fk_cascade_skips_when_single_cascade(monkeypatch):
+    class _Conn:
+        def __init__(self):
+            self.script_calls = 0
+
+        async def execute_query_dict(self, _query):
+            if "table_constraints" in _query and "promo_usages" in _query:
+                return [
+                    {
+                        "table_schema": "public",
+                        "constraint_name": "fk_promo_usages_user",
+                        "delete_rule": "CASCADE",
+                    }
+                ]
+            if "pg_class" in _query and "promo_usages" in _query:
+                return [{"table_schema": "public"}]
+            return []
+
+        async def execute_script(self, _script):
+            self.script_calls += 1
+
+    conn = _Conn()
+    monkeypatch.setattr(fk_guards.Tortoise, "get_connection", lambda _name: conn)
+    result = await fk_guards.ensure_promo_usages_fk_cascade()
+    assert conn.script_calls == 0
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_ensure_users_referred_by_fk_set_null_repairs_wrong_rule(monkeypatch):
+    class _Conn:
+        def __init__(self):
+            self.script_calls = 0
+            self.last_script = ""
+
+        async def execute_query_dict(self, _query):
+            if "table_constraints" in _query and "referred_by" in _query:
+                return [
+                    {
+                        "table_schema": "public",
+                        "constraint_name": "users_referred_by_foreign",
+                        "delete_rule": "NO ACTION",
+                    }
+                ]
+            if "pg_class" in _query and "WHERE c.relname = 'users'" in _query:
+                return [{"table_schema": "public"}]
+            return []
+
+        async def execute_script(self, _script):
+            self.script_calls += 1
+            self.last_script = _script
+
+    conn = _Conn()
+    monkeypatch.setattr(fk_guards.Tortoise, "get_connection", lambda _name: conn)
+    result = await fk_guards.ensure_users_referred_by_fk_set_null()
+
+    assert result is True
+    assert conn.script_calls == 1
+    assert "ON DELETE SET NULL" in conn.last_script
+    assert 'SET "referred_by" = NULL' in conn.last_script
+
+
+@pytest.mark.asyncio
+async def test_ensure_users_referred_by_fk_set_null_skips_when_single_set_null(monkeypatch):
+    class _Conn:
+        def __init__(self):
+            self.script_calls = 0
+
+        async def execute_query_dict(self, _query):
+            if "table_constraints" in _query and "referred_by" in _query:
+                return [
+                    {
+                        "table_schema": "public",
+                        "constraint_name": "users_referred_by_foreign",
+                        "delete_rule": "SET NULL",
+                    }
+                ]
+            if "pg_class" in _query and "WHERE c.relname = 'users'" in _query:
+                return [{"table_schema": "public"}]
+            return []
+
+        async def execute_script(self, _script):
+            self.script_calls += 1
+
+    conn = _Conn()
+    monkeypatch.setattr(fk_guards.Tortoise, "get_connection", lambda _name: conn)
+    result = await fk_guards.ensure_users_referred_by_fk_set_null()
+
+    assert result is True
+    assert conn.script_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_ensure_users_referred_by_fk_set_null_repairs_missing_or_duplicate(monkeypatch):
+    class _Conn:
+        def __init__(self):
+            self.script_calls = 0
+
+        async def execute_query_dict(self, _query):
+            if "table_constraints" in _query and "referred_by" in _query:
+                return [
+                    {
+                        "table_schema": "public",
+                        "constraint_name": "users_referred_by_foreign",
+                        "delete_rule": "SET NULL",
+                    },
+                    {
+                        "table_schema": "public",
+                        "constraint_name": "users_referred_by_foreign_dup",
+                        "delete_rule": "SET NULL",
+                    },
+                ]
+            if "pg_class" in _query and "WHERE c.relname = 'users'" in _query:
+                return [{"table_schema": "public"}]
+            return []
+
+        async def execute_script(self, _script):
+            self.script_calls += 1
+
+    conn = _Conn()
+    monkeypatch.setattr(fk_guards.Tortoise, "get_connection", lambda _name: conn)
+    result = await fk_guards.ensure_users_referred_by_fk_set_null()
+
+    assert result is True
+    assert conn.script_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_users_delete_calls_active_tariffs_fk_guard(monkeypatch):
+    calls = {
+        "guard_active_tariffs": 0,
+        "guard_notification_marks": 0,
+        "guard_promo_usages": 0,
+        "guard_users_referred_by": 0,
+        "cancel": 0,
+        "super_delete": 0,
+    }
+
+    async def _guard_active_tariffs():
+        calls["guard_active_tariffs"] += 1
+
+    async def _guard_notification_marks():
+        calls["guard_notification_marks"] += 1
+
+    async def _guard_promo_usages():
+        calls["guard_promo_usages"] += 1
+
+    async def _guard_users_referred_by():
+        calls["guard_users_referred_by"] += 1
 
     def _cancel(_user_id):
         calls["cancel"] += 1
@@ -393,7 +583,10 @@ async def test_users_delete_calls_active_tariffs_fk_guard(monkeypatch):
         calls["super_delete"] += 1
         return 1
 
-    monkeypatch.setattr("bloobcat.db.users.ensure_active_tariffs_fk_cascade", _guard)
+    monkeypatch.setattr("bloobcat.db.users.ensure_active_tariffs_fk_cascade", _guard_active_tariffs)
+    monkeypatch.setattr("bloobcat.db.users.ensure_notification_marks_fk_cascade", _guard_notification_marks)
+    monkeypatch.setattr("bloobcat.db.users.ensure_promo_usages_fk_cascade", _guard_promo_usages)
+    monkeypatch.setattr("bloobcat.db.users.ensure_users_referred_by_fk_set_null", _guard_users_referred_by)
     scheduler_module = importlib.import_module("bloobcat.scheduler")
     monkeypatch.setattr(scheduler_module, "cancel_user_tasks", _cancel, raising=False)
     monkeypatch.setattr("tortoise.models.Model.delete", _super_delete)
@@ -404,15 +597,31 @@ async def test_users_delete_calls_active_tariffs_fk_guard(monkeypatch):
 
     result = await user.delete()
     assert result == 1
-    assert calls == {"guard": 1, "cancel": 1, "super_delete": 1}
+    assert calls == {
+        "guard_active_tariffs": 1,
+        "guard_notification_marks": 1,
+        "guard_promo_usages": 1,
+        "guard_users_referred_by": 1,
+        "cancel": 1,
+        "super_delete": 1,
+    }
 
 
 @pytest.mark.asyncio
 async def test_users_delete_calls_guard_before_super_delete(monkeypatch):
     order = []
 
-    async def _guard():
-        order.append("guard")
+    async def _guard_active_tariffs():
+        order.append("guard_active_tariffs")
+
+    async def _guard_notification_marks():
+        order.append("guard_notification_marks")
+
+    async def _guard_promo_usages():
+        order.append("guard_promo_usages")
+
+    async def _guard_users_referred_by():
+        order.append("guard_users_referred_by")
 
     def _cancel(_user_id):
         order.append("cancel")
@@ -421,7 +630,10 @@ async def test_users_delete_calls_guard_before_super_delete(monkeypatch):
         order.append("super_delete")
         return 1
 
-    monkeypatch.setattr("bloobcat.db.users.ensure_active_tariffs_fk_cascade", _guard)
+    monkeypatch.setattr("bloobcat.db.users.ensure_active_tariffs_fk_cascade", _guard_active_tariffs)
+    monkeypatch.setattr("bloobcat.db.users.ensure_notification_marks_fk_cascade", _guard_notification_marks)
+    monkeypatch.setattr("bloobcat.db.users.ensure_promo_usages_fk_cascade", _guard_promo_usages)
+    monkeypatch.setattr("bloobcat.db.users.ensure_users_referred_by_fk_set_null", _guard_users_referred_by)
     scheduler_module = importlib.import_module("bloobcat.scheduler")
     monkeypatch.setattr(scheduler_module, "cancel_user_tasks", _cancel, raising=False)
     monkeypatch.setattr("tortoise.models.Model.delete", _super_delete)
@@ -431,4 +643,11 @@ async def test_users_delete_calls_guard_before_super_delete(monkeypatch):
     user.remnawave_uuid = None
 
     await user.delete()
-    assert order == ["cancel", "guard", "super_delete"]
+    assert order == [
+        "cancel",
+        "guard_active_tariffs",
+        "guard_notification_marks",
+        "guard_promo_usages",
+        "guard_users_referred_by",
+        "super_delete",
+    ]

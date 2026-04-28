@@ -58,9 +58,13 @@ family_revoke_limiter = RateLimiter(requests_per_minute=1, window_seconds=300)  
 promo_validate_limiter = RateLimiter(requests_per_minute=5, window_seconds=60)  # 5 запросов в минуту
 promo_redeem_limiter = RateLimiter(requests_per_minute=2, window_seconds=60)  # 2 запроса в минуту
 auth_ip_limiter = RateLimiter(requests_per_minute=120, window_seconds=60)  # Anti-storm для /auth/telegram
+auth_oauth_ip_limiter = RateLimiter(requests_per_minute=60, window_seconds=60)  # OAuth start/callback/ticket
+auth_password_ip_limiter = RateLimiter(requests_per_minute=12, window_seconds=60)  # login/register/reset brute-force guard
+auth_link_ip_limiter = RateLimiter(requests_per_minute=30, window_seconds=60)  # account linking guard
 user_ip_limiter = RateLimiter(requests_per_minute=240, window_seconds=60)  # Hot endpoint /user
 devices_ip_limiter = RateLimiter(requests_per_minute=240, window_seconds=60)  # Hot endpoint /devices
 app_info_ip_limiter = RateLimiter(requests_per_minute=300, window_seconds=60)  # Public endpoint /app/info
+welcome_vpn_ip_limiter = RateLimiter(requests_per_minute=180, window_seconds=60)  # Public endpoint /welcome-vpn
 partner_summary_ip_limiter = RateLimiter(requests_per_minute=180, window_seconds=60)  # Hot partner endpoint
 unauth_sensitive_ip_limiter = RateLimiter(requests_per_minute=60, window_seconds=60)  # Неавторизованные запросы на чувствительные endpoints
 
@@ -119,6 +123,30 @@ async def rate_limit_middleware(request: Request, call_next):
                 wait_time=wait_time or 1,
                 detail=f"Слишком много запросов. Попробуйте снова через {wait_time} секунд.",
             )
+    elif request.url.path.startswith("/auth/oauth/") or request.url.path == "/auth/exchange-ticket":
+        allowed, wait_time = await auth_oauth_ip_limiter.is_allowed(client_ip)
+        if not allowed:
+            logger.warning(f"Rate limit exceeded for auth oauth by ip={client_ip}, wait={wait_time}s")
+            return _rate_limited_response(
+                wait_time=wait_time or 1,
+                detail=f"Слишком много запросов. Попробуйте снова через {wait_time} секунд.",
+            )
+    elif request.url.path.startswith("/auth/password/"):
+        allowed, wait_time = await auth_password_ip_limiter.is_allowed(client_ip)
+        if not allowed:
+            logger.warning(f"Rate limit exceeded for auth password by ip={client_ip}, wait={wait_time}s")
+            return _rate_limited_response(
+                wait_time=wait_time or 1,
+                detail=f"Слишком много запросов. Попробуйте снова через {wait_time} секунд.",
+            )
+    elif request.url.path.startswith("/auth/link/"):
+        allowed, wait_time = await auth_link_ip_limiter.is_allowed(client_ip)
+        if not allowed:
+            logger.warning(f"Rate limit exceeded for auth link by ip={client_ip}, wait={wait_time}s")
+            return _rate_limited_response(
+                wait_time=wait_time or 1,
+                detail=f"Слишком много запросов. Попробуйте снова через {wait_time} секунд.",
+            )
     elif request.url.path == "/user" and request.method == "GET":
         allowed, wait_time = await user_ip_limiter.is_allowed(client_ip)
         if not allowed:
@@ -139,6 +167,14 @@ async def rate_limit_middleware(request: Request, call_next):
         allowed, wait_time = await app_info_ip_limiter.is_allowed(client_ip)
         if not allowed:
             logger.warning(f"Rate limit exceeded for /app/info by ip={client_ip}, wait={wait_time}s")
+            return _rate_limited_response(
+                wait_time=wait_time or 1,
+                detail=f"Слишком много запросов. Попробуйте снова через {wait_time} секунд.",
+            )
+    elif request.url.path == "/welcome-vpn" and request.method == "GET":
+        allowed, wait_time = await welcome_vpn_ip_limiter.is_allowed(client_ip)
+        if not allowed:
+            logger.warning(f"Rate limit exceeded for /welcome-vpn by ip={client_ip}, wait={wait_time}s")
             return _rate_limited_response(
                 wait_time=wait_time or 1,
                 detail=f"Слишком много запросов. Попробуйте снова через {wait_time} секунд.",

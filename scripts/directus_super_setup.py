@@ -13,7 +13,9 @@ except ImportError:  # pragma: no cover
     load_dotenv = None
 
 
-def env(name: str, default: Optional[str] = None, *, required: bool = True) -> Optional[str]:
+def env(
+    name: str, default: Optional[str] = None, *, required: bool = True
+) -> Optional[str]:
     value = os.getenv(name, default)
     if value is None:
         if required:
@@ -43,7 +45,9 @@ class DirectusClient:
         self.session = requests.Session()
         self.timeout = timeout
 
-    def get(self, path: str, *, params: Optional[Dict[str, Any]] = None) -> requests.Response:
+    def get(
+        self, path: str, *, params: Optional[Dict[str, Any]] = None
+    ) -> requests.Response:
         return self.session.get(
             f"{self.auth.base_url}{path}",
             headers=self.auth.headers,
@@ -51,7 +55,9 @@ class DirectusClient:
             timeout=self.timeout,
         )
 
-    def post(self, path: str, *, json: Optional[Dict[str, Any]] = None) -> requests.Response:
+    def post(
+        self, path: str, *, json: Optional[Dict[str, Any]] = None
+    ) -> requests.Response:
         return self.session.post(
             f"{self.auth.base_url}{path}",
             headers=self.auth.headers,
@@ -59,7 +65,9 @@ class DirectusClient:
             timeout=self.timeout,
         )
 
-    def patch(self, path: str, *, json: Optional[Dict[str, Any]] = None) -> requests.Response:
+    def patch(
+        self, path: str, *, json: Optional[Dict[str, Any]] = None
+    ) -> requests.Response:
         return self.session.patch(
             f"{self.auth.base_url}{path}",
             headers=self.auth.headers,
@@ -153,12 +161,19 @@ def ensure_role(
     return str(created.json()["data"]["id"])
 
 
-def get_primary_policy_id_for_role(client: DirectusClient, role_id: str) -> Optional[str]:
+def get_primary_policy_id_for_role(
+    client: DirectusClient, role_id: str
+) -> Optional[str]:
     # In Directus v11, role<->policy mapping goes through /access.
     # Role endpoints may return access IDs, not policy IDs, depending on fields/permissions.
     resp = client.get(
         "/access",
-        params={"filter[role][_eq]": role_id, "fields": "id,policy,sort", "limit": 50, "sort": "sort"},
+        params={
+            "filter[role][_eq]": role_id,
+            "fields": "id,policy,sort",
+            "limit": 50,
+            "sort": "sort",
+        },
     )
     if resp.status_code == 403:
         return None
@@ -171,7 +186,9 @@ def get_primary_policy_id_for_role(client: DirectusClient, role_id: str) -> Opti
 
 
 def get_policy_id_by_name(client: DirectusClient, name: str) -> Optional[str]:
-    resp = client.get("/policies", params={"filter[name][_eq]": name, "fields": "id,name", "limit": 1})
+    resp = client.get(
+        "/policies", params={"filter[name][_eq]": name, "fields": "id,name", "limit": 1}
+    )
     if resp.status_code == 403:
         return None
     resp.raise_for_status()
@@ -181,7 +198,9 @@ def get_policy_id_by_name(client: DirectusClient, name: str) -> Optional[str]:
     return str(data[0]["id"])
 
 
-def ensure_access_link_role_policy(client: DirectusClient, role_id: str, policy_id: str) -> None:
+def ensure_access_link_role_policy(
+    client: DirectusClient, role_id: str, policy_id: str
+) -> None:
     # Ensure policy is assigned to role via /access.
     existing = client.get(
         "/access",
@@ -196,7 +215,9 @@ def ensure_access_link_role_policy(client: DirectusClient, role_id: str, policy_
     rows = existing.json().get("data") or []
     if rows:
         return
-    created = client.post("/access", json={"role": role_id, "policy": policy_id, "sort": 1})
+    created = client.post(
+        "/access", json={"role": role_id, "policy": policy_id, "sort": 1}
+    )
     created.raise_for_status()
 
 
@@ -240,15 +261,24 @@ def ensure_policy_for_role(
     ensure_access_link_role_policy(client, role_id, policy_id)
     return policy_id
 
-def list_permissions_for_role(client: DirectusClient, role_id: str) -> set[tuple[str, str]]:
+
+def list_permissions_for_role(
+    client: DirectusClient, role_id: str
+) -> set[tuple[str, str]]:
     # Deprecated: some instances restrict access to the "role" field on directus_permissions.
     # Kept for backwards compatibility with older setups, but avoided in main flow.
-    resp = client.get("/permissions", params={"filter[role][_eq]": role_id, "limit": 1000})
+    resp = client.get(
+        "/permissions", params={"filter[role][_eq]": role_id, "limit": 1000}
+    )
     if resp.status_code == 403:
         return set()
     resp.raise_for_status()
     perms = resp.json().get("data", [])
-    return {(p.get("collection"), p.get("action")) for p in perms if p.get("collection") and p.get("action")}
+    return {
+        (p.get("collection"), p.get("action"))
+        for p in perms
+        if p.get("collection") and p.get("action")
+    }
 
 
 def ensure_permission(
@@ -335,20 +365,57 @@ def ensure_permission(
     return False
 
 
-def patch_collection_meta(client: DirectusClient, collection: str, meta: Dict[str, Any]) -> None:
+def patch_collection_meta(
+    client: DirectusClient, collection: str, meta: Dict[str, Any]
+) -> None:
     # PATCH is idempotent; missing collections will error, but we want a clear signal.
     client.patch(f"/collections/{collection}", json={"meta": meta}).raise_for_status()
 
 
 def ensure_nav_groups(client: DirectusClient) -> None:
     group_defs = [
-        {"collection": "grp_main", "label": "Основное", "icon": "dashboard", "sort": 1, "collapse": "open"},
-        {"collection": "grp_promo", "label": "Промо", "icon": "confirmation_number", "sort": 2, "collapse": "closed"},
-        {"collection": "grp_prizes", "label": "Колесо призов", "icon": "casino", "sort": 3, "collapse": "closed"},
-        {"collection": "grp_partners", "label": "Партнерка", "icon": "handshake", "sort": 4, "collapse": "closed"},
-        {"collection": "grp_analytics", "label": "Аналитика", "icon": "timeline", "sort": 5, "collapse": "closed"},
-        {"collection": "grp_payments", "label": "Платежи", "icon": "payments", "sort": 6, "collapse": "closed"},
-        {"collection": "grp_service", "label": "Служебное", "icon": "build", "sort": 7, "collapse": "closed"},
+        {
+            "collection": "grp_main",
+            "label": "Основное",
+            "icon": "dashboard",
+            "sort": 1,
+            "collapse": "open",
+        },
+        {
+            "collection": "grp_promo",
+            "label": "Промо",
+            "icon": "confirmation_number",
+            "sort": 2,
+            "collapse": "closed",
+        },
+        {
+            "collection": "grp_partners",
+            "label": "Партнерка",
+            "icon": "handshake",
+            "sort": 4,
+            "collapse": "closed",
+        },
+        {
+            "collection": "grp_analytics",
+            "label": "Аналитика",
+            "icon": "timeline",
+            "sort": 5,
+            "collapse": "closed",
+        },
+        {
+            "collection": "grp_payments",
+            "label": "Платежи",
+            "icon": "payments",
+            "sort": 6,
+            "collapse": "closed",
+        },
+        {
+            "collection": "grp_service",
+            "label": "Служебное",
+            "icon": "build",
+            "sort": 7,
+            "collapse": "closed",
+        },
     ]
 
     for group in group_defs:
@@ -366,7 +433,37 @@ def ensure_nav_groups(client: DirectusClient) -> None:
         if exists:
             patch_collection_meta(client, key, payload_meta)
         else:
-            client.post("/collections", json={"collection": key, "schema": None, "meta": payload_meta}).raise_for_status()
+            client.post(
+                "/collections",
+                json={"collection": key, "schema": None, "meta": payload_meta},
+            ).raise_for_status()
+
+    # Hide legacy/disabled nav groups if they still exist in old installations.
+    deprecated_groups = [
+        {
+            "collection": "grp_prizes",
+            "label": "Deprecated",
+            "icon": "hide_source",
+            "sort": 99,
+            "collapse": "closed",
+        },
+    ]
+    for group in deprecated_groups:
+        key = group["collection"]
+        if client.get(f"/collections/{key}").status_code != 200:
+            continue
+        patch_collection_meta(
+            client,
+            key,
+            {
+                "icon": group["icon"],
+                "note": group["label"],
+                "sort": group["sort"],
+                "collapse": group["collapse"],
+                "hidden": True,
+                "translations": [{"language": "ru-RU", "translation": group["label"]}],
+            },
+        )
 
 
 def apply_collection_ux(client: DirectusClient) -> None:
@@ -421,7 +518,9 @@ def apply_collection_ux(client: DirectusClient) -> None:
             "note": "Устройства внутри семейной подписки",
             "sort": 6,
             "hidden": False,
-            "translations": [{"language": "ru-RU", "translation": "Семейные устройства"}],
+            "translations": [
+                {"language": "ru-RU", "translation": "Семейные устройства"}
+            ],
         },
         "family_audit_logs": {
             "group": "grp_main",
@@ -438,7 +537,9 @@ def apply_collection_ux(client: DirectusClient) -> None:
             "sort": 8,
             "hidden": False,
             "display_template": "{{title}}",
-            "translations": [{"language": "ru-RU", "translation": "In-App уведомления"}],
+            "translations": [
+                {"language": "ru-RU", "translation": "In-App уведомления"}
+            ],
         },
         "promo_batches": {
             "group": "grp_promo",
@@ -462,23 +563,26 @@ def apply_collection_ux(client: DirectusClient) -> None:
             "note": "История активаций промокодов пользователями. Связь: промокод → пользователь.",
             "sort": 3,
             "hidden": False,
-            "translations": [{"language": "ru-RU", "translation": "Использование промокодов"}],
+            "translations": [
+                {"language": "ru-RU", "translation": "Использование промокодов"}
+            ],
         },
+        # Prize wheel is deprecated in Directus UI: keep collections hidden if they still exist.
         "prize_wheel_config": {
-            "group": "grp_prizes",
-            "icon": "casino",
-            "note": "Настройки призов и вероятностей",
-            "sort": 1,
-            "hidden": False,
-            "translations": [{"language": "ru-RU", "translation": "Настройки призов"}],
+            "group": None,
+            "icon": "block",
+            "note": "Disabled",
+            "sort": 9990,
+            "hidden": True,
+            "translations": [{"language": "ru-RU", "translation": "Отключено"}],
         },
         "prize_wheel_history": {
-            "group": "grp_prizes",
-            "icon": "history_toggle_off",
-            "note": "История выпадения призов",
-            "sort": 2,
-            "hidden": False,
-            "translations": [{"language": "ru-RU", "translation": "История призов"}],
+            "group": None,
+            "icon": "block",
+            "note": "Disabled",
+            "sort": 9991,
+            "hidden": True,
+            "translations": [{"language": "ru-RU", "translation": "Отключено"}],
         },
         "processed_payments": {
             "group": "grp_payments",
@@ -510,7 +614,9 @@ def apply_collection_ux(client: DirectusClient) -> None:
             "note": "Служебные отметки рассылок",
             "sort": 2,
             "hidden": True,
-            "translations": [{"language": "ru-RU", "translation": "Отметки уведомлений"}],
+            "translations": [
+                {"language": "ru-RU", "translation": "Отметки уведомлений"}
+            ],
         },
         # Partners module (if present)
         "partner_withdrawals": {
@@ -535,7 +641,9 @@ def apply_collection_ux(client: DirectusClient) -> None:
             "note": "История начислений по партнерке",
             "sort": 3,
             "hidden": True,
-            "translations": [{"language": "ru-RU", "translation": "Начисления партнеров"}],
+            "translations": [
+                {"language": "ru-RU", "translation": "Начисления партнеров"}
+            ],
         },
         # Service (hide from app nav by default; still accessible for admin if needed)
         "personal_discounts": {
@@ -544,7 +652,9 @@ def apply_collection_ux(client: DirectusClient) -> None:
             "note": "Персональные скидки (служебное)",
             "sort": 1,
             "hidden": True,
-            "translations": [{"language": "ru-RU", "translation": "Персональные скидки"}],
+            "translations": [
+                {"language": "ru-RU", "translation": "Персональные скидки"}
+            ],
         },
         "hwid_devices_local": {
             "group": "grp_service",
@@ -584,7 +694,9 @@ def apply_collection_ux(client: DirectusClient) -> None:
             "note": "История показов уведомлений",
             "sort": 6,
             "hidden": True,
-            "translations": [{"language": "ru-RU", "translation": "История показов уведомлений"}],
+            "translations": [
+                {"language": "ru-RU", "translation": "История показов уведомлений"}
+            ],
         },
     }
 
@@ -597,7 +709,9 @@ def apply_collection_ux(client: DirectusClient) -> None:
         patch_collection_meta(client, collection, meta)
 
 
-def patch_field_meta(client: DirectusClient, collection: str, field: str, meta: Dict[str, Any]) -> None:
+def patch_field_meta(
+    client: DirectusClient, collection: str, field: str, meta: Dict[str, Any]
+) -> None:
     # Transient upstream/proxy errors may happen on production (502/503/504).
     # Retry a few times to keep setup idempotent and resilient.
     last_resp: Optional[requests.Response] = None
@@ -646,7 +760,6 @@ def apply_field_notes_ru(client: DirectusClient) -> None:
             "active_tariff_id": "ID активного тарифа. Поле для быстрого перехода к тарифу.",
             "utm": "UTM-метка источника привлечения.",
             "renew_id": "Внешний идентификатор для продления.",
-            "prize_wheel_attempts": "Доступное число попыток в колесе призов.",
             "blocked_at": "Дата и время последней блокировки.",
             "connected_at": "Последняя активность подключения.",
             "last_hwid_reset": "Когда в последний раз выполнялся сброс HWID.",
@@ -691,10 +804,6 @@ def apply_field_notes_ru(client: DirectusClient) -> None:
             "user_id": "Кто применил промокод.",
             "used_at": "Когда промокод был активирован.",
             "context": "Доп. контекст (payment_id и т.п.).",
-        },
-        "prize_wheel_config": {
-            "probability": "Вероятность от 0 до 1. Сумма активных призов ≤ 1.",
-            "prize_value": "Для subscription указывать число дней.",
         },
         "processed_payments": {
             "amount": "Сумма платежа. Используется в витрине и для поиска аномалий.",
@@ -775,7 +884,6 @@ def apply_field_notes_ru(client: DirectusClient) -> None:
             "referral_first_payment_rewarded": "Награда за 1-й платеж",
             "active_tariff": "Активный тариф",
             "active_tariff_id": "Активный тариф (ID)",
-            "prize_wheel_attempts": "Попытки колеса",
             "last_hwid_reset": "Сброс HWID",
             "last_failed_message_at": "Последняя ошибка сообщений",
             "failed_message_count": "Ошибки сообщений",
@@ -827,12 +935,6 @@ def apply_field_notes_ru(client: DirectusClient) -> None:
             "user_id": "Пользователь",
             "used_at": "Дата использования",
             "context": "Контекст",
-        },
-        "prize_wheel_config": {
-            "prize_type": "Тип приза",
-            "prize_name": "Название",
-            "prize_value": "Значение",
-            "probability": "Вероятность",
         },
         "connections": {"at": "Дата подключения"},
         "processed_payments": {
@@ -893,7 +995,9 @@ def apply_field_notes_ru(client: DirectusClient) -> None:
             meta_payload: Dict[str, Any] = {"note": note}
             translation = field_translations.get(collection, {}).get(field)
             if translation:
-                meta_payload["translations"] = [{"language": "ru-RU", "translation": translation}]
+                meta_payload["translations"] = [
+                    {"language": "ru-RU", "translation": translation}
+                ]
             patch_field_meta(client, collection, field, meta_payload)
 
     # Error reports triage controls
@@ -928,10 +1032,24 @@ def apply_field_notes_ru(client: DirectusClient) -> None:
             },
         },
     )
-    patch_field_meta(client, "error_reports", "triage_note", {"interface": "input-multiline"})
-    patch_field_meta(client, "error_reports", "triage_due_at", {"interface": "datetime"})
-    patch_field_meta(client, "error_reports", "triage_updated_at", {"interface": "datetime", "readonly": True})
-    patch_field_meta(client, "error_reports", "created_at", {"interface": "datetime", "readonly": True})
+    patch_field_meta(
+        client, "error_reports", "triage_note", {"interface": "input-multiline"}
+    )
+    patch_field_meta(
+        client, "error_reports", "triage_due_at", {"interface": "datetime"}
+    )
+    patch_field_meta(
+        client,
+        "error_reports",
+        "triage_updated_at",
+        {"interface": "datetime", "readonly": True},
+    )
+    patch_field_meta(
+        client,
+        "error_reports",
+        "created_at",
+        {"interface": "datetime", "readonly": True},
+    )
     patch_field_meta(client, "error_reports", "reported_at", {"interface": "datetime"})
     patch_field_meta(
         client,
@@ -947,7 +1065,9 @@ def apply_field_notes_ru(client: DirectusClient) -> None:
             },
         },
     )
-    patch_field_meta(client, "partner_withdrawals", "paid_amount_rub", {"interface": "input"})
+    patch_field_meta(
+        client, "partner_withdrawals", "paid_amount_rub", {"interface": "input"}
+    )
 
 
 def ensure_admin_settings(client: DirectusClient) -> None:
@@ -979,7 +1099,9 @@ def ensure_admin_settings(client: DirectusClient) -> None:
         created.raise_for_status()
 
     # Ensure fields exist (best-effort; Directus will reject duplicates).
-    def ensure_field(field: str, type_: str, schema_extra: Dict[str, Any], meta_extra: Dict[str, Any]) -> None:
+    def ensure_field(
+        field: str, type_: str, schema_extra: Dict[str, Any], meta_extra: Dict[str, Any]
+    ) -> None:
         resp = client.get(f"/fields/{collection}/{field}")
         if resp.status_code == 200:
             # Keep it simple: don't overwrite if already exists.
@@ -1013,61 +1135,91 @@ def ensure_admin_settings(client: DirectusClient) -> None:
         "reg_spike_factor",
         "float",
         {"default_value": 3.0},
-        {"interface": "input", "note": "Всплеск регистраций: сегодня >= avg(7д) * factor"},
+        {
+            "interface": "input",
+            "note": "Всплеск регистраций: сегодня >= avg(7д) * factor",
+        },
     )
     ensure_field(
         "reg_spike_min",
         "integer",
         {"default_value": 10},
-        {"interface": "input", "note": "Минимум регистраций сегодня для алерта (шум-фильтр)"},
+        {
+            "interface": "input",
+            "note": "Минимум регистраций сегодня для алерта (шум-фильтр)",
+        },
     )
     ensure_field(
         "conn_drop_factor",
         "float",
         {"default_value": 0.4},
-        {"interface": "input", "note": "Падение подключений: сегодня <= avg(7д) * factor"},
+        {
+            "interface": "input",
+            "note": "Падение подключений: сегодня <= avg(7д) * factor",
+        },
     )
     ensure_field(
         "conn_drop_min_avg",
         "integer",
         {"default_value": 20},
-        {"interface": "input", "note": "Минимум avg(7д) подключений, чтобы алерт считался значимым"},
+        {
+            "interface": "input",
+            "note": "Минимум avg(7д) подключений, чтобы алерт считался значимым",
+        },
     )
     ensure_field(
         "pay_spike_factor",
         "float",
         {"default_value": 2.5},
-        {"interface": "input", "note": "Аномалия платежей: сумма сегодня >= avg(7д) * factor"},
+        {
+            "interface": "input",
+            "note": "Аномалия платежей: сумма сегодня >= avg(7д) * factor",
+        },
     )
     ensure_field(
         "pay_spike_min_sum",
         "float",
         {"default_value": 5000.0},
-        {"interface": "input", "note": "Минимальная сумма за день для алерта по платежам"},
+        {
+            "interface": "input",
+            "note": "Минимальная сумма за день для алерта по платежам",
+        },
     )
     ensure_field(
         "expiring_days",
         "integer",
         {"default_value": 7},
-        {"interface": "input", "note": "Сколько дней вперед показывать “истекает подписка”"},
+        {
+            "interface": "input",
+            "note": "Сколько дней вперед показывать “истекает подписка”",
+        },
     )
     ensure_field(
         "suspicious_block_days",
         "integer",
         {"default_value": 3},
-        {"interface": "input", "note": "Окно (дней) для виджета “подозрительные блокировки”"},
+        {
+            "interface": "input",
+            "note": "Окно (дней) для виджета “подозрительные блокировки”",
+        },
     )
     ensure_field(
         "maintenance_mode",
         "boolean",
         {"default_value": False},
-        {"interface": "boolean", "note": "Включить режим технических работ для клиентского приложения"},
+        {
+            "interface": "boolean",
+            "note": "Включить режим технических работ для клиентского приложения",
+        },
     )
     ensure_field(
         "maintenance_message",
         "string",
         {"default_value": ""},
-        {"interface": "input-multiline", "note": "Кастомный текст техработ (что происходит, сроки и т.д.)"},
+        {
+            "interface": "input-multiline",
+            "note": "Кастомный текст техработ (что происходит, сроки и т.д.)",
+        },
     )
 
     # Ensure singleton row exists.
@@ -1084,7 +1236,12 @@ def ensure_admin_settings(client: DirectusClient) -> None:
         "maintenance_mode": False,
         "maintenance_message": "",
     }
-    items = client.get(f"/items/{collection}", params={"limit": 1, "fields": "id"}).json().get("data") or []
+    items = (
+        client.get(f"/items/{collection}", params={"limit": 1, "fields": "id"})
+        .json()
+        .get("data")
+        or []
+    )
     if not items:
         created = client.post(f"/items/{collection}", json=defaults)
         if created.status_code in (401, 403):
@@ -1145,8 +1302,12 @@ def apply_error_reports_form_ux(client: DirectusClient) -> None:
             meta["sort"] = sort[field]
         patch_field_meta(client, "error_reports", field, meta)
 
-    patch_field_meta(client, "error_reports", "message", {"interface": "input-multiline"})
-    patch_field_meta(client, "error_reports", "triage_note", {"interface": "input-multiline"})
+    patch_field_meta(
+        client, "error_reports", "message", {"interface": "input-multiline"}
+    )
+    patch_field_meta(
+        client, "error_reports", "triage_note", {"interface": "input-multiline"}
+    )
 
 
 def apply_users_form_ux(client: DirectusClient) -> None:
@@ -1195,7 +1356,6 @@ def apply_users_form_ux(client: DirectusClient) -> None:
         "balance": "quarter",
         "lte_gb_total": "quarter",
         "hwid_limit": "quarter",
-        "prize_wheel_attempts": "quarter",
         "active_tariff": "half",
         "active_tariff_id": "half",
         "is_registered": "quarter",
@@ -1257,7 +1417,6 @@ def apply_users_form_ux(client: DirectusClient) -> None:
         "balance": 40,
         "lte_gb_total": 41,
         "hwid_limit": 42,
-        "prize_wheel_attempts": 43,
         "is_blocked": 50,
         "blocked_at": 51,
         "last_failed_message_at": 52,
@@ -1279,15 +1438,22 @@ def apply_users_form_ux(client: DirectusClient) -> None:
         "family_members_owner_list": 76,
         "family_members_member_list": 77,
         "family_invites_list": 78,
-        "remnawave_uuid": 80,
-        "last_hwid_reset": 81,
-        "familyurl": 82,
+        "remnawave_uuid": 84,
+        "last_hwid_reset": 85,
+        "familyurl": 86,
     }
 
     # Important: Directus may treat `PATCH /fields/...` with `meta` as replacement-like
     # for nested UI settings in some deployments. Preserve existing UI keys so o2m/alias
     # blocks (including Family) don't lose their interface and appear as "empty sections".
-    preserve_meta_keys = ("interface", "options", "display", "special", "note", "translations")
+    preserve_meta_keys = (
+        "interface",
+        "options",
+        "display",
+        "special",
+        "note",
+        "translations",
+    )
 
     def get_existing_meta(field: str) -> Dict[str, Any]:
         resp = client.get(f"/fields/users/{field}", params={"fields": "meta"})
@@ -1312,6 +1478,14 @@ def apply_users_form_ux(client: DirectusClient) -> None:
             meta["sort"] = sort[field]
         meta["group"] = None
         patch_field_meta(client, "users", field, meta)
+
+    # Prize wheel is disabled; keep legacy field hidden in item view.
+    patch_field_meta(
+        client,
+        "users",
+        "prize_wheel_attempts",
+        {"hidden": True, "readonly": True, "sort": 9991},
+    )
 
 
 def ensure_users_presentation_dividers(client: DirectusClient) -> None:
@@ -1365,11 +1539,17 @@ def ensure_users_presentation_dividers(client: DirectusClient) -> None:
     ensure_divider("ui_divider_partner", "Партнерка", "groups", 59)
     ensure_divider("ui_divider_ops", "Операции", "build", 66)
     ensure_divider("ui_divider_family", "Семья", "family_restroom", 75)
-    ensure_divider("ui_divider_tech", "Техника", "settings", 79)
+    ensure_divider("ui_divider_tech", "Техника", "settings", 83)
 
     # Hide deprecated divider variants to avoid duplicate/empty sections.
-    for legacy_divider in ("ui_divider_profile", "ui_divider_finance", "ui_divider_relations"):
-        patch_field_meta(client, "users", legacy_divider, {"hidden": True, "sort": 9990})
+    for legacy_divider in (
+        "ui_divider_profile",
+        "ui_divider_finance",
+        "ui_divider_relations",
+    ):
+        patch_field_meta(
+            client, "users", legacy_divider, {"hidden": True, "sort": 9990}
+        )
 
     # Improve interfaces for key fields (best-effort).
     # If a field doesn't exist in the current instance, patch_field_meta will safely skip.
@@ -1388,7 +1568,6 @@ def ensure_users_presentation_dividers(client: DirectusClient) -> None:
         "balance": {"interface": "input"},
         "lte_gb_total": {"interface": "input"},
         "hwid_limit": {"interface": "input"},
-        "prize_wheel_attempts": {"interface": "input"},
         "failed_message_count": {"interface": "input"},
         "referrals": {"interface": "input"},
         "referral_bonus_days_total": {"interface": "input"},
@@ -1396,17 +1575,50 @@ def ensure_users_presentation_dividers(client: DirectusClient) -> None:
         "remnawave_uuid": {"interface": "input"},
         "familyurl": {"interface": "input"},
         # Booleans
-        "referral_first_payment_rewarded": {"interface": "toggle", "options": {"label": "Награда за первый платеж"}},
+        "referral_first_payment_rewarded": {
+            "interface": "toggle",
+            "options": {"label": "Награда за первый платеж"},
+        },
     }
     for field, meta_patch in explicit_interfaces.items():
         patch_field_meta(client, "users", field, meta_patch)
 
-    patch_field_meta(client, "users", "is_blocked", {"interface": "toggle", "options": {"label": "Заблокирован"}})
-    patch_field_meta(client, "users", "is_registered", {"interface": "toggle", "options": {"label": "Зарегистрирован"}})
-    patch_field_meta(client, "users", "is_subscribed", {"interface": "toggle", "options": {"label": "Подписан"}})
-    patch_field_meta(client, "users", "is_trial", {"interface": "toggle", "options": {"label": "Триал"}})
-    patch_field_meta(client, "users", "used_trial", {"interface": "toggle", "options": {"label": "Триал использован"}})
-    patch_field_meta(client, "users", "is_partner", {"interface": "toggle", "options": {"label": "Партнер"}})
+    patch_field_meta(
+        client,
+        "users",
+        "is_blocked",
+        {"interface": "toggle", "options": {"label": "Заблокирован"}},
+    )
+    patch_field_meta(
+        client,
+        "users",
+        "is_registered",
+        {"interface": "toggle", "options": {"label": "Зарегистрирован"}},
+    )
+    patch_field_meta(
+        client,
+        "users",
+        "is_subscribed",
+        {"interface": "toggle", "options": {"label": "Подписан"}},
+    )
+    patch_field_meta(
+        client,
+        "users",
+        "is_trial",
+        {"interface": "toggle", "options": {"label": "Триал"}},
+    )
+    patch_field_meta(
+        client,
+        "users",
+        "used_trial",
+        {"interface": "toggle", "options": {"label": "Триал использован"}},
+    )
+    patch_field_meta(
+        client,
+        "users",
+        "is_partner",
+        {"interface": "toggle", "options": {"label": "Партнер"}},
+    )
     patch_field_meta(
         client,
         "users",
@@ -1449,15 +1661,63 @@ def ensure_users_presentation_dividers(client: DirectusClient) -> None:
             "hidden": False,
         },
     )
-    patch_field_meta(client, "users", "expired_at", {"interface": "datetime", "options": {"use24": True, "includeSeconds": False}})
-    patch_field_meta(client, "users", "created_at", {"interface": "datetime", "options": {"use24": True, "includeSeconds": False}})
-    patch_field_meta(client, "users", "registration_date", {"interface": "datetime", "options": {"use24": True, "includeSeconds": False}})
-    patch_field_meta(client, "users", "activation_date", {"interface": "datetime", "options": {"use24": True, "includeSeconds": False}})
-    patch_field_meta(client, "users", "connected_at", {"interface": "datetime", "options": {"use24": True, "includeSeconds": False}})
-    patch_field_meta(client, "users", "blocked_at", {"interface": "datetime", "options": {"use24": True, "includeSeconds": False}})
-    patch_field_meta(client, "users", "last_hwid_reset", {"interface": "datetime", "options": {"use24": True, "includeSeconds": False}})
-    patch_field_meta(client, "users", "last_failed_message_at", {"interface": "datetime", "options": {"use24": True, "includeSeconds": False}})
-    patch_field_meta(client, "users", "custom_referral_percent", {"interface": "slider", "options": {"min": 0, "max": 100, "step": 1, "alwaysShowValue": True}})
+    patch_field_meta(
+        client,
+        "users",
+        "expired_at",
+        {"interface": "datetime", "options": {"use24": True, "includeSeconds": False}},
+    )
+    patch_field_meta(
+        client,
+        "users",
+        "created_at",
+        {"interface": "datetime", "options": {"use24": True, "includeSeconds": False}},
+    )
+    patch_field_meta(
+        client,
+        "users",
+        "registration_date",
+        {"interface": "datetime", "options": {"use24": True, "includeSeconds": False}},
+    )
+    patch_field_meta(
+        client,
+        "users",
+        "activation_date",
+        {"interface": "datetime", "options": {"use24": True, "includeSeconds": False}},
+    )
+    patch_field_meta(
+        client,
+        "users",
+        "connected_at",
+        {"interface": "datetime", "options": {"use24": True, "includeSeconds": False}},
+    )
+    patch_field_meta(
+        client,
+        "users",
+        "blocked_at",
+        {"interface": "datetime", "options": {"use24": True, "includeSeconds": False}},
+    )
+    patch_field_meta(
+        client,
+        "users",
+        "last_hwid_reset",
+        {"interface": "datetime", "options": {"use24": True, "includeSeconds": False}},
+    )
+    patch_field_meta(
+        client,
+        "users",
+        "last_failed_message_at",
+        {"interface": "datetime", "options": {"use24": True, "includeSeconds": False}},
+    )
+    patch_field_meta(
+        client,
+        "users",
+        "custom_referral_percent",
+        {
+            "interface": "slider",
+            "options": {"min": 0, "max": 100, "step": 1, "alwaysShowValue": True},
+        },
+    )
 
 
 def apply_tariffs_form_ux(client: DirectusClient) -> None:
@@ -1511,9 +1771,24 @@ def apply_tariffs_form_ux(client: DirectusClient) -> None:
             meta["readonly"] = True
         patch_field_meta(client, "tariffs", field, meta)
 
-    patch_field_meta(client, "tariffs", "is_active", {"interface": "toggle", "options": {"label": "Активен"}})
-    patch_field_meta(client, "tariffs", "family_plan_enabled", {"interface": "toggle", "options": {"label": "Семейный план"}})
-    patch_field_meta(client, "tariffs", "lte_enabled", {"interface": "toggle", "options": {"label": "LTE включен"}})
+    patch_field_meta(
+        client,
+        "tariffs",
+        "is_active",
+        {"interface": "toggle", "options": {"label": "Активен"}},
+    )
+    patch_field_meta(
+        client,
+        "tariffs",
+        "family_plan_enabled",
+        {"interface": "toggle", "options": {"label": "Семейный план"}},
+    )
+    patch_field_meta(
+        client,
+        "tariffs",
+        "lte_enabled",
+        {"interface": "toggle", "options": {"label": "LTE включен"}},
+    )
     patch_field_meta(client, "tariffs", "name", {"interface": "input"})
     patch_field_meta(client, "tariffs", "months", {"interface": "input"})
     patch_field_meta(client, "tariffs", "order", {"interface": "input"})
@@ -1522,7 +1797,9 @@ def apply_tariffs_form_ux(client: DirectusClient) -> None:
     patch_field_meta(client, "tariffs", "devices_limit_default", {"interface": "input"})
     patch_field_meta(client, "tariffs", "devices_limit_family", {"interface": "input"})
     patch_field_meta(client, "tariffs", "base_price", {"interface": "input"})
-    patch_field_meta(client, "tariffs", "progressive_multiplier", {"interface": "input"})
+    patch_field_meta(
+        client, "tariffs", "progressive_multiplier", {"interface": "input"}
+    )
     patch_field_meta(client, "tariffs", "lte_price_per_gb", {"interface": "input"})
 
 
@@ -1716,10 +1993,14 @@ def apply_users_luxury_ux(client: DirectusClient) -> None:
             return
         resp.raise_for_status()
 
-    # Keep optional luxury section at the very bottom so base sections are not
+    # Keep optional section at the very bottom so base sections are not
     # affected. It is purely additive and does not re-order existing fields.
-    ensure_divider("ui_divider_kpi", "KPI и быстрые действия", "insights", 9900)
-    patch_field_meta(client, "users", "ui_divider_quick_actions", {"hidden": True, "sort": 9992})
+    ensure_divider(
+        "ui_divider_kpi", "Связанные данные пользователя", "account_tree", 9900
+    )
+    patch_field_meta(
+        client, "users", "ui_divider_quick_actions", {"hidden": True, "sort": 9992}
+    )
     ensure_alias_field(
         "ui_kpi_notice",
         {
@@ -1727,14 +2008,19 @@ def apply_users_luxury_ux(client: DirectusClient) -> None:
             "special": ["alias", "no-data"],
             "options": {
                 "color": "info",
-                "icon": "insights",
+                "icon": "info",
                 "text": (
-                    "Единый блок KPI/действий: быстрый доступ к метрикам и переходам "
-                    "строго по текущему пользователю."
+                    "Ниже собраны быстрые переходы к связанным данным текущего пользователя. "
+                    "Часть ссылок открывает встроенные списки в карточке, часть — связанные сущности."
                 ),
             },
             "width": "full",
             "sort": 9901,
+            "hidden": False,
+            "group": None,
+            "translations": [
+                {"language": "ru-RU", "translation": "Навигация: подсказка"}
+            ],
         },
     )
     ensure_alias_field(
@@ -1745,10 +2031,12 @@ def apply_users_luxury_ux(client: DirectusClient) -> None:
             "options": {
                 "color": "normal",
                 "icon": "filter_alt",
-                "text": "Фильтр активен: переходы ниже ведут к встроенным спискам карточки текущего пользователя.",
+                "text": "Встроенные списки в карточке уже отфильтрованы по текущему пользователю.",
             },
-            "width": "half",
-            "sort": 9902,
+            "width": "full",
+            "sort": 9906,
+            "hidden": True,
+            "group": None,
         },
     )
     ensure_alias_field(
@@ -1759,28 +2047,28 @@ def apply_users_luxury_ux(client: DirectusClient) -> None:
             "options": {
                 "links": [
                     {
-                        "label": "История тарифов (в карточке)",
+                        "label": "Тарифы пользователя (в карточке)",
                         "icon": "subscriptions",
                         "type": "primary",
                         "actionType": "url",
                         "url": "/content/users/{{id}}#active_tariffs_list",
                     },
                     {
-                        "label": "История промокодов (в карточке)",
+                        "label": "Промокоды пользователя (в карточке)",
                         "icon": "confirmation_number",
-                        "type": "info",
+                        "type": "normal",
                         "actionType": "url",
                         "url": "/content/users/{{id}}#promo_usages_list",
                     },
                     {
-                        "label": "История логов уведомлений (в карточке)",
+                        "label": "Логи уведомлений (в карточке)",
                         "icon": "notifications",
                         "type": "normal",
                         "actionType": "url",
                         "url": "/content/users/{{id}}#notification_marks_list",
                     },
                     {
-                        "label": "История семейного аудита (в карточке)",
+                        "label": "Семейный аудит (в карточке)",
                         "icon": "fact_check",
                         "type": "normal",
                         "actionType": "url",
@@ -1789,7 +2077,10 @@ def apply_users_luxury_ux(client: DirectusClient) -> None:
                 ]
             },
             "width": "full",
-            "sort": 9903,
+            "sort": 9902,
+            "hidden": False,
+            "group": None,
+            "translations": [{"language": "ru-RU", "translation": "Связанные списки"}],
         },
     )
     ensure_alias_field(
@@ -1806,7 +2097,9 @@ def apply_users_luxury_ux(client: DirectusClient) -> None:
                 ),
             },
             "width": "full",
-            "sort": 9904,
+            "sort": 9907,
+            "hidden": True,
+            "group": None,
         },
     )
     ensure_alias_field(
@@ -1817,21 +2110,21 @@ def apply_users_luxury_ux(client: DirectusClient) -> None:
             "options": {
                 "links": [
                     {
-                        "label": "Открыть карточку реферера",
+                        "label": "Открыть реферера",
                         "icon": "person_search",
                         "type": "primary",
                         "actionType": "url",
                         "url": "/content/users/{{referred_by}}",
                     },
                     {
-                        "label": "Открыть активный тариф",
+                        "label": "Открыть активный тариф пользователя",
                         "icon": "local_offer",
                         "type": "primary",
                         "actionType": "url",
                         "url": "/content/active_tariffs/{{active_tariff_id}}",
                     },
                     {
-                        "label": "Открыть список рефералов",
+                        "label": "Открыть рефералов пользователя",
                         "icon": "groups",
                         "type": "normal",
                         "actionType": "url",
@@ -1840,7 +2133,10 @@ def apply_users_luxury_ux(client: DirectusClient) -> None:
                 ]
             },
             "width": "full",
-            "sort": 9905,
+            "sort": 9903,
+            "hidden": False,
+            "group": None,
+            "translations": [{"language": "ru-RU", "translation": "Быстрые переходы"}],
         },
     )
 
@@ -1851,7 +2147,9 @@ def apply_users_luxury_ux(client: DirectusClient) -> None:
         "active_tariffs_list",
         {
             "interface": "list-o2m",
-            "options": {"template": "{{id}} • {{name}} • {{start_date}} → {{end_date}} • LTE {{lte_gb_used}}/{{lte_gb_total}}"},
+            "options": {
+                "template": "{{id}} • {{name}} • {{start_date}} → {{end_date}} • LTE {{lte_gb_used}}/{{lte_gb_total}}"
+            },
             "note": "История тарифов пользователя.",
         },
     )
@@ -1891,7 +2189,9 @@ def apply_users_luxury_ux(client: DirectusClient) -> None:
         "family_members_owner_list",
         {
             "interface": "list-o2m",
-            "options": {"template": "{{id}} • member {{member_id}} • {{status}} • {{allocated_devices}} devices"},
+            "options": {
+                "template": "{{id}} • member {{member_id}} • {{status}} • {{allocated_devices}} devices"
+            },
             "note": "Участники семьи, где пользователь выступает владельцем.",
         },
     )
@@ -1901,7 +2201,9 @@ def apply_users_luxury_ux(client: DirectusClient) -> None:
         "family_members_member_list",
         {
             "interface": "list-o2m",
-            "options": {"template": "{{id}} • owner {{owner_id}} • {{status}} • {{allocated_devices}} devices"},
+            "options": {
+                "template": "{{id}} • owner {{owner_id}} • {{status}} • {{allocated_devices}} devices"
+            },
             "note": "Членство в семье, где пользователь выступает участником.",
         },
     )
@@ -1911,7 +2213,9 @@ def apply_users_luxury_ux(client: DirectusClient) -> None:
         "family_invites_list",
         {
             "interface": "list-o2m",
-            "options": {"template": "{{id}} • {{used_count}}/{{max_uses}} • {{expires_at}}"},
+            "options": {
+                "template": "{{id}} • {{used_count}}/{{max_uses}} • {{expires_at}}"
+            },
             "note": "Инвайты семьи, созданные пользователем.",
         },
     )
@@ -1927,7 +2231,9 @@ def ensure_users_relations_ux(client: DirectusClient) -> None:
     if client.get("/collections/users").status_code != 200:
         return
 
-    def get_relation_item(many_collection: str, many_field: str) -> Optional[Dict[str, Any]]:
+    def get_relation_item(
+        many_collection: str, many_field: str
+    ) -> Optional[Dict[str, Any]]:
         # Prefer the dedicated /relations endpoint. In some Directus setups
         # /items/directus_relations is forbidden even for admin API users.
         resp = client.get(f"/relations/{many_collection}/{many_field}")
@@ -1946,6 +2252,7 @@ def ensure_users_relations_ux(client: DirectusClient) -> None:
         one_collection: str,
         one_field: str,
         one_deselect_action: str = "nullify",
+        schema_on_delete: Optional[str] = None,
         create_if_missing: bool = False,
     ) -> bool:
         relation = get_relation_item(many_collection, many_field)
@@ -1960,6 +2267,8 @@ def ensure_users_relations_ux(client: DirectusClient) -> None:
                     "one_deselect_action": one_deselect_action,
                 },
             }
+            if schema_on_delete:
+                payload["schema"] = {"on_delete": schema_on_delete}
             resp = client.patch(
                 f"/relations/{many_collection}/{many_field}",
                 json=payload,
@@ -1973,18 +2282,22 @@ def ensure_users_relations_ux(client: DirectusClient) -> None:
         if not create_if_missing:
             return False
 
+        create_payload: Dict[str, Any] = {
+            "collection": many_collection,
+            "field": many_field,
+            "related_collection": one_collection,
+            "meta": {
+                "one_collection": one_collection,
+                "one_field": one_field,
+                "one_deselect_action": one_deselect_action,
+            },
+        }
+        if schema_on_delete:
+            create_payload["schema"] = {"on_delete": schema_on_delete}
+
         created = client.post(
             "/relations",
-            json={
-                "collection": many_collection,
-                "field": many_field,
-                "related_collection": one_collection,
-                "meta": {
-                    "one_collection": one_collection,
-                    "one_field": one_field,
-                    "one_deselect_action": one_deselect_action,
-                },
-            },
+            json=create_payload,
         )
         if created.status_code in (400, 401, 403, 404):
             return False
@@ -1995,7 +2308,9 @@ def ensure_users_relations_ux(client: DirectusClient) -> None:
             return False
         return True
 
-    def ensure_alias_o2m_field(alias_field: str, title: str, sort: int, template: str = "{{id}}") -> None:
+    def ensure_alias_o2m_field(
+        alias_field: str, title: str, sort: int, template: str = "{{id}}"
+    ) -> None:
         meta = {
             "interface": "list-o2m",
             "options": {"template": template},
@@ -2045,13 +2360,19 @@ def ensure_users_relations_ux(client: DirectusClient) -> None:
     # Self-reference for "Чей реферал": keep reverse o2m list visible and clickable.
     # Create alias first, then patch relation metadata. Some Directus instances reject
     # one_field updates when the target alias isn't created yet.
-    ensure_alias_o2m_field("referred_users_list", "Рефералы пользователя", 68, "{{id}} — {{username}} — {{full_name}}")
+    ensure_alias_o2m_field(
+        "referred_users_list",
+        "Рефералы пользователя",
+        68,
+        "{{id}} — {{username}} — {{full_name}}",
+    )
     referred_rel_ok = ensure_relation(
         many_collection="users",
         many_field="referred_by",
         one_collection="users",
         one_field="referred_users_list",
         one_deselect_action="nullify",
+        schema_on_delete="SET NULL",
         create_if_missing=True,
     )
     if referred_rel_ok:
@@ -2067,24 +2388,133 @@ def ensure_users_relations_ux(client: DirectusClient) -> None:
                 "sort": 62,
             },
         )
-        ensure_alias_o2m_field("referred_users_list", "Рефералы пользователя", 68, "{{id}} — {{username}} — {{full_name}}")
+        ensure_alias_o2m_field(
+            "referred_users_list",
+            "Рефералы пользователя",
+            68,
+            "{{id}} — {{username}} — {{full_name}}",
+        )
     elif client.get("/fields/users/referred_users_list").status_code == 200:
-        ensure_alias_o2m_field("referred_users_list", "Рефералы пользователя", 68, "{{id}} — {{username}} — {{full_name}}")
+        ensure_alias_o2m_field(
+            "referred_users_list",
+            "Рефералы пользователя",
+            68,
+            "{{id}} — {{username}} — {{full_name}}",
+        )
 
     # Existing business relations -> embedded logs/history inside user card.
     relation_specs = [
-        ("active_tariffs", "user_id", "active_tariffs_list", "История активных тарифов", 69, "{{id}} — {{name}} — LTE {{lte_gb_used}}/{{lte_gb_total}}"),
-        ("promo_usages", "user_id", "promo_usages_list", "Использование промокодов", 70, "{{id}} — {{used_at}}"),
-        ("notification_marks", "user_id", "notification_marks_list", "Логи уведомлений", 71, "{{id}} — {{type}} — {{sent_at}}"),
-        ("family_devices", "user_id", "family_devices_list", "Устройства семьи", 72, "{{id}} — {{device_name}}"),
-        ("partner_withdrawals", "owner_id", "partner_withdrawals_list", "Выводы партнера", 73, "{{id}} — {{status}} — {{amount_rub}}"),
-        ("partner_earnings", "partner_id", "partner_earnings_list", "Начисления партнера", 74, "{{id}} — {{amount}} — {{created_at}}"),
-        ("family_audit_logs", "owner_id", "family_audit_logs_owner", "Аудит семьи", 75, "{{id}} — {{action}} — {{created_at}}"),
-        ("family_members", "owner_id", "family_members_owner_list", "Участники семьи (owner)", 76, "{{id}} — member {{member_id}} — {{status}} — {{allocated_devices}}"),
-        ("family_members", "member_id", "family_members_member_list", "Членство в семье (member)", 77, "{{id}} — owner {{owner_id}} — {{status}} — {{allocated_devices}}"),
-        ("family_invites", "owner_id", "family_invites_list", "Инвайты семьи", 78, "{{id}} — {{used_count}}/{{max_uses}} — {{expires_at}}"),
+        (
+            "active_tariffs",
+            "user_id",
+            "active_tariffs_list",
+            "История активных тарифов",
+            69,
+            "{{id}} — {{name}} — LTE {{lte_gb_used}}/{{lte_gb_total}}",
+            "delete",
+            "CASCADE",
+        ),
+        (
+            "promo_usages",
+            "user_id",
+            "promo_usages_list",
+            "Использование промокодов",
+            70,
+            "{{id}} — {{used_at}}",
+            "delete",
+            "CASCADE",
+        ),
+        (
+            "notification_marks",
+            "user_id",
+            "notification_marks_list",
+            "Логи уведомлений",
+            71,
+            "{{id}} — {{type}} — {{sent_at}}",
+            "delete",
+            "CASCADE",
+        ),
+        (
+            "family_devices",
+            "user_id",
+            "family_devices_list",
+            "Устройства семьи",
+            72,
+            "{{id}} — {{device_name}}",
+            "delete",
+            None,
+        ),
+        (
+            "partner_withdrawals",
+            "owner_id",
+            "partner_withdrawals_list",
+            "Выводы партнера",
+            73,
+            "{{id}} — {{status}} — {{amount_rub}}",
+            "delete",
+            None,
+        ),
+        (
+            "partner_earnings",
+            "partner_id",
+            "partner_earnings_list",
+            "Начисления партнера",
+            74,
+            "{{id}} — {{amount}} — {{created_at}}",
+            "delete",
+            None,
+        ),
+        (
+            "family_audit_logs",
+            "owner_id",
+            "family_audit_logs_owner",
+            "Аудит семьи",
+            75,
+            "{{id}} — {{action}} — {{created_at}}",
+            "delete",
+            None,
+        ),
+        (
+            "family_members",
+            "owner_id",
+            "family_members_owner_list",
+            "Участники семьи (я владелец)",
+            76,
+            "{{id}} — member {{member_id}} — {{status}} — {{allocated_devices}}",
+            "delete",
+            None,
+        ),
+        (
+            "family_members",
+            "member_id",
+            "family_members_member_list",
+            "Моё членство в семьях",
+            77,
+            "{{id}} — owner {{owner_id}} — {{status}} — {{allocated_devices}}",
+            "delete",
+            None,
+        ),
+        (
+            "family_invites",
+            "owner_id",
+            "family_invites_list",
+            "Инвайты семьи",
+            78,
+            "{{id}} — {{used_count}}/{{max_uses}} — {{expires_at}}",
+            "delete",
+            None,
+        ),
     ]
-    for many_collection, many_field, one_field, title, sort, template in relation_specs:
+    for (
+        many_collection,
+        many_field,
+        one_field,
+        title,
+        sort,
+        template,
+        one_deselect_action,
+        schema_on_delete,
+    ) in relation_specs:
         # Make the o2m block visible first; relation metadata can be patched after.
         ensure_alias_o2m_field(one_field, title, sort, template)
         rel_ok = ensure_relation(
@@ -2092,7 +2522,8 @@ def ensure_users_relations_ux(client: DirectusClient) -> None:
             many_field=many_field,
             one_collection="users",
             one_field=one_field,
-            one_deselect_action="nullify",
+            one_deselect_action=one_deselect_action,
+            schema_on_delete=schema_on_delete,
             create_if_missing=True,
         )
         # If relation metadata update is blocked in this environment but alias field
@@ -2124,13 +2555,13 @@ def ensure_users_family_section_ux(client: DirectusClient) -> None:
         ),
         (
             "family_members_owner_list",
-            "Участники семьи (owner)",
+            "Участники семьи (я владелец)",
             76,
             "{{id}} — member {{member_id}} — {{status}} — {{allocated_devices}}",
         ),
         (
             "family_members_member_list",
-            "Членство в семье (member)",
+            "Моё членство в семьях",
             77,
             "{{id}} — owner {{owner_id}} — {{status}} — {{allocated_devices}}",
         ),
@@ -2159,7 +2590,7 @@ def ensure_users_family_section_ux(client: DirectusClient) -> None:
                 "meta": {
                     "one_collection": "users",
                     "one_field": one_field,
-                    "one_deselect_action": "nullify",
+                    "one_deselect_action": "delete",
                 },
             },
         )
@@ -2250,16 +2681,16 @@ def ensure_users_family_workspace_aliases(client: DirectusClient) -> None:
                 "color": "info",
                 "icon": "family_restroom",
                 "text": (
-                    "Блок Семья: быстрый доступ к family-операциям. "
-                    "Если relation-виджеты временно не отрисовались, "
-                    "используйте ссылки ниже."
+                    "Блок «Семья»: быстрые переходы к связанным данным. "
+                    "Если встроенные relation-списки временно не отображаются, "
+                    "используйте кнопки ниже."
                 ),
             },
             "width": "full",
-            "sort": 76,
+            "sort": 79,
             "hidden": False,
             "group": None,
-            "translations": [{"language": "ru-RU", "translation": "Семья: быстрый доступ"}],
+            "translations": [{"language": "ru-RU", "translation": "Семья: навигация"}],
         },
     )
 
@@ -2271,40 +2702,42 @@ def ensure_users_family_workspace_aliases(client: DirectusClient) -> None:
             "options": {
                 "links": [
                     {
-                        "label": "Участники семьи (owner = текущий user)",
+                        "label": "Участники семьи (я владелец)",
                         "icon": "groups",
                         "type": "primary",
                         "actionType": "url",
-                        "url": "/content/family_members?filter[owner_id][_eq]={{id}}",
+                        "url": "/content/family_members?filter=%7B%22owner_id%22%3A%7B%22_eq%22%3A%22{{id}}%22%7D%7D",
                     },
                     {
-                        "label": "Членство пользователя в семье (member = текущий user)",
+                        "label": "Моё членство в семьях",
                         "icon": "person_search",
-                        "type": "info",
+                        "type": "normal",
                         "actionType": "url",
-                        "url": "/content/family_members?filter[member_id][_eq]={{id}}",
+                        "url": "/content/family_members?filter=%7B%22member_id%22%3A%7B%22_eq%22%3A%22{{id}}%22%7D%7D",
                     },
                     {
-                        "label": "Инвайты семьи (owner = текущий user)",
+                        "label": "Инвайты семьи (я владелец)",
                         "icon": "mail",
                         "type": "normal",
                         "actionType": "url",
-                        "url": "/content/family_invites?filter[owner_id][_eq]={{id}}",
+                        "url": "/content/family_invites?filter=%7B%22owner_id%22%3A%7B%22_eq%22%3A%22{{id}}%22%7D%7D",
                     },
                     {
-                        "label": "Аудит семьи (owner = текущий user)",
+                        "label": "Аудит семьи (я владелец)",
                         "icon": "fact_check",
                         "type": "normal",
                         "actionType": "url",
-                        "url": "/content/family_audit_logs?filter[owner_id][_eq]={{id}}",
+                        "url": "/content/family_audit_logs?filter=%7B%22owner_id%22%3A%7B%22_eq%22%3A%22{{id}}%22%7D%7D",
                     },
                 ]
             },
             "width": "full",
-            "sort": 77,
+            "sort": 80,
             "hidden": False,
             "group": None,
-            "translations": [{"language": "ru-RU", "translation": "Семья: ссылки"}],
+            "translations": [
+                {"language": "ru-RU", "translation": "Семья: быстрые переходы"}
+            ],
         },
     )
 
@@ -2322,7 +2755,10 @@ def verify_users_family_section_visibility(client: DirectusClient) -> None:
         "family_invites_list": "list-o2m",
     }
     for field, expected_interface in expected_interfaces.items():
-        resp = client.get(f"/fields/users/{field}", params={"fields": "field,meta.interface,meta.hidden,meta.sort"})
+        resp = client.get(
+            f"/fields/users/{field}",
+            params={"fields": "field,meta.interface,meta.hidden,meta.sort"},
+        )
         if resp.status_code in (401, 403, 404):
             print(f"WARN: users field {field} not readable (status={resp.status_code})")
             continue
@@ -2336,6 +2772,7 @@ def verify_users_family_section_visibility(client: DirectusClient) -> None:
             )
         if bool(meta.get("hidden", False)):
             print(f"WARN: users field {field} is hidden")
+
 
 def set_language_ru(client: DirectusClient) -> None:
     # Make the whole instance default to Russian and set the current user language too.
@@ -2352,7 +2789,9 @@ def ensure_permissions_baseline(client: DirectusClient) -> None:
 
     # Bootstrap: some instances don't allow creating policies until the current policy
     # explicitly has system permissions. We grant them to the Administrator policy.
-    admin_policy_id = get_policy_id_by_name(client, "Administrator") or get_primary_policy_id_for_role(client, admin_role_id)
+    admin_policy_id = get_policy_id_by_name(
+        client, "Administrator"
+    ) or get_primary_policy_id_for_role(client, admin_role_id)
     if admin_policy_id:
         for collection in (
             "directus_policies",
@@ -2370,7 +2809,7 @@ def ensure_permissions_baseline(client: DirectusClient) -> None:
         client,
         "Manager",
         icon="manage_accounts",
-        description="Операционная роль: управление пользователями/тарифами/промо/призами",
+        description="Операционная роль: управление пользователями/тарифами/промо",
     )
     viewer_role_id = ensure_role(
         client,
@@ -2402,7 +2841,9 @@ def ensure_permissions_baseline(client: DirectusClient) -> None:
     # Some Directus setups can still fail item view navigation without explicit
     # read permission rows on business collections (even for admin-like roles).
     # Keep this explicit to avoid "list works, card doesn't open" regressions.
-    admin_policy_id = get_policy_id_by_name(client, "Administrator") or get_primary_policy_id_for_role(client, admin_role_id)
+    admin_policy_id = get_policy_id_by_name(
+        client, "Administrator"
+    ) or get_primary_policy_id_for_role(client, admin_role_id)
 
     existing_collections = set(list_collections(client))
 
@@ -2417,8 +2858,6 @@ def ensure_permissions_baseline(client: DirectusClient) -> None:
         "promo_batches",
         "promo_codes",
         "promo_usages",
-        "prize_wheel_config",
-        "prize_wheel_history",
         "processed_payments",
         "in_app_notifications",
         # Partners (optional)
@@ -2457,8 +2896,6 @@ def ensure_permissions_baseline(client: DirectusClient) -> None:
         "promo_batches",
         "promo_codes",
         "promo_usages",
-        "prize_wheel_config",
-        "prize_wheel_history",
         "connections",
         "processed_payments",
         "in_app_notifications",
@@ -2514,22 +2951,82 @@ def ensure_permissions_baseline(client: DirectusClient) -> None:
         ensure_permission(client, viewer_policy_id, collection, "read")
 
 
+def cleanup_disabled_feature_permissions(client: DirectusClient) -> None:
+    """
+    Remove permissions for disabled Directus-only features from non-admin roles.
+    This prevents opening legacy URLs even if collections still exist in DB.
+    """
+    disabled_collections = {"prize_wheel_config", "prize_wheel_history"}
+    target_policy_names = {"Manager", "Viewer"}
+
+    policies_resp = client.get("/policies", params={"limit": 200, "fields": "id,name"})
+    if policies_resp.status_code in (401, 403):
+        return
+    policies_resp.raise_for_status()
+    policies = policies_resp.json().get("data") or []
+    target_policy_ids: set[str] = set()
+    for row in policies:
+        if row.get("name") in target_policy_names and row.get("id"):
+            target_policy_ids.add(str(row["id"]))
+    if not target_policy_ids:
+        return
+
+    perms_resp = client.get(
+        "/permissions", params={"limit": 2000, "fields": "id,policy,collection"}
+    )
+    if perms_resp.status_code in (401, 403):
+        return
+    perms_resp.raise_for_status()
+    perms = perms_resp.json().get("data") or []
+
+    for row in perms:
+        if row.get("collection") not in disabled_collections:
+            continue
+        policy_val = row.get("policy")
+        if isinstance(policy_val, dict):
+            policy_id = str(policy_val.get("id") or "")
+        else:
+            policy_id = str(policy_val or "")
+        if policy_id not in target_policy_ids:
+            continue
+        perm_id = row.get("id")
+        if not perm_id:
+            continue
+        deleted = client.delete(f"/permissions/{perm_id}")
+        if deleted.status_code in (401, 403, 404):
+            continue
+        deleted.raise_for_status()
+
+
 def ensure_insights_dashboard(client: DirectusClient) -> None:
     # Reuse the existing logic from scripts/directus_insights_setup.py, but inline to keep this script standalone.
     dashboards = client.get("/dashboards", params={"limit": 200})
     dashboards.raise_for_status()
-    existing = next((d for d in dashboards.json().get("data", []) if d.get("name") == "Главный дашборд"), None)
+    existing = next(
+        (
+            d
+            for d in dashboards.json().get("data", [])
+            if d.get("name") == "Главный дашборд"
+        ),
+        None,
+    )
     if existing:
         dashboard_id = existing["id"]
     else:
         created = client.post(
             "/dashboards",
-            json={"name": "Главный дашборд", "icon": "dashboard", "note": "Ключевые метрики проекта"},
+            json={
+                "name": "Главный дашборд",
+                "icon": "dashboard",
+                "note": "Ключевые метрики проекта",
+            },
         )
         created.raise_for_status()
         dashboard_id = created.json()["data"]["id"]
 
-    panels = client.get("/panels", params={"filter[dashboard][_eq]": dashboard_id, "limit": 200})
+    panels = client.get(
+        "/panels", params={"filter[dashboard][_eq]": dashboard_id, "limit": 200}
+    )
     panels.raise_for_status()
     existing_panels = {p["name"]: p for p in panels.json().get("data", [])}
 
@@ -2553,7 +3050,11 @@ def ensure_insights_dashboard(client: DirectusClient) -> None:
             "position_y": 1,
             "width": 4,
             "height": 4,
-            "options": {"collection": "active_tariffs", "field": "id", "function": "count"},
+            "options": {
+                "collection": "active_tariffs",
+                "field": "id",
+                "function": "count",
+            },
         },
         {
             "name": "Промокодов использовано",
@@ -2563,7 +3064,11 @@ def ensure_insights_dashboard(client: DirectusClient) -> None:
             "position_y": 1,
             "width": 4,
             "height": 4,
-            "options": {"collection": "promo_usages", "field": "id", "function": "count"},
+            "options": {
+                "collection": "promo_usages",
+                "field": "id",
+                "function": "count",
+            },
         },
         {
             "name": "Регистрации пользователей (90 дней)",
@@ -2634,11 +3139,15 @@ def ensure_nav_group_permissions(client: DirectusClient) -> None:
 
     policy_ids: list[str] = []
     if manager_role:
-        pid = get_policy_id_by_name(client, "Manager") or get_primary_policy_id_for_role(client, str(manager_role["id"]))
+        pid = get_policy_id_by_name(
+            client, "Manager"
+        ) or get_primary_policy_id_for_role(client, str(manager_role["id"]))
         if pid:
             policy_ids.append(str(pid))
     if viewer_role:
-        pid = get_policy_id_by_name(client, "Viewer") or get_primary_policy_id_for_role(client, str(viewer_role["id"]))
+        pid = get_policy_id_by_name(client, "Viewer") or get_primary_policy_id_for_role(
+            client, str(viewer_role["id"])
+        )
         if pid:
             policy_ids.append(str(pid))
 
@@ -2648,7 +3157,6 @@ def ensure_nav_group_permissions(client: DirectusClient) -> None:
     groups = [
         "grp_main",
         "grp_promo",
-        "grp_prizes",
         "grp_partners",
         "grp_analytics",
         "grp_payments",
@@ -2680,7 +3188,9 @@ def ensure_role_presets_legacy(client: DirectusClient) -> None:
     existing_resp.raise_for_status()
     existing = existing_resp.json().get("data", []) or []
 
-    def ensure_tabular_fields_include_pk(preset: Dict[str, Any], *, pk_field: str = "id") -> Optional[Dict[str, Any]]:
+    def ensure_tabular_fields_include_pk(
+        preset: Dict[str, Any], *, pk_field: str = "id"
+    ) -> Optional[Dict[str, Any]]:
         """
         Directus list UX depends on items having a primary key.
         If tabular `fields` omit the PK, item navigation on row-click may silently stop working.
@@ -2768,7 +3278,9 @@ def ensure_role_presets_legacy(client: DirectusClient) -> None:
             continue
         if not new_layout_query:
             continue
-        client.patch(f"/presets/{preset_id}", json={"layout_query": new_layout_query}).raise_for_status()
+        client.patch(
+            f"/presets/{preset_id}", json={"layout_query": new_layout_query}
+        ).raise_for_status()
         p["layout_query"] = new_layout_query
 
     def upsert_preset(payload: Dict[str, Any]) -> None:
@@ -2846,7 +3358,12 @@ def ensure_role_presets_legacy(client: DirectusClient) -> None:
                 "role": rid,
                 "collection": "users",
                 "layout": "tabular",
-                "layout_query": {"tabular": {"fields": users_tabular_fields, "sort": "-registration_date"}},
+                "layout_query": {
+                    "tabular": {
+                        "fields": users_tabular_fields,
+                        "sort": "-registration_date",
+                    }
+                },
                 "layout_options": {"tabular": {"widths": users_widths}},
                 "search": None,
                 "filter": None,
@@ -2862,7 +3379,12 @@ def ensure_role_presets_legacy(client: DirectusClient) -> None:
                 "role": rid,
                 "collection": "users",
                 "layout": "tabular",
-                "layout_query": {"tabular": {"fields": users_tabular_fields, "sort": "-registration_date"}},
+                "layout_query": {
+                    "tabular": {
+                        "fields": users_tabular_fields,
+                        "sort": "-registration_date",
+                    }
+                },
                 "layout_options": {"tabular": {"widths": users_widths}},
                 "filter": {"is_blocked": {"_eq": True}},
                 "icon": "bookmark",
@@ -2876,7 +3398,9 @@ def ensure_role_presets_legacy(client: DirectusClient) -> None:
                 "role": rid,
                 "collection": "users",
                 "layout": "tabular",
-                "layout_query": {"tabular": {"fields": users_tabular_fields, "sort": "expired_at"}},
+                "layout_query": {
+                    "tabular": {"fields": users_tabular_fields, "sort": "expired_at"}
+                },
                 "layout_options": {"tabular": {"widths": users_widths}},
                 "filter": {"expired_at": {"_nnull": True}},
                 "icon": "bookmark",
@@ -2890,7 +3414,9 @@ def ensure_role_presets_legacy(client: DirectusClient) -> None:
                 "role": rid,
                 "collection": "users",
                 "layout": "tabular",
-                "layout_query": {"tabular": {"fields": users_tabular_fields, "sort": "-balance"}},
+                "layout_query": {
+                    "tabular": {"fields": users_tabular_fields, "sort": "-balance"}
+                },
                 "layout_options": {"tabular": {"widths": users_widths}},
                 "filter": None,
                 "icon": "bookmark",
@@ -2908,7 +3434,15 @@ def ensure_role_presets_legacy(client: DirectusClient) -> None:
                     "cards": {
                         "sort": "-registration_date",
                         # IMPORTANT: include PK; without it cards navigation can break.
-                        "fields": ["id", "username", "full_name", "expired_at", "lte_gb_total", "is_blocked", "registration_date"],
+                        "fields": [
+                            "id",
+                            "username",
+                            "full_name",
+                            "expired_at",
+                            "lte_gb_total",
+                            "is_blocked",
+                            "registration_date",
+                        ],
                     }
                 },
                 "layout_options": {
@@ -3129,8 +3663,20 @@ def ensure_role_presets_legacy(client: DirectusClient) -> None:
             }
         )
         # promo_batches: default list
-        promo_batches_tabular_fields = ["id", "title", "notes", "created_at", "created_by_id"]
-        promo_batches_widths = {"id": 80, "title": 200, "notes": 200, "created_at": 160, "created_by_id": 120}
+        promo_batches_tabular_fields = [
+            "id",
+            "title",
+            "notes",
+            "created_at",
+            "created_by_id",
+        ]
+        promo_batches_widths = {
+            "id": 80,
+            "title": 200,
+            "notes": 200,
+            "created_at": 160,
+            "created_by_id": 120,
+        }
         upsert_preset(
             {
                 "bookmark": None,
@@ -3151,8 +3697,20 @@ def ensure_role_presets_legacy(client: DirectusClient) -> None:
             }
         )
         # promo_usages: default and latest
-        promo_usages_tabular_fields = ["id", "promo_code_id", "user_id", "used_at", "context"]
-        promo_usages_widths = {"id": 80, "promo_code_id": 120, "user_id": 140, "used_at": 180, "context": 150}
+        promo_usages_tabular_fields = [
+            "id",
+            "promo_code_id",
+            "user_id",
+            "used_at",
+            "context",
+        ]
+        promo_usages_widths = {
+            "id": 80,
+            "promo_code_id": 120,
+            "user_id": 140,
+            "used_at": 180,
+            "context": 150,
+        }
         upsert_preset(
             {
                 "bookmark": None,
@@ -3200,11 +3758,27 @@ def ensure_role_presets_legacy(client: DirectusClient) -> None:
                 "layout": "tabular",
                 "layout_query": {
                     "tabular": {
-                        "fields": ["payment_id", "user_id", "amount", "status", "processed_at"],
+                        "fields": [
+                            "payment_id",
+                            "user_id",
+                            "amount",
+                            "status",
+                            "processed_at",
+                        ],
                         "sort": "-processed_at",
                     }
                 },
-                "layout_options": {"tabular": {"widths": {"payment_id": 220, "user_id": 160, "amount": 120, "status": 140, "processed_at": 180}}},
+                "layout_options": {
+                    "tabular": {
+                        "widths": {
+                            "payment_id": 220,
+                            "user_id": 160,
+                            "amount": 120,
+                            "status": 140,
+                            "processed_at": 180,
+                        }
+                    }
+                },
                 "filter": None,
                 "icon": "bookmark",
                 "color": "#8B5CF6",
@@ -3219,11 +3793,27 @@ def ensure_role_presets_legacy(client: DirectusClient) -> None:
                 "layout": "tabular",
                 "layout_query": {
                     "tabular": {
-                        "fields": ["payment_id", "user_id", "amount", "status", "processed_at"],
+                        "fields": [
+                            "payment_id",
+                            "user_id",
+                            "amount",
+                            "status",
+                            "processed_at",
+                        ],
                         "sort": "-amount",
                     }
                 },
-                "layout_options": {"tabular": {"widths": {"payment_id": 220, "user_id": 160, "amount": 120, "status": 140, "processed_at": 180}}},
+                "layout_options": {
+                    "tabular": {
+                        "widths": {
+                            "payment_id": 220,
+                            "user_id": 160,
+                            "amount": 120,
+                            "status": 140,
+                            "processed_at": 180,
+                        }
+                    }
+                },
                 "filter": {"amount": {"_gt": 0}},
                 "icon": "bookmark",
                 "color": "#10B981",
@@ -3238,7 +3828,18 @@ def ensure_role_presets_legacy(client: DirectusClient) -> None:
                 "layout": "tabular",
                 "layout_query": {
                     "tabular": {
-                        "fields": ["id", "created_at", "triage_severity", "triage_status", "type", "code", "user_id", "route", "message", "triage_owner"],
+                        "fields": [
+                            "id",
+                            "created_at",
+                            "triage_severity",
+                            "triage_status",
+                            "type",
+                            "code",
+                            "user_id",
+                            "route",
+                            "message",
+                            "triage_owner",
+                        ],
                         "sort": "-created_at",
                     }
                 },
@@ -3272,11 +3873,31 @@ def ensure_role_presets_legacy(client: DirectusClient) -> None:
                 "layout": "tabular",
                 "layout_query": {
                     "tabular": {
-                        "fields": ["id", "created_at", "triage_status", "type", "code", "route", "message"],
+                        "fields": [
+                            "id",
+                            "created_at",
+                            "triage_status",
+                            "type",
+                            "code",
+                            "route",
+                            "message",
+                        ],
                         "sort": "-created_at",
                     }
                 },
-                "layout_options": {"tabular": {"widths": {"id": 200, "created_at": 180, "triage_status": 150, "type": 150, "code": 260, "route": 260, "message": 360}}},
+                "layout_options": {
+                    "tabular": {
+                        "widths": {
+                            "id": 200,
+                            "created_at": 180,
+                            "triage_status": 150,
+                            "type": 150,
+                            "code": 260,
+                            "route": 260,
+                            "message": 360,
+                        }
+                    }
+                },
                 "filter": {"triage_status": {"_eq": "new"}},
                 "icon": "bookmark",
                 "color": "#EF4444",
@@ -3291,11 +3912,35 @@ def ensure_role_presets_legacy(client: DirectusClient) -> None:
                 "layout": "tabular",
                 "layout_query": {
                     "tabular": {
-                        "fields": ["id", "created_at", "triage_due_at", "triage_severity", "triage_status", "type", "code", "route", "message"],
+                        "fields": [
+                            "id",
+                            "created_at",
+                            "triage_due_at",
+                            "triage_severity",
+                            "triage_status",
+                            "type",
+                            "code",
+                            "route",
+                            "message",
+                        ],
                         "sort": "triage_due_at",
                     }
                 },
-                "layout_options": {"tabular": {"widths": {"id": 200, "created_at": 180, "triage_due_at": 180, "triage_severity": 140, "triage_status": 150, "type": 150, "code": 260, "route": 260, "message": 360}}},
+                "layout_options": {
+                    "tabular": {
+                        "widths": {
+                            "id": 200,
+                            "created_at": 180,
+                            "triage_due_at": 180,
+                            "triage_severity": 140,
+                            "triage_status": 150,
+                            "type": 150,
+                            "code": 260,
+                            "route": 260,
+                            "message": 360,
+                        }
+                    }
+                },
                 "filter": {
                     "_and": [
                         {"triage_status": {"_eq": "new"}},
@@ -3316,11 +3961,35 @@ def ensure_role_presets_legacy(client: DirectusClient) -> None:
                 "layout": "tabular",
                 "layout_query": {
                     "tabular": {
-                        "fields": ["id", "created_at", "triage_severity", "triage_status", "triage_owner", "type", "code", "route", "message"],
+                        "fields": [
+                            "id",
+                            "created_at",
+                            "triage_severity",
+                            "triage_status",
+                            "triage_owner",
+                            "type",
+                            "code",
+                            "route",
+                            "message",
+                        ],
                         "sort": "-triage_updated_at",
                     }
                 },
-                "layout_options": {"tabular": {"widths": {"id": 200, "created_at": 180, "triage_severity": 140, "triage_status": 150, "triage_owner": 180, "type": 150, "code": 260, "route": 260, "message": 360}}},
+                "layout_options": {
+                    "tabular": {
+                        "widths": {
+                            "id": 200,
+                            "created_at": 180,
+                            "triage_severity": 140,
+                            "triage_status": 150,
+                            "triage_owner": 180,
+                            "type": 150,
+                            "code": 260,
+                            "route": 260,
+                            "message": 360,
+                        }
+                    }
+                },
                 "filter": {"triage_status": {"_eq": "in_progress"}},
                 "icon": "bookmark",
                 "color": "#F59E0B",
@@ -3335,18 +4004,50 @@ def ensure_role_presets_legacy(client: DirectusClient) -> None:
                 "layout": "tabular",
                 "layout_query": {
                     "tabular": {
-                        "fields": ["id", "created_at", "triage_status", "triage_updated_at", "type", "code", "route", "message"],
+                        "fields": [
+                            "id",
+                            "created_at",
+                            "triage_status",
+                            "triage_updated_at",
+                            "type",
+                            "code",
+                            "route",
+                            "message",
+                        ],
                         "sort": "-triage_updated_at",
                     }
                 },
-                "layout_options": {"tabular": {"widths": {"id": 200, "created_at": 180, "triage_status": 150, "triage_updated_at": 180, "type": 150, "code": 260, "route": 260, "message": 360}}},
+                "layout_options": {
+                    "tabular": {
+                        "widths": {
+                            "id": 200,
+                            "created_at": 180,
+                            "triage_status": 150,
+                            "triage_updated_at": 180,
+                            "type": 150,
+                            "code": 260,
+                            "route": 260,
+                            "message": 360,
+                        }
+                    }
+                },
                 "filter": {"triage_status": {"_eq": "resolved"}},
                 "icon": "bookmark",
                 "color": "#10B981",
             }
         )
         # in_app_notifications: default list + bookmarks
-        notif_tabular_fields = ["id", "title", "is_active", "start_at", "end_at", "max_per_user", "max_per_session", "auto_hide_seconds", "created_at"]
+        notif_tabular_fields = [
+            "id",
+            "title",
+            "is_active",
+            "start_at",
+            "end_at",
+            "max_per_user",
+            "max_per_session",
+            "auto_hide_seconds",
+            "created_at",
+        ]
         notif_widths = {
             "id": 80,
             "title": 240,
@@ -3365,7 +4066,9 @@ def ensure_role_presets_legacy(client: DirectusClient) -> None:
                 "role": rid,
                 "collection": "in_app_notifications",
                 "layout": "tabular",
-                "layout_query": {"tabular": {"fields": notif_tabular_fields, "sort": "-created_at"}},
+                "layout_query": {
+                    "tabular": {"fields": notif_tabular_fields, "sort": "-created_at"}
+                },
                 "layout_options": {"tabular": {"widths": notif_widths}},
                 "filter": None,
                 "icon": "bookmark",
@@ -3379,7 +4082,9 @@ def ensure_role_presets_legacy(client: DirectusClient) -> None:
                 "role": rid,
                 "collection": "in_app_notifications",
                 "layout": "tabular",
-                "layout_query": {"tabular": {"fields": notif_tabular_fields, "sort": "-created_at"}},
+                "layout_query": {
+                    "tabular": {"fields": notif_tabular_fields, "sort": "-created_at"}
+                },
                 "layout_options": {"tabular": {"widths": notif_widths}},
                 "filter": {
                     "_and": [
@@ -3403,7 +4108,9 @@ def ensure_role_presets_legacy(client: DirectusClient) -> None:
                 "role": rid,
                 "collection": "in_app_notifications",
                 "layout": "tabular",
-                "layout_query": {"tabular": {"fields": notif_tabular_fields, "sort": "-created_at"}},
+                "layout_query": {
+                    "tabular": {"fields": notif_tabular_fields, "sort": "-created_at"}
+                },
                 "layout_options": {"tabular": {"widths": notif_widths}},
                 "filter": {"is_active": {"_eq": False}},
                 "icon": "bookmark",
@@ -3420,8 +4127,31 @@ def ensure_role_presets_legacy(client: DirectusClient) -> None:
                 "role": rid,
                 "collection": "users",
                 "layout": "tabular",
-                "layout_query": {"tabular": {"fields": ["id", "username", "full_name", "registration_date", "expired_at", "is_blocked"], "sort": "-registration_date"}},
-                "layout_options": {"tabular": {"widths": {"id": 140, "username": 180, "full_name": 240, "registration_date": 180, "expired_at": 160, "is_blocked": 130}}},
+                "layout_query": {
+                    "tabular": {
+                        "fields": [
+                            "id",
+                            "username",
+                            "full_name",
+                            "registration_date",
+                            "expired_at",
+                            "is_blocked",
+                        ],
+                        "sort": "-registration_date",
+                    }
+                },
+                "layout_options": {
+                    "tabular": {
+                        "widths": {
+                            "id": 140,
+                            "username": 180,
+                            "full_name": 240,
+                            "registration_date": 180,
+                            "expired_at": 160,
+                            "is_blocked": 130,
+                        }
+                    }
+                },
                 "filter": None,
                 "icon": "bookmark",
                 "color": None,
@@ -3440,7 +4170,12 @@ def ensure_role_presets_legacy(client: DirectusClient) -> None:
                 "role": None,
                 "collection": "users",
                 "layout": "tabular",
-                "layout_query": {"tabular": {"fields": users_tabular_fields, "sort": "-registration_date"}},
+                "layout_query": {
+                    "tabular": {
+                        "fields": users_tabular_fields,
+                        "sort": "-registration_date",
+                    }
+                },
                 "layout_options": {"tabular": {"widths": users_widths}},
                 "search": None,
                 "filter": None,
@@ -3464,8 +4199,6 @@ def get_content_redesign_collections() -> list[str]:
         "promo_usages",
         "processed_payments",
         "in_app_notifications",
-        "prize_wheel_config",
-        "prize_wheel_history",
         "error_reports",
         "partner_withdrawals",
         "partner_qr_codes",
@@ -3473,7 +4206,9 @@ def get_content_redesign_collections() -> list[str]:
     ]
 
 
-def cleanup_user_presets_for_scope(client: DirectusClient, collections: Iterable[str]) -> None:
+def cleanup_user_presets_for_scope(
+    client: DirectusClient, collections: Iterable[str]
+) -> None:
     """
     Rollout helper:
     DIRECTUS_CONTENT_UX_CLEAN_USER_PRESETS=1 removes personal presets in scope
@@ -3486,7 +4221,9 @@ def cleanup_user_presets_for_scope(client: DirectusClient, collections: Iterable
     if not target:
         return
 
-    resp = client.get("/presets", params={"limit": 1200, "fields": "id,user,collection"})
+    resp = client.get(
+        "/presets", params={"limit": 1200, "fields": "id,user,collection"}
+    )
     if resp.status_code in (401, 403):
         return
     resp.raise_for_status()
@@ -3539,7 +4276,25 @@ def ensure_role_presets(client: DirectusClient) -> None:
     resp.raise_for_status()
     existing = resp.json().get("data") or []
 
-    def ensure_tabular_fields_include_pk(preset: Dict[str, Any], *, pk_field: str = "id") -> Optional[Dict[str, Any]]:
+    disabled_collections = {"prize_wheel_config", "prize_wheel_history"}
+    for row in list(existing):
+        if row.get("collection") not in disabled_collections:
+            continue
+        preset_id = row.get("id")
+        if not preset_id:
+            continue
+        deleted = client.delete(f"/presets/{preset_id}")
+        if deleted.status_code in (401, 403, 404):
+            continue
+        deleted.raise_for_status()
+        try:
+            existing.remove(row)
+        except ValueError:
+            pass
+
+    def ensure_tabular_fields_include_pk(
+        preset: Dict[str, Any], *, pk_field: str = "id"
+    ) -> Optional[Dict[str, Any]]:
         layout_query = preset.get("layout_query")
         if not isinstance(layout_query, dict):
             return {"tabular": {"fields": [pk_field]}}
@@ -3596,12 +4351,16 @@ def ensure_role_presets(client: DirectusClient) -> None:
         if layout == "tabular":
             new_layout = ensure_tabular_fields_include_pk(row, pk_field="id")
         elif layout == "cards":
-            new_layout = ensure_cards_fields_include_pk(row, pk_field="id", required_fields=["username", "full_name"])
+            new_layout = ensure_cards_fields_include_pk(
+                row, pk_field="id", required_fields=["username", "full_name"]
+            )
         else:
             continue
         if not new_layout:
             continue
-        client.patch(f"/presets/{preset_id}", json={"layout_query": new_layout}).raise_for_status()
+        client.patch(
+            f"/presets/{preset_id}", json={"layout_query": new_layout}
+        ).raise_for_status()
         row["layout_query"] = new_layout
 
     def upsert_preset(payload: Dict[str, Any]) -> None:
@@ -3637,7 +4396,9 @@ def ensure_role_presets(client: DirectusClient) -> None:
         created_row = created.json().get("data") or {}
         existing.append(created_row)
 
-    def prune_legacy_role_bookmarks(role_id: Any, collection: str, keep_set: set[str]) -> None:
+    def prune_legacy_role_bookmarks(
+        role_id: Any, collection: str, keep_set: set[str]
+    ) -> None:
         role_key = str(role_id)
         to_remove: list[Dict[str, Any]] = []
         for row in existing:
@@ -3810,7 +4571,14 @@ def ensure_role_presets(client: DirectusClient) -> None:
             "collection": collection,
             "layout": "cards",
             "layout_query": {"cards": {"fields": safe_fields, "sort": sort}},
-            "layout_options": {"cards": {"title": title, "subtitle": subtitle, "icon": "person", "size": 2}},
+            "layout_options": {
+                "cards": {
+                    "title": title,
+                    "subtitle": subtitle,
+                    "icon": "person",
+                    "size": 2,
+                }
+            },
             "search": None,
             "filter": None,
             "icon": "bookmark",
@@ -3819,13 +4587,34 @@ def ensure_role_presets(client: DirectusClient) -> None:
 
     matrix = {
         "users": {
-            "default_fields": ["id", "username", "full_name", "balance", "expired_at", "is_subscribed", "is_trial", "is_blocked", "hwid_limit", "lte_gb_total", "active_tariff_id", "connected_at", "registration_date", "is_partner", "referrals"],
+            "default_fields": [
+                "id",
+                "username",
+                "full_name",
+                "balance",
+                "expired_at",
+                "is_subscribed",
+                "is_trial",
+                "is_blocked",
+                "hwid_limit",
+                "lte_gb_total",
+                "active_tariff_id",
+                "connected_at",
+                "registration_date",
+                "is_partner",
+                "referrals",
+            ],
             "default_sort": "-registration_date",
             "bookmarks": [
                 {
                     "bookmark": "Пользователи · Риск",
                     "sort": "-registration_date",
-                    "filter": {"_or": [{"is_blocked": {"_eq": True}}, {"expired_at": {"_lte": "$NOW"}}]},
+                    "filter": {
+                        "_or": [
+                            {"is_blocked": {"_eq": True}},
+                            {"expired_at": {"_lte": "$NOW"}},
+                        ]
+                    },
                     "color": "#F59E0B",
                 },
                 {
@@ -3838,143 +4627,430 @@ def ensure_role_presets(client: DirectusClient) -> None:
                     "bookmark": "Пользователи · Карточки",
                     "layout": "cards",
                     "sort": "-registration_date",
-                    "fields": ["id", "username", "full_name", "expired_at", "balance", "is_blocked", "is_subscribed", "registration_date"],
+                    "fields": [
+                        "id",
+                        "username",
+                        "full_name",
+                        "expired_at",
+                        "balance",
+                        "is_blocked",
+                        "is_subscribed",
+                        "registration_date",
+                    ],
                     "color": "#3B82F6",
                 },
             ],
         },
         "active_tariffs": {
-            "default_fields": ["id", "user_id", "name", "months", "price", "hwid_limit", "lte_gb_total", "lte_gb_used", "devices_decrease_count", "lte_price_per_gb", "progressive_multiplier", "residual_day_fraction"],
+            "default_fields": [
+                "id",
+                "user_id",
+                "name",
+                "months",
+                "price",
+                "hwid_limit",
+                "lte_gb_total",
+                "lte_gb_used",
+                "devices_decrease_count",
+                "lte_price_per_gb",
+                "progressive_multiplier",
+                "residual_day_fraction",
+            ],
             "default_sort": "-id",
             "bookmarks": [
-                {"bookmark": "Активные тарифы · LTE usage", "sort": "-lte_gb_used", "filter": {"lte_gb_total": {"_gt": 0}}, "color": "#06B6D4"},
-                {"bookmark": "Активные тарифы · Устройства", "sort": "-devices_decrease_count", "filter": None, "color": "#F59E0B"},
+                {
+                    "bookmark": "Активные тарифы · LTE usage",
+                    "sort": "-lte_gb_used",
+                    "filter": {"lte_gb_total": {"_gt": 0}},
+                    "color": "#06B6D4",
+                },
+                {
+                    "bookmark": "Активные тарифы · Устройства",
+                    "sort": "-devices_decrease_count",
+                    "filter": None,
+                    "color": "#F59E0B",
+                },
             ],
         },
         "tariffs": {
-            "default_fields": ["id", "order", "name", "months", "is_active", "family_plan_enabled", "final_price_default", "final_price_family", "devices_limit_default", "devices_limit_family", "lte_enabled", "lte_price_per_gb"],
+            "default_fields": [
+                "id",
+                "order",
+                "name",
+                "months",
+                "is_active",
+                "family_plan_enabled",
+                "final_price_default",
+                "final_price_family",
+                "devices_limit_default",
+                "devices_limit_family",
+                "lte_enabled",
+                "lte_price_per_gb",
+            ],
             "default_sort": "order",
             "bookmarks": [
-                {"bookmark": "Тарифы · Семейные", "sort": "order", "filter": {"family_plan_enabled": {"_eq": True}}, "color": "#14B8A6"},
-                {"bookmark": "Тарифы · Неактивные", "sort": "order", "filter": {"is_active": {"_eq": False}}, "color": "#EF4444"},
+                {
+                    "bookmark": "Тарифы · Семейные",
+                    "sort": "order",
+                    "filter": {"family_plan_enabled": {"_eq": True}},
+                    "color": "#14B8A6",
+                },
+                {
+                    "bookmark": "Тарифы · Неактивные",
+                    "sort": "order",
+                    "filter": {"is_active": {"_eq": False}},
+                    "color": "#EF4444",
+                },
             ],
         },
         "family_members": {
-            "default_fields": ["id", "owner_id", "member_id", "status", "allocated_devices", "created_at", "updated_at"],
+            "default_fields": [
+                "id",
+                "owner_id",
+                "member_id",
+                "status",
+                "allocated_devices",
+                "created_at",
+                "updated_at",
+            ],
             "default_sort": "-updated_at",
             "bookmarks": [
-                {"bookmark": "Семья · Активные", "sort": "-updated_at", "filter": {"status": {"_eq": "active"}}, "color": "#10B981"},
-                {"bookmark": "Семья · Последние изменения", "sort": "-updated_at", "filter": None, "color": "#06B6D4"},
+                {
+                    "bookmark": "Семья · Активные",
+                    "sort": "-updated_at",
+                    "filter": {"status": {"_eq": "active"}},
+                    "color": "#10B981",
+                },
+                {
+                    "bookmark": "Семья · Последние изменения",
+                    "sort": "-updated_at",
+                    "filter": None,
+                    "color": "#06B6D4",
+                },
             ],
         },
         "family_invites": {
-            "default_fields": ["id", "owner_id", "allocated_devices", "max_uses", "used_count", "expires_at", "revoked_at", "created_at"],
+            "default_fields": [
+                "id",
+                "owner_id",
+                "allocated_devices",
+                "max_uses",
+                "used_count",
+                "expires_at",
+                "revoked_at",
+                "created_at",
+            ],
             "default_sort": "-created_at",
             "bookmarks": [
                 {
                     "bookmark": "Инвайты · Активные",
                     "sort": "-created_at",
-                    "filter": {"_and": [{"revoked_at": {"_null": True}}, {"_or": [{"expires_at": {"_null": True}}, {"expires_at": {"_gte": "$NOW"}}]}]},
+                    "filter": {
+                        "_and": [
+                            {"revoked_at": {"_null": True}},
+                            {
+                                "_or": [
+                                    {"expires_at": {"_null": True}},
+                                    {"expires_at": {"_gte": "$NOW"}},
+                                ]
+                            },
+                        ]
+                    },
                     "color": "#10B981",
                 },
-                {"bookmark": "Инвайты · Использованные", "sort": "-created_at", "filter": {"used_count": {"_gt": 0}}, "color": "#F59E0B"},
+                {
+                    "bookmark": "Инвайты · Использованные",
+                    "sort": "-created_at",
+                    "filter": {"used_count": {"_gt": 0}},
+                    "color": "#F59E0B",
+                },
             ],
         },
         "family_devices": {
-            "default_fields": ["id", "user_id", "title", "subtitle", "client_id", "created_at"],
+            "default_fields": [
+                "id",
+                "user_id",
+                "title",
+                "subtitle",
+                "client_id",
+                "created_at",
+            ],
             "default_sort": "-created_at",
-            "bookmarks": [{"bookmark": "Устройства · Последние", "sort": "-created_at", "filter": None, "color": "#06B6D4"}],
+            "bookmarks": [
+                {
+                    "bookmark": "Устройства · Последние",
+                    "sort": "-created_at",
+                    "filter": None,
+                    "color": "#06B6D4",
+                }
+            ],
         },
         "family_audit_logs": {
-            "default_fields": ["id", "owner_id", "actor_id", "action", "target_id", "created_at"],
+            "default_fields": [
+                "id",
+                "owner_id",
+                "actor_id",
+                "action",
+                "target_id",
+                "created_at",
+            ],
             "default_sort": "-created_at",
-            "bookmarks": [{"bookmark": "Аудит семьи · Последние", "sort": "-created_at", "filter": None, "color": "#64748B"}],
+            "bookmarks": [
+                {
+                    "bookmark": "Аудит семьи · Последние",
+                    "sort": "-created_at",
+                    "filter": None,
+                    "color": "#64748B",
+                }
+            ],
         },
         "promo_codes": {
-            "default_fields": ["id", "name", "batch_id", "disabled", "expires_at", "max_activations", "per_user_limit", "code_hmac", "created_at"],
+            "default_fields": [
+                "id",
+                "name",
+                "batch_id",
+                "disabled",
+                "expires_at",
+                "max_activations",
+                "per_user_limit",
+                "code_hmac",
+                "created_at",
+            ],
             "default_sort": "-created_at",
             "bookmarks": [
                 {
                     "bookmark": "Промокоды · Активные",
                     "sort": "-created_at",
-                    "filter": {"_and": [{"disabled": {"_eq": False}}, {"_or": [{"expires_at": {"_null": True}}, {"expires_at": {"_gte": "$NOW"}}]}]},
+                    "filter": {
+                        "_and": [
+                            {"disabled": {"_eq": False}},
+                            {
+                                "_or": [
+                                    {"expires_at": {"_null": True}},
+                                    {"expires_at": {"_gte": "$NOW"}},
+                                ]
+                            },
+                        ]
+                    },
                     "color": "#10B981",
                 },
-                {"bookmark": "Промокоды · Истекшие", "sort": "expires_at", "filter": {"_and": [{"expires_at": {"_nnull": True}}, {"expires_at": {"_lt": "$NOW"}}]}, "color": "#EF4444"},
-                {"bookmark": "Промокоды · Отключенные", "sort": "-created_at", "filter": {"disabled": {"_eq": True}}, "color": "#F59E0B"},
+                {
+                    "bookmark": "Промокоды · Истекшие",
+                    "sort": "expires_at",
+                    "filter": {
+                        "_and": [
+                            {"expires_at": {"_nnull": True}},
+                            {"expires_at": {"_lt": "$NOW"}},
+                        ]
+                    },
+                    "color": "#EF4444",
+                },
+                {
+                    "bookmark": "Промокоды · Отключенные",
+                    "sort": "-created_at",
+                    "filter": {"disabled": {"_eq": True}},
+                    "color": "#F59E0B",
+                },
             ],
         },
         "promo_batches": {
             "default_fields": ["id", "title", "notes", "created_at", "created_by_id"],
             "default_sort": "-created_at",
-            "bookmarks": [{"bookmark": "Партии промо · Последние", "sort": "-created_at", "filter": None, "color": "#8B5CF6"}],
+            "bookmarks": [
+                {
+                    "bookmark": "Партии промо · Последние",
+                    "sort": "-created_at",
+                    "filter": None,
+                    "color": "#8B5CF6",
+                }
+            ],
         },
         "promo_usages": {
             "default_fields": ["id", "promo_code_id", "user_id", "used_at", "context"],
             "default_sort": "-used_at",
-            "bookmarks": [{"bookmark": "Промо usage · Последние", "sort": "-used_at", "filter": None, "color": "#8B5CF6"}],
+            "bookmarks": [
+                {
+                    "bookmark": "Промо usage · Последние",
+                    "sort": "-used_at",
+                    "filter": None,
+                    "color": "#8B5CF6",
+                }
+            ],
         },
         "processed_payments": {
-            "default_fields": ["id", "payment_id", "user_id", "amount", "amount_external", "amount_from_balance", "status", "processed_at"],
+            "default_fields": [
+                "id",
+                "payment_id",
+                "user_id",
+                "amount",
+                "amount_external",
+                "amount_from_balance",
+                "status",
+                "processed_at",
+            ],
             "default_sort": "-processed_at",
             "bookmarks": [
-                {"bookmark": "Платежи · Крупные", "sort": "-amount", "filter": {"amount": {"_gt": 0}}, "color": "#10B981"},
-                {"bookmark": "Платежи · Неуспешные", "sort": "-processed_at", "filter": {"status": {"_neq": "succeeded"}}, "color": "#EF4444"},
+                {
+                    "bookmark": "Платежи · Крупные",
+                    "sort": "-amount",
+                    "filter": {"amount": {"_gt": 0}},
+                    "color": "#10B981",
+                },
+                {
+                    "bookmark": "Платежи · Неуспешные",
+                    "sort": "-processed_at",
+                    "filter": {"status": {"_neq": "succeeded"}},
+                    "color": "#EF4444",
+                },
             ],
         },
         "in_app_notifications": {
-            "default_fields": ["id", "title", "is_active", "start_at", "end_at", "max_per_user", "max_per_session", "auto_hide_seconds", "created_at"],
+            "default_fields": [
+                "id",
+                "title",
+                "is_active",
+                "start_at",
+                "end_at",
+                "max_per_user",
+                "max_per_session",
+                "auto_hide_seconds",
+                "created_at",
+            ],
             "default_sort": "-created_at",
             "bookmarks": [
-                {"bookmark": "Уведомления · Активные", "sort": "-created_at", "filter": {"_and": [{"is_active": {"_eq": True}}, {"_or": [{"end_at": {"_null": True}}, {"end_at": {"_gte": "$NOW"}}]}]}, "color": "#10B981"},
-                {"bookmark": "Уведомления · Неактивные", "sort": "-created_at", "filter": {"is_active": {"_eq": False}}, "color": "#EF4444"},
-            ],
-        },
-        "prize_wheel_config": {
-            "default_fields": ["id", "prize_type", "prize_name", "prize_value", "probability", "is_active", "requires_admin", "updated_at"],
-            "default_sort": "-updated_at",
-            "bookmarks": [
-                {"bookmark": "Призы · Активные", "sort": "-updated_at", "filter": {"is_active": {"_eq": True}}, "color": "#10B981"},
-                {"bookmark": "Призы · Требуют админа", "sort": "-updated_at", "filter": {"requires_admin": {"_eq": True}}, "color": "#F59E0B"},
-            ],
-        },
-        "prize_wheel_history": {
-            "default_fields": ["id", "user_id", "prize_name", "prize_type", "prize_value", "is_claimed", "is_rejected", "admin_notified", "created_at"],
-            "default_sort": "-created_at",
-            "bookmarks": [
-                {"bookmark": "История призов · Не обработаны", "sort": "-created_at", "filter": {"_and": [{"is_claimed": {"_eq": False}}, {"is_rejected": {"_eq": False}}]}, "color": "#F59E0B"},
-                {"bookmark": "История призов · Отклонены", "sort": "-created_at", "filter": {"is_rejected": {"_eq": True}}, "color": "#EF4444"},
+                {
+                    "bookmark": "Уведомления · Активные",
+                    "sort": "-created_at",
+                    "filter": {
+                        "_and": [
+                            {"is_active": {"_eq": True}},
+                            {
+                                "_or": [
+                                    {"end_at": {"_null": True}},
+                                    {"end_at": {"_gte": "$NOW"}},
+                                ]
+                            },
+                        ]
+                    },
+                    "color": "#10B981",
+                },
+                {
+                    "bookmark": "Уведомления · Неактивные",
+                    "sort": "-created_at",
+                    "filter": {"is_active": {"_eq": False}},
+                    "color": "#EF4444",
+                },
             ],
         },
         "error_reports": {
-            "default_fields": ["id", "created_at", "triage_due_at", "triage_severity", "triage_status", "triage_owner", "type", "code", "route", "user_id", "message"],
+            "default_fields": [
+                "id",
+                "created_at",
+                "triage_due_at",
+                "triage_severity",
+                "triage_status",
+                "triage_owner",
+                "type",
+                "code",
+                "route",
+                "user_id",
+                "message",
+            ],
             "default_sort": "-created_at",
             "bookmarks": [
-                {"bookmark": "Ошибки · Новые", "sort": "-created_at", "filter": {"triage_status": {"_eq": "new"}}, "color": "#EF4444"},
-                {"bookmark": "Ошибки · Просрочен triage", "sort": "triage_due_at", "filter": {"_and": [{"triage_status": {"_eq": "new"}}, {"triage_due_at": {"_nnull": True}}, {"triage_due_at": {"_lte": "$NOW"}}]}, "color": "#DC2626"},
-                {"bookmark": "Ошибки · В работе", "sort": "-created_at", "filter": {"triage_status": {"_eq": "in_progress"}}, "color": "#F59E0B"},
+                {
+                    "bookmark": "Ошибки · Новые",
+                    "sort": "-created_at",
+                    "filter": {"triage_status": {"_eq": "new"}},
+                    "color": "#EF4444",
+                },
+                {
+                    "bookmark": "Ошибки · Просрочен triage",
+                    "sort": "triage_due_at",
+                    "filter": {
+                        "_and": [
+                            {"triage_status": {"_eq": "new"}},
+                            {"triage_due_at": {"_nnull": True}},
+                            {"triage_due_at": {"_lte": "$NOW"}},
+                        ]
+                    },
+                    "color": "#DC2626",
+                },
+                {
+                    "bookmark": "Ошибки · В работе",
+                    "sort": "-created_at",
+                    "filter": {"triage_status": {"_eq": "in_progress"}},
+                    "color": "#F59E0B",
+                },
             ],
         },
         "partner_withdrawals": {
-            "default_fields": ["id", "owner_id", "amount_rub", "paid_amount_rub", "method", "status", "error", "created_at", "updated_at"],
+            "default_fields": [
+                "id",
+                "owner_id",
+                "amount_rub",
+                "paid_amount_rub",
+                "method",
+                "status",
+                "error",
+                "created_at",
+                "updated_at",
+            ],
             "default_sort": "-created_at",
             "bookmarks": [
-                {"bookmark": "Партнерка · Выводы в ожидании", "sort": "-created_at", "filter": {"status": {"_eq": "created"}}, "color": "#F59E0B"},
-                {"bookmark": "Партнерка · Выводы завершенные", "sort": "-updated_at", "filter": {"status": {"_eq": "paid"}}, "color": "#10B981"},
+                {
+                    "bookmark": "Партнерка · Выводы в ожидании",
+                    "sort": "-created_at",
+                    "filter": {"status": {"_eq": "created"}},
+                    "color": "#F59E0B",
+                },
+                {
+                    "bookmark": "Партнерка · Выводы завершенные",
+                    "sort": "-updated_at",
+                    "filter": {"status": {"_eq": "paid"}},
+                    "color": "#10B981",
+                },
             ],
         },
         "partner_qr_codes": {
-            "default_fields": ["id", "owner_id", "title", "slug", "is_active", "views_count", "activations_count", "created_at", "updated_at"],
+            "default_fields": [
+                "id",
+                "owner_id",
+                "title",
+                "slug",
+                "is_active",
+                "views_count",
+                "activations_count",
+                "created_at",
+                "updated_at",
+            ],
             "default_sort": "-updated_at",
             "bookmarks": [
-                {"bookmark": "Партнерка · Активные QR", "sort": "-updated_at", "filter": {"is_active": {"_eq": True}}, "color": "#10B981"},
-                {"bookmark": "Партнерка · Топ активаций", "sort": "-activations_count", "filter": None, "color": "#06B6D4"},
+                {
+                    "bookmark": "Партнерка · Активные QR",
+                    "sort": "-updated_at",
+                    "filter": {"is_active": {"_eq": True}},
+                    "color": "#10B981",
+                },
+                {
+                    "bookmark": "Партнерка · Топ активаций",
+                    "sort": "-activations_count",
+                    "filter": None,
+                    "color": "#06B6D4",
+                },
             ],
         },
         "connections": {
             "default_fields": ["id", "user_id", "at"],
             "default_sort": "-at",
-            "bookmarks": [{"bookmark": "Подключения · Последние", "sort": "-at", "filter": None, "color": "#06B6D4"}],
+            "bookmarks": [
+                {
+                    "bookmark": "Подключения · Последние",
+                    "sort": "-at",
+                    "filter": None,
+                    "color": "#06B6D4",
+                }
+            ],
         },
     }
 
@@ -3993,7 +5069,9 @@ def ensure_role_presets(client: DirectusClient) -> None:
             default_fields = list(config["default_fields"])
             default_sort = str(config["default_sort"])
             bookmark_defs = list(config.get("bookmarks") or [])
-            keep_set = {str(item["bookmark"]) for item in bookmark_defs if item.get("bookmark")}
+            keep_set = {
+                str(item["bookmark"]) for item in bookmark_defs if item.get("bookmark")
+            }
             prune_legacy_role_bookmarks(role_id, collection, keep_set)
 
             upsert_preset(
@@ -4039,7 +5117,14 @@ def ensure_role_presets(client: DirectusClient) -> None:
             make_tabular(
                 role_id=rid,
                 collection="users",
-                fields=["id", "username", "full_name", "registration_date", "expired_at", "is_blocked"],
+                fields=[
+                    "id",
+                    "username",
+                    "full_name",
+                    "registration_date",
+                    "expired_at",
+                    "is_blocked",
+                ],
                 sort="-registration_date",
             ),
             make_tabular(
@@ -4067,7 +5152,9 @@ def ensure_role_presets(client: DirectusClient) -> None:
             collection = payload.get("collection")
             if collection not in available_collections:
                 continue
-            prune_legacy_role_bookmarks(rid, str(collection), viewer_bookmark_keep.get(str(collection), set()))
+            prune_legacy_role_bookmarks(
+                rid, str(collection), viewer_bookmark_keep.get(str(collection), set())
+            )
             upsert_preset(payload)
         for payload in viewer_bookmarks:
             collection = payload.get("collection")
@@ -4076,8 +5163,10 @@ def ensure_role_presets(client: DirectusClient) -> None:
             upsert_preset(payload)
 
 
-def ensure_extension_enabled(client: DirectusClient, extension_name: str) -> None:
-    # Extension enabling is stored in Directus metadata. We enable by extension ID.
+def set_extension_enabled(
+    client: DirectusClient, extension_name: str, enabled: bool
+) -> None:
+    # Extension state is stored in Directus metadata.
     resp = client.get("/extensions")
     if resp.status_code in (401, 403):
         return
@@ -4093,12 +5182,22 @@ def ensure_extension_enabled(client: DirectusClient, extension_name: str) -> Non
     if not target:
         return
     meta = target.get("meta") or {}
-    if meta.get("enabled") is True:
+    if bool(meta.get("enabled")) == bool(enabled):
         return
     ext_id = target.get("id")
     if not ext_id:
         return
-    client.patch(f"/extensions/{ext_id}", json={"meta": {"enabled": True}}).raise_for_status()
+    client.patch(
+        f"/extensions/{ext_id}", json={"meta": {"enabled": bool(enabled)}}
+    ).raise_for_status()
+
+
+def ensure_extension_enabled(client: DirectusClient, extension_name: str) -> None:
+    set_extension_enabled(client, extension_name, True)
+
+
+def ensure_extension_disabled(client: DirectusClient, extension_name: str) -> None:
+    set_extension_enabled(client, extension_name, False)
 
 
 def verify_users_item_access(client: DirectusClient) -> None:
@@ -4150,13 +5249,17 @@ def verify_tariffs_form_visibility(client: DirectusClient) -> None:
     for field in required_fields:
         resp = client.get(f"/fields/tariffs/{field}", params={"fields": "field,meta"})
         if resp.status_code in (401, 403, 404):
-            print(f"WARN: tariffs field {field} not readable (status={resp.status_code})")
+            print(
+                f"WARN: tariffs field {field} not readable (status={resp.status_code})"
+            )
             continue
         resp.raise_for_status()
         data = resp.json().get("data") or {}
         meta = data.get("meta") or {}
         if bool(meta.get("hidden", False)):
-            print(f"WARN: tariffs field {field} is hidden; forcing visible may be required.")
+            print(
+                f"WARN: tariffs field {field} is hidden; forcing visible may be required."
+            )
 
 
 def main() -> None:
@@ -4179,26 +5282,72 @@ def main() -> None:
         ("apply_field_notes_ru", lambda: apply_field_notes_ru(client)),
         ("apply_error_reports_form_ux", lambda: apply_error_reports_form_ux(client)),
         ("apply_tariffs_form_ux", lambda: apply_tariffs_form_ux(client)),
-        ("ensure_tariffs_presentation_dividers", lambda: ensure_tariffs_presentation_dividers(client)),
+        (
+            "ensure_tariffs_presentation_dividers",
+            lambda: ensure_tariffs_presentation_dividers(client),
+        ),
         ("ensure_users_relations_ux", lambda: ensure_users_relations_ux(client)),
         ("apply_users_form_ux", lambda: apply_users_form_ux(client)),
-        ("ensure_users_presentation_dividers", lambda: ensure_users_presentation_dividers(client)),
+        (
+            "ensure_users_presentation_dividers",
+            lambda: ensure_users_presentation_dividers(client),
+        ),
         ("apply_users_luxury_ux", lambda: apply_users_luxury_ux(client)),
-        ("ensure_users_family_section_ux", lambda: ensure_users_family_section_ux(client)),
-        ("ensure_users_family_workspace_aliases", lambda: ensure_users_family_workspace_aliases(client)),
+        (
+            "ensure_users_family_section_ux",
+            lambda: ensure_users_family_section_ux(client),
+        ),
+        (
+            "ensure_users_family_workspace_aliases",
+            lambda: ensure_users_family_workspace_aliases(client),
+        ),
         ("ensure_admin_settings", lambda: ensure_admin_settings(client)),
         # Re-run baseline after all late-created collections to avoid skipped grants.
-        ("ensure_permissions_baseline_post", lambda: ensure_permissions_baseline(client)),
+        (
+            "ensure_permissions_baseline_post",
+            lambda: ensure_permissions_baseline(client),
+        ),
+        (
+            "cleanup_disabled_feature_permissions",
+            lambda: cleanup_disabled_feature_permissions(client),
+        ),
         ("ensure_insights_dashboard", lambda: ensure_insights_dashboard(client)),
-        ("cleanup_user_presets_for_scope", lambda: cleanup_user_presets_for_scope(client, get_content_redesign_collections())),
+        (
+            "cleanup_user_presets_for_scope",
+            lambda: cleanup_user_presets_for_scope(
+                client, get_content_redesign_collections()
+            ),
+        ),
         ("ensure_role_presets", lambda: ensure_role_presets(client)),
-        ("enable_extension_tvpn_content_ops", lambda: ensure_extension_enabled(client, "tvpn-content-ops")),
+        (
+            "enable_extension_tvpn_content_ops",
+            lambda: ensure_extension_enabled(client, "tvpn-content-ops"),
+        ),
         ("verify_users_item_access", lambda: verify_users_item_access(client)),
-        ("verify_users_family_section_visibility", lambda: verify_users_family_section_visibility(client)),
-        ("verify_tariffs_form_visibility", lambda: verify_tariffs_form_visibility(client)),
-        ("enable_extension_tvpn_home", lambda: ensure_extension_enabled(client, "tvpn-home")),
-        ("enable_extension_server_ops", lambda: ensure_extension_enabled(client, "server-ops")),
-        ("enable_extension_id_link_editor", lambda: ensure_extension_enabled(client, "id-link-editor")),
+        (
+            "verify_users_family_section_visibility",
+            lambda: verify_users_family_section_visibility(client),
+        ),
+        (
+            "verify_tariffs_form_visibility",
+            lambda: verify_tariffs_form_visibility(client),
+        ),
+        (
+            "enable_extension_tvpn_home",
+            lambda: ensure_extension_enabled(client, "tvpn-home"),
+        ),
+        (
+            "enable_extension_server_ops",
+            lambda: ensure_extension_enabled(client, "server-ops"),
+        ),
+        (
+            "enable_extension_id_link_editor",
+            lambda: ensure_extension_enabled(client, "id-link-editor"),
+        ),
+        (
+            "disable_extension_prize_wheel_validate",
+            lambda: ensure_extension_disabled(client, "prize-wheel-validate"),
+        ),
     ]
 
     for phase_name, phase_fn in phases:

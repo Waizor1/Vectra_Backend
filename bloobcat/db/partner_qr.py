@@ -3,7 +3,7 @@ from tortoise.contrib.pydantic import pydantic_model_creator
 
 
 class PartnerQr(models.Model):
-    id = fields.UUIDField(pk=True)
+    id = fields.UUIDField(primary_key=True)
     owner = fields.ForeignKeyField("models.Users", related_name="partner_qr_codes", on_delete=fields.CASCADE)
     title = fields.CharField(max_length=120)
     slug = fields.CharField(max_length=64, null=True)

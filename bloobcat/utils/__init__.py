@@ -1,2 +1,2 @@
-"""Utility helpers for shared logic across the Bloobcat backend."""
+"""Utility helpers for shared logic across the Vectra Connect backend."""
 

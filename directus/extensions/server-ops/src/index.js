@@ -10,6 +10,88 @@ function rowsFromRaw(raw) {
   return [];
 }
 
+function getAdminIntegrationConfig() {
+  const baseUrl = String(process.env.ADMIN_INTEGRATION_URL || "").trim().replace(/\/+$/, "");
+  const token = String(process.env.ADMIN_INTEGRATION_TOKEN || "").trim();
+  return { baseUrl, token };
+}
+
+async function callBackend(method, path, body) {
+  const { baseUrl, token } = getAdminIntegrationConfig();
+  if (!baseUrl || !token) {
+    const error = new Error("ADMIN_INTEGRATION_URL / ADMIN_INTEGRATION_TOKEN are not configured");
+    error.status = 503;
+    throw error;
+  }
+
+  const res = await fetch(`${baseUrl}${path}`, {
+    method,
+    headers: {
+      "Content-Type": "application/json",
+      "X-Admin-Integration-Token": token,
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+
+  const rawText = await res.text().catch(() => "");
+  const contentType = String(res.headers.get("content-type") || "").toLowerCase();
+  const payload = contentType.includes("application/json") && rawText
+    ? JSON.parse(rawText)
+    : rawText;
+
+  if (!res.ok) {
+    const detail =
+      payload?.detail ||
+      payload?.error ||
+      payload?.message ||
+      rawText ||
+      `Admin integration request failed with ${res.status}`;
+    const error = new Error(String(detail));
+    error.status = res.status;
+    error.payload = payload;
+    throw error;
+  }
+
+  return payload;
+}
+
+function buildHwidActor(req) {
+  const accountability = req?.accountability || {};
+  const actor = {
+    directus_user_id: accountability?.user != null ? String(accountability.user) : undefined,
+    directus_role_id: accountability?.role != null ? String(accountability.role) : undefined,
+    is_admin: accountability?.admin === true,
+  };
+
+  if (typeof accountability?.email === "string" && accountability.email.trim()) {
+    actor.email = accountability.email.trim();
+  }
+
+  const firstName = typeof accountability?.first_name === "string" ? accountability.first_name.trim() : "";
+  const lastName = typeof accountability?.last_name === "string" ? accountability.last_name.trim() : "";
+  const fullName = [firstName, lastName].filter(Boolean).join(" ").trim();
+  if (fullName) {
+    actor.name = fullName;
+  } else if (typeof accountability?.name === "string" && accountability.name.trim()) {
+    actor.name = accountability.name.trim();
+  }
+
+  return actor;
+}
+
+function normalizeErrorResponse(error, fallbackMessage) {
+  const status = Number(error?.status);
+  const safeStatus = Number.isInteger(status) && status >= 400 ? status : 500;
+  const message = error instanceof Error ? error.message : fallbackMessage;
+  return {
+    status: safeStatus,
+    body: {
+      ok: false,
+      error: message || fallbackMessage,
+    },
+  };
+}
+
 async function cmdFkUsersOverview(database) {
   const raw = await database.raw(
     `
@@ -177,6 +259,51 @@ export default function registerEndpoint(router, { database }) {
     if (!isAdminRequest(req)) return res.status(403).json({ error: "Admin access required" });
     const list = Object.entries(COMMANDS).map(([id, item]) => ({ id, label: item.label }));
     res.json({ commands: list });
+  });
+
+  router.post("/hwid/preview", async (req, res) => {
+    if (!isAdminRequest(req)) return res.status(403).json({ error: "Admin access required" });
+    try {
+      const hwid = String(req?.body?.hwid || "").trim();
+      if (!hwid) {
+        return res.status(400).json({ ok: false, error: "HWID is required" });
+      }
+      const response = await callBackend("POST", "/admin/integration/hwid/preview", { hwid });
+      return res.json(response);
+    } catch (error) {
+      console.error("[server-ops] hwid preview failed", {
+        hwid: String(req?.body?.hwid || ""),
+        error,
+      });
+      const normalized = normalizeErrorResponse(error, "Failed to preview HWID purge");
+      return res.status(normalized.status).json(normalized.body);
+    }
+  });
+
+  router.post("/hwid/purge", async (req, res) => {
+    if (!isAdminRequest(req)) return res.status(403).json({ error: "Admin access required" });
+    try {
+      const hwid = String(req?.body?.hwid || "").trim();
+      if (!hwid) {
+        return res.status(400).json({ ok: false, error: "HWID is required" });
+      }
+
+      const reasonRaw = req?.body?.reason;
+      const reason = typeof reasonRaw === "string" ? reasonRaw.trim() : "";
+      const response = await callBackend("POST", "/admin/integration/hwid/purge", {
+        hwid,
+        reason: reason || null,
+        actor: buildHwidActor(req),
+      });
+      return res.json(response);
+    } catch (error) {
+      console.error("[server-ops] hwid purge failed", {
+        hwid: String(req?.body?.hwid || ""),
+        error,
+      });
+      const normalized = normalizeErrorResponse(error, "Failed to purge HWID");
+      return res.status(normalized.status).json(normalized.body);
+    }
   });
 
   router.post("/run", async (req, res) => {

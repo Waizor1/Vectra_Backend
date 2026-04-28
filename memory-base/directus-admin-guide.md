@@ -53,12 +53,24 @@
 6. Закладки: **«Уведомления: активные»** (зелёная) и **«Уведомления: неактивные»** (красная) для быстрой фильтрации.
 7. История показов — коллекция `notification_views` (служебная, только чтение).
 
-**Тарифы: как менять цену карточек (рекомендуемый путь)**
-1. Открыть Tariffs и редактировать `final_price_default` (и `final_price_family` для 12 мес family).
-2. При сохранении Directus-hook выполняет пересчет и сразу записывает `base_price` + `progressive_multiplier`.
-3. Family-карточка отображается только если:
-   - `family_plan_enabled = true`
-   - `devices_limit_family > devices_limit_default`
+**Тарифы: как настраивать новый конструктор (рекомендуемый путь)**
+1. Открыть модуль **Tariff Studio**: `/admin/tvpn-tariff-studio`.
+2. Слева выбрать срок (`1 / 3 / 6 / 12 месяцев`). Отдельной family-card больше нет.
+3. В редакторе менять продуктовые поля:
+   - `Активен`;
+   - `Порядок`;
+   - `Срок, мес.`;
+   - `Цена за 1 устройство`;
+   - `Максимум устройств` (v1: 1–30);
+   - `LTE включён`, `Цена LTE за 1 ГБ`, `Мин/макс/шаг LTE`;
+   - `Бейдж` и `Подсказка` для витрины.
+   - LTE по умолчанию должен оставаться включённым для всех сроков; базовый восстановленный прайс — `1.5 ₽/ГБ`, максимум конструктора — `500 ГБ`, шаг — `1 ГБ`.
+4. Справа смотреть preview строк `1 / 2 / 5 / 10 / 30 устройств`.
+   - `1` устройство = персональная подписка (`base`);
+   - `2+` устройства = семейная ёмкость (`family`);
+   - preview подтягивает backend `/admin/integration/tariffs/quote-preview` через Directus endpoint `/tariff-studio/quote-preview`, поэтому warnings/blocking errors совпадают с backend-валидацией.
+5. Нажать **Сохранить**. Directus-hook `remnawave-sync` вызывает backend `/admin/integration/tariffs/compute-pricing`, сохраняет derived `base_price`/`progressive_multiplier`/legacy anchors и блокирует явно невалидные значения.
+6. Raw collection **Tariffs** остаётся advanced/fallback для Manager/Admin. Служебные поля `progressive_multiplier`, `final_price_default`, `final_price_family`, `family_plan_enabled` не являются основным UX; ориентир — Tariff Studio.
 
 ### 3) Дашборды и метрики
 Раздел **Аналитика** (`/admin/insights`) — список дашбордов и панелей.

@@ -7,7 +7,7 @@ class HwidDeviceLocal(models.Model):
     Не чистим записи при удалении устройств на стороне панели.
     """
 
-    id = fields.IntField(pk=True)
+    id = fields.IntField(primary_key=True)
     hwid = fields.CharField(max_length=255)
     user_uuid = fields.UUIDField(null=True)
     telegram_user_id = fields.BigIntField(null=True)

@@ -7,6 +7,13 @@ from bloobcat.db.discounts import PersonalDiscount
 from bloobcat.db.notifications import NotificationMarks
 from bloobcat.logger import get_logger
 from bloobcat.bot.notifications.winback.discount_offer import notify_winback_discount_offer
+from bloobcat.tasks.quiet_hours import (
+    PENDING_WINBACK_DISCOUNT_MARK_TYPE,
+    build_pending_meta,
+    build_winback_notification_key,
+    ensure_notification_mark,
+    is_quiet_hours,
+)
 
 logger = get_logger("winback_discounts")
 MOSCOW = ZoneInfo("Europe/Moscow")
@@ -105,6 +112,7 @@ async def create_winback_discounts():
     Finds churned users and creates or updates personal winback discounts for them.
     """
     logger.info("Starting winback discount creation task...")
+    now_msk = datetime.now(MOSCOW)
 
     churn_date = date.today() - timedelta(days=CHURN_DAYS)
 
@@ -120,7 +128,7 @@ async def create_winback_discounts():
         recent_notification = await NotificationMarks.filter(
             user_id=user.id,
             type="winback_discount",
-            sent_at__gte=datetime.now(MOSCOW) - timedelta(days=NOTIFICATION_COOLDOWN_DAYS)
+            sent_at__gte=now_msk - timedelta(days=NOTIFICATION_COOLDOWN_DAYS)
         ).exists()
 
         expired_at = normalize_date(user.expired_at)
@@ -137,12 +145,50 @@ async def create_winback_discounts():
         # Уведомляем, только если произошли изменения и не было свежих рассылок
         if changed and not recent_notification:
             logger.info(f"Winback discount upserted for user {user.id}: {discount_percent}% (days_since_expired={days_since_expired})")
-            await notify_winback_discount_offer(user, discount_percent, expires_at)
-            await NotificationMarks.create(
+            key = build_winback_notification_key(expires_at)
+            await NotificationMarks.filter(
                 user_id=user.id,
-                type="winback_discount",
-                key="offer"
-            )
+                type=PENDING_WINBACK_DISCOUNT_MARK_TYPE,
+            ).delete()
+            if user.is_blocked:
+                logger.info(
+                    f"Skipping winback notification for blocked user {user.id}"
+                )
+            elif is_quiet_hours(now_msk):
+                await ensure_notification_mark(
+                    user_id=user.id,
+                    mark_type=PENDING_WINBACK_DISCOUNT_MARK_TYPE,
+                    key=key,
+                    meta=build_pending_meta(
+                        discount_percent=discount_percent,
+                        expires_at=expires_at.isoformat(),
+                    ),
+                )
+            else:
+                delivered = await notify_winback_discount_offer(
+                    user, discount_percent, expires_at
+                )
+                if delivered:
+                    await ensure_notification_mark(
+                        user_id=user.id,
+                        mark_type="winback_discount",
+                        key=key,
+                    )
+                else:
+                    refreshed_user = await Users.get_or_none(id=user.id)
+                    if refreshed_user and not refreshed_user.is_blocked:
+                        await ensure_notification_mark(
+                            user_id=user.id,
+                            mark_type=PENDING_WINBACK_DISCOUNT_MARK_TYPE,
+                            key=key,
+                            meta=build_pending_meta(
+                                discount_percent=discount_percent,
+                                expires_at=expires_at.isoformat(),
+                            ),
+                        )
+                        logger.warning(
+                            f"Winback notification delivery not confirmed for user {user.id}; queued for retry"
+                        )
 
     logger.info("Winback discount creation task finished.")
 

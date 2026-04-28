@@ -7,6 +7,7 @@ from bloobcat.bot.notifications.trial.no_trial import notify_no_trial_taken
 from bloobcat.db.notifications import NotificationMarks
 from bloobcat.logger import get_logger
 from bloobcat.settings import app_settings
+from bloobcat.tasks.quiet_hours import is_quiet_hours
 
 MOSCOW = ZoneInfo("Europe/Moscow")
 logger = get_logger("tasks.retry_trial_notifications")
@@ -20,12 +21,20 @@ async def retry_send_missed_trial_notifications_once() -> tuple[int, int]:
     logger.debug("Starting missed trial notifications check")
 
     # Только для пользователей с активным триалом, без коннектов и без платной подписки
-    users = await Users.filter(is_trial=True, connected_at=None, is_subscribed=False)
+    users = await Users.filter(
+        is_trial=True,
+        is_blocked=False,
+        connected_at=None,
+        is_subscribed=False,
+    )
 
     processed_count = 0
     sent_count = 0
 
     now = datetime.now(MOSCOW)
+    if is_quiet_hours(now):
+        logger.debug("Skipping retry of missed trial notifications during quiet hours")
+        return processed_count, sent_count
     for user in users:
         processed_count += 1
 
@@ -47,9 +56,12 @@ async def retry_send_missed_trial_notifications_once() -> tuple[int, int]:
                 logger.debug(
                     f"Sending missed 2h notification to user {user.id}, registration {hours_since_reg:.1f}h ago"
                 )
-                await notify_no_trial_taken(user, 2)
-                await NotificationMarks.create(user_id=user.id, type="trial_no_sub", key="2h")
-                sent_count += 1
+                sent_ok = await notify_no_trial_taken(user, 2)
+                if sent_ok:
+                    await NotificationMarks.create(
+                        user_id=user.id, type="trial_no_sub", key="2h"
+                    )
+                    sent_count += 1
 
         if hours_since_reg >= 24:
             mark_24h = await NotificationMarks.filter(user_id=user.id, type="trial_no_sub", key="24h").exists()
@@ -57,9 +69,12 @@ async def retry_send_missed_trial_notifications_once() -> tuple[int, int]:
                 logger.debug(
                     f"Sending missed 24h notification to user {user.id}, registration {hours_since_reg:.1f}h ago"
                 )
-                await notify_no_trial_taken(user, 24)
-                await NotificationMarks.create(user_id=user.id, type="trial_no_sub", key="24h")
-                sent_count += 1
+                sent_ok = await notify_no_trial_taken(user, 24)
+                if sent_ok:
+                    await NotificationMarks.create(
+                        user_id=user.id, type="trial_no_sub", key="24h"
+                    )
+                    sent_count += 1
 
     logger.debug(
         f"Finished missed trial notifications: processed {processed_count}, sent {sent_count}"
@@ -86,5 +101,3 @@ async def run_retry_trial_notifications_scheduler(interval_seconds: int = 900):
         except Exception as e:
             logger.error(f"Error in retry trial notifications scheduler: {e}")
         await asyncio.sleep(interval_seconds)
-
-

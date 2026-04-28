@@ -1,41 +1,49 @@
-from aiogram import Router, F
-from aiogram.filters import CommandObject, CommandStart
-from aiogram.types import CallbackQuery, Message
+from urllib.parse import quote
 
-from bloobcat.bot.keyboard import webapp_inline_button
+from aiogram import Router
+from aiogram.filters import Command, CommandObject, CommandStart
+from aiogram.types import Message
+
+from bloobcat.bot.keyboard import legal_documents_inline_keyboard, start_inline_keyboard
 from bloobcat.db.users import Users
 from bloobcat.logger import get_logger
 from bloobcat.settings import telegram_settings
-from urllib.parse import quote
 
 logger = get_logger("bot_start")
 router = Router()
 
 
+def _detect_lang(message: Message) -> str:
+    lang_code = message.from_user.language_code
+    if lang_code and lang_code.lower().startswith("ru"):
+        return "ru"
+    return "en"
+
+
 @router.message(CommandStart())
 async def command_start_handler(message: Message, command: CommandObject):
 
-    # Определяем язык пользователя
-    lang_code = message.from_user.language_code
+    detected_lang = _detect_lang(message)
 
-    detected_lang = "en"
-    if lang_code and lang_code.lower().startswith("ru"):
-        detected_lang = "ru"
-
-    # Тексты приветствий (минималистичные)
+    # Тексты приветствий
     welcome_texts = {
-        "ru": "Привет! 👋 Нажми кнопку ниже, чтобы запустить TVPN.",
-        "en": "Hi! 👋 Press the button below to launch TVPN."
+        "ru": "Привет.\n\nЭто Vectra Connect.\n\nНажмите кнопку ниже для запуска.",
+        "en": "Hello.\n\nThis is Vectra Connect.\n\nPress the button below to launch."
     }
     
     button_texts = {
         "ru": "Запустить",
         "en": "Launch"
     }
+    docs_button_texts = {
+        "ru": "Документы",
+        "en": "Documents",
+    }
 
     # Выбираем текст и текст кнопки в зависимости от языка
     response_text = welcome_texts.get(detected_lang, welcome_texts["en"])
     button_text = button_texts.get(detected_lang, button_texts["en"])
+    docs_button_text = docs_button_texts.get(detected_lang, docs_button_texts["en"])
 
     # Forward /start payload into the Mini App URL as a query param.
     # Telegram's `start_param` is available only for MiniApp deep links, so we store it in the URL
@@ -50,7 +58,11 @@ async def command_start_handler(message: Message, command: CommandObject):
 
     await message.answer(
         response_text,
-        reply_markup=await webapp_inline_button(button_text, url=launch_url),  # локализованный текст кнопки
+        reply_markup=await start_inline_keyboard(
+            launch_text=button_text,
+            docs_text=docs_button_text,
+            launch_url=launch_url,
+        ),
     )
     
     # Автоматическая установка админской клавиатуры только для уже зарегистрированных админов.
@@ -65,3 +77,21 @@ async def command_start_handler(message: Message, command: CommandObject):
         logger.error(f"Ошибка при установке админской клавиатуры для {message.from_user.id}: {e}")
 
 
+@router.message(Command("documents", "legal", "docs"))
+async def documents_handler(message: Message):
+    detected_lang = _detect_lang(message)
+    texts = {
+        "ru": (
+            "Документы Vectra Connect\n\n"
+            "Политика конфиденциальности, пользовательское соглашение и контакт поддержки всегда доступны по ссылкам ниже."
+        ),
+        "en": (
+            "Vectra Connect documents\n\n"
+            "Privacy Policy, Terms of Use, and support contact are always available below."
+        ),
+    }
+
+    await message.answer(
+        texts.get(detected_lang, texts["en"]),
+        reply_markup=await legal_documents_inline_keyboard(detected_lang),
+    )

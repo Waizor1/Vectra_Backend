@@ -53,6 +53,7 @@ let chart = null;
 let resizeObserver = null;
 let resizeFrame = null;
 let delayedResizeTimer = null;
+let themeObserver = null;
 
 const heightStyle = computed(() => (typeof props.height === 'number' ? `${props.height}px` : String(props.height)));
 
@@ -78,10 +79,27 @@ function normalizeSeries() {
 		.filter((item) => item.data.length);
 }
 
+function cssVar(name, fallback) {
+	if (typeof window === 'undefined') return fallback;
+	const target = chartEl.value || document.documentElement;
+	if (!target) return fallback;
+	const value = window.getComputedStyle(target).getPropertyValue(name).trim();
+	return value || fallback;
+}
+
 function optionForData() {
 	const categories = Array.isArray(props.categories) ? props.categories.map((x) => String(x ?? '')) : [];
 	const series = normalizeSeries();
 	const hasData = series.some((s) => s.data.some((v) => Number(v) > 0));
+	const palette = {
+		tooltipBorder: cssVar('--tvpn-chart-tooltip-border', 'rgba(255, 255, 255, 0.18)'),
+		tooltipBg: cssVar('--tvpn-chart-tooltip-bg', 'rgba(8, 16, 32, 0.94)'),
+		tooltipText: cssVar('--tvpn-chart-tooltip-text', '#eaf2ff'),
+		axisLine: cssVar('--tvpn-chart-axis-strong', 'rgba(255, 255, 255, 0.14)'),
+		axisLabel: cssVar('--tvpn-chart-axis', 'rgba(215, 231, 255, 0.70)'),
+		gridLine: cssVar('--tvpn-chart-grid', 'rgba(255, 255, 255, 0.07)'),
+		emptyText: cssVar('--tvpn-chart-empty-text', 'rgba(215, 231, 255, 0.56)'),
+	};
 
 	return {
 		animationDuration: 520,
@@ -97,16 +115,16 @@ function optionForData() {
 			trigger: 'axis',
 			confine: true,
 			borderWidth: 1,
-			borderColor: 'rgba(255, 255, 255, 0.18)',
-			backgroundColor: 'rgba(8, 16, 32, 0.94)',
+			borderColor: palette.tooltipBorder,
+			backgroundColor: palette.tooltipBg,
 			textStyle: {
-				color: '#EAF2FF',
+				color: palette.tooltipText,
 				fontSize: 12,
 			},
 			axisPointer: {
 				type: 'line',
 				lineStyle: {
-					color: 'rgba(255, 255, 255, 0.20)',
+					color: palette.axisLine,
 				},
 			},
 			formatter(params) {
@@ -128,12 +146,12 @@ function optionForData() {
 			data: categories,
 			axisLine: {
 				lineStyle: {
-					color: 'rgba(255, 255, 255, 0.14)',
+					color: palette.axisLine,
 				},
 			},
 			axisTick: { show: false },
 			axisLabel: {
-				color: 'rgba(215, 231, 255, 0.70)',
+				color: palette.axisLabel,
 				fontSize: 11,
 				interval: props.mode === '12m' ? 0 : 'auto',
 				hideOverlap: true,
@@ -142,13 +160,13 @@ function optionForData() {
 		yAxis: {
 			type: 'value',
 			axisLabel: {
-				color: 'rgba(215, 231, 255, 0.68)',
+				color: palette.axisLabel,
 				fontSize: 11,
 				formatter: (v) => compactAxisValue(v),
 			},
 			splitLine: {
 				lineStyle: {
-					color: 'rgba(255, 255, 255, 0.07)',
+					color: palette.gridLine,
 				},
 			},
 		},
@@ -161,7 +179,7 @@ function optionForData() {
 						top: 'center',
 						style: {
 							text: 'Нет данных для графика',
-							fill: 'rgba(215, 231, 255, 0.56)',
+							fill: palette.emptyText,
 							fontSize: 13,
 							fontWeight: 500,
 						},
@@ -242,6 +260,12 @@ onMounted(() => {
 	if (typeof window !== 'undefined') {
 		window.addEventListener('resize', queueResize, { passive: true });
 	}
+	if (typeof MutationObserver !== 'undefined' && typeof document !== 'undefined' && document.body) {
+		themeObserver = new MutationObserver(() => {
+			renderChart();
+		});
+		themeObserver.observe(document.body, { attributes: true, attributeFilter: ['class'] });
+	}
 });
 
 watch(
@@ -271,6 +295,10 @@ onBeforeUnmount(() => {
 		resizeObserver.disconnect();
 		resizeObserver = null;
 	}
+	if (themeObserver) {
+		themeObserver.disconnect();
+		themeObserver = null;
+	}
 	if (chart) {
 		chart.dispose();
 		chart = null;
@@ -293,20 +321,20 @@ onBeforeUnmount(() => {
 .chart__title {
 	font-weight: 700;
 	font-size: 15px;
-	color: #f3f7ff;
+	color: var(--tvpn-text, #f3f7ff);
 }
 
 .chart__subtitle {
 	font-size: 12px;
-	color: rgba(220, 235, 255, 0.72);
+	color: var(--tvpn-text-soft, rgba(220, 235, 255, 0.72));
 }
 
 .chart__canvas {
 	width: 100%;
 	min-width: 0;
 	border-radius: 16px;
-	background: radial-gradient(circle at 0 0, rgba(120, 174, 255, 0.14), rgba(6, 14, 28, 0.72) 56%), linear-gradient(180deg, rgba(7, 16, 32, 0.98), rgba(7, 14, 30, 0.88));
-	border: 1px solid rgba(147, 188, 255, 0.22);
-	box-shadow: inset 0 0 0 1px rgba(15, 28, 52, 0.45), 0 24px 60px rgba(0, 0, 0, 0.35);
+	background: var(--tvpn-chart-bg, radial-gradient(circle at 0 0, rgba(120, 174, 255, 0.14), rgba(6, 14, 28, 0.72) 56%), linear-gradient(180deg, rgba(7, 16, 32, 0.98), rgba(7, 14, 30, 0.88)));
+	border: 1px solid var(--tvpn-chart-border, rgba(147, 188, 255, 0.22));
+	box-shadow: var(--tvpn-chart-shadow, inset 0 0 0 1px rgba(15, 28, 52, 0.45), 0 24px 60px rgba(0, 0, 0, 0.35));
 }
 </style>

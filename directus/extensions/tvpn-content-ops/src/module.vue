@@ -33,7 +33,7 @@
 			<div class="hero panel-base">
 				<div class="hero__title">Контент Ops</div>
 				<div class="hero__subtitle">
-					Premium-слой для быстрых операционных решений: KPI, очереди, быстрый поиск и переходы в карточки.
+					Операционный слой для быстрых решений: KPI, очереди, быстрый поиск и переходы в карточки.
 				</div>
 				<div class="hero__toolbar">
 					<div class="input-wrap">

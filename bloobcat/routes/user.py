@@ -14,21 +14,32 @@ from yookassa import Payment
 from bloobcat.db.users import User_Pydantic, Users, normalize_date
 from bloobcat.funcs.validate import validate
 from bloobcat.routes.remnawave.client import RemnaWaveClient
-from bloobcat.settings import app_settings, payment_settings, remnawave_settings
+from bloobcat.settings import remnawave_settings, app_settings, payment_settings
 from bloobcat.logger import get_logger
 from fastapi import FastAPI
 from starlette.background import BackgroundTask
-from bloobcat.routes.remnawave.hwid_utils import cleanup_user_hwid_devices, count_active_devices
+from bloobcat.routes.remnawave.hwid_utils import (
+    cleanup_user_hwid_devices,
+    count_active_devices,
+)
 from bloobcat.db.active_tariff import ActiveTariffs
-from bloobcat.db.family_invites import FamilyInvites
 from bloobcat.db.family_members import FamilyMembers
 from bloobcat.db.tariff import Tariffs
 from bloobcat.db.notifications import NotificationMarks
 from bloobcat.db.payments import ProcessedPayments
 from bloobcat.bot.bot import get_bot_username
-from bloobcat.bot.notifications.admin import cancel_subscription, notify_active_tariff_change, notify_lte_topup
+from bloobcat.bot.notifications.admin import (
+    cancel_subscription,
+    notify_active_tariff_change,
+    notify_lte_topup,
+)
 from bloobcat.utils.dates import add_months_safe
-from tortoise.expressions import F, Q
+from bloobcat.routes.family_quota import build_family_quota_snapshot
+from bloobcat.services.subscription_limits import family_devices_threshold
+from bloobcat.services.subscription_overlay import (
+    get_overlay_payload,
+    resume_frozen_base_if_due,
+)
 
 logger = get_logger("routes.user")
 
@@ -55,17 +66,99 @@ def _normalize_devices_limit(value: Any) -> int:
 
 
 def _family_devices_limit() -> int:
-    return max(1, int(getattr(app_settings, "family_devices_limit", 10) or 10))
+    return family_devices_threshold()
 
 
 def _is_active_subscription(expired_at: date | None) -> bool:
     return bool(expired_at and expired_at >= date.today())
 
 
-def _auto_renewal_enabled_for_user(user: Users) -> bool:
-    return bool(user.renew_id) and str(
-        getattr(payment_settings, "auto_renewal_mode", "") or ""
-    ).strip().lower() == "yookassa"
+def _has_completed_onboarding(user: Users) -> bool:
+    return bool(getattr(user, "id", None))
+
+
+def _dump_user_pydantic_compat(user_data: Any) -> Dict[str, Any]:
+    """Serialize Tortoise/Pydantic user models across pydantic v1/v2 test stubs."""
+    if hasattr(user_data, "model_dump"):
+        return user_data.model_dump(mode="json")
+    if hasattr(user_data, "dict"):
+        return user_data.dict()
+    if hasattr(user_data, "_meta"):
+        payload: Dict[str, Any] = {}
+        for field_name in getattr(user_data._meta, "db_fields", []):
+            value = getattr(user_data, field_name, None)
+            if isinstance(value, (datetime, date)):
+                payload[field_name] = value.isoformat()
+            elif hasattr(value, "hex") and value.__class__.__name__ == "UUID":
+                payload[field_name] = str(value)
+            else:
+                payload[field_name] = value
+        return payload
+    return dict(user_data)
+
+
+SUBSCRIPTION_URL_PENDING_MESSAGE = (
+    "Аккаунт ещё настраивается. Обычно это занимает несколько секунд."
+)
+SUBSCRIPTION_URL_UNAVAILABLE_MESSAGE = (
+    "Не удалось получить ключ подключения. Обновите экран или попробуйте позже."
+)
+
+
+async def _resolve_subscription_url_state(
+    user: Users, *, source: str
+) -> Dict[str, str | None]:
+    if not user.remnawave_uuid:
+        logger.warning(
+            "Пользователь {} прошел валидацию, но еще не создан в RemnaWave ({}).",
+            user.id,
+            source,
+        )
+        return {
+            "subscription_url": None,
+            "subscription_url_error": SUBSCRIPTION_URL_PENDING_MESSAGE,
+            "subscription_url_error_code": "account_initializing",
+            "subscription_url_status": "pending",
+        }
+
+    try:
+        logger.debug("Получаем URL подписки для {} ({})", user.id, source)
+        subscription_url = await remnawave_client.users.get_subscription_url(user)
+        logger.debug(
+            "Пользователь {} получил URL подписки RemnaWave: {}...",
+            user.id,
+            str(subscription_url)[:20],
+        )
+        return {
+            "subscription_url": subscription_url,
+            "subscription_url_error": None,
+            "subscription_url_error_code": None,
+            "subscription_url_status": "ready",
+        }
+    except Exception as exc:
+        logger.error(
+            "Ошибка при получении URL подписки для пользователя {} ({}): {}",
+            user.id,
+            source,
+            exc,
+            exc_info=True,
+        )
+        return {
+            "subscription_url": None,
+            "subscription_url_error": SUBSCRIPTION_URL_UNAVAILABLE_MESSAGE,
+            "subscription_url_error_code": "subscription_url_unavailable",
+            "subscription_url_status": "error",
+        }
+
+
+async def _resolve_effective_hwid_limit(user: Users) -> int:
+    if user.hwid_limit is not None:
+        return max(1, int(user.hwid_limit or 1))
+    if user.active_tariff_id:
+        tariff = await ActiveTariffs.get_or_none(id=user.active_tariff_id)
+        if tariff and tariff.hwid_limit is not None:
+            return max(1, int(tariff.hwid_limit or 1))
+    return 1
 
 
 class UserUpdate(BaseModel):
@@ -73,19 +166,25 @@ class UserUpdate(BaseModel):
 
 
 # --- Инициализируем клиент RemnaWave один раз ---
-remnawave_client = RemnaWaveClient(remnawave_settings.url, remnawave_settings.token.get_secret_value())
+remnawave_client = RemnaWaveClient(
+    remnawave_settings.url, remnawave_settings.token.get_secret_value()
+)
+
 
 # Функция для закрытия клиента RemnaWave при завершении работы приложения
 async def close_remnawave_client():
     logger.info("Закрытие клиента RemnaWave при завершении работы приложения")
     await remnawave_client.close()
 
+
 def register_shutdown_event(app: FastAPI):
     """Регистрирует обработчик события завершения работы приложения"""
+
     @app.on_event("shutdown")
     async def shutdown_event():
         logger.info("Приложение завершает работу, закрываем RemnaWave клиент")
         await close_remnawave_client()
+
 
 @router.get("")
 async def check(user: Users = Depends(validate)) -> Dict[str, Any]:
@@ -95,28 +194,18 @@ async def check(user: Users = Depends(validate)) -> Dict[str, Any]:
     """
     try:
         logger.info(f"Начало обработки запроса /user для пользователя {user.id}")
-        subscription_url = None
-        error_getting_url = None
-    
-        # Убеждаемся, что пользователь есть в RemnaWave (вызов уже был в Users.get_user)
-        if not user.remnawave_uuid:
-            logger.error(f"Пользователь {user.id} прошел валидацию, но не был создан в RemnaWave (_ensure_remnawave_user не сработал?).")
-            # Не прерываем, вернем пользователя без URL
-            error_getting_url = "Failed to initialize user account."
-        else:
-            try:
-                # Получаем URL подписки
-                logger.debug(f"Получаем URL подписки для {user.id} внутри эндпоинта /user")
-                subscription_url = await remnawave_client.users.get_subscription_url(user)
-                logger.debug(f"Пользователь {user.id} получил URL подписки RemnaWave: {subscription_url[:20]}...")
-            except Exception as e:
-                error_getting_url = f"Failed to get subscription URL: {str(e)}"
-                logger.error(f"Ошибка при получении URL подписки для пользователя {user.id} в эндпоинте /user: {error_getting_url}")
-                # Не прерываем запрос, вернем данные пользователя с ошибкой URL
+        resumed = await resume_frozen_base_if_due(user)
+        if resumed:
+            user = await Users.get(id=user.id)
+        subscription_url_state = await _resolve_subscription_url_state(
+            user, source="/user"
+        )
 
         # Получаем стандартные данные пользователя
         user_data = await User_Pydantic.from_tortoise_orm(user)
-        user_dict = user_data.model_dump(mode='json')
+        user_dict = _dump_user_pydantic_compat(user_data)
+        user_dict["has_completed_onboarding"] = _has_completed_onboarding(user)
+        user_dict.update(await get_overlay_payload(user))
 
         # Effective family context for members:
         # - show owner as subscription source
@@ -132,7 +221,22 @@ async def check(user: Users = Depends(validate)) -> Dict[str, Any]:
         if family_membership:
             owner = family_membership.owner
             owner_expired = normalize_date(owner.expired_at)
-            family_is_active = _is_active_subscription(owner_expired)
+            owner_overlay = await get_overlay_payload(owner)
+            owner_active_kind = (
+                str(owner_overlay.get("active_kind") or "").strip().lower()
+            )
+            owner_is_family_overlay_active = owner_active_kind in {
+                "family",
+                "family_owner",
+                "family_member",
+            }
+            owner_effective_hwid_limit = await _resolve_effective_hwid_limit(owner)
+            owner_is_family_capacity_active = (
+                owner_effective_hwid_limit >= _family_devices_limit()
+            )
+            family_is_active = _is_active_subscription(owner_expired) and (
+                owner_is_family_overlay_active or owner_is_family_capacity_active
+            )
             is_active_family_member = family_is_active
             user_dict["family_member"] = {
                 "is_member": True,
@@ -142,31 +246,41 @@ async def check(user: Users = Depends(validate)) -> Dict[str, Any]:
                 "owner_full_name": owner.full_name,
                 "allocated_devices": int(family_membership.allocated_devices or 0),
                 "status": family_membership.status,
-                "family_expires_at": owner.expired_at.isoformat() if owner.expired_at else None,
+                "family_expires_at": owner.expired_at.isoformat()
+                if owner.expired_at
+                else None,
                 "family_is_active": family_is_active,
                 "can_leave": True,
             }
-            user_dict["expired_at"] = owner.expired_at.isoformat() if owner.expired_at else None
+            user_dict["expired_at"] = (
+                owner.expired_at.isoformat() if owner.expired_at else None
+            )
             user_dict["is_subscribed"] = family_is_active
             family_allocated_devices = int(family_membership.allocated_devices or 0)
         else:
             user_dict["family_member"] = {"is_member": False}
 
-        # Добавляем URL и возможную ошибку в ответ
-        user_dict["subscription_url"] = subscription_url
-        user_dict["subscription_url_error"] = error_getting_url
+        # Добавляем URL и публичное состояние получения ключа в ответ.
+        user_dict.update(subscription_url_state)
         logger.debug(
-            f"[/user check] sub_url_present={bool(subscription_url)}, url_error={error_getting_url}"
+            "[/user check] sub_url_present={}, url_status={}, url_error_code={}",
+            bool(subscription_url_state.get("subscription_url")),
+            subscription_url_state.get("subscription_url_status"),
+            subscription_url_state.get("subscription_url_error_code"),
         )
 
         # Добавляем количество HWID устройств для пользователя (только валидные активные)
         devices_count = 0
         if user.remnawave_uuid:
             try:
-                raw_resp = await remnawave_client.users.get_user_hwid_devices(str(user.remnawave_uuid))
+                raw_resp = await remnawave_client.users.get_user_hwid_devices(
+                    str(user.remnawave_uuid)
+                )
                 devices_count = count_active_devices(raw_resp)
             except Exception as e:
-                logger.error(f"Ошибка получения списка устройств для пользователя {user.id}: {e}")
+                logger.error(
+                    f"Ошибка получения списка устройств для пользователя {user.id}: {e}"
+                )
         user_dict["devices_count"] = devices_count
         logger.debug(f"[/user check] devices_count={devices_count}")
 
@@ -187,7 +301,11 @@ async def check(user: Users = Depends(validate)) -> Dict[str, Any]:
                 source = f"тарифу ({tariff.name})"
                 # Добавляем информацию об активном тарифе в ответ
                 remaining_decreases = (
-                    max(0, devices_decrease_limit - int(tariff.devices_decrease_count or 0))
+                    max(
+                        0,
+                        devices_decrease_limit
+                        - int(tariff.devices_decrease_count or 0),
+                    )
                     if devices_decrease_limit
                     else None
                 )
@@ -209,47 +327,20 @@ async def check(user: Users = Depends(validate)) -> Dict[str, Any]:
                         float(effective_lte_total or 0)
                         - float(getattr(tariff, "lte_gb_used", 0) or 0),
                     ),
-                    "lte_price_per_gb": float(getattr(tariff, "lte_price_per_gb", 0) or 0),
+                    "lte_price_per_gb": float(
+                        getattr(tariff, "lte_price_per_gb", 0) or 0
+                    ),
                     "devices_decrease_count": int(tariff.devices_decrease_count or 0),
                     "devices_decrease_limit": devices_decrease_limit or None,
                     "devices_decrease_remaining": remaining_decreases,
                 }
-        
+
         # 3. Личное значение из БД имеет наивысший приоритет
         if user.hwid_limit is not None:
             devices_limit = user.hwid_limit
             source = "личной настройке в БД"
 
         owner_base_devices_limit = max(1, int(devices_limit or 1))
-
-        # For family owners, expose remaining personal quota after
-        # allocations to active members.
-        owner_allocated_devices = 0
-        active_members_count = 0
-        if family_allocated_devices is None:
-            active_owner_members = await FamilyMembers.filter(
-                owner_id=user.id,
-                status="active",
-                allocated_devices__gt=0,
-            )
-            active_members_count = len(active_owner_members)
-            owner_allocated_devices = sum(
-                int(member.allocated_devices or 0) for member in active_owner_members
-            )
-            if owner_allocated_devices > 0:
-                devices_limit = max(0, int(devices_limit or 0) - owner_allocated_devices)
-                source = "семейному распределению (остаток владельца)"
-
-        # Family membership quota has final priority for member-facing UX.
-        if family_allocated_devices is not None:
-            devices_limit = family_allocated_devices
-            source = "семейной квоте"
-
-        logger.debug(f"Итоговый лимит устройств для пользователя {user.id} установлен по {source}: {devices_limit}")
-        user_dict["active_tariff"] = active_tariff_data
-
-        # `devices_limit` is an operational limit (owner remainder after allocations).
-        # `family_entitled` is business entitlement for family subscription rules.
         family_limit = _family_devices_limit()
         effective_expired_at = normalize_date(user.expired_at)
         if family_membership:
@@ -260,6 +351,29 @@ async def check(user: Users = Depends(validate)) -> Dict[str, Any]:
             and is_effectively_active
             and owner_base_devices_limit >= family_limit
         )
+        owner_family_quota = None
+        if is_active_family_owner:
+            owner_family_quota = await build_family_quota_snapshot(
+                user,
+                owner_connected_devices=devices_count,
+                owner_base_devices_limit=owner_base_devices_limit,
+            )
+            family_limit = int(owner_family_quota.family_limit)
+            devices_limit = owner_family_quota.owner_quota_limit
+            source = "семейной квоте владельца (остаток после участников и приглашений)"
+
+        # Family membership quota has final priority for member-facing UX.
+        if family_allocated_devices is not None:
+            devices_limit = family_allocated_devices
+            source = "семейной квоте"
+
+        logger.debug(
+            f"Итоговый лимит устройств для пользователя {user.id} установлен по {source}: {devices_limit}"
+        )
+        user_dict["active_tariff"] = active_tariff_data
+
+        # `devices_limit` is an operational limit (owner remainder after allocations).
+        # `family_entitled` is business entitlement for family subscription rules.
         family_entitled = bool(is_active_family_member or is_active_family_owner)
         if is_active_family_member:
             subscription_context = "family_member"
@@ -281,20 +395,19 @@ async def check(user: Users = Depends(validate)) -> Dict[str, Any]:
         user_dict["subscription_context"] = subscription_context
 
         if is_active_family_owner:
-            now_utc = datetime.now(timezone.utc)
-            active_invites_count = (
-                await FamilyInvites.filter(owner_id=user.id, revoked_at=None)
-                .filter(Q(expires_at__isnull=True) | Q(expires_at__gte=now_utc))
-                .filter(used_count__lt=F("max_uses"))
-                .count()
-            )
+            assert owner_family_quota is not None
             user_dict["family_owner"] = {
                 "is_owner": True,
                 "family_devices_total": int(family_limit),
-                "allocated_devices_total": int(owner_allocated_devices),
-                "owner_remaining_devices": max(0, int(family_limit) - int(owner_allocated_devices)),
-                "active_members_count": int(active_members_count),
-                "active_invites_count": int(active_invites_count),
+                "allocated_devices_total": int(
+                    owner_family_quota.member_allocated_devices
+                ),
+                "active_invites_devices_total": int(
+                    owner_family_quota.invite_reserved_devices
+                ),
+                "owner_remaining_devices": int(owner_family_quota.owner_quota_limit),
+                "active_members_count": int(owner_family_quota.active_members_count),
+                "active_invites_count": int(owner_family_quota.active_invites_count),
             }
         else:
             user_dict["family_owner"] = None
@@ -305,18 +418,19 @@ async def check(user: Users = Depends(validate)) -> Dict[str, Any]:
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
         return response
-    
+
     except Exception as e:
-        logger.error(f"Ошибка в эндпоинте /user для пользователя {getattr(user, 'id', 'unknown')}: {str(e)}", exc_info=True)
+        logger.error(
+            f"Ошибка в эндпоинте /user для пользователя {getattr(user, 'id', 'unknown')}: {str(e)}",
+            exc_info=True,
+        )
         from fastapi import HTTPException
+
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.patch("")
-async def update_user_profile(
-    update_data: UserUpdate,
-    user: Users = Depends(validate)
-):
+async def update_user_profile(update_data: UserUpdate, user: Users = Depends(validate)):
     """
     Обновляет email пользователя.
     """
@@ -324,7 +438,7 @@ async def update_user_profile(
     await user.save()
     # Можно вернуть новый формат ответа, как в check, или оставить старый
     user_data = await User_Pydantic.from_tortoise_orm(user)
-    user_dict = user_data.model_dump(mode='json')
+    user_dict = _dump_user_pydantic_compat(user_data)
     # Опционально: добавить сюда получение URL, если нужно
     # user_dict["subscription_url"] = await remnawave_client.users.get_subscription_url(user)
     response = JSONResponse(content=user_dict)
@@ -346,6 +460,7 @@ async def unsubscribe(user: Users = Depends(validate)):
     await cancel_subscription(user)
     return {"status": "ok"}
 
+
 @router.post("/reset_devices")
 async def reset_devices(user: Users = Depends(validate)):
     """
@@ -365,30 +480,40 @@ class ChangeDevicesRequest(BaseModel):
 
 
 @router.patch("/active_tariff")
-async def change_active_tariff_devices(payload: ChangeDevicesRequest, user: Users = Depends(validate)) -> Dict[str, Any]:
+async def change_active_tariff_devices(
+    payload: ChangeDevicesRequest, user: Users = Depends(validate)
+) -> Dict[str, Any]:
     """
     Меняет количество устройств (hwid_limit) в текущем активном тарифе пользователя
     и пропорционально пересчитывает дату окончания подписки без новой покупки.
     Алгоритм: считаем стоимость неиспользованной части текущего тарифа и
     конвертируем её в дни по новой цене (с учётом device_count).
     """
-    logger.debug(f"[change_active_tariff_devices] user_id={user.id}, payload={payload.model_dump()}")
+    logger.debug(
+        f"[change_active_tariff_devices] user_id={user.id}, payload={payload.model_dump()}"
+    )
     if payload.device_count is None or payload.device_count < 1:
         raise HTTPException(status_code=400, detail="Некорректное количество устройств")
     if payload.lte_gb is not None and payload.lte_gb < 0:
         raise HTTPException(status_code=400, detail="Некорректное значение LTE лимита")
 
     if not user.active_tariff_id:
-        raise HTTPException(status_code=400, detail="У пользователя нет активного тарифа")
+        raise HTTPException(
+            status_code=400, detail="У пользователя нет активного тарифа"
+        )
 
-    logger.debug(f"[change_active_tariff_devices] active_tariff_id={user.active_tariff_id}")
+    logger.debug(
+        f"[change_active_tariff_devices] active_tariff_id={user.active_tariff_id}"
+    )
     active_tariff = await ActiveTariffs.get_or_none(id=user.active_tariff_id)
     if not active_tariff:
         raise HTTPException(status_code=404, detail="Активный тариф не найден")
 
     # Находим соответствующий базовый тариф по имени и количеству месяцев
     # Находим базовый тариф (если есть), иначе используем снапшот из ActiveTariffs
-    original = await Tariffs.filter(name=active_tariff.name, months=active_tariff.months).first()
+    original = await Tariffs.filter(
+        name=active_tariff.name, months=active_tariff.months
+    ).first()
 
     current_date = date.today()
     user_expired_at = normalize_date(user.expired_at)
@@ -405,14 +530,18 @@ async def change_active_tariff_devices(payload: ChangeDevicesRequest, user: User
                     status_code=400,
                     detail="Изменение активного тарифа недоступно в последний день подписки",
                 )
-    logger.debug(f"[change_active_tariff_devices] days_remaining={days_remaining}, expired_at={user.expired_at}, current_date={current_date}")
+    logger.debug(
+        f"[change_active_tariff_devices] days_remaining={days_remaining}, expired_at={user.expired_at}, current_date={current_date}"
+    )
 
     # Если количество устройств не изменилось, нет смысла пересчитывать срок подписки.
     new_device_count = int(payload.device_count)
     if new_device_count < 1:
         new_device_count = 1
 
-    stored_limits = [value for value in (user.hwid_limit, active_tariff.hwid_limit) if value]
+    stored_limits = [
+        value for value in (user.hwid_limit, active_tariff.hwid_limit) if value
+    ]
     current_hwid_limit = stored_limits[0] if stored_limits else 1
     decrease_limit = max(
         0, int(getattr(app_settings, "devices_decrease_limit", 0) or 0)
@@ -431,9 +560,7 @@ async def change_active_tariff_devices(payload: ChangeDevicesRequest, user: User
         else (getattr(active_tariff, "lte_gb_total", 0) or 0)
     )
     new_lte_gb_total = (
-        int(payload.lte_gb)
-        if payload.lte_gb is not None
-        else current_lte_gb_total
+        int(payload.lte_gb) if payload.lte_gb is not None else current_lte_gb_total
     )
 
     device_change_needed = not (
@@ -477,33 +604,47 @@ async def change_active_tariff_devices(payload: ChangeDevicesRequest, user: User
         active_months = int(active_tariff.months)
         target_date_old = add_months_safe(current_date, active_months)
         total_days_old = (target_date_old - current_date).days
-        logger.debug(f"[change_active_tariff_devices] total_days_old={total_days_old}, target_date_old={target_date_old}")
+        logger.debug(
+            f"[change_active_tariff_devices] total_days_old={total_days_old}, target_date_old={target_date_old}"
+        )
 
         # Денежная стоимость неиспользованной части текущего тарифа
         # Точная математика: избегаем накопления ошибки за счет Decimal и округления к ближайшему дню
         getcontext().prec = 28
-        unused_percent = (Decimal(days_remaining) / Decimal(total_days_old)) if total_days_old > 0 else Decimal(0)
+        unused_percent = (
+            (Decimal(days_remaining) / Decimal(total_days_old))
+            if total_days_old > 0
+            else Decimal(0)
+        )
         active_price_dec = Decimal(active_tariff.price)
-        unused_value = (unused_percent * active_price_dec)
-        logger.debug(f"[change_active_tariff_devices] unused_percent={float(unused_percent):.6f}, unused_value={float(unused_value):.6f}, active_price={active_tariff.price}")
+        unused_value = unused_percent * active_price_dec
+        logger.debug(
+            f"[change_active_tariff_devices] unused_percent={float(unused_percent):.6f}, unused_value={float(unused_value):.6f}, active_price={active_tariff.price}"
+        )
 
         # Рассчитываем цену тарифа для нового количества устройств
         if original:
             # Если нашли базовый тариф — используем его актуальный multiplier
             base_price = original.base_price
-            multiplier = active_tariff.progressive_multiplier or original.progressive_multiplier
+            multiplier = (
+                active_tariff.progressive_multiplier or original.progressive_multiplier
+            )
         else:
             # Нет в магазине — используем снапшот цены и множитель (если есть) для восстановления base_price
-            multiplier = (active_tariff.progressive_multiplier or 0.9)
+            multiplier = active_tariff.progressive_multiplier or 0.9
             # Если текущая цена была рассчитана с прогрессивным множителем, восстановим base через сумму геометрической прогрессии
             # S_n = base * (1 - m^n) / (1 - m) при n>=1
             n = max(1, active_tariff.hwid_limit)
             if n == 1:
                 base_price = active_tariff.price
             else:
-                denom = (1 - multiplier)
-                geom_sum = (1 - (multiplier ** n)) / denom if denom != 0 else n
-                base_price = active_tariff.price / geom_sum if geom_sum > 0 else active_tariff.price
+                denom = 1 - multiplier
+                geom_sum = (1 - (multiplier**n)) / denom if denom != 0 else n
+                base_price = (
+                    active_tariff.price / geom_sum
+                    if geom_sum > 0
+                    else active_tariff.price
+                )
 
         def calc_price_dec(base: Decimal, mult: Decimal, devices: int) -> Decimal:
             if devices <= 1:
@@ -516,32 +657,46 @@ async def change_active_tariff_devices(payload: ChangeDevicesRequest, user: User
         mult_dec = Decimal(str(multiplier))
         base_dec = Decimal(str(base_price))
         new_calculated_price_dec = calc_price_dec(base_dec, mult_dec, new_device_count)
-        new_calculated_price = int(new_calculated_price_dec.to_integral_value(rounding=ROUND_HALF_UP))
-        logger.debug(f"[change_active_tariff_devices] new_device_count={new_device_count}, new_calculated_price={new_calculated_price}")
+        new_calculated_price = int(
+            new_calculated_price_dec.to_integral_value(rounding=ROUND_HALF_UP)
+        )
+        logger.debug(
+            f"[change_active_tariff_devices] new_device_count={new_device_count}, new_calculated_price={new_calculated_price}"
+        )
 
         # Полный период тарифа (в днях) для перерасчёта по новой цене
-        months_length = int(active_tariff.months)  # сохраняем длительность из снапшота, даже если её нет в магазине
+        months_length = int(
+            active_tariff.months
+        )  # сохраняем длительность из снапшота, даже если её нет в магазине
         target_date_new = add_months_safe(current_date, months_length)
         total_days_new = (target_date_new - current_date).days
-        logger.debug(f"[change_active_tariff_devices] total_days_new={total_days_new}, target_date_new={target_date_new}")
+        logger.debug(
+            f"[change_active_tariff_devices] total_days_new={total_days_new}, target_date_new={target_date_new}"
+        )
 
         # Конвертируем неиспользованную стоимость в дни по новой цене
         # Пропорция: x = (unused_value * total_days_new) / new_calculated_price
         new_days = 0
         residual = Decimal(str(active_tariff.residual_day_fraction or 0))
         if new_calculated_price > 0 and total_days_new > 0 and unused_value > 0:
-            new_days_dec = (unused_value * Decimal(total_days_new)) / Decimal(new_calculated_price)
+            new_days_dec = (unused_value * Decimal(total_days_new)) / Decimal(
+                new_calculated_price
+            )
             # Добавляем накопленную дробную часть
             new_days_dec_total = new_days_dec + residual
             # Берем целую часть к добавлению, остаток сохраняем
-            integer_part = int(new_days_dec_total.to_integral_value(rounding=ROUND_HALF_UP))
+            integer_part = int(
+                new_days_dec_total.to_integral_value(rounding=ROUND_HALF_UP)
+            )
             # Чтобы не перепрыгивать, возьмем floor через int(new_days_dec_total)
             integer_part = int(new_days_dec_total)
             fractional_part = new_days_dec_total - Decimal(integer_part)
             # Не допускаем отрицательного количества дней, 0 — корректный результат
             new_days = max(0, integer_part)
             residual = fractional_part
-        logger.debug(f"[change_active_tariff_devices] computed new_days={new_days}, residual={float(residual):.6f}")
+        logger.debug(
+            f"[change_active_tariff_devices] computed new_days={new_days}, residual={float(residual):.6f}"
+        )
 
         new_expired_at = current_date + timedelta(days=new_days)
         pending_device_update = {
@@ -550,7 +705,9 @@ async def change_active_tariff_devices(payload: ChangeDevicesRequest, user: User
             "price": new_calculated_price,
             "progressive_multiplier": multiplier,
             "residual_day_fraction": float(residual),
-            "devices_decrease_count": (devices_decrease_count + 1) if is_decrease else None,
+            "devices_decrease_count": (devices_decrease_count + 1)
+            if is_decrease
+            else None,
         }
 
     lte_price_per_gb = None
@@ -587,15 +744,27 @@ async def change_active_tariff_devices(payload: ChangeDevicesRequest, user: User
                     "amount_from_balance": amount_from_balance,
                 }
                 if pending_device_update:
-                    metadata.update({
-                        "pending_device_count": pending_device_update["hwid_limit"],
-                        "pending_expired_at": pending_device_update["expired_at"].isoformat(),
-                        "pending_active_tariff_price": pending_device_update["price"],
-                        "pending_progressive_multiplier": pending_device_update["progressive_multiplier"],
-                        "pending_residual_day_fraction": pending_device_update["residual_day_fraction"],
-                    })
+                    metadata.update(
+                        {
+                            "pending_device_count": pending_device_update["hwid_limit"],
+                            "pending_expired_at": pending_device_update[
+                                "expired_at"
+                            ].isoformat(),
+                            "pending_active_tariff_price": pending_device_update[
+                                "price"
+                            ],
+                            "pending_progressive_multiplier": pending_device_update[
+                                "progressive_multiplier"
+                            ],
+                            "pending_residual_day_fraction": pending_device_update[
+                                "residual_day_fraction"
+                            ],
+                        }
+                    )
                     if pending_device_update["devices_decrease_count"] is not None:
-                        metadata["pending_devices_decrease_count"] = pending_device_update["devices_decrease_count"]
+                        metadata["pending_devices_decrease_count"] = (
+                            pending_device_update["devices_decrease_count"]
+                        )
                 try:
                     payment_data = {
                         "amount": {"value": str(amount_to_pay), "currency": "RUB"},
@@ -609,30 +778,47 @@ async def change_active_tariff_devices(payload: ChangeDevicesRequest, user: User
                     }
                     idempotence_key = str(randint(100000, 999999999999))
                     payment = await asyncio.wait_for(
-                        asyncio.to_thread(partial(Payment.create, payment_data, idempotence_key)),
+                        asyncio.to_thread(
+                            partial(Payment.create, payment_data, idempotence_key)
+                        ),
                         timeout=30.0,
                     )
-                    return {"status": "payment_required", "redirect_to": payment.confirmation.confirmation_url}
+                    return {
+                        "status": "payment_required",
+                        "redirect_to": payment.confirmation.confirmation_url,
+                    }
                 except Exception as e:
                     logger.error(f"Ошибка при создании LTE платежа для {user.id}: {e}")
-                    raise HTTPException(status_code=500, detail="Ошибка при создании платежа")
+                    raise HTTPException(
+                        status_code=500, detail="Ошибка при создании платежа"
+                    )
 
     if pending_device_update:
         # Обновляем пользователя и активный тариф
         user.expired_at = pending_device_update["expired_at"]
         user.hwid_limit = pending_device_update["hwid_limit"]
         await user.save()
-        logger.debug(f"[change_active_tariff_devices] user updated: expired_at={user.expired_at}, hwid_limit={user.hwid_limit}")
+        logger.debug(
+            f"[change_active_tariff_devices] user updated: expired_at={user.expired_at}, hwid_limit={user.hwid_limit}"
+        )
 
         # Обновляем snapshot активного тарифа
         active_tariff.hwid_limit = pending_device_update["hwid_limit"]
         active_tariff.price = pending_device_update["price"]
-        active_tariff.progressive_multiplier = pending_device_update["progressive_multiplier"]
-        active_tariff.residual_day_fraction = pending_device_update["residual_day_fraction"]
+        active_tariff.progressive_multiplier = pending_device_update[
+            "progressive_multiplier"
+        ]
+        active_tariff.residual_day_fraction = pending_device_update[
+            "residual_day_fraction"
+        ]
         if pending_device_update["devices_decrease_count"] is not None:
-            active_tariff.devices_decrease_count = pending_device_update["devices_decrease_count"]
+            active_tariff.devices_decrease_count = pending_device_update[
+                "devices_decrease_count"
+            ]
         await active_tariff.save()
-        logger.debug(f"[change_active_tariff_devices] active_tariff updated: id={active_tariff.id}, hwid_limit={active_tariff.hwid_limit}, price={active_tariff.price}, residual={active_tariff.residual_day_fraction}")
+        logger.debug(
+            f"[change_active_tariff_devices] active_tariff updated: id={active_tariff.id}, hwid_limit={active_tariff.hwid_limit}, price={active_tariff.price}, residual={active_tariff.residual_day_fraction}"
+        )
 
         # Синхронизируем с RemnaWave
         if user.remnawave_uuid:
@@ -640,9 +826,11 @@ async def change_active_tariff_devices(payload: ChangeDevicesRequest, user: User
                 await remnawave_client.users.update_user(
                     uuid=user.remnawave_uuid,
                     expireAt=user.expired_at,
-                    hwidDeviceLimit=pending_device_update["hwid_limit"]
+                    hwidDeviceLimit=pending_device_update["hwid_limit"],
                 )
-                logger.debug(f"[change_active_tariff_devices] RemnaWave updated: uuid={user.remnawave_uuid}, expireAt={user.expired_at}, hwidDeviceLimit={pending_device_update['hwid_limit']}")
+                logger.debug(
+                    f"[change_active_tariff_devices] RemnaWave updated: uuid={user.remnawave_uuid}, expireAt={user.expired_at}, hwidDeviceLimit={pending_device_update['hwid_limit']}"
+                )
             except Exception as e:
                 logger.error(f"Ошибка обновления RemnaWave при смене устройств: {e}")
                 # Не прерываем из-за ошибки внешнего сервиса
@@ -655,15 +843,22 @@ async def change_active_tariff_devices(payload: ChangeDevicesRequest, user: User
                 old_limit=old_hwid_limit,
                 new_limit=pending_device_update["hwid_limit"],
                 old_lte_gb=current_lte_gb_total,
-                new_lte_gb=new_lte_gb_total if lte_change_needed else current_lte_gb_total,
+                new_lte_gb=new_lte_gb_total
+                if lte_change_needed
+                else current_lte_gb_total,
                 old_price=old_tariff_price,
                 new_price=pending_device_update["price"],
                 old_expired_at=old_expired_at,
                 new_expired_at=user.expired_at,
-                auto_renew_enabled=_auto_renewal_enabled_for_user(user),
+                auto_renew_enabled=(
+                    bool(user.renew_id)
+                    and payment_settings.auto_renewal_mode == "yookassa"
+                ),
             )
         except Exception as e:
-            logger.error(f"Ошибка отправки уведомления об изменении активного тарифа: {e}")
+            logger.error(
+                f"Ошибка отправки уведомления об изменении активного тарифа: {e}"
+            )
 
     if lte_change_needed:
         if new_lte_gb_total < current_lte_gb_total:
@@ -716,17 +911,25 @@ async def change_active_tariff_devices(payload: ChangeDevicesRequest, user: User
                         lte_gb_delta=int(additional_gb),
                         lte_gb_before=int(current_lte_gb_total),
                         lte_gb_after=int(new_lte_gb_total),
-                        price_per_gb=float(lte_price_per_gb) if lte_price_per_gb is not None else None,
+                        price_per_gb=float(lte_price_per_gb)
+                        if lte_price_per_gb is not None
+                        else None,
                         amount_total=int(extra_cost),
                         amount_external=0,
                         amount_from_balance=int(extra_cost),
-                        old_hwid_limit=int(old_hwid_limit) if old_hwid_limit is not None else None,
-                        new_hwid_limit=int(user.hwid_limit) if getattr(user, "hwid_limit", None) is not None else None,
+                        old_hwid_limit=int(old_hwid_limit)
+                        if old_hwid_limit is not None
+                        else None,
+                        new_hwid_limit=int(user.hwid_limit)
+                        if getattr(user, "hwid_limit", None) is not None
+                        else None,
                         old_expired_at=old_expired_at,
                         new_expired_at=user.expired_at,
                     )
                 except Exception as notify_exc:
-                    logger.error(f"Не удалось отправить админ-уведомление о LTE пополнении (баланс) для {user.id}: {notify_exc}")
+                    logger.error(
+                        f"Не удалось отправить админ-уведомление о LTE пополнении (баланс) для {user.id}: {notify_exc}"
+                    )
             active_tariff.lte_gb_total = new_lte_gb_total
             await active_tariff.save(update_fields=["lte_gb_total"])
             user.lte_gb_total = new_lte_gb_total
@@ -741,7 +944,9 @@ async def change_active_tariff_devices(payload: ChangeDevicesRequest, user: User
             )
             should_enable = effective_lte_total > (active_tariff.lte_gb_used or 0)
             try:
-                await set_lte_squad_status(str(user.remnawave_uuid), enable=should_enable)
+                await set_lte_squad_status(
+                    str(user.remnawave_uuid), enable=should_enable
+                )
             except Exception as e:
                 logger.error(f"Ошибка обновления LTE-сквада для {user.id}: {e}")
         await NotificationMarks.filter(user_id=user.id, type="lte_usage").delete()
@@ -760,10 +965,15 @@ async def change_active_tariff_devices(payload: ChangeDevicesRequest, user: User
                     new_price=active_tariff.price,
                     old_expired_at=old_expired_at,
                     new_expired_at=user.expired_at,
-                    auto_renew_enabled=_auto_renewal_enabled_for_user(user),
+                    auto_renew_enabled=(
+                        bool(user.renew_id)
+                        and payment_settings.auto_renewal_mode == "yookassa"
+                    ),
                 )
             except Exception as e:
-                logger.error(f"Ошибка отправки уведомления об изменении активного тарифа: {e}")
+                logger.error(
+                    f"Ошибка отправки уведомления об изменении активного тарифа: {e}"
+                )
 
     return {
         "status": "ok",
@@ -777,6 +987,7 @@ async def change_active_tariff_devices(payload: ChangeDevicesRequest, user: User
         "price": active_tariff.price,
     }
 
+
 @router.get("/family/{familyurl}")
 async def get_family_subscription(familyurl: str):
     """
@@ -786,31 +997,28 @@ async def get_family_subscription(familyurl: str):
     if not user:
         raise HTTPException(status_code=404, detail="Family link not found")
 
-    # Подготовка URL подписки
-    subscription_url = None
-    error_getting_url = None
-    if not user.remnawave_uuid:
-        error_getting_url = "Failed to initialize user account."
-    else:
-        try:
-            subscription_url = await remnawave_client.users.get_subscription_url(user)
-        except Exception as e:
-            error_getting_url = f"Failed to get subscription URL: {str(e)}"
+    # Подготовка URL подписки. Технические ошибки остаются только в логах.
+    subscription_url_state = await _resolve_subscription_url_state(
+        user, source=f"/user/family/{familyurl}"
+    )
 
     # Сериализация данных пользователя
     user_data = await User_Pydantic.from_tortoise_orm(user)
-    user_dict = user_data.model_dump(mode='json')
-    user_dict["subscription_url"] = subscription_url
-    user_dict["subscription_url_error"] = error_getting_url
+    user_dict = _dump_user_pydantic_compat(user_data)
+    user_dict.update(subscription_url_state)
 
     # Подсчёт устройств (только валидные активные)
     devices_count = 0
     if user.remnawave_uuid:
         try:
-            raw_resp = await remnawave_client.users.get_user_hwid_devices(str(user.remnawave_uuid))
+            raw_resp = await remnawave_client.users.get_user_hwid_devices(
+                str(user.remnawave_uuid)
+            )
             devices_count = count_active_devices(raw_resp)
         except Exception as e:
-            logger.warning(f"Ошибка получения списка устройств для пользователя {user.id} (family/{familyurl}): {e}")
+            logger.warning(
+                f"Ошибка получения списка устройств для пользователя {user.id} (family/{familyurl}): {e}"
+            )
     user_dict["devices_count"] = devices_count
 
     # --- Определение лимита устройств (только из БД) ---
@@ -843,17 +1051,20 @@ async def get_family_subscription(familyurl: str):
                 "devices_decrease_limit": devices_decrease_limit or None,
                 "devices_decrease_remaining": remaining_decreases,
             }
-    
+
     # 3. Личное значение из БД имеет наивысший приоритет
     if user.hwid_limit is not None:
         devices_limit = user.hwid_limit
         source = "личной настройке в БД"
 
-    logger.debug(f"Итоговый лимит устройств для пользователя {user.id} по семейной ссылке установлен по {source}: {devices_limit}")
+    logger.debug(
+        f"Итоговый лимит устройств для пользователя {user.id} по семейной ссылке установлен по {source}: {devices_limit}"
+    )
     user_dict["devices_limit"] = _normalize_devices_limit(devices_limit)
     user_dict["active_tariff"] = active_tariff_data
 
     return user_dict
+
 
 @router.post("/family/revoke")
 async def revoke_family(user: Users = Depends(validate)) -> Dict[str, Any]:
@@ -866,8 +1077,12 @@ async def revoke_family(user: Users = Depends(validate)) -> Dict[str, Any]:
     try:
         await remnawave_client.users.revoke_user(str(user.remnawave_uuid))
     except Exception as e:
-        logger.error(f"Error revoking subscription in RemnaWave for user {user.id}: {e}")
-        raise HTTPException(status_code=500, detail="Failed to revoke subscription in RemnaWave")
+        logger.error(
+            f"Error revoking subscription in RemnaWave for user {user.id}: {e}"
+        )
+        raise HTTPException(
+            status_code=500, detail="Failed to revoke subscription in RemnaWave"
+        )
 
     # Очищаем зарегистрированные устройства в RemnaWave
     try:

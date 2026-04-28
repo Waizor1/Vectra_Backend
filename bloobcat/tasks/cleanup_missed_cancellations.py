@@ -1,5 +1,6 @@
 import asyncio
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 from bloobcat.db.users import Users
 from bloobcat.bot.notifications.subscription.renewal import (
@@ -7,8 +8,15 @@ from bloobcat.bot.notifications.subscription.renewal import (
 )
 from bloobcat.logger import get_logger
 from bloobcat.settings import app_settings, payment_settings
+from bloobcat.tasks.quiet_hours import (
+    PENDING_SUBSCRIPTION_CANCELLED_MARK_TYPE,
+    SUBSCRIPTION_CANCELLED_AFTER_FAILURES_MARK_TYPE,
+    ensure_notification_mark,
+    is_quiet_hours,
+)
 
 logger = get_logger("tasks.cleanup_missed_cancellations")
+MOSCOW = ZoneInfo("Europe/Moscow")
 
 
 async def cleanup_missed_cancellations_once() -> int:
@@ -16,10 +24,12 @@ async def cleanup_missed_cancellations_once() -> int:
 
     Returns number of cancelled users.
     """
-    logger.info("Running cleanup for missed subscription cancellations...")
-    if str(getattr(payment_settings, "auto_renewal_mode", "") or "").strip().lower() != "yookassa":
-        logger.info("Cleanup missed cancellations skipped: auto-renewal is disabled")
+    if payment_settings.auto_renewal_mode != "yookassa":
+        logger.info("Skipping missed cancellation cleanup: auto-renewal disabled")
         return 0
+
+    logger.info("Running cleanup for missed subscription cancellations...")
+    now = datetime.now(MOSCOW)
 
     users_to_cancel = await Users.filter(
         is_subscribed=True,
@@ -36,7 +46,33 @@ async def cleanup_missed_cancellations_once() -> int:
             user.is_subscribed = False
             user.renew_id = None
             await user.save()
-            await notify_subscription_cancelled_after_failures(user)
+            notification_key = str(user.expired_at)
+            if user.is_blocked:
+                logger.info(
+                    f"Subscription cancelled for blocked user {user.id} without notification"
+                )
+            elif is_quiet_hours(now):
+                await ensure_notification_mark(
+                    user_id=user.id,
+                    mark_type=PENDING_SUBSCRIPTION_CANCELLED_MARK_TYPE,
+                    key=notification_key,
+                )
+            else:
+                sent_ok = await notify_subscription_cancelled_after_failures(user)
+                if sent_ok:
+                    await ensure_notification_mark(
+                        user_id=user.id,
+                        mark_type=SUBSCRIPTION_CANCELLED_AFTER_FAILURES_MARK_TYPE,
+                        key=notification_key,
+                    )
+                else:
+                    refreshed_user = await Users.get_or_none(id=user.id)
+                    if refreshed_user and not refreshed_user.is_blocked:
+                        await ensure_notification_mark(
+                            user_id=user.id,
+                            mark_type=PENDING_SUBSCRIPTION_CANCELLED_MARK_TYPE,
+                            key=notification_key,
+                        )
             cancelled_count += 1
         except Exception as e:
             logger.error(f"Failed to cleanup missed cancellation for user {user.id}: {e}")
@@ -63,4 +99,3 @@ async def run_cleanup_missed_cancellations_scheduler(interval_seconds: int = 360
         except Exception as e:
             logger.error(f"Error in cleanup missed cancellations scheduler: {e}")
         await asyncio.sleep(interval_seconds)
-

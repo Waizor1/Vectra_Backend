@@ -9,6 +9,7 @@ from bloobcat.db.active_tariff import ActiveTariffs
 from bloobcat.db.family_devices import FamilyDevices
 from bloobcat.db.family_members import FamilyMembers
 from bloobcat.settings import app_settings
+from bloobcat.services.subscription_limits import family_devices_threshold
 from bloobcat.logger import get_logger
 
 logger = get_logger("routes.family")
@@ -57,8 +58,8 @@ async def create_family_device(payload: FamilyDeviceCreate, user: Users = Depend
         raise HTTPException(status_code=400, detail="Title or subtitle is too long")
 
     devices_limit = await _get_devices_limit(user)
-    family_max = int(getattr(app_settings, "family_devices_limit", 10) or 10)
-    if devices_limit < 10:
+    family_max = max(family_devices_threshold(), int(devices_limit or 0))
+    if devices_limit < family_devices_threshold():
         raise HTTPException(status_code=403, detail="Family subscription required")
     count = await FamilyDevices.filter(user_id=user.id).count()
     allocated_to_members = 0

@@ -1,4 +1,4 @@
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional, Any, Union
 import asyncio
 
@@ -19,8 +19,12 @@ from bloobcat.settings import remnawave_settings, test_mode, app_settings
 from bloobcat.logger import get_logger
 
 from bloobcat.db.active_tariff import ActiveTariffs
-from bloobcat.db.fk_guards import ensure_active_tariffs_fk_cascade
-
+from bloobcat.db.fk_guards import (
+    ensure_active_tariffs_fk_cascade,
+    ensure_notification_marks_fk_cascade,
+    ensure_promo_usages_fk_cascade,
+    ensure_users_referred_by_fk_set_null,
+)
 import zlib
 
 # Import for new trial granted notification
@@ -30,6 +34,7 @@ logger = get_logger("users_db")
 
 _REMNAWAVE_USER_LOCKS: dict[int, asyncio.Lock] = {}
 _REMNAWAVE_USER_LOCKS_GUARD = asyncio.Lock()
+WEB_USER_ID_FLOOR = 8_000_000_000_000_000
 
 
 async def _get_remnawave_user_lock(user_id: int) -> asyncio.Lock:
@@ -65,9 +70,7 @@ def crc32(a: str):
 
 
 def get_family_url(user_id) -> str:
-    return (
-        crc32(f"{user_id}family") + crc32(f"family {user_id}") + "blubcat"
-    )
+    return crc32(f"{user_id}family") + crc32(f"family {user_id}") + "blubcat"
 
 
 class Users(models.Model):
@@ -76,6 +79,10 @@ class Users(models.Model):
     full_name = fields.CharField(max_length=1000)
     expired_at = fields.DateField(null=True)
     is_registered = fields.BooleanField(default=False)
+    key_activated = fields.BooleanField(
+        default=False,
+        description="Активирован ли ключ (появился первый HWID в RemnaWave)",
+    )
     balance = fields.IntField(default=0)
     referred_by = fields.BigIntField(null=True, default=None)
     is_admin = fields.BooleanField(default=False)
@@ -93,24 +100,54 @@ class Users(models.Model):
     renew_id = fields.CharField(max_length=100, null=True)
     connected_at = fields.DatetimeField(null=True)
     email = fields.CharField(max_length=255, null=True)
-    language_code = fields.CharField(max_length=5, default="ru", description="Код языка пользователя для локализации уведомлений")
+    language_code = fields.CharField(
+        max_length=5,
+        default="ru",
+        description="Код языка пользователя для локализации уведомлений",
+    )
     created_at = fields.DatetimeField(auto_now_add=True)
     is_trial = fields.BooleanField(default=False)
     used_trial = fields.BooleanField(default=False)
     remnawave_uuid = fields.UUIDField(null=True)  # UUID пользователя в RemnaWave
-    last_hwid_reset = fields.DatetimeField(null=True, description="Дата и время последнего ручного отключения HWID устройств")
-    familyurl = fields.CharField(max_length=100, null=True)
-    active_tariff: fields.ForeignKeyNullableRelation["ActiveTariffs"] = fields.ForeignKeyField(
-        "models.ActiveTariffs", related_name="users", null=True, on_delete=fields.SET_NULL, description="ID активного тарифа пользователя"
+    last_hwid_reset = fields.DatetimeField(
+        null=True,
+        description="Дата и время последнего ручного отключения HWID устройств",
     )
-    hwid_limit = fields.IntField(null=True, description="Личный лимит устройств (переопределяет тариф и настройки панели)")
-    lte_gb_total = fields.IntField(null=True, description="Личный LTE лимит (GB), переопределяет тариф")
-    is_blocked = fields.BooleanField(default=False, description="Пользователь заблокировал бота")
+    familyurl = fields.CharField(max_length=100, null=True)
+    active_tariff: fields.ForeignKeyNullableRelation["ActiveTariffs"] = (
+        fields.ForeignKeyField(
+            "models.ActiveTariffs",
+            related_name="users",
+            null=True,
+            on_delete=fields.SET_NULL,
+            description="ID активного тарифа пользователя",
+        )
+    )
+    hwid_limit = fields.IntField(
+        null=True,
+        description="Личный лимит устройств (переопределяет тариф и настройки панели)",
+    )
+    lte_gb_total = fields.IntField(
+        null=True, description="Личный LTE лимит (GB), переопределяет тариф"
+    )
+    is_blocked = fields.BooleanField(
+        default=False, description="Пользователь заблокировал бота"
+    )
     blocked_at = fields.DatetimeField(null=True, description="Дата и время блокировки")
-    last_failed_message_at = fields.DatetimeField(null=True, description="Последняя неуспешная попытка отправки")
-    failed_message_count = fields.IntField(default=0, description="Количество неуспешных попыток подряд")
+    last_failed_message_at = fields.DatetimeField(
+        null=True, description="Последняя неуспешная попытка отправки"
+    )
+    failed_message_count = fields.IntField(
+        default=0, description="Количество неуспешных попыток подряд"
+    )
+    auth_token_version = fields.IntField(
+        default=0,
+        description="Версия auth-токенов пользователя для серверной ревокации сессий",
+    )
     # Колесо призов: количество доступных попыток для пользователя
-    prize_wheel_attempts = fields.IntField(default=0, description="Доступные попытки на колесе призов")
+    prize_wheel_attempts = fields.IntField(
+        default=0, description="Доступные попытки на колесе призов"
+    )
 
     @staticmethod
     def _extract_remnawave_user(payload: Any) -> Optional[dict]:
@@ -132,13 +169,14 @@ class Users(models.Model):
 
     @staticmethod
     def _is_remnawave_not_found_error(error_text: str) -> bool:
-        lowered = (error_text or "").lower()
-        return (
-            "user not found" in lowered
-            or "a063" in lowered
-            or "404" in lowered
-            or "not found" in lowered
+        normalized = "".join(ch for ch in (error_text or "").lower() if ch.isalnum())
+        explicit_signals = (
+            "a025",
+            "a063",
+            "userwithspecifiedparamsnotfound",
+            "usernotfound",
         )
+        return any(signal in normalized for signal in explicit_signals)
 
     @staticmethod
     def _normalize_hwid_limit_value(value: Any) -> int:
@@ -148,7 +186,99 @@ class Users(models.Model):
             return 1
         return max(1, parsed)
 
-    async def _find_existing_remnawave_user(self, remnawave: Any, base_username: str) -> Optional[dict]:
+    @staticmethod
+    def _parse_remnawave_datetime(value: Any) -> Optional[datetime]:
+        if not value:
+            return None
+        try:
+            raw_value = str(value).strip()
+            if not raw_value:
+                return None
+            parsed = datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                return parsed.replace(tzinfo=timezone.utc)
+            return parsed
+        except Exception:
+            return None
+
+    @classmethod
+    def _extract_existing_remnawave_connection_at(
+        cls, remote_user: Any
+    ) -> Optional[datetime]:
+        """Return historical connection time for an adopted RemnaWave user.
+
+        When a fresh local DB rebinds to an already-existing RemnaWave user,
+        `userTraffic.onlineAt`/`firstConnectedAt` describes historical remote
+        activity, not a new local first connection. Import that state silently
+        so the periodic checker does not emit a misleading first-activation log.
+        """
+        if not isinstance(remote_user, dict):
+            return None
+
+        user_traffic = remote_user.get("userTraffic") or {}
+        if not isinstance(user_traffic, dict):
+            user_traffic = {}
+
+        for candidate in (
+            user_traffic.get("firstConnectedAt"),
+            remote_user.get("firstConnectedAt"),
+            user_traffic.get("onlineAt"),
+            remote_user.get("onlineAt"),
+        ):
+            parsed = cls._parse_remnawave_datetime(candidate)
+            if parsed:
+                return parsed
+        return None
+
+    async def _remote_user_has_hwid_device(
+        self, remnawave: Any, remnawave_uuid: Any
+    ) -> bool:
+        if not remnawave_uuid:
+            return False
+        try:
+            from bloobcat.routes.remnawave.hwid_utils import (
+                extract_hwid_from_device,
+                parse_remnawave_devices,
+            )
+
+            raw_devices = await remnawave.users.get_user_hwid_devices(
+                str(remnawave_uuid)
+            )
+            return any(
+                extract_hwid_from_device(item)
+                for item in parse_remnawave_devices(raw_devices)
+            )
+        except Exception as exc:
+            logger.warning(
+                "Не удалось проверить HWID при rebind local user=%s uuid=%s: %s",
+                self.id,
+                remnawave_uuid,
+                exc,
+            )
+            return False
+
+    @classmethod
+    def _apply_existing_remnawave_connection_state(
+        cls, current_user: "Users", remote_user: Any, *, has_hwid_device: bool
+    ) -> list[str]:
+        connection_at = cls._extract_existing_remnawave_connection_at(remote_user)
+        update_fields: list[str] = []
+
+        if connection_at and not current_user.connected_at:
+            current_user.connected_at = connection_at
+            update_fields.append("connected_at")
+
+        if has_hwid_device and not current_user.key_activated:
+            current_user.key_activated = True
+            update_fields.append("key_activated")
+        if has_hwid_device and not current_user.is_registered:
+            current_user.is_registered = True
+            update_fields.append("is_registered")
+        return update_fields
+
+    async def _find_existing_remnawave_user(
+        self, remnawave: Any, base_username: str
+    ) -> Optional[dict]:
         candidates: list[dict] = []
 
         async def _collect(payload_coro, source: str):
@@ -187,8 +317,12 @@ class Users(models.Model):
             normalized_email = (self.email or "").strip().lower()
             username_prefix = f"{base_username}_"
 
-            while pages_fetched < max_pages and (total_users is None or start_index < total_users):
-                response = await remnawave.users.get_users(size=page_size, start=start_index)
+            while pages_fetched < max_pages and (
+                total_users is None or start_index < total_users
+            ):
+                response = await remnawave.users.get_users(
+                    size=page_size, start=start_index
+                )
                 body = response.get("response") if isinstance(response, dict) else None
                 if not isinstance(body, dict):
                     break
@@ -246,7 +380,11 @@ class Users(models.Model):
                 score += 50
             elif candidate_username.startswith(f"{base_username}_"):
                 score += 20
-            if self.email and candidate_email and candidate_email == self.email.strip().lower():
+            if (
+                self.email
+                and candidate_email
+                and candidate_email == self.email.strip().lower()
+            ):
                 score += 30
 
             if score > best_score:
@@ -265,13 +403,17 @@ class Users(models.Model):
             try:
                 current_user = await Users.get_or_none(id=self.id) or self
                 if current_user.remnawave_uuid:
-                    normalized_existing_hwid_limit = self._normalize_hwid_limit_value(current_user.hwid_limit)
+                    normalized_existing_hwid_limit = self._normalize_hwid_limit_value(
+                        current_user.hwid_limit
+                    )
                     if current_user.hwid_limit != normalized_existing_hwid_limit:
                         current_user.hwid_limit = normalized_existing_hwid_limit
                         await current_user.save(update_fields=["hwid_limit"])
                     self.remnawave_uuid = current_user.remnawave_uuid
                     self.hwid_limit = normalized_existing_hwid_limit
-                    logger.info(f"Пользователь {self.id} уже имеет UUID в RemnaWave: {self.remnawave_uuid}")
+                    logger.info(
+                        f"Пользователь {self.id} уже имеет UUID в RemnaWave: {self.remnawave_uuid}"
+                    )
                     return False
 
                 from bloobcat.routes.remnawave.client import RemnaWaveClient
@@ -283,13 +425,18 @@ class Users(models.Model):
                 )
                 try:
                     expire_at_date = current_user.expired_at
+                    today = date.today()
                     if expire_at_date is None:
                         if not current_user.used_trial:
-                            expire_at_date = date.today() + timedelta(days=app_settings.trial_days)
+                            expire_at_date = today + timedelta(
+                                days=app_settings.trial_days
+                            )
                             current_user.is_trial = True
                             current_user.used_trial = True
                             current_user.expired_at = expire_at_date
-                            logger.info(f"Назначен триал для {self.id} до {expire_at_date}")
+                            logger.info(
+                                f"Назначен триал для {self.id} до {expire_at_date}"
+                            )
                             try:
                                 await notify_trial_granted(current_user)
                             except Exception as e_notify:
@@ -298,67 +445,119 @@ class Users(models.Model):
                                     f"пользователю {self.id} в _ensure_remnawave_user: {e_notify}"
                                 )
                     else:
-                        # Сохраняем текущую бизнес-логику даты (без изменения поведения)
-                        expire_at_date = date.today()
-                        logger.warning(
-                            f"Пользователь {self.id} уже использовал триал, дата истечения: {expire_at_date}"
-                        )
+                        expire_at_date = max(expire_at_date, today)
+                        if current_user.expired_at < today:
+                            logger.info(
+                                "Пользователь %s имеет истекшую подписку (%s), expire_at для RemnaWave зажат до today=%s",
+                                self.id,
+                                current_user.expired_at,
+                                today,
+                            )
+                        else:
+                            logger.info(
+                                "Пользователь %s сохраняет существующую дату подписки для RemnaWave: %s",
+                                self.id,
+                                expire_at_date,
+                            )
 
-                    normalized_hwid_limit = self._normalize_hwid_limit_value(current_user.hwid_limit)
+                    normalized_hwid_limit = self._normalize_hwid_limit_value(
+                        current_user.hwid_limit
+                    )
                     if current_user.hwid_limit != normalized_hwid_limit:
                         current_user.hwid_limit = normalized_hwid_limit
                     self.hwid_limit = normalized_hwid_limit
 
                     internal_squads = []
                     if remnawave_settings.default_internal_squad_uuid:
-                        internal_squads.append(remnawave_settings.default_internal_squad_uuid)
+                        internal_squads.append(
+                            remnawave_settings.default_internal_squad_uuid
+                        )
                     lte_uuid = remnawave_settings.lte_internal_squad_uuid
                     if lte_uuid:
                         lte_allowed = False
                         if current_user.is_trial:
                             lte_allowed = True
                         elif current_user.active_tariff_id:
-                            active_tariff = await ActiveTariffs.get_or_none(id=current_user.active_tariff_id)
+                            active_tariff = await ActiveTariffs.get_or_none(
+                                id=current_user.active_tariff_id
+                            )
                             effective_lte_total = (
                                 current_user.lte_gb_total
                                 if current_user.lte_gb_total is not None
-                                else (active_tariff.lte_gb_total or 0 if active_tariff else 0)
+                                else (
+                                    active_tariff.lte_gb_total or 0
+                                    if active_tariff
+                                    else 0
+                                )
                             )
-                            effective_lte_used = active_tariff.lte_gb_used if active_tariff else 0
+                            effective_lte_used = (
+                                active_tariff.lte_gb_used if active_tariff else 0
+                            )
                             if (effective_lte_total or 0) > (effective_lte_used or 0):
                                 lte_allowed = True
                         if lte_allowed:
                             internal_squads.append(lte_uuid)
                     active_internal_squads = internal_squads or None
 
-                    base_username = f"{self.id}_TEST" if test_mode else str(self.id)
+                    is_web_user = int(self.id) >= WEB_USER_ID_FLOOR
+                    base_username = (
+                        f"web_{self.id}_TEST"
+                        if test_mode and is_web_user
+                        else (f"{self.id}_TEST" if test_mode else (f"web_{self.id}" if is_web_user else str(self.id)))
+                    )
+                    remnawave_telegram_id = None if is_web_user else self.id
+                    remnawave_description = (
+                        f"Web: {current_user.email or current_user.name()}"
+                        if is_web_user
+                        else f"Telegram: {current_user.name()}"
+                    )
                     try:
                         response = await remnawave.users.create_user(
                             username=base_username,
                             expire_at=expire_at_date,
-                            telegram_id=self.id,
+                            telegram_id=remnawave_telegram_id,
                             email=current_user.email,
-                            description=f"Telegram: {current_user.name()}",
+                            description=remnawave_description,
                             hwid_device_limit=normalized_hwid_limit,
                             active_internal_squads=active_internal_squads,
                             external_squad_uuid=remnawave_settings.default_external_squad_uuid,
                         )
                     except Exception as create_err:
                         if self._is_remnawave_username_exists_error(str(create_err)):
-                            existing_remote_user = await self._find_existing_remnawave_user(
-                                remnawave,
-                                base_username=base_username,
+                            existing_remote_user = (
+                                await self._find_existing_remnawave_user(
+                                    remnawave,
+                                    base_username=base_username,
+                                )
                             )
-                            if existing_remote_user and existing_remote_user.get("uuid"):
-                                current_user.remnawave_uuid = existing_remote_user["uuid"]
+                            if existing_remote_user and existing_remote_user.get(
+                                "uuid"
+                            ):
+                                current_user.remnawave_uuid = existing_remote_user[
+                                    "uuid"
+                                ]
+                                has_existing_hwid = (
+                                    await self._remote_user_has_hwid_device(
+                                        remnawave,
+                                        current_user.remnawave_uuid,
+                                    )
+                                )
+                                update_fields = [
+                                    "remnawave_uuid",
+                                    "is_trial",
+                                    "used_trial",
+                                    "expired_at",
+                                    "hwid_limit",
+                                ]
+                                update_fields.extend(
+                                    self._apply_existing_remnawave_connection_state(
+                                        current_user,
+                                        existing_remote_user,
+                                        has_hwid_device=has_existing_hwid,
+                                    )
+                                )
                                 await current_user.save(
-                                    update_fields=[
-                                        "remnawave_uuid",
-                                        "is_trial",
-                                        "used_trial",
-                                        "expired_at",
-                                        "hwid_limit",
-                                    ]
+                                    update_fields=list(dict.fromkeys(update_fields))
                                 )
                                 self.remnawave_uuid = current_user.remnawave_uuid
                                 self.hwid_limit = current_user.hwid_limit
@@ -383,14 +582,28 @@ class Users(models.Model):
                                 return True
                         raise
 
-                    current_user.remnawave_uuid = (response.get("response") or {}).get("uuid")
+                    current_user.remnawave_uuid = (response.get("response") or {}).get(
+                        "uuid"
+                    )
                     if not current_user.remnawave_uuid:
-                        raise ValueError(f"create_user не вернул uuid для пользователя {self.id}")
+                        raise ValueError(
+                            f"create_user не вернул uuid для пользователя {self.id}"
+                        )
 
-                    await current_user.save()
+                    await current_user.save(
+                        update_fields=[
+                            "remnawave_uuid",
+                            "is_trial",
+                            "used_trial",
+                            "expired_at",
+                            "hwid_limit",
+                        ]
+                    )
                     self.remnawave_uuid = current_user.remnawave_uuid
                     self.hwid_limit = current_user.hwid_limit
-                    logger.info(f"Пользователь {self.id} успешно создан в RemnaWave с UUID: {self.remnawave_uuid}")
+                    logger.info(
+                        f"Пользователь {self.id} успешно создан в RemnaWave с UUID: {self.remnawave_uuid}"
+                    )
                     return True
                 finally:
                     await remnawave.close()
@@ -399,7 +612,9 @@ class Users(models.Model):
                         self.id,
                     )
             except Exception as e:
-                logger.error(f"Ошибка при создании пользователя {self.id} в RemnaWave: {str(e)}")
+                logger.error(
+                    f"Ошибка при создании пользователя {self.id} в RemnaWave: {str(e)}"
+                )
                 return False
 
     async def recreate_remnawave_user(self) -> bool:
@@ -415,7 +630,9 @@ class Users(models.Model):
                 from datetime import date
 
                 current_user = await Users.get_or_none(id=self.id) or self
-                normalized_hwid_limit = self._normalize_hwid_limit_value(current_user.hwid_limit)
+                normalized_hwid_limit = self._normalize_hwid_limit_value(
+                    current_user.hwid_limit
+                )
                 hwid_limit_changed = current_user.hwid_limit != normalized_hwid_limit
                 if hwid_limit_changed:
                     current_user.hwid_limit = normalized_hwid_limit
@@ -429,24 +646,47 @@ class Users(models.Model):
                 try:
                     if current_user.remnawave_uuid:
                         try:
-                            payload = await remnawave.users.get_user_by_uuid(str(current_user.remnawave_uuid))
+                            payload = await remnawave.users.get_user_by_uuid(
+                                str(current_user.remnawave_uuid)
+                            )
                             if self._extract_remnawave_user(payload):
                                 if hwid_limit_changed:
-                                    await current_user.save(update_fields=["hwid_limit"])
+                                    await current_user.save(
+                                        update_fields=["hwid_limit"]
+                                    )
                                 self.remnawave_uuid = current_user.remnawave_uuid
                                 return True
                         except Exception as lookup_err:
                             if not self._is_remnawave_not_found_error(str(lookup_err)):
                                 raise
 
-                    base_username = f"{self.id}_TEST" if test_mode else str(self.id)
+                    is_web_user = int(self.id) >= WEB_USER_ID_FLOOR
+                    base_username = (
+                        f"web_{self.id}_TEST"
+                        if test_mode and is_web_user
+                        else (f"{self.id}_TEST" if test_mode else (f"web_{self.id}" if is_web_user else str(self.id)))
+                    )
                     existing_remote_user = await self._find_existing_remnawave_user(
                         remnawave,
                         base_username=base_username,
                     )
                     if existing_remote_user and existing_remote_user.get("uuid"):
                         current_user.remnawave_uuid = existing_remote_user["uuid"]
-                        await current_user.save(update_fields=["remnawave_uuid", "hwid_limit"])
+                        has_existing_hwid = await self._remote_user_has_hwid_device(
+                            remnawave,
+                            current_user.remnawave_uuid,
+                        )
+                        update_fields = ["remnawave_uuid", "hwid_limit"]
+                        update_fields.extend(
+                            self._apply_existing_remnawave_connection_state(
+                                current_user,
+                                existing_remote_user,
+                                has_hwid_device=has_existing_hwid,
+                            )
+                        )
+                        await current_user.save(
+                            update_fields=list(dict.fromkeys(update_fields))
+                        )
                         self.remnawave_uuid = current_user.remnawave_uuid
                         self.hwid_limit = normalized_hwid_limit
                         try:
@@ -474,20 +714,30 @@ class Users(models.Model):
 
                     internal_squads = []
                     if remnawave_settings.default_internal_squad_uuid:
-                        internal_squads.append(remnawave_settings.default_internal_squad_uuid)
+                        internal_squads.append(
+                            remnawave_settings.default_internal_squad_uuid
+                        )
                     lte_uuid = remnawave_settings.lte_internal_squad_uuid
                     if lte_uuid:
                         lte_allowed = False
                         if current_user.is_trial:
                             lte_allowed = True
                         elif current_user.active_tariff_id:
-                            active_tariff = await ActiveTariffs.get_or_none(id=current_user.active_tariff_id)
+                            active_tariff = await ActiveTariffs.get_or_none(
+                                id=current_user.active_tariff_id
+                            )
                             effective_lte_total = (
                                 current_user.lte_gb_total
                                 if current_user.lte_gb_total is not None
-                                else (active_tariff.lte_gb_total or 0 if active_tariff else 0)
+                                else (
+                                    active_tariff.lte_gb_total or 0
+                                    if active_tariff
+                                    else 0
+                                )
                             )
-                            effective_lte_used = active_tariff.lte_gb_used if active_tariff else 0
+                            effective_lte_used = (
+                                active_tariff.lte_gb_used if active_tariff else 0
+                            )
                             if (effective_lte_total or 0) > (effective_lte_used or 0):
                                 lte_allowed = True
                         if lte_allowed:
@@ -498,22 +748,34 @@ class Users(models.Model):
                         response = await remnawave.users.create_user(
                             username=base_username,
                             expire_at=expire_at_date,
-                            telegram_id=self.id,
+                            telegram_id=None if is_web_user else self.id,
                             email=current_user.email,
-                            description=f"Telegram: {current_user.name()}",
+                            description=(
+                                f"Web: {current_user.email or current_user.name()}"
+                                if is_web_user
+                                else f"Telegram: {current_user.name()}"
+                            ),
                             hwid_device_limit=hwid_limit,
                             active_internal_squads=active_internal_squads,
                             external_squad_uuid=remnawave_settings.default_external_squad_uuid,
                         )
                     except Exception as create_err:
                         if self._is_remnawave_username_exists_error(str(create_err)):
-                            existing_remote_user = await self._find_existing_remnawave_user(
-                                remnawave,
-                                base_username=base_username,
+                            existing_remote_user = (
+                                await self._find_existing_remnawave_user(
+                                    remnawave,
+                                    base_username=base_username,
+                                )
                             )
-                            if existing_remote_user and existing_remote_user.get("uuid"):
-                                current_user.remnawave_uuid = existing_remote_user["uuid"]
-                                await current_user.save(update_fields=["remnawave_uuid", "hwid_limit"])
+                            if existing_remote_user and existing_remote_user.get(
+                                "uuid"
+                            ):
+                                current_user.remnawave_uuid = existing_remote_user[
+                                    "uuid"
+                                ]
+                                await current_user.save(
+                                    update_fields=["remnawave_uuid", "hwid_limit"]
+                                )
                                 self.remnawave_uuid = current_user.remnawave_uuid
                                 self.hwid_limit = normalized_hwid_limit
                                 try:
@@ -537,25 +799,120 @@ class Users(models.Model):
                                 return True
                         raise
 
-                    current_user.remnawave_uuid = (response.get("response") or {}).get("uuid")
+                    current_user.remnawave_uuid = (response.get("response") or {}).get(
+                        "uuid"
+                    )
                     if not current_user.remnawave_uuid:
-                        raise ValueError(f"create_user не вернул uuid для пользователя {self.id}")
+                        raise ValueError(
+                            f"create_user не вернул uuid для пользователя {self.id}"
+                        )
 
-                    await current_user.save(update_fields=["remnawave_uuid", "hwid_limit"])
+                    await current_user.save(
+                        update_fields=["remnawave_uuid", "hwid_limit"]
+                    )
                     self.remnawave_uuid = current_user.remnawave_uuid
                     self.hwid_limit = normalized_hwid_limit
-                    logger.info(f"Пользователь {self.id} пересоздан в RemnaWave с UUID: {self.remnawave_uuid}")
+                    logger.info(
+                        f"Пользователь {self.id} пересоздан в RemnaWave с UUID: {self.remnawave_uuid}"
+                    )
                     return True
                 finally:
                     await remnawave.close()
             except Exception as e:
-                logger.error(f"Не удалось пересоздать пользователя {self.id} в RemnaWave: {e}")
+                logger.error(
+                    f"Не удалось пересоздать пользователя {self.id} в RemnaWave: {e}"
+                )
                 return False
 
     @classmethod
+    async def _scrub_stale_subscription_freezes(
+        cls,
+        user_id: int,
+        *,
+        created_before: datetime | None = None,
+        allow_full_fallback: bool = False,
+    ) -> None:
+        """Best-effort cleanup for stale freeze artifacts after hard-delete + recreate."""
+        try:
+            from bloobcat.db.subscription_freezes import SubscriptionFreezes
+
+            scrub_qs = SubscriptionFreezes.filter(user_id=user_id)
+            deleted_rows = 0
+            used_fallback = False
+            if created_before is not None:
+                deleted_rows = await scrub_qs.filter(created_at__lt=created_before).delete()
+                # SQLite timestamps may collapse rapid delete/recreate flows into the same
+                # second, so stale rows can survive the strict boundary filter. On a brand-new
+                # local user row there should be no legitimate freezes yet, so fall back to a
+                # full scrub for this user id.
+                if deleted_rows == 0 and allow_full_fallback:
+                    deleted_rows = await scrub_qs.delete()
+                    used_fallback = deleted_rows > 0
+            else:
+                deleted_rows = await scrub_qs.delete()
+
+            if deleted_rows:
+                logger.info(
+                    "Scrubbed stale subscription_freezes for recreated user=%s: deleted=%s boundary=%s fallback_full_scrub=%s",
+                    user_id,
+                    deleted_rows,
+                    created_before,
+                    used_fallback,
+                )
+        except Exception as cleanup_exc:
+            # Non-critical side effect: auth flow should not fail on transient cleanup issues.
+            logger.warning(
+                "Failed to scrub stale subscription_freezes for recreated user=%s boundary=%s: %s",
+                user_id,
+                created_before,
+                cleanup_exc,
+            )
+
+    @classmethod
+    def _schedule_remnawave_ensure(cls, user_id: int) -> None:
+        async def _runner() -> None:
+            try:
+                scheduled_user = await cls.get_or_none(id=user_id)
+                if not scheduled_user:
+                    logger.warning(
+                        "Background RemnaWave ensure skipped: user=%s not found",
+                        user_id,
+                    )
+                    return
+                if scheduled_user.remnawave_uuid:
+                    return
+                await scheduled_user._ensure_remnawave_user()
+            except Exception as bg_exc:
+                logger.warning(
+                    "Background RemnaWave ensure failed for user=%s: %s",
+                    user_id,
+                    bg_exc,
+                )
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.warning(
+                "Background RemnaWave ensure not scheduled: no running loop for user=%s",
+                user_id,
+            )
+            return
+
+        loop.create_task(_runner())
+
+    @classmethod
     async def get_user(
-        cls, telegram_user: WebAppUser | User | None, referred_by: Optional[int] = None, utm: Optional[str] = None
+        cls,
+        telegram_user: WebAppUser | User | None,
+        referred_by: Optional[int] = None,
+        utm: Optional[str] = None,
+        ensure_remnawave: bool = True,
     ):
+        from bloobcat.funcs.referral_attribution import (
+            is_partner_source_utm,
+            pick_attribution_utm,
+        )
+
         if not telegram_user:
             logger.error("get_user: telegram_user is None")
             return None, False
@@ -567,40 +924,21 @@ class Users(models.Model):
                     username=telegram_user.username,
                     full_name=telegram_user.first_name
                     + (
-                        f" {telegram_user.last_name}"
-                        if telegram_user.last_name
-                        else ""
+                        f" {telegram_user.last_name}" if telegram_user.last_name else ""
                     ),
                     familyurl=get_family_url(telegram_user.id),
-                    # `referred_by=0` became invalid after FK hardening in some environments.
-                    # Keep "no referrer" as NULL for new users.
-                    referred_by=None,
                 ),
             )
 
             # Логируем, является ли пользователь новым
-            logger.debug(f"Пользователь {user.id} - новый: {is_new}, текущий UTM: {user.utm}")
-            
-            needs_save = False
-            
-            # Обработка UTM: first-touch — сохраняем при первом визите с меткой (новый пользователь
-            # или существующий без utm). Иначе у пришедших по партнёрской ссылке после первого
-            # захода без ссылки не считались активации и покупки в статистике партнёра.
-            if utm:
-                logger.debug(f"Получен параметр UTM: {utm} для пользователя {user.id}")
-                current_utm = (getattr(user, "utm", None) or "").strip()
-                if is_new or not current_utm:
-                    user.utm = utm
-                    needs_save = True
-                    logger.debug(
-                        "UTM установлен (is_new=%s, было пусто=%s): %s",
-                        is_new,
-                        not current_utm,
-                        utm,
-                    )
-                else:
-                    logger.debug(f"Пользователь {user.id} уже имеет UTM, пропускаем (first-touch)")
-            
+            logger.debug(
+                f"Пользователь {user.id} - новый: {is_new}, текущий UTM: {user.utm}"
+            )
+
+            updated_fields: set[str] = set()
+
+            current_utm = (getattr(user, "utm", None) or "").strip()
+
             # Обработка реферала:
             # Важно: пользователь мог уже существовать (например, ранее нажал /start без реф-ссылки),
             # а затем пришёл по реферальной ссылке. В этом случае `referred_by` нужно зафиксировать,
@@ -611,26 +949,67 @@ class Users(models.Model):
                 bool(referred_by)
                 and int(referred_by) != int(user.id)
                 and not getattr(user, "referred_by", None)
-                and not bool(getattr(user, "is_registered", False))
             )
+            should_force_partner_source = bool(
+                can_set_referrer and is_partner_source_utm(utm)
+            )
+            next_utm = pick_attribution_utm(
+                current_utm,
+                utm,
+                force_partner_source=should_force_partner_source,
+            )
+            if next_utm != (current_utm or None):
+                user.utm = next_utm
+                updated_fields.add("utm")
+                logger.debug(
+                    "UTM установлен/обновлён (is_new=%s, force_partner_source=%s): %s",
+                    is_new,
+                    should_force_partner_source,
+                    next_utm,
+                )
+            elif utm:
+                logger.debug(
+                    "Пользователь %s сохраняет текущий UTM (incoming=%s, current=%s)",
+                    user.id,
+                    utm,
+                    current_utm,
+                )
             if can_set_referrer:
-                referrer = await cls.get_or_none(id=referred_by)
-                if referrer:
-                    user.referred_by = int(referred_by)
-                    needs_save = True
-                    logger.info(
-                        "Referral bind: user=%s referred_by=%s (is_new=%s)",
+                if referred_by is None:
+                    logger.debug(
+                        "Referral bind skipped: referred_by unexpectedly missing for user=%s",
                         user.id,
-                        referred_by,
-                        is_new,
                     )
                 else:
-                    logger.info(
-                        "Referral bind skipped: referrer not found (user=%s referred_by=%s is_new=%s)",
-                        user.id,
-                        referred_by,
-                        is_new,
-                    )
+                    referred_by_value = int(referred_by)
+                    referrer = await cls.get_or_none(id=referred_by)
+                    if referrer:
+                        rows_updated = await cls.filter(
+                            id=user.id,
+                            referred_by__isnull=True,
+                            is_registered=False,
+                        ).update(referred_by=referred_by_value)
+                        if rows_updated:
+                            user.referred_by = referred_by_value
+                            logger.info(
+                                "Referral bind: user=%s referred_by=%s (is_new=%s)",
+                                user.id,
+                                referred_by,
+                                is_new,
+                            )
+                        else:
+                            logger.debug(
+                                "Referral bind skipped by atomic guard: user=%s provided_referred_by=%s",
+                                user.id,
+                                referred_by,
+                            )
+                    else:
+                        logger.info(
+                            "Referral bind skipped: referrer not found (user=%s referred_by=%s is_new=%s)",
+                            user.id,
+                            referred_by,
+                            is_new,
+                        )
             elif referred_by:
                 # Extra visibility for debugging referrals that "didn't stick".
                 logger.debug(
@@ -643,27 +1022,43 @@ class Users(models.Model):
                 )
 
             if is_new:
+                await cls._scrub_stale_subscription_freezes(
+                    int(user.id),
+                    created_before=getattr(user, "created_at", None),
+                    allow_full_fallback=True,
+                )
+
+            if is_new:
                 # Отправляем уведомление о новом пользователе
                 try:
-                    await on_activated_bot(
+                    delivered = await on_activated_bot(
                         user.id,
                         user.full_name,
                         referrer_id=referrer.id if referrer else None,
                         referrer_name=referrer.full_name if referrer else None,
                         utm=user.utm,
                     )
+                    if not delivered:
+                        logger.warning(
+                            "Лог о новой регистрации не доставлен в админ-чат: user=%s",
+                            user.id,
+                        )
                 except Exception as e:
                     logger.error(
                         f"Ошибка отправки уведомления админу о новом пользователе: {str(e)}"
                     )
-            
+
             # Сохраняем пользователя, если были изменения (UTM или реферал)
-            if needs_save:
-                await user.save()
-                logger.debug(f"Пользователь {user.id} сохранен после изменений. Текущий UTM: {user.utm}")
+            if updated_fields:
+                await user.save(update_fields=sorted(updated_fields))
+                logger.debug(
+                    f"Пользователь {user.id} сохранен после изменений. Текущий UTM: {user.utm}"
+                )
             else:
-                logger.debug(f"Пользователь {user.id} не сохранялся, изменений не было. Текущий UTM: {user.utm}")
-                
+                logger.debug(
+                    f"Пользователь {user.id} не сохранялся, изменений не было. Текущий UTM: {user.utm}"
+                )
+
             # Referral count recalculation is non-critical for auth flow.
             # Do not fail user registration if this side effect is temporary unavailable.
             try:
@@ -677,13 +1072,17 @@ class Users(models.Model):
 
             # Создаем пользователя в RemnaWave, если он еще не создан
             if is_new or not user.remnawave_uuid:
-                await user._ensure_remnawave_user()
+                if ensure_remnawave:
+                    await user._ensure_remnawave_user()
+                else:
+                    cls._schedule_remnawave_ensure(int(user.id))
             # Schedule referral notifications for new users
             if is_new:
                 # Scheduling is a post-registration side effect.
                 # Registration must still succeed even if scheduler is temporarily unhealthy.
                 try:
                     from bloobcat.scheduler import schedule_user_tasks
+
                     await schedule_user_tasks(user)
                 except Exception as e_schedule:
                     logger.error(
@@ -694,7 +1093,7 @@ class Users(models.Model):
                     )
 
             return user, is_new
-            
+
         except Exception as e:
             logger.error(f"Ошибка создания/обновления пользователя: {str(e)}")
             raise
@@ -727,13 +1126,18 @@ class Users(models.Model):
         # Иначе (подписка истекла или ее не было), используем текущую дату.
         # Используем normalize_date для безопасного сравнения datetime/date
         expired_at_normalized = normalize_date(self.expired_at)
-        start_date = max(expired_at_normalized, current_date) if expired_at_normalized else current_date
+        start_date = (
+            max(expired_at_normalized, current_date)
+            if expired_at_normalized
+            else current_date
+        )
 
         self.expired_at = start_date + timedelta(days=days)
-        
+
         await self.save()
         # Schedule subscription tasks whenever expired_at is updated
         from bloobcat.scheduler import schedule_user_tasks
+
         await schedule_user_tasks(self)
 
     async def referrer(self):
@@ -743,9 +1147,7 @@ class Users(models.Model):
 
     async def count_referrals(self):
         """Обновляет счётчик рефералов атомарно, не трогая другие поля"""
-        referrals = await Users.filter(
-            referred_by=self.id, is_registered=True
-        ).count()
+        referrals = await Users.filter(referred_by=self.id, is_registered=True).count()
 
         # Атомарное обновление только поля referrals (не перезаписывает expired_at и др.)
         await Users.filter(id=self.id).update(referrals=referrals)
@@ -761,9 +1163,13 @@ class Users(models.Model):
         """Удаляет пользователя: отзывает задачи Celery, удаляет в RemnaWave и из локальной БД"""
         # Cancel all scheduled asyncio tasks for this user
         from bloobcat.scheduler import cancel_user_tasks
+
         cancel_user_tasks(self.id)
         # Safety net: перед удалением пользователя гарантируем CASCADE для active_tariffs.user_id.
         await ensure_active_tariffs_fk_cascade()
+        await ensure_notification_marks_fk_cascade()
+        await ensure_promo_usages_fk_cascade()
+        await ensure_users_referred_by_fk_set_null()
         # Удаляем пользователя в RemnaWave
         if self.remnawave_uuid:
             from bloobcat.routes.remnawave.client import RemnaWaveClient
@@ -772,7 +1178,10 @@ class Users(models.Model):
                 is_remnawave_transient_error,
             )
             from bloobcat.settings import remnawave_settings
-            client = RemnaWaveClient(remnawave_settings.url, remnawave_settings.token.get_secret_value())
+
+            client = RemnaWaveClient(
+                remnawave_settings.url, remnawave_settings.token.get_secret_value()
+            )
             try:
                 await client.users.delete_user(self.remnawave_uuid)
                 logger.info(f"Пользователь {self.id} удален из RemnaWave")
@@ -811,6 +1220,8 @@ class Users(models.Model):
         return result
 
     async def save(self, *args, **kwargs):
+        skip_remnawave_sync = bool(kwargs.pop("skip_remnawave_sync", False))
+
         # Check previous values for fields that affect task scheduling
         old_expired_at = None
         old_is_subscribed = None
@@ -829,10 +1240,10 @@ class Users(models.Model):
                 # Check if any fields that affect scheduling have changed
                 current_expired_at = normalize_date(self.expired_at)
                 should_reschedule = (
-                    current_expired_at != old_expired_at or
-                    self.is_subscribed != old_is_subscribed or
-                    self.is_trial != old_is_trial or
-                    self.is_blocked != old_is_blocked
+                    current_expired_at != old_expired_at
+                    or self.is_subscribed != old_is_subscribed
+                    or self.is_trial != old_is_trial
+                    or self.is_blocked != old_is_blocked
                 )
             else:
                 # New user, always schedule tasks
@@ -844,67 +1255,89 @@ class Users(models.Model):
         # Save the user as usual
         await super().save(*args, **kwargs)
 
-        if self.expired_at and normalize_date(self.expired_at) != old_expired_at:
+        if (
+            not skip_remnawave_sync
+            and self.expired_at
+            and normalize_date(self.expired_at) != old_expired_at
+        ):
             # Немедленно обновляем RemnaWave при изменении expired_at
             if self.remnawave_uuid:
                 try:
                     from bloobcat.routes.remnawave.client import RemnaWaveClient
                     from bloobcat.settings import remnawave_settings
+
                     remnawave_client = RemnaWaveClient(
-                        remnawave_settings.url, 
-                        remnawave_settings.token.get_secret_value()
+                        remnawave_settings.url,
+                        remnawave_settings.token.get_secret_value(),
                     )
-                    
+
                     try:
                         await remnawave_client.users.update_user(
-                            uuid=self.remnawave_uuid,
-                            expireAt=self.expired_at
+                            uuid=self.remnawave_uuid, expireAt=self.expired_at
                         )
-                        logger.debug(f"User {self.id} RemnaWave updated immediately: {old_expired_at} -> {self.expired_at}")
+                        logger.debug(
+                            f"User {self.id} RemnaWave updated immediately: {old_expired_at} -> {self.expired_at}"
+                        )
                     finally:
                         await remnawave_client.close()
-                        
+
                 except Exception as e:
                     # Если пользователь был удален в RemnaWave – пересоздаем и пытаемся обновить снова
                     err_text = str(e)
-                    if any(token in err_text for token in ["User not found", "A039", "Update user error"]):
+                    if self._is_remnawave_not_found_error(err_text) or any(
+                        token in err_text for token in ["A039", "Update user error"]
+                    ):
                         recreated = await self.recreate_remnawave_user()
                         if recreated and self.remnawave_uuid:
                             try:
-                                from bloobcat.routes.remnawave.client import RemnaWaveClient
+                                from bloobcat.routes.remnawave.client import (
+                                    RemnaWaveClient,
+                                )
                                 from bloobcat.settings import remnawave_settings
+
                                 remnawave_client = RemnaWaveClient(
                                     remnawave_settings.url,
-                                    remnawave_settings.token.get_secret_value()
+                                    remnawave_settings.token.get_secret_value(),
                                 )
                                 try:
                                     await remnawave_client.users.update_user(
                                         uuid=self.remnawave_uuid,
-                                        expireAt=self.expired_at
+                                        expireAt=self.expired_at,
                                     )
-                                    logger.info(f"User {self.id} RemnaWave re-created and updated immediately")
+                                    logger.info(
+                                        f"User {self.id} RemnaWave re-created and updated immediately"
+                                    )
                                 finally:
                                     await remnawave_client.close()
                             except Exception as e2:
-                                logger.warning(f"User {self.id} re-create update attempt failed: {e2}")
+                                logger.warning(
+                                    f"User {self.id} re-create update attempt failed: {e2}"
+                                )
                     else:
-                        logger.warning(f"User {self.id} failed to update RemnaWave immediately, will be synced by batch updater: {e}")
-        
+                        logger.warning(
+                            f"User {self.id} failed to update RemnaWave immediately, will be synced by batch updater: {e}"
+                        )
+
         # Перепланируем задачи только при изменении важных полей
         if should_reschedule:
             try:
                 from bloobcat.scheduler import schedule_user_tasks
-                logger.debug(f"Rescheduling tasks for user {self.id} after save (fields changed).")
+
+                logger.debug(
+                    f"Rescheduling tasks for user {self.id} after save (fields changed)."
+                )
                 await schedule_user_tasks(self)
             except Exception as e:
                 logger.error(f"Failed to reschedule tasks for user {self.id}: {e}")
         else:
-            logger.debug(f"User {self.id} saved without rescheduling tasks (no relevant changes).")
+            logger.debug(
+                f"User {self.id} saved without rescheduling tasks (no relevant changes)."
+            )
 
     class PydanticMeta:
         computed = ["expires", "name", "referral_percent"]
         exclude = ["country_code"]
-    
+
     @staticmethod
     async def get_blocked_users_stats() -> dict:
         """
@@ -914,48 +1347,49 @@ class Users(models.Model):
             from bloobcat.settings import app_settings
             from datetime import datetime, timedelta
             from zoneinfo import ZoneInfo
-            
+
             MOSCOW = ZoneInfo("Europe/Moscow")
-            
+
             total_blocked = await Users.filter(is_blocked=True).count()
-            
+
             # Пользователи заблокированные в последние 24 часа
             last_24h = datetime.now(MOSCOW) - timedelta(hours=24)
             blocked_last_24h = await Users.filter(
-                is_blocked=True,
-                blocked_at__gte=last_24h
+                is_blocked=True, blocked_at__gte=last_24h
             ).count()
-            
+
             # Пользователи готовые к очистке
-            cutoff_date = datetime.now(MOSCOW) - timedelta(days=app_settings.blocked_user_cleanup_days)
+            cutoff_date = datetime.now(MOSCOW) - timedelta(
+                days=app_settings.blocked_user_cleanup_days
+            )
             today = datetime.now(MOSCOW).date()
-            subscription_cutoff_date = today - timedelta(days=app_settings.blocked_user_cleanup_days)
-            
+            subscription_cutoff_date = today - timedelta(
+                days=app_settings.blocked_user_cleanup_days
+            )
+
             # СЛУЧАЙ 1: Триальные пользователи (заблокированы > 7 дней назад)
             blocked_trial_ready = await Users.filter(
-                is_blocked=True,
-                blocked_at__lte=cutoff_date,
-                is_trial=True
+                is_blocked=True, blocked_at__lte=cutoff_date, is_trial=True
             ).count()
-            
+
             # СЛУЧАЙ 2: Платные пользователи с истекшей подпиской (заблокированы > 7 дней И подписка истекла > 7 дней назад)
             blocked_paid_expired_ready = await Users.filter(
                 is_blocked=True,
                 blocked_at__lte=cutoff_date,
                 is_trial=False,
-                expired_at__lte=subscription_cutoff_date
+                expired_at__lte=subscription_cutoff_date,
             ).count()
-            
+
             ready_for_cleanup = blocked_trial_ready + blocked_paid_expired_ready
-            
+
             # Платные пользователи с активной подпиской (которые НЕ удаляются)
             blocked_paid_active = await Users.filter(
                 is_blocked=True,
                 blocked_at__lte=cutoff_date,
                 is_trial=False,
-                expired_at__gt=subscription_cutoff_date
+                expired_at__gt=subscription_cutoff_date,
             ).count()
-            
+
             return {
                 "total_blocked": total_blocked,
                 "blocked_last_24h": blocked_last_24h,
@@ -965,13 +1399,11 @@ class Users(models.Model):
                 "blocked_paid_active": blocked_paid_active,
                 "cleanup_enabled": app_settings.cleanup_blocked_users_enabled,
                 "cleanup_days": app_settings.blocked_user_cleanup_days,
-                "max_failed_attempts": app_settings.blocked_user_max_failed_attempts
+                "max_failed_attempts": app_settings.blocked_user_max_failed_attempts,
             }
         except Exception as e:
             logger.error(f"Error getting blocked users stats: {e}")
-            return {
-                "error": str(e)
-            }
+            return {"error": str(e)}
 
 
 User_Pydantic = pydantic_model_creator(Users, name="User")
@@ -979,9 +1411,11 @@ User_Pydantic = pydantic_model_creator(Users, name="User")
 
 class UsersUpdateSchema(FastAdminBaseModel):
     """Схема обновления пользователя через админку (включая LTE лимит)."""
+
     lte_gb_total: Optional[int] = Field(
         None, description="LTE лимит (GB) для активного тарифа"
     )
+
 
 @register(Users)
 class UsersModelAdmin(TortoiseModelAdmin):
@@ -1001,9 +1435,7 @@ class UsersModelAdmin(TortoiseModelAdmin):
         "blocked_at",
         "prize_wheel_attempts",
     )
-    list_editable = (
-        "prize_wheel_attempts",
-    )
+    list_editable = ("prize_wheel_attempts",)
     readonly_fields = (
         "id",
         "registration_date",
@@ -1052,9 +1484,9 @@ class UsersModelAdmin(TortoiseModelAdmin):
     async def save_model(self, pk, form_data=None):
         """
         Переопределенный метод сохранения пользователя.
-        
+
         После сохранения в БД обновляет дату истечения и лимит устройств в RemnaWave.
-        
+
         :param pk: Первичный ключ пользователя (ID)
         :param form_data: Данные формы с изменениями
         """
@@ -1065,7 +1497,7 @@ class UsersModelAdmin(TortoiseModelAdmin):
         original_obj = None
         original_expired_at = None
         original_hwid_limit = None
-        
+
         if pk:
             original_obj = await Users.get_or_none(id=pk)
             if original_obj:
@@ -1091,7 +1523,7 @@ class UsersModelAdmin(TortoiseModelAdmin):
             raise ValueError("Нельзя включать is_trial при активном тарифе.")
 
         result = await super().save_model(pk, form_data)
-        
+
         obj = await Users.get(id=pk)
 
         if lte_gb_total is not None:
@@ -1112,27 +1544,40 @@ class UsersModelAdmin(TortoiseModelAdmin):
                 try:
                     from bloobcat.routes.remnawave.lte_utils import set_lte_squad_status
                     from bloobcat.db.notifications import NotificationMarks
+
                     should_enable = lte_gb_total > float(active_tariff.lte_gb_used or 0)
                     if obj.remnawave_uuid:
-                        await set_lte_squad_status(str(obj.remnawave_uuid), enable=should_enable)
-                    await NotificationMarks.filter(user_id=obj.id, type="lte_usage").delete()
+                        await set_lte_squad_status(
+                            str(obj.remnawave_uuid), enable=should_enable
+                        )
+                    await NotificationMarks.filter(
+                        user_id=obj.id, type="lte_usage"
+                    ).delete()
                 except Exception as e:
                     logger.error(f"Ошибка обновления LTE лимита для {obj.id}: {e}")
             else:
                 try:
                     from bloobcat.routes.remnawave.lte_utils import set_lte_squad_status
                     from bloobcat.db.notifications import NotificationMarks
+
                     # Для пользователей без active_tariff_id (триал/партнеры) сверяем
                     # фактический расход в RemnaWave, чтобы не включать LTE при нулевом остатке.
                     should_enable = lte_gb_total > 0
                     if obj.remnawave_uuid:
-                        from datetime import datetime, timezone, timedelta, time as dt_time
+                        from datetime import (
+                            datetime,
+                            timezone,
+                            timedelta,
+                            time as dt_time,
+                        )
                         from bloobcat.routes.remnawave.client import RemnaWaveClient
                         from bloobcat.settings import remnawave_settings
 
-                        BYTES_IN_GB = 1024 ** 3
+                        BYTES_IN_GB = 1024**3
                         MSK_TZ = timezone(timedelta(hours=3))
-                        marker_upper = (remnawave_settings.lte_node_marker or "").upper()
+                        marker_upper = (
+                            remnawave_settings.lte_node_marker or ""
+                        ).upper()
 
                         created_at = obj.created_at
                         if created_at:
@@ -1144,13 +1589,19 @@ class UsersModelAdmin(TortoiseModelAdmin):
                         else:
                             start_date = datetime.now(MSK_TZ).date()
 
-                        start_dt = datetime.combine(start_date, dt_time.min, tzinfo=MSK_TZ)
-                        start_str = start_dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-                        end_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+                        start_dt = datetime.combine(
+                            start_date, dt_time.min, tzinfo=MSK_TZ
+                        )
+                        start_str = start_dt.astimezone(timezone.utc).strftime(
+                            "%Y-%m-%dT%H:%M:%S.000Z"
+                        )
+                        end_str = datetime.now(timezone.utc).strftime(
+                            "%Y-%m-%dT%H:%M:%S.000Z"
+                        )
 
                         client = RemnaWaveClient(
                             remnawave_settings.url,
-                            remnawave_settings.token.get_secret_value()
+                            remnawave_settings.token.get_secret_value(),
                         )
                         try:
                             resp = await client.users.get_user_usage_by_range(
@@ -1170,9 +1621,13 @@ class UsersModelAdmin(TortoiseModelAdmin):
                         finally:
                             await client.close()
 
-                        await set_lte_squad_status(str(obj.remnawave_uuid), enable=should_enable)
+                        await set_lte_squad_status(
+                            str(obj.remnawave_uuid), enable=should_enable
+                        )
 
-                    await NotificationMarks.filter(user_id=obj.id, type="lte_usage").delete()
+                    await NotificationMarks.filter(
+                        user_id=obj.id, type="lte_usage"
+                    ).delete()
                     logger.info(
                         "Admin LTE update without active_tariff: user=%s total=%s enable=%s",
                         obj.id,
@@ -1180,47 +1635,70 @@ class UsersModelAdmin(TortoiseModelAdmin):
                         should_enable,
                     )
                 except Exception as e:
-                    logger.error(f"Ошибка обновления LTE лимита для {obj.id} (без active_tariff): {e}")
-        
-        logger.debug(f"Пользователь {obj.id} сохранен. Проверяем необходимость обновления в RemnaWave")
-        
+                    logger.error(
+                        f"Ошибка обновления LTE лимита для {obj.id} (без active_tariff): {e}"
+                    )
+
+        logger.debug(
+            f"Пользователь {obj.id} сохранен. Проверяем необходимость обновления в RemnaWave"
+        )
+
         if obj.remnawave_uuid:
             updates_needed = {}
-            
+
             # Проверяем изменение даты истечения
             obj_expired_at = normalize_date(obj.expired_at)
             orig_expired_at = normalize_date(original_expired_at)
             if obj_expired_at and obj_expired_at != orig_expired_at:
                 from datetime import date
+
                 today = date.today()
 
                 if obj_expired_at < today:
-                    logger.warning(f"Дата истечения {obj.expired_at} в прошлом. Пропускаем обновление даты.")
+                    logger.warning(
+                        f"Дата истечения {obj.expired_at} в прошлом. Пропускаем обновление даты."
+                    )
                 else:
                     updates_needed["expireAt"] = obj.expired_at
-                    logger.debug(f"Дата истечения изменилась: {original_expired_at} -> {obj.expired_at}")
-            
+                    logger.debug(
+                        f"Дата истечения изменилась: {original_expired_at} -> {obj.expired_at}"
+                    )
+
             # Проверяем изменение hwid_limit
             if obj.hwid_limit is not None and obj.hwid_limit != original_hwid_limit:
                 updates_needed["hwidDeviceLimit"] = obj.hwid_limit
-                logger.debug(f"Лимит устройств изменился: {original_hwid_limit} -> {obj.hwid_limit}")
-            
+                logger.debug(
+                    f"Лимит устройств изменился: {original_hwid_limit} -> {obj.hwid_limit}"
+                )
+
             # Обновляем RemnaWave, если есть изменения
             if updates_needed:
                 try:
                     from bloobcat.routes.remnawave.client import RemnaWaveClient
-                    client = RemnaWaveClient(remnawave_settings.url, remnawave_settings.token.get_secret_value())
+
+                    client = RemnaWaveClient(
+                        remnawave_settings.url,
+                        remnawave_settings.token.get_secret_value(),
+                    )
                     try:
-                        await client.users.update_user(obj.remnawave_uuid, **updates_needed)
-                        logger.debug(f"Данные для пользователя {obj.id} обновлены в RemnaWave: {updates_needed}")
+                        await client.users.update_user(
+                            obj.remnawave_uuid, **updates_needed
+                        )
+                        logger.debug(
+                            f"Данные для пользователя {obj.id} обновлены в RemnaWave: {updates_needed}"
+                        )
                     finally:
                         await client.close()
                 except Exception as e:
-                    logger.error(f"Ошибка при обновлении данных в RemnaWave для пользователя {obj.id}: {e}", 
-                                exc_info=True)
+                    logger.error(
+                        f"Ошибка при обновлении данных в RemnaWave для пользователя {obj.id}: {e}",
+                        exc_info=True,
+                    )
         else:
-            logger.warning(f"Пользователь {obj.id} не имеет UUID в RemnaWave, обновления пропускаются")
-        
+            logger.warning(
+                f"Пользователь {obj.id} не имеет UUID в RemnaWave, обновления пропускаются"
+            )
+
         return result
 
     async def delete_model(self, pk: int):
@@ -1230,9 +1708,12 @@ class UsersModelAdmin(TortoiseModelAdmin):
         if user_obj:
             # Удаляем через метод delete(), где отзываются задачи Celery и удаляется из RemnaWave
             await user_obj.delete()
-            logger.info(f"Пользователь {pk} удалён через админку с revocation Celery и RemnaWave")
+            logger.info(
+                f"Пользователь {pk} удалён через админку с revocation Celery и RemnaWave"
+            )
         else:
-            logger.warning(f"Пользователь с ID {pk} не найден при удалении через админку")
+            logger.warning(
+                f"Пользователь с ID {pk} не найден при удалении через админку"
+            )
         # Возвращаем стандартный ответ админки
         await super().delete_model(pk)
-

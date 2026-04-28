@@ -10,11 +10,12 @@ from bloobcat.db.users import Users, normalize_date
 from bloobcat.db.connections import Connections
 from bloobcat.db.payments import ProcessedPayments
 from bloobcat.db.partner_qr import PartnerQr
+from bloobcat.funcs.referral_attribution import is_partner_source_utm
 from bloobcat.logger import get_logger
 from bloobcat.db.hwid_local import HwidDeviceLocal
 from .client import RemnaWaveClient
 from .activation_logic import should_trigger_registration
-from .hwid_utils import extract_hwid_from_device, has_duplicate_hwid, parse_remnawave_devices
+from .hwid_utils import extract_hwid_from_device, parse_remnawave_devices
 from bloobcat.settings import remnawave_settings, test_mode
 from bloobcat.bot.notifications.general.referral import on_referral_registration
 from bloobcat.bot.notifications.trial.revoked_hwid import notify_trial_revoked_hwid
@@ -102,6 +103,46 @@ def _normalize_hwid_limit(value: Any) -> Optional[int]:
     except (TypeError, ValueError):
         return 1
     return max(1, parsed)
+
+
+def _seed_orphan_owners_from_hwid_cache(
+    uuid_owner_map: Dict[str, int],
+    cached_rows: list[dict],
+) -> None:
+    """Backfill UUID ownership from the local HWID cache.
+
+    Old RemnaWave UUIDs can remain in `hwid_devices_local` after a local user is
+    rebound or recreated. Treating those old UUIDs as a different owner creates
+    false duplicate-HWID sanctions; the cache stores telegram_user_id exactly to
+    keep same-owner historical UUIDs safe.
+    """
+    for item in cached_rows:
+        user_uuid_value = item.get("user_uuid")
+        cached_owner_id = item.get("telegram_user_id")
+        if not user_uuid_value or not cached_owner_id:
+            continue
+        uuid_owner_map.setdefault(str(user_uuid_value), int(cached_owner_id))
+
+
+def _user_has_hwid_device(user_uuid: str, hwid_index: Dict[str, set[str]]) -> bool:
+    return any(user_uuid in owners for owners in hwid_index.values())
+
+
+def _has_duplicate_hwid_for_other_owner(
+    user_uuid: str,
+    owner_id: int | None,
+    uuid_owner_map: Dict[str, int],
+    hwid_index: Dict[str, set[str]],
+) -> bool:
+    for owners in hwid_index.values():
+        if user_uuid not in owners:
+            continue
+        for other_uuid in owners:
+            if other_uuid == user_uuid:
+                continue
+            if uuid_owner_map.get(other_uuid) != owner_id:
+                return True
+    return False
 
 @router.get("/status")
 async def remnawave_status():
@@ -284,22 +325,34 @@ async def remnawave_updater():
         anti_twink_enabled = not test_mode
         logger.info("Anti-twink checker enabled=%s (test_mode=%s)", anti_twink_enabled, test_mode)
 
+        uuid_owner_map: dict[str, int] = {}
+        tracked_uuid_owner_pairs: list[tuple[str, int]] = []
+        for item in users_with_uuid:
+            uuid_str = str(item.remnawave_uuid)
+            uuid_owner_map[uuid_str] = item.id
+            tracked_uuid_owner_pairs.append((uuid_str, item.id))
+
         hwid_index: dict[str, set[str]] = {}
+        hwid_check_available = anti_twink_enabled
         total_hwid_payload_items = 0
         users_with_any_hwid_payload = 0
         if anti_twink_enabled:
             try:
                 # 0) Берем локальный кеш, чтобы учитывать старые HWID (даже если удалены на панели)
-                cached = await HwidDeviceLocal.all().values("hwid", "user_uuid")
+                cached = await HwidDeviceLocal.all().values(
+                    "hwid",
+                    "user_uuid",
+                    "telegram_user_id",
+                )
                 for item in cached:
                     hwid_value = item.get("hwid")
                     user_uuid_value = item.get("user_uuid")
                     if hwid_value and user_uuid_value:
                         hwid_index.setdefault(str(hwid_value), set()).add(str(user_uuid_value))
+                _seed_orphan_owners_from_hwid_cache(uuid_owner_map, cached)
 
-                # 1) Для каждого нашего пользователя тянем его устройства и сохраняем локально
-                for user in users_with_uuid:
-                    user_uuid_str = str(user.remnawave_uuid)
+                # 1) Для каждого tracked UUID тянем его устройства и сохраняем локально
+                for user_uuid_str, owner_id in tracked_uuid_owner_pairs:
                     try:
                         raw_devices = await remnawave.users.get_user_hwid_devices(user_uuid_str)
                     except Exception as e:
@@ -322,7 +375,7 @@ async def remnawave_updater():
                                 obj, created = await HwidDeviceLocal.get_or_create(
                                     hwid=hwid_str,
                                     user_uuid=user_uuid_str,
-                                    defaults={"telegram_user_id": user.id},
+                                    defaults={"telegram_user_id": owner_id},
                                 )
                             except IntegrityError:
                                 obj = await HwidDeviceLocal.get_or_none(
@@ -331,8 +384,8 @@ async def remnawave_updater():
                                 if not obj:
                                     raise
                                 created = False
-                            if obj.telegram_user_id != user.id:
-                                obj.telegram_user_id = user.id
+                            if obj.telegram_user_id != owner_id:
+                                obj.telegram_user_id = owner_id
                             obj.last_seen_at = datetime.now(ZoneInfo("UTC"))
                             await obj.save(update_fields=["telegram_user_id", "last_seen_at"])
                         except Exception as persist_exc:
@@ -351,6 +404,7 @@ async def remnawave_updater():
                 )
             except Exception as e:
                 anti_twink_enabled = False
+                hwid_check_available = False
                 logger.warning(
                     "Не удалось собрать индекс HWID, анти-твинк отключен для цикла: %s",
                     e,
@@ -368,7 +422,7 @@ async def remnawave_updater():
         # (если промокод был применён во время загрузки данных из RemnaWave)
         user_ids = [u.id for u in users_with_uuid]
         fresh_users_data = await Users.filter(id__in=user_ids).values(
-            'id', 'expired_at', 'hwid_limit', 'active_tariff_id', 'is_trial', 'used_trial'
+            'id', 'expired_at', 'hwid_limit', 'active_tariff_id', 'is_trial', 'used_trial', 'key_activated'
         )
         fresh_data_map = {item['id']: item for item in fresh_users_data}
         logger.debug(f"Загружены актуальные данные для {len(fresh_data_map)} пользователей")
@@ -379,6 +433,7 @@ async def remnawave_updater():
         online_at_recovered_count = 0
         activation_path_entered_count = 0
         activation_notify_sent_count = 0
+        activation_notify_failed_count = 0
         activation_skipped_flags_count = 0
         duplicate_hwid_detected_count = 0
         duplicate_hwid_blocked_count = 0
@@ -399,6 +454,7 @@ async def remnawave_updater():
                     db_active_tariff_id = fresh_data.get('active_tariff_id', user.active_tariff_id)
                     db_is_trial = fresh_data.get('is_trial', user.is_trial)
                     db_used_trial = fresh_data.get('used_trial', user.used_trial)
+                    db_key_activated = fresh_data.get('key_activated', user.key_activated)
 
                     # Словарь для сбора обновлений для RemnaWave
                     remnawave_updates = {}
@@ -475,17 +531,25 @@ async def remnawave_updater():
                                 block_registration = True
                             if (
                                 anti_twink_enabled
-                                and not old_connected_at
-                                and not user.is_registered
+                                and not db_key_activated
                             ):
                                 current_uuid = str(user.remnawave_uuid) if user.remnawave_uuid else None
+                                current_owner_id = (
+                                    uuid_owner_map.get(current_uuid) if current_uuid else None
+                                )
                                 user_devices_hwid = (
                                     [hwid for hwid, owners in hwid_index.items() if current_uuid in owners]
                                     if current_uuid
                                     else []
                                 )
                                 duplicate_hwid = (
-                                    bool(current_uuid) and has_duplicate_hwid(current_uuid, hwid_index)
+                                    bool(current_uuid)
+                                    and _has_duplicate_hwid_for_other_owner(
+                                        current_uuid,
+                                        current_owner_id,
+                                        uuid_owner_map,
+                                        hwid_index,
+                                    )
                                 )
 
                                 if duplicate_hwid and not has_paid_subscription:
@@ -549,6 +613,18 @@ async def remnawave_updater():
                                         user.id,
                                     )
 
+                            # Эталонная логика: activation/admin log должен срабатывать
+                            # только после появления первого HWID, а не по одному onlineAt.
+                            if test_mode:
+                                has_hwid_device = True
+                            elif hwid_check_available:
+                                has_hwid_device = _user_has_hwid_device(
+                                    user_uuid_str,
+                                    hwid_index,
+                                )
+                            else:
+                                has_hwid_device = False
+
                             # Разрешаем регистрацию, только если нет блокировки (включая сохранённую анти-твинк санкцию)
                             should_register = should_trigger_registration(
                                 online_at=online_at,
@@ -556,15 +632,34 @@ async def remnawave_updater():
                                 is_registered=user.is_registered,
                                 block_registration=block_registration,
                                 is_antitwink_sanction=is_antitwink_sanction,
+                                key_activated=db_key_activated,
+                                has_hwid_device=has_hwid_device,
                             )
                             if should_register:
                                 activation_path_entered_count += 1
                                 referrer = await user.referrer()
-                                await on_activated_key(user.id, user.full_name, referrer_id=referrer.id if referrer else None, referrer_name=referrer.full_name if referrer else None, utm=user.utm)
+                                delivered = await on_activated_key(
+                                    user.id,
+                                    user.full_name,
+                                    referrer_id=referrer.id if referrer else None,
+                                    referrer_name=referrer.full_name if referrer else None,
+                                    utm=user.utm,
+                                )
+                                user.key_activated = True
                                 user.is_registered = True
                                 registration_changed = True
-                                activation_notify_sent_count += 1
-                                logger.info(f"Первое подключение пользователя {user.id}, отправлено уведомление")
+                                if delivered:
+                                    activation_notify_sent_count += 1
+                                    logger.info(
+                                        f"Первое зарегистрированное HWID-устройство пользователя {user.id}, admin log доставлен"
+                                    )
+                                else:
+                                    activation_notify_failed_count += 1
+                                    logger.warning(
+                                        "Первое зарегистрированное HWID-устройство пользователя %s зафиксировано, "
+                                        "но admin log не доставлен",
+                                        user.id,
+                                    )
 
                                 # Partner QR "activation": when a user connects for the first time,
                                 # and their utm/start param points to a QR token, increment QR activations counter.
@@ -585,10 +680,10 @@ async def remnawave_updater():
                                 except Exception as e_qr_act:
                                     logger.warning("Failed to update partner QR activations for user %s: %s", user.id, e_qr_act)
 
-                                # TVPN referral program is days-based (not money-based).
+                                # Vectra Connect referral program is days-based (not money-based).
                                 # We do NOT credit any RUB bonus on registration.
                                 # Optional: keep a lightweight "friend registered" notification (no balance changes).
-                                if referrer:
+                                if referrer and not is_partner_source_utm(getattr(user, "utm", None)):
                                     try:
                                         await on_referral_registration(referrer, user)
                                         logger.info(f"Реферал зарегистрировался: уведомили реферера {referrer.id} о регистрации {user.id}")
@@ -597,8 +692,10 @@ async def remnawave_updater():
                             else:
                                 activation_skipped_flags_count += 1
                                 logger.debug(
-                                    "Activation skipped user=%s reason_flags: is_registered=%s block_registration=%s antitwink_sanction=%s has_paid_subscription=%s old_connected_at=%s",
+                                    "Activation skipped user=%s reason_flags: key_activated=%s has_hwid_device=%s is_registered=%s block_registration=%s antitwink_sanction=%s has_paid_subscription=%s old_connected_at=%s",
                                     user.id,
+                                    db_key_activated,
+                                    has_hwid_device,
                                     user.is_registered,
                                     block_registration,
                                     is_antitwink_sanction,
@@ -741,6 +838,7 @@ async def remnawave_updater():
             "onlineAt_recovered_individual": online_at_recovered_count,
             "activation_candidates": activation_path_entered_count,
             "activation_notify_sent": activation_notify_sent_count,
+            "activation_notify_failed": activation_notify_failed_count,
             "activation_skipped": activation_skipped_flags_count,
             "duplicate_hwid_detected": duplicate_hwid_detected_count,
             "duplicate_hwid_blocked": duplicate_hwid_blocked_count,
@@ -754,10 +852,11 @@ async def remnawave_updater():
         # Выполняем батчевое обновление пользователей
         if users_to_bulk_update:
             try:
-                # Используем bulk_update для обновления connected_at и is_registered
+                # key_activated фиксирует факт первой HWID-активации; без него
+                # admin/referral уведомления повторятся на следующих циклах.
                 await Users.bulk_update(
                     users_to_bulk_update, 
-                    fields=['connected_at', 'is_registered']
+                    fields=['connected_at', 'is_registered', 'key_activated']
                 )
                 logger.info(f"Батчевое обновление выполнено для {len(users_to_bulk_update)} пользователей")
             except Exception:
@@ -765,7 +864,7 @@ async def remnawave_updater():
                 # Fallback: сохраняем пользователей по одному
                 for user in users_to_bulk_update:
                     try:
-                        await user.save(update_fields=['connected_at', 'is_registered'])
+                        await user.save(update_fields=['connected_at', 'is_registered', 'key_activated'])
                     except Exception:
                         logger.exception("Ошибка при сохранении пользователя %s", user.id)
                         errors += 1

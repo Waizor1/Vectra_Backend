@@ -31,7 +31,7 @@ async def trial_expiring_catchup_once(now_msk: datetime | None = None) -> int:
 
     tomorrow = (now_msk + timedelta(days=1)).date()
 
-    users = await Users.filter(is_trial=True, expired_at=tomorrow)
+    users = await Users.filter(is_trial=True, is_blocked=False, expired_at=tomorrow)
     sent = 0
     for user in users:
         # Idempotency: mark per (user, expired_at)
@@ -41,11 +41,12 @@ async def trial_expiring_catchup_once(now_msk: datetime | None = None) -> int:
         if mark_exists:
             continue
         try:
-            await notify_expiring_trial(user)
-            await NotificationMarks.create(
-                user_id=user.id, type="trial_expiring", key=str(tomorrow)
-            )
-            sent += 1
+            sent_ok = await notify_expiring_trial(user)
+            if sent_ok:
+                await NotificationMarks.create(
+                    user_id=user.id, type="trial_expiring", key=str(tomorrow)
+                )
+                sent += 1
         except Exception as e:
             logger.error(f"Failed to send trial expiring to user {user.id}: {e}")
 
@@ -64,5 +65,4 @@ async def run_trial_expiring_catchup_scheduler(interval_seconds: int = 600):
         except Exception as e:
             logger.error(f"Error in trial expiring catch-up scheduler: {e}")
         await asyncio.sleep(interval_seconds)
-
 

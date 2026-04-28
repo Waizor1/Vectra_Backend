@@ -2,27 +2,36 @@ name: Auto Deploy Backend
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main ]
     paths:
       - '**'
   release:
     types: [ published ]
   workflow_dispatch:
+    inputs:
+      allow_destructive_db_reset_once:
+        description: "Allow one-time destructive DB fallback (default: false)"
+        required: false
+        default: "false"
+      destructive_reset_ack:
+        description: "Ack token for one-time destructive DB fallback"
+        required: false
+        default: ""
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 35
     concurrency:
-      group: tvpn-backend-deploy-${{ github.ref }}
-      cancel-in-progress: true
+      group: tvpn-backend-deploy-prod
+      cancel-in-progress: ${{ vars.PRERELEASE_FULL_REINSTALL != 'true' }}
     
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
 
     - name: Setup Python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v6
       with:
         python-version: '3.12'
 
@@ -45,42 +54,51 @@ jobs:
     - name: Run backend tests
       run: python -m pytest tests -q
 
-    - name: Detect deploy target
-      id: deploy_target
-      shell: bash
-      env:
-        SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
-        SERVER_HOST: ${{ secrets.SERVER_HOST }}
-        SERVER_USER: ${{ secrets.SERVER_USER }}
-        PROJECT_PATH: ${{ secrets.PROJECT_PATH }}
+    - name: Setup SSH agent
       run: |
-        if [ -n "$SSH_PRIVATE_KEY" ] && [ -n "$SERVER_HOST" ] && [ -n "$SERVER_USER" ] && [ -n "$PROJECT_PATH" ]; then
-          echo "enabled=true" >> "$GITHUB_OUTPUT"
-        else
-          echo "enabled=false" >> "$GITHUB_OUTPUT"
-          echo "::notice::Backend SSH deploy secrets are not configured; tests passed and deploy steps will be skipped."
-        fi
-
-    - name: Setup SSH
-      if: steps.deploy_target.outputs.enabled == 'true'
-      uses: webfactory/ssh-agent@v0.8.0
-      with:
-        ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+        mkdir -p ~/.ssh
+        chmod 700 ~/.ssh
+        eval "$(ssh-agent -s)"
+        echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> "$GITHUB_ENV"
+        echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> "$GITHUB_ENV"
+        printf '%s\n' "${{ secrets.SSH_PRIVATE_KEY }}" | tr -d '\r' | ssh-add -
 
     - name: Add server to known hosts
-      if: steps.deploy_target.outputs.enabled == 'true'
       run: |
         ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts
+        chmod 644 ~/.ssh/known_hosts
 
     - name: Deploy to server
-      if: steps.deploy_target.outputs.enabled == 'true'
       env:
         SERVER_HOST: ${{ secrets.SERVER_HOST }}
         SERVER_USER: ${{ secrets.SERVER_USER }}
         PROJECT_PATH: ${{ secrets.PROJECT_PATH }}
+        GITHUB_REF_TYPE: ${{ github.ref_type }}
+        GITHUB_REF_NAME: ${{ github.ref_name }}
+        GITHUB_EVENT_NAME: ${{ github.event_name }}
+        PRERELEASE_FULL_REINSTALL: ${{ vars.PRERELEASE_FULL_REINSTALL || 'false' }}
+        ALLOW_DESTRUCTIVE_DB_RESET_ONCE: ${{ github.event_name == 'workflow_dispatch' && inputs.allow_destructive_db_reset_once || 'false' }}
+        DESTRUCTIVE_RESET_ACK: ${{ github.event_name == 'workflow_dispatch' && inputs.destructive_reset_ack || '' }}
+        DESTRUCTIVE_RESET_ACK_TOKEN: ${{ vars.DESTRUCTIVE_RESET_ACK_TOKEN || 'RESET_DB_VOLUME_ONCE' }}
       run: |
-        ssh $SERVER_USER@$SERVER_HOST << EOF
-        set -e
+        set -euo pipefail
+        DEPLOY_LOG_FILE="$(mktemp)"
+        cleanup_deploy_log() {
+          rm -f "$DEPLOY_LOG_FILE"
+        }
+        trap cleanup_deploy_log EXIT
+
+        REMOTE_SCRIPT_CONTENT="$(cat <<'REMOTE_SCRIPT'
+        PROJECT_PATH="$1"
+        GITHUB_REF_TYPE="${2:-}"
+        GITHUB_REF_NAME="${3:-}"
+        ALLOW_DESTRUCTIVE_DB_RESET_ONCE="${4:-false}"
+        DESTRUCTIVE_RESET_ACK="${5:-}"
+        DESTRUCTIVE_RESET_ACK_TOKEN="${6:-RESET_DB_VOLUME_ONCE}"
+        PRERELEASE_FULL_REINSTALL="${7:-false}"
+        GITHUB_EVENT_NAME="${8:-}"
+
+        set -euo pipefail
         if [ -z "$PROJECT_PATH" ]; then
           echo "PROJECT_PATH is empty"
           exit 1
@@ -88,16 +106,70 @@ jobs:
         cd "$PROJECT_PATH"
         echo "🚀 Выполняем деплой..."
 
-        if [ -d .git ]; then
-          # The VPS repo can have local hotfixes / untracked overrides.
-          # If we don't stash them, `git pull --ff-only` can fail and block deploy.
-          # We stash including untracked files to avoid merge overwrites (best-effort).
-          ts="$(date +%F_%H%M%S)"
-          git stash push -u -m "autodeploy-prepull $ts" || true
-          git pull --ff-only
-        else
-          echo "⚠️  No .git directory in PROJECT_PATH; skipping git pull"
+        if [ ! -d .git ]; then
+          echo "❌ .git directory not found in PROJECT_PATH: $PROJECT_PATH"
+          exit 1
         fi
+
+        TARGET_BRANCH="main" # Non-branch events intentionally default to main.
+        if [ "${GITHUB_REF_TYPE:-}" = "branch" ] && [ -n "${GITHUB_REF_NAME:-}" ]; then
+          TARGET_BRANCH="$GITHUB_REF_NAME"
+        fi
+        echo "🔀 Deploy branch: \$TARGET_BRANCH"
+
+        normalize_toggle() {
+          raw_value="$1"
+          if [ "$raw_value" = "true" ]; then
+            printf 'true'
+          else
+            printf 'false'
+          fi
+        }
+
+        PRERELEASE_FULL_REINSTALL_NORMALIZED="$(normalize_toggle "${PRERELEASE_FULL_REINSTALL:-false}")"
+        FULL_REINSTALL_ACTIVE=0
+        FULL_REINSTALL_INACTIVE_REASON=""
+        if [ "${GITHUB_EVENT_NAME:-}" != "push" ]; then
+          FULL_REINSTALL_INACTIVE_REASON="event='${GITHUB_EVENT_NAME:-unknown}' is not push"
+        elif [ "$TARGET_BRANCH" != "main" ]; then
+          FULL_REINSTALL_INACTIVE_REASON="target branch '$TARGET_BRANCH' is not main"
+        elif [ "$PRERELEASE_FULL_REINSTALL_NORMALIZED" != "true" ]; then
+          FULL_REINSTALL_INACTIVE_REASON="PRERELEASE_FULL_REINSTALL='${PRERELEASE_FULL_REINSTALL:-false}' is not true"
+        else
+          FULL_REINSTALL_ACTIVE=1
+        fi
+
+        if [ "$FULL_REINSTALL_ACTIVE" -eq 1 ]; then
+          echo "🧪 PRERELEASE FULL REINSTALL MODE: ACTIVE (event=push, branch=main, toggle=true)"
+        else
+          echo "ℹ️  PRERELEASE FULL REINSTALL MODE: INACTIVE ($FULL_REINSTALL_INACTIVE_REASON)"
+        fi
+
+        git fetch --prune origin "\$TARGET_BRANCH"
+        if ! git rev-parse --verify --quiet "origin/\$TARGET_BRANCH^{commit}" >/dev/null; then
+          echo "❌ Remote branch not found: origin/\$TARGET_BRANCH"
+          exit 1
+        fi
+        git checkout -f -B "\$TARGET_BRANCH" "origin/\$TARGET_BRANCH"
+        git reset --hard "origin/\$TARGET_BRANCH"
+        git clean -ffd
+
+        if [ -n "\$(git status --porcelain --untracked-files=no)" ]; then
+          echo "❌ Git working tree is dirty after sync (tracked files only)"
+          git status --short --untracked-files=no
+          exit 1
+        fi
+        echo "✅ Working tree is clean after sync"
+
+        LOCAL_HEAD="\$(git rev-parse HEAD)"
+        REMOTE_HEAD="\$(git rev-parse "origin/\$TARGET_BRANCH")"
+        if [ "\$LOCAL_HEAD" != "\$REMOTE_HEAD" ]; then
+          echo "❌ Git sync verification failed: HEAD mismatch after reset"
+          echo "Local: \$LOCAL_HEAD"
+          echo "Remote: \$REMOTE_HEAD"
+          exit 1
+        fi
+        echo "✅ Synced commit: \$LOCAL_HEAD"
 
         if [ ! -f docker-compose.yml ]; then
           echo "docker-compose.yml not found in $PROJECT_PATH"
@@ -107,9 +179,41 @@ jobs:
         # Prefer prod override when present (Caddy/TLS, etc.)
         if [ -f docker-compose.prod.yml ]; then
           COMPOSE_ARGS="-f docker-compose.yml -f docker-compose.prod.yml"
+          COMPOSE_FILES="docker-compose.yml,docker-compose.prod.yml"
         else
           COMPOSE_ARGS="-f docker-compose.yml"
+          COMPOSE_FILES="docker-compose.yml"
         fi
+
+        resolve_compose_project_name() {
+          if [ -n "${COMPOSE_PROJECT_NAME:-}" ]; then
+            printf '%s' "$COMPOSE_PROJECT_NAME"
+          else
+            raw_name="$(basename "$PROJECT_PATH")"
+            sanitized_name="$(printf '%s' "$raw_name" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' '_' | tr -s '_' | sed 's/^_*//; s/_*$//')"
+            printf '%s' "${sanitized_name:-tvpn_backend}"
+          fi
+        }
+
+        COMPOSE_PROJECT_NAME_RESOLVED="$(resolve_compose_project_name)"
+        export COMPOSE_PROJECT_NAME="$COMPOSE_PROJECT_NAME_RESOLVED"
+        echo "🧭 Using deterministic COMPOSE_PROJECT_NAME='$COMPOSE_PROJECT_NAME'"
+
+        compose_exec() {
+          if [ "${COMPOSE_EXEC_SUPPORTS_INTERACTIVE+x}" != "x" ]; then
+            if docker compose $COMPOSE_ARGS exec --help 2>/dev/null | grep -q -- '--interactive'; then
+              COMPOSE_EXEC_SUPPORTS_INTERACTIVE=1
+            else
+              COMPOSE_EXEC_SUPPORTS_INTERACTIVE=0
+            fi
+          fi
+
+          if [ "$COMPOSE_EXEC_SUPPORTS_INTERACTIVE" -eq 1 ]; then
+            docker compose $COMPOSE_ARGS exec --interactive=false -T "$@" </dev/null
+          else
+            docker compose $COMPOSE_ARGS exec -T "$@" </dev/null
+          fi
+        }
 
         echo "рџ›°пёЏ  Pre-pulling python:3.12-slim (best-effort)..."
         PULL_OK=0
@@ -130,77 +234,398 @@ jobs:
           echo "вљ пёЏ  python:3.12-slim pre-pull failed after retries; continuing with compose build"
         fi
 
-        echo "рџЏ—пёЏ  Running docker compose up --build with retries..."
-        DEPLOY_OK=0
+        if [ "$FULL_REINSTALL_ACTIVE" -eq 1 ]; then
+          echo "🧹 Running prerelease full reinstall for compose project '$COMPOSE_PROJECT_NAME_RESOLVED'"
+          docker compose $COMPOSE_ARGS down -v --remove-orphans
+
+          PROJECT_SCOPED_VOLUMES="$(docker volume ls -q --filter "label=com.docker.compose.project=$COMPOSE_PROJECT_NAME_RESOLVED")"
+          if [ -z "$PROJECT_SCOPED_VOLUMES" ]; then
+            echo "ℹ️  No project-scoped volumes found for '$COMPOSE_PROJECT_NAME_RESOLVED'"
+          else
+            printf '%s\n' "$PROJECT_SCOPED_VOLUMES" | while IFS= read -r volume_name || [ -n "$volume_name" ]; do
+              [ -n "$volume_name" ] || continue
+              echo "🗑️  Removing project volume: $volume_name"
+              docker volume rm "$volume_name"
+            done
+          fi
+
+          container_exists_exact() {
+            container_name="$1"
+            matched_name="$(docker ps -a --filter "name=^/${container_name}$" --format '{{.Names}}')"
+            [ "$matched_name" = "$container_name" ]
+          }
+
+          inspect_container_compose_project_label() {
+            container_name="$1"
+            container_label="$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.project" }}' "$container_name" 2>/dev/null || true)"
+            if [ "$container_label" = "<no value>" ] || [ "$container_label" = "<nil>" ]; then
+              container_label=""
+            fi
+            printf '%s' "$container_label"
+          }
+
+          cleanup_stale_fixed_name_container() {
+            container_name="$1"
+            allow_unlabeled="$2"
+
+            if ! container_exists_exact "$container_name"; then
+              echo "ℹ️  No stale fixed-name container found: $container_name"
+              return 0
+            fi
+
+            container_project_label="$(inspect_container_compose_project_label "$container_name")"
+            if [ -n "$container_project_label" ] && [ "$container_project_label" != "$COMPOSE_PROJECT_NAME_RESOLVED" ]; then
+              echo "⏭️  Skipping stale fixed-name container owned by another compose project: $container_name (project='$container_project_label')"
+              return 0
+            fi
+
+            if [ -z "$container_project_label" ] && [ "$allow_unlabeled" != "true" ]; then
+              echo "⏭️  Skipping unlabeled fixed-name container due alias safety guard: $container_name"
+              return 0
+            fi
+
+            echo "🧽 Removing stale fixed-name container: $container_name"
+            docker rm -f "$container_name"
+          }
+
+          cleanup_stale_fixed_name_container "bloobcat_db" "true"
+          cleanup_stale_fixed_name_container "bloobcat" "true"
+          cleanup_stale_fixed_name_container "bloobcat_directus" "true"
+          cleanup_stale_fixed_name_container "directus" "false"
+        fi
+
+        echo "🗄️  Starting DB service first with retries..."
+        DB_DEPLOY_OK=0
         for attempt in 1 2 3; do
-          echo "compose deploy attempt \$attempt/3"
-          if DOCKER_CLIENT_TIMEOUT=240 COMPOSE_HTTP_TIMEOUT=240 docker compose \$COMPOSE_ARGS up -d --build; then
-            DEPLOY_OK=1
+          echo "DB deploy attempt \$attempt/3"
+          set +e
+          DOCKER_CLIENT_TIMEOUT=240 COMPOSE_HTTP_TIMEOUT=240 docker compose \$COMPOSE_ARGS up -d --build bloobcat_db
+          rc=\$?
+          set -e
+          if [ "\$rc" -eq 0 ]; then
+            DB_DEPLOY_OK=1
             break
           fi
-          rc=\$?
-          echo "вљ пёЏ  compose deploy attempt failed (exit=\$rc)"
+          echo "⚠️  DB deploy attempt failed (exit=\$rc)"
           if [ "\$attempt" -lt 3 ]; then
-            echo "вљ пёЏ  retry in 20s..."
+            echo "⚠️  retry in 20s..."
             sleep 20
           fi
         done
-        if [ "\$DEPLOY_OK" -ne 1 ]; then
-          echo "вќЊ docker compose up -d --build failed after retries"
+        if [ "\$DB_DEPLOY_OK" -ne 1 ]; then
+          echo "❌ DB service deploy failed after retries"
+          docker compose \$COMPOSE_ARGS ps || true
+          docker compose \$COMPOSE_ARGS logs --tail=200 bloobcat_db || true
+          exit 1
+        fi
+
+        echo "🩺 Waiting for DB service readiness..."
+        DB_READY=0
+        for i in {1..60}; do
+          if compose_exec bloobcat_db pg_isready -U postgres -d postgres >/dev/null 2>&1; then
+            DB_READY=1
+            break
+          fi
+          sleep 2
+        done
+
+        if [ "\$DB_READY" -ne 1 ]; then
+          echo "❌ bloobcat_db did not become ready in time"
+          docker compose \$COMPOSE_ARGS ps
+          docker compose \$COMPOSE_ARGS logs --tail=200 bloobcat_db || true
+          exit 1
+        fi
+
+        normalize_secret_value() {
+          value="\$1"
+          value="\${value%$'\r'}"
+          value="\${value#"\${value%%[![:space:]]*}"}"
+          value="\${value%"\${value##*[![:space:]]}"}"
+
+          case "\$value" in
+            \"*\")
+              value="\${value#\"}"
+              value="\${value%\"}"
+              ;;
+            \'*\')
+              value="\${value#\'}"
+              value="\${value%\'}"
+              ;;
+          esac
+
+          printf '%s' "\$value"
+        }
+
+        resolve_postgres_password() {
+          resolved=""
+
+          if [ -f .env ]; then
+            while IFS= read -r line || [ -n "\$line" ]; do
+              line="\${line%$'\r'}"
+              case "\$line" in
+                ''|\#*)
+                  continue
+                  ;;
+                export\ *)
+                  line="\${line#export }"
+                  ;;
+              esac
+
+              case "\$line" in
+                POSTGRES_PASSWORD=*)
+                  resolved="\${line#POSTGRES_PASSWORD=}"
+                  resolved="\$(normalize_secret_value "\$resolved")"
+                  break
+                  ;;
+              esac
+            done < .env
+          fi
+
+          if [ -z "\$resolved" ]; then
+            resolved="\$(compose_exec bloobcat_db sh -c 'printf %s "\${POSTGRES_PASSWORD:-}"' 2>/dev/null || true)"
+            resolved="\$(normalize_secret_value "\$resolved")"
+          fi
+
+          if [ -n "\$resolved" ] && [[ "\$resolved" == *'\${'* ]]; then
+            echo "❌ POSTGRES_PASSWORD appears unresolved (contains literal dollar-brace placeholder pattern)"
+            return 1
+          fi
+
+          printf '%s' "\$resolved"
+        }
+
+        POSTGRES_PASSWORD="\$(resolve_postgres_password)"
+
+        if [ -z "\$POSTGRES_PASSWORD" ]; then
+          echo "❌ POSTGRES_PASSWORD is required for reconcile script"
+          exit 1
+        fi
+
+        echo "🛡️  Running non-destructive DB credential reconcile..."
+        if ! POSTGRES_PASSWORD="\$POSTGRES_PASSWORD" COMPOSE_FILES="\$COMPOSE_FILES" sh scripts/db/reconcile_postgres_auth.sh; then
+          echo "❌ Non-destructive DB credential reconcile failed"
+          docker compose \$COMPOSE_ARGS logs --tail=200 bloobcat_db || true
+          exit 1
+        fi
+
+        echo "🏗️  Starting application services with retries..."
+        APP_SERVICES="bloobcat directus"
+        HAS_CADDY_SERVICE=0
+        if docker compose $COMPOSE_ARGS config --services | grep -qx "caddy"; then
+          HAS_CADDY_SERVICE=1
+          APP_SERVICES="$APP_SERVICES caddy"
+        fi
+        APP_DEPLOY_OK=0
+        for attempt in 1 2 3; do
+          echo "app deploy attempt \$attempt/3"
+          if DOCKER_CLIENT_TIMEOUT=240 COMPOSE_HTTP_TIMEOUT=240 docker compose \$COMPOSE_ARGS up -d --build \$APP_SERVICES; then
+            APP_DEPLOY_OK=1
+            break
+          else
+            rc=\$?
+            echo "⚠️  app deploy attempt failed (exit=\$rc)"
+          fi
+          if [ "\$attempt" -lt 3 ]; then
+            echo "⚠️  retry in 20s..."
+            sleep 20
+          fi
+        done
+        if [ "\$APP_DEPLOY_OK" -ne 1 ]; then
+          echo "❌ Application services deploy failed after retries"
           docker compose \$COMPOSE_ARGS ps || true
           docker compose \$COMPOSE_ARGS logs --tail=200 bloobcat || true
+          docker compose \$COMPOSE_ARGS logs --tail=200 directus || true
           exit 1
+        fi
+
+        if [ "\$HAS_CADDY_SERVICE" -eq 1 ]; then
+          echo "🩺 Verifying caddy container is running..."
+          CADDY_CONTAINER_ID="\$(docker compose \$COMPOSE_ARGS ps -q caddy)"
+          if [ -z "\$CADDY_CONTAINER_ID" ]; then
+            echo "❌ Caddy service is expected but container is missing"
+            docker compose \$COMPOSE_ARGS ps || true
+            docker compose \$COMPOSE_ARGS logs --tail=200 caddy || true
+            exit 1
+          fi
+
+          CADDY_RUNNING_STATE="\$(docker inspect --format '{{.State.Running}}' "\$CADDY_CONTAINER_ID" 2>/dev/null || true)"
+          if [ "\$CADDY_RUNNING_STATE" != "true" ]; then
+            echo "❌ Caddy service is expected but not running (container=\$CADDY_CONTAINER_ID, running=\$CADDY_RUNNING_STATE)"
+            docker compose \$COMPOSE_ARGS ps || true
+            docker compose \$COMPOSE_ARGS logs --tail=200 caddy || true
+            exit 1
+          fi
+
+          echo "✅ Caddy service is running (container=\$CADDY_CONTAINER_ID)"
         fi
 
         # Directus doesn't always reload app extensions on volume changes.
         # Restart ensures new /directus/extensions/* dist bundles are picked up.
         docker compose \$COMPOSE_ARGS restart directus || true
 
-        echo "🩺 Ждем готовности Directus..."
-        echo "🩺 Waiting for bloobcat health..."
-        BLOOBCAT_READY=0
-        for i in {1..90}; do
-          if command -v curl >/dev/null; then
-            if curl -sf "http://localhost:33083/health" >/dev/null; then
-              BLOOBCAT_READY=1
-              break
+        wait_bloobcat_health() {
+          BLOOBCAT_READY=0
+          for i in {1..90}; do
+            if command -v curl >/dev/null; then
+              if curl -sf "http://localhost:33083/health" >/dev/null; then
+                BLOOBCAT_READY=1
+                break
+              fi
+            else
+              if wget -qO- "http://localhost:33083/health" >/dev/null; then
+                BLOOBCAT_READY=1
+                break
+              fi
             fi
-          else
-            if wget -qO- "http://localhost:33083/health" >/dev/null; then
-              BLOOBCAT_READY=1
-              break
-            fi
-          fi
-          sleep 2
-        done
+            sleep 2
+          done
+          [ "\$BLOOBCAT_READY" -eq 1 ]
+        }
 
-        if [ "\$BLOOBCAT_READY" -ne 1 ]; then
+        wait_directus_health() {
+          DIRECTUS_READY=0
+          for i in {1..60}; do
+            if command -v curl >/dev/null; then
+              if curl -sf "http://localhost:8055/server/health" >/dev/null; then
+                DIRECTUS_READY=1
+                break
+              fi
+            else
+              if wget -qO- "http://localhost:8055/server/health" >/dev/null; then
+                DIRECTUS_READY=1
+                break
+              fi
+            fi
+            sleep 2
+          done
+          [ "\$DIRECTUS_READY" -eq 1 ]
+        }
+
+        echo "🩺 Waiting for bloobcat health..."
+        if ! wait_bloobcat_health; then
           echo "❌ bloobcat did not become healthy in time"
           docker compose \$COMPOSE_ARGS ps
           docker compose \$COMPOSE_ARGS logs --tail=200 bloobcat || true
           exit 1
         fi
 
-        DIRECTUS_READY=0
-        for i in {1..60}; do
-          if command -v curl >/dev/null; then
-            if curl -sf "http://localhost:8055/server/health" >/dev/null; then
-              DIRECTUS_READY=1
-              break
-            fi
-          else
-            if wget -qO- "http://localhost:8055/server/health" >/dev/null; then
-              DIRECTUS_READY=1
-              break
-            fi
-          fi
-          sleep 2
-        done
-
-        if [ "\$DIRECTUS_READY" -ne 1 ]; then
-          echo "❌ Directus не стал healthy за отведенное время"
+        DIRECTUS_HEALTH_WAIT_STARTED_AT="\$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+        echo "🩺 Waiting for Directus health (failure window starts at \$DIRECTUS_HEALTH_WAIT_STARTED_AT)..."
+        if ! wait_directus_health; then
+          echo "❌ Directus did not become healthy in time"
           docker compose \$COMPOSE_ARGS ps
           docker compose \$COMPOSE_ARGS logs --tail=120 directus || true
+
+          if [ "\${ALLOW_DESTRUCTIVE_DB_RESET_ONCE:-false}" = "true" ] && [ -n "\${DESTRUCTIVE_RESET_ACK:-}" ]; then
+            echo "🔎 Evaluating DB-specific fallback preconditions..."
+
+            DB_AUTH_LOG_MATCH=0
+            if docker compose \$COMPOSE_ARGS logs --since "\$DIRECTUS_HEALTH_WAIT_STARTED_AT" --tail=200 directus 2>&1 | grep -Eqi '28P01|password authentication failed'; then
+              DB_AUTH_LOG_MATCH=1
+              echo "✅ Directus logs since health-wait window contain DB auth failure signature"
+            else
+              echo "ℹ️  Directus logs since health-wait window do not contain DB auth failure signature"
+            fi
+
+            DIRECTUS_DB_USER="\$(compose_exec directus sh -c 'printf %s "\${DB_USER:-}"' 2>/dev/null || true)"
+            DIRECTUS_DB_PASSWORD="\$(compose_exec directus sh -c 'printf %s "\${DB_PASSWORD:-}"' 2>/dev/null || true)"
+            DIRECTUS_DB_DATABASE="\$(compose_exec directus sh -c 'printf %s "\${DB_DATABASE:-postgres}"' 2>/dev/null || true)"
+
+            DB_AUTH_PROBE_MISMATCH=0
+            if [ -n "\$DIRECTUS_DB_USER" ] && [ -n "\$DIRECTUS_DB_PASSWORD" ] && [ -n "\$DIRECTUS_DB_DATABASE" ]; then
+              # DB_AUTH_PROBE_CONTRACT: in-container-sh-posargs
+              DB_AUTH_PROBE_OUTPUT="\$(compose_exec bloobcat_db sh -lc 'PGPASSWORD="\$1" psql -h 127.0.0.1 -U "\$2" -d "\$3" -c "SELECT 1;"' sh "\$DIRECTUS_DB_PASSWORD" "\$DIRECTUS_DB_USER" "\$DIRECTUS_DB_DATABASE" 2>&1 || true)"
+              if printf '%s\n' "\$DB_AUTH_PROBE_OUTPUT" | grep -Eqi '28P01|password authentication failed'; then
+                DB_AUTH_PROBE_MISMATCH=1
+                echo "✅ DB auth probe indicates Directus credential mismatch"
+              else
+                echo "ℹ️  DB auth probe did not indicate Directus credential mismatch"
+              fi
+            else
+              echo "⚠️  DB auth probe skipped: missing DB_USER/DB_PASSWORD/DB_DATABASE in Directus env"
+            fi
+
+            if [ "\$DB_AUTH_LOG_MATCH" -ne 1 ] && [ "\$DB_AUTH_PROBE_MISMATCH" -ne 1 ]; then
+              echo "❌ Destructive fallback blocked: Directus health failure is not confirmed as DB auth mismatch (no 28P01/password-auth evidence)"
+              echo "❌ Refusing to run destructive_reset_once.sh without DB-specific evidence"
+              exit 1
+            fi
+
+            echo "⚠️  Opt-in destructive fallback enabled with DB auth evidence; attempting one-time DB reset"
+
+            DESTRUCTIVE_RESET_MARKER_PATH="/var/tmp/tvpn/\${COMPOSE_PROJECT_NAME}_destructive_db_reset_once.marker"
+
+            if ! ALLOW_DESTRUCTIVE_DB_RESET_ONCE="\${ALLOW_DESTRUCTIVE_DB_RESET_ONCE}" \
+              DESTRUCTIVE_RESET_ACK="\${DESTRUCTIVE_RESET_ACK}" \
+              DESTRUCTIVE_RESET_ACK_TOKEN="\${DESTRUCTIVE_RESET_ACK_TOKEN}" \
+              COMPOSE_PROJECT_NAME="\${COMPOSE_PROJECT_NAME}" \
+              DESTRUCTIVE_RESET_MARKER_PATH="\${DESTRUCTIVE_RESET_MARKER_PATH}" \
+              COMPOSE_FILES="\$COMPOSE_FILES" \
+              sh scripts/db/destructive_reset_once.sh; then
+              echo "❌ Destructive fallback failed"
+              docker compose \$COMPOSE_ARGS ps
+              docker compose \$COMPOSE_ARGS logs --tail=200 bloobcat_db || true
+              docker compose \$COMPOSE_ARGS logs --tail=200 directus || true
+              exit 1
+            fi
+
+            echo "🩺 Waiting for DB readiness after destructive fallback..."
+            DB_READY_AFTER_FALLBACK=0
+            for i in {1..60}; do
+              if compose_exec bloobcat_db pg_isready -U postgres -d postgres >/dev/null 2>&1; then
+                DB_READY_AFTER_FALLBACK=1
+                break
+              fi
+              sleep 2
+            done
+
+            if [ "\$DB_READY_AFTER_FALLBACK" -ne 1 ]; then
+              echo "❌ bloobcat_db did not become ready after destructive fallback"
+              docker compose \$COMPOSE_ARGS ps
+              docker compose \$COMPOSE_ARGS logs --tail=200 bloobcat_db || true
+              exit 1
+            fi
+
+            echo "🛡️  Re-running non-destructive DB credential reconcile after fallback..."
+            if ! POSTGRES_PASSWORD="\$POSTGRES_PASSWORD" COMPOSE_FILES="\$COMPOSE_FILES" sh scripts/db/reconcile_postgres_auth.sh; then
+              echo "❌ Reconcile after destructive fallback failed"
+              docker compose \$COMPOSE_ARGS logs --tail=200 bloobcat_db || true
+              exit 1
+            fi
+
+            echo "🩺 Re-running service health checks after fallback..."
+            if ! wait_bloobcat_health; then
+              echo "❌ bloobcat did not recover after destructive fallback"
+              docker compose \$COMPOSE_ARGS ps
+              docker compose \$COMPOSE_ARGS logs --tail=200 bloobcat || true
+              exit 1
+            fi
+
+            if ! wait_directus_health; then
+              echo "❌ Directus still unhealthy after destructive fallback"
+              docker compose \$COMPOSE_ARGS ps
+              docker compose \$COMPOSE_ARGS logs --tail=200 directus || true
+              exit 1
+            fi
+          else
+            echo "ℹ️  Destructive fallback is disabled (default)."
+            echo "ℹ️  To enable one-time fallback set ALLOW_DESTRUCTIVE_DB_RESET_ONCE=true and provide DESTRUCTIVE_RESET_ACK."
+            exit 1
+          fi
+        fi
+
+        echo "🧭 Running explicit migrations + runtime-state verification..."
+        if ! compose_exec bloobcat sh -lc '
+          if command -v python >/dev/null 2>&1; then
+            python scripts/apply_migrations.py
+          else
+            python3 scripts/apply_migrations.py
+          fi
+        '; then
+          echo "❌ Migration + runtime-state verification failed; abort deploy"
+          docker compose \$COMPOSE_ARGS ps
+          docker compose \$COMPOSE_ARGS logs --tail=150 bloobcat || true
+          docker compose \$COMPOSE_ARGS logs --tail=150 bloobcat_db || true
           exit 1
         fi
 
@@ -209,99 +634,96 @@ jobs:
         # Setup can fail transiently right after restart; retry to reduce flaky deploys.
         echo "Fixing FK active_tariffs.user_id -> users.id (ON DELETE CASCADE)..."
         FK_FIX_OK=0
-        HAS_DB_SERVICE=0
-        if docker compose \$COMPOSE_ARGS config --services | grep -qx "bloobcat_db"; then
-          HAS_DB_SERVICE=1
-        fi
+        echo "FK repair uses deterministic SQL payload mode"
 
-        if [ "\$HAS_DB_SERVICE" -eq 1 ]; then
-          if docker compose \$COMPOSE_ARGS exec -T bloobcat_db \
-            psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
-              -c "DO \\\$\\\$
-            DECLARE
-              schema_rec RECORD;
-              fk_rec RECORD;
-            BEGIN
-              FOR schema_rec IN
-                SELECT ns.nspname AS schema_name
-                FROM pg_namespace ns
-                WHERE ns.nspname NOT IN ('pg_catalog', 'information_schema')
-                  AND EXISTS (
-                    SELECT 1
-                    FROM pg_class cls
-                    WHERE cls.relnamespace = ns.oid
-                      AND cls.relname = 'active_tariffs'
-                      AND cls.relkind IN ('r', 'p')
-                  )
-                  AND EXISTS (
-                    SELECT 1
-                    FROM pg_class cls
-                    WHERE cls.relnamespace = ns.oid
-                      AND cls.relname = 'users'
-                      AND cls.relkind IN ('r', 'p')
-                  )
-              LOOP
-                FOR fk_rec IN
-                  SELECT tc.constraint_name
-                  FROM information_schema.table_constraints tc
-                  JOIN information_schema.key_column_usage kcu
-                    ON tc.constraint_name = kcu.constraint_name
-                   AND tc.constraint_schema = kcu.constraint_schema
-                  JOIN information_schema.constraint_column_usage ccu
-                    ON tc.constraint_name = ccu.constraint_name
-                   AND tc.constraint_schema = ccu.constraint_schema
-                  WHERE tc.constraint_type = 'FOREIGN KEY'
-                    AND tc.table_schema = schema_rec.schema_name
-                    AND tc.table_name = 'active_tariffs'
-                    AND kcu.column_name = 'user_id'
-                    AND ccu.table_name = 'users'
-                    AND ccu.column_name = 'id'
-                LOOP
-                  EXECUTE format(
-                    'ALTER TABLE %I.%I DROP CONSTRAINT IF EXISTS %I',
-                    schema_rec.schema_name,
-                    'active_tariffs',
-                    fk_rec.constraint_name
-                  );
-                END LOOP;
+        FK_REPAIR_SQL="$(cat <<-'FK_REPAIR_SQL_PAYLOAD'
+        DO $tvpn_fk$
+        DECLARE
+          schema_rec RECORD;
+          fk_rec RECORD;
+        BEGIN
+          FOR schema_rec IN
+            SELECT ns.nspname AS schema_name
+            FROM pg_namespace ns
+            WHERE ns.nspname NOT IN ('pg_catalog', 'information_schema')
+              AND EXISTS (
+                SELECT 1
+                FROM pg_class cls
+                WHERE cls.relnamespace = ns.oid
+                  AND cls.relname = 'active_tariffs'
+                  AND cls.relkind IN ('r', 'p')
+              )
+              AND EXISTS (
+                SELECT 1
+                FROM pg_class cls
+                WHERE cls.relnamespace = ns.oid
+                  AND cls.relname = 'users'
+                  AND cls.relkind IN ('r', 'p')
+              )
+          LOOP
+            FOR fk_rec IN
+              SELECT tc.constraint_name
+              FROM information_schema.table_constraints tc
+              JOIN information_schema.key_column_usage kcu
+                ON tc.constraint_name = kcu.constraint_name
+               AND tc.constraint_schema = kcu.constraint_schema
+              JOIN information_schema.constraint_column_usage ccu
+                ON tc.constraint_name = ccu.constraint_name
+               AND tc.constraint_schema = ccu.constraint_schema
+              WHERE tc.constraint_type = 'FOREIGN KEY'
+                AND tc.table_schema = schema_rec.schema_name
+                AND tc.table_name = 'active_tariffs'
+                AND kcu.column_name = 'user_id'
+                AND ccu.table_name = 'users'
+                AND ccu.column_name = 'id'
+            LOOP
+              EXECUTE format(
+                'ALTER TABLE %I.%I DROP CONSTRAINT IF EXISTS %I',
+                schema_rec.schema_name,
+                'active_tariffs',
+                fk_rec.constraint_name
+              );
+            END LOOP;
 
-                EXECUTE format(
-                  'ALTER TABLE %I.%I ADD CONSTRAINT %I FOREIGN KEY (%I) REFERENCES %I.%I (%I) ON DELETE CASCADE',
-                  schema_rec.schema_name,
-                  'active_tariffs',
-                  'fk_active_tariffs_user',
-                  'user_id',
-                  schema_rec.schema_name,
-                  'users',
-                  'id'
-                );
-              END LOOP;
-            END \\\$\\\$;" \
-              -c "SELECT
-            tc.table_schema,
-            tc.constraint_name,
-            rc.delete_rule
-          FROM information_schema.table_constraints tc
-          JOIN information_schema.key_column_usage kcu
-            ON tc.constraint_name = kcu.constraint_name
-           AND tc.constraint_schema = kcu.constraint_schema
-          JOIN information_schema.constraint_column_usage ccu
-            ON tc.constraint_name = ccu.constraint_name
-           AND tc.constraint_schema = ccu.constraint_schema
-          JOIN information_schema.referential_constraints rc
-            ON tc.constraint_name = rc.constraint_name
-           AND tc.constraint_schema = rc.constraint_schema
-          WHERE tc.constraint_type = 'FOREIGN KEY'
-            AND tc.table_name = 'active_tariffs'
-            AND kcu.column_name = 'user_id'
-            AND ccu.table_name = 'users'
-            AND ccu.column_name = 'id'
-          ORDER BY tc.table_schema, tc.constraint_name;" \
-            </dev/null; then
-            FK_FIX_OK=1
-          fi
-        else
-          echo "Warning: service bloobcat_db not found in compose config; skipping FK DB fix"
+            EXECUTE format(
+              'ALTER TABLE %I.%I ADD CONSTRAINT %I FOREIGN KEY (%I) REFERENCES %I.%I (%I) ON DELETE CASCADE',
+              schema_rec.schema_name,
+              'active_tariffs',
+              'fk_active_tariffs_user',
+              'user_id',
+              schema_rec.schema_name,
+              'users',
+              'id'
+            );
+          END LOOP;
+        END
+        $tvpn_fk$;
+        FK_REPAIR_SQL_PAYLOAD
+        )"
+
+        if compose_exec bloobcat_db \
+          psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -c "\$FK_REPAIR_SQL" \
+            -c "SELECT
+          tc.table_schema,
+          tc.constraint_name,
+          rc.delete_rule
+        FROM information_schema.table_constraints tc
+        JOIN information_schema.key_column_usage kcu
+          ON tc.constraint_name = kcu.constraint_name
+         AND tc.constraint_schema = kcu.constraint_schema
+        JOIN information_schema.constraint_column_usage ccu
+          ON tc.constraint_name = ccu.constraint_name
+         AND tc.constraint_schema = ccu.constraint_schema
+        JOIN information_schema.referential_constraints rc
+          ON tc.constraint_name = rc.constraint_name
+         AND tc.constraint_schema = rc.constraint_schema
+        WHERE tc.constraint_type = 'FOREIGN KEY'
+          AND tc.table_name = 'active_tariffs'
+          AND kcu.column_name = 'user_id'
+          AND ccu.table_name = 'users'
+          AND ccu.column_name = 'id'
+        ORDER BY tc.table_schema, tc.constraint_name;"; then
           FK_FIX_OK=1
         fi
 
@@ -313,7 +735,7 @@ jobs:
         fi
 
         SUPER_SETUP_OK=0
-        if docker compose \$COMPOSE_ARGS exec -T bloobcat sh -lc '
+        if compose_exec bloobcat sh -lc '
           export DIRECTUS_URL="http://directus:8055"
           attempt=1
           max_attempts=4
@@ -334,20 +756,55 @@ jobs:
             attempt=\$((attempt + 1))
           done
           exit 1
-        ' </dev/null; then
+        '; then
           SUPER_SETUP_OK=1
         fi
 
         if [ "\$SUPER_SETUP_OK" -ne 1 ]; then
-          echo "⚠️  Directus super-setup failed after retries; continue deploy without blocking release"
+          echo "❌ Directus super-setup failed after retries; abort deploy"
           docker compose \$COMPOSE_ARGS ps
           docker compose \$COMPOSE_ARGS logs --tail=150 bloobcat || true
           docker compose \$COMPOSE_ARGS logs --tail=150 directus || true
+          exit 1
+        fi
+
+        echo "Running post-super-setup runtime-state verification gate..."
+        POST_SETUP_VERIFY_OK=0
+        if compose_exec bloobcat sh -lc '
+          if (python scripts/verify_runtime_state.py || python3 scripts/verify_runtime_state.py); then
+            exit 0
+          fi
+
+          echo "Runtime-state verify failed after super-setup; attempting FK self-heal..."
+          if (python scripts/self_heal_runtime_state.py || python3 scripts/self_heal_runtime_state.py); then
+            echo "Self-heal completed, re-running runtime-state verification..."
+          else
+            echo "FK self-heal failed"
+            exit 1
+          fi
+
+          if (python scripts/verify_runtime_state.py || python3 scripts/verify_runtime_state.py); then
+            exit 0
+          fi
+
+          echo "Runtime-state verification still failing after self-heal"
+          exit 1
+        '; then
+          POST_SETUP_VERIFY_OK=1
+        fi
+
+        if [ "\$POST_SETUP_VERIFY_OK" -ne 1 ]; then
+          echo "Post-super-setup runtime-state gate failed; abort deploy"
+          docker compose \$COMPOSE_ARGS ps
+          docker compose \$COMPOSE_ARGS logs --tail=200 bloobcat || true
+          docker compose \$COMPOSE_ARGS logs --tail=200 bloobcat_db || true
+          docker compose \$COMPOSE_ARGS logs --tail=200 directus || true
+          exit 1
         fi
 
         echo "📦 Применяем тарифы (idempotent seed)..."
         TARIFFS_SEED_OK=0
-        if docker compose \$COMPOSE_ARGS exec -T bloobcat sh -lc '
+        if compose_exec bloobcat sh -lc '
           attempt=1
           max_attempts=3
           while [ "\$attempt" -le "\$max_attempts" ]; do
@@ -364,7 +821,7 @@ jobs:
             attempt=\$((attempt + 1))
           done
           exit 1
-        ' </dev/null; then
+        '; then
           TARIFFS_SEED_OK=1
         fi
 
@@ -376,4 +833,27 @@ jobs:
         fi
 
         echo "✅ Деплой завершен"
-        EOF
+        echo "__TVPN_DEPLOY_DONE__"
+        REMOTE_SCRIPT
+        )"
+
+        # Preserve the existing remote script content while switching to quoted heredoc transport.
+        REMOTE_SCRIPT_CONTENT="${REMOTE_SCRIPT_CONTENT//\\$/\$}"
+
+        if ! printf '%s\n' "$REMOTE_SCRIPT_CONTENT" | ssh "$SERVER_USER@$SERVER_HOST" bash -seuo pipefail -s -- \
+          "$PROJECT_PATH" \
+          "$GITHUB_REF_TYPE" \
+          "$GITHUB_REF_NAME" \
+          "$ALLOW_DESTRUCTIVE_DB_RESET_ONCE" \
+          "$DESTRUCTIVE_RESET_ACK" \
+          "$DESTRUCTIVE_RESET_ACK_TOKEN" \
+          "$PRERELEASE_FULL_REINSTALL" \
+          "$GITHUB_EVENT_NAME" | tee "$DEPLOY_LOG_FILE"; then
+          echo "❌ Remote deploy execution failed"
+          exit 1
+        fi
+
+        if ! grep -Fq "__TVPN_DEPLOY_DONE__" "$DEPLOY_LOG_FILE"; then
+          echo "❌ Remote deploy completion marker missing (__TVPN_DEPLOY_DONE__)"
+          exit 1
+        fi

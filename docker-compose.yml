@@ -4,11 +4,12 @@ services:
     container_name: bloobcat_db
     restart: always
     environment:
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       TZ: Europe/Moscow
       POSTGRES_INITDB_ARGS: "-c timezone='Europe/Moscow'"
     ports:
-      - "59132:5432"
+      - "127.0.0.1:59132:5432"
     volumes:
       - bloobcat-db-volume:/var/lib/postgresql/data
     networks:
@@ -26,8 +27,9 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - TZ=Europe/Moscow
+      - SCRIPT_DB=postgres://postgres:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@bloobcat_db:5432/postgres
     ports:
-      - "33083:33083"
+      - "127.0.0.1:33083:33083"
     container_name: bloobcat
     restart: always
     build:
@@ -58,7 +60,7 @@ services:
         condition: service_healthy
 
   directus:
-    image: directus/directus:11.15.0
+    image: directus/directus:11.17.3
     container_name: bloobcat_directus
     restart: always
     depends_on:
@@ -77,7 +79,7 @@ services:
       DB_PORT: 5432
       DB_DATABASE: postgres
       DB_USER: postgres
-      DB_PASSWORD: postgres
+      DB_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       WEBSOCKETS_ENABLED: "true"
       CORS_ENABLED: "true"
       CORS_ORIGIN: "true"
@@ -88,7 +90,7 @@ services:
       ADMIN_INTEGRATION_TOKEN: ${ADMIN_INTEGRATION_TOKEN}
       PROMO_HMAC_SECRET: ${PROMO_HMAC_SECRET}
     ports:
-      - "8055:8055"
+      - "127.0.0.1:8055:8055"
     volumes:
       - ./directus/extensions:/directus/extensions
       - directus-uploads:/directus/uploads

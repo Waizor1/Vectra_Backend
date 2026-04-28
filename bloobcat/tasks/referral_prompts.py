@@ -34,7 +34,7 @@ async def _send_referral_prompt_if_due(user: Users, now_msk: datetime) -> bool:
     should_send_now = _should_send_today(now_msk)
     # region agent log
     try:
-        with open("/Users/urijgurov/Documents/resilcio/documents/PROJECTS/Разработки/BloobCat/BloobCatbot/.cursor/debug.log", "a", encoding="utf-8") as f:
+        with open("/Users/urijgurov/Documents/resilcio/documents/PROJECTS/Разработки/Vectra/VectraConnectbot/.cursor/debug.log", "a", encoding="utf-8") as f:
             f.write(json.dumps({
                 "sessionId": "debug-session",
                 "runId": "pre-fix",
@@ -65,7 +65,7 @@ async def _send_referral_prompt_if_due(user: Users, now_msk: datetime) -> bool:
             last_age_days = None
             if last_30d and last_30d.sent_at:
                 last_age_days = (now_msk.date() - last_30d.sent_at.astimezone(MOSCOW).date()).days
-            with open("/Users/urijgurov/Documents/resilcio/documents/PROJECTS/Разработки/BloobCat/BloobCatbot/.cursor/debug.log", "a", encoding="utf-8") as f:
+            with open("/Users/urijgurov/Documents/resilcio/documents/PROJECTS/Разработки/Vectra/VectraConnectbot/.cursor/debug.log", "a", encoding="utf-8") as f:
                 f.write(json.dumps({
                     "sessionId": "debug-session",
                     "runId": "pre-fix",

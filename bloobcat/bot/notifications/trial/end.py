@@ -3,38 +3,43 @@ from bloobcat.bot.bot import bot
 from bloobcat.bot.keyboard import webapp_inline_button
 from bloobcat.logger import get_logger
 from bloobcat.bot.notifications.localization import get_user_locale
+from bloobcat.bot.notifications.rescue_link import append_rescue_link
 from bloobcat.bot.error_handler import handle_telegram_forbidden_error, handle_telegram_bad_request, reset_user_failed_count
 
 logger = get_logger("notifications.trial.end")
 
-async def notify_trial_ended(user):
+async def notify_trial_ended(user) -> bool:
     """
     Уведомляет пользователя о завершении пробного периода
     """
     lang = get_user_locale(user)
     if lang == 'ru':
         text = (
-            f"Привет, {user.full_name}! Ваш пробный период завершен.\n"
-            "Не упустите возможность продления и получите эксклюзивные условия!\n"
-            "Обратитесь в поддержку TVPN или продлите подписку прямо сейчас."
+            f"{user.full_name}, пробный доступ завершён.\n\n"
+            "Для продолжения работы оформите подписку."
         )
-        button = await webapp_inline_button("Продлить сейчас", "/pay")
+        button = await webapp_inline_button("Продлить доступ", "/pay")
     else:
         text = (
             f"Hi {user.full_name}! Your trial period has ended.\n"
             "Don't miss out on exclusive offers and renew now!\n"
-            "Contact TVPN support or renew now."
+            "Contact Vectra Connect support or renew now."
         )
         button = await webapp_inline_button("Renew Now", "/pay")
+    text = append_rescue_link(text, lang=lang)
     try:
         await bot.send_message(user.id, text, reply_markup=button)
         logger.info(f"Уведомление о завершении пробного периода успешно отправлено пользователю {user.id}")
         await reset_user_failed_count(user.id)
+        return True
     except TelegramForbiddenError as e:
         logger.warning(f"User {user.id} blocked the bot: {e}")
         await handle_telegram_forbidden_error(user.id, e)
+        return False
     except TelegramBadRequest as e:
         logger.error(f"Bad request error for user {user.id}: {e}")
         await handle_telegram_bad_request(user.id, e)
+        return False
     except Exception as e:
         logger.error(f"Ошибка при отправке уведомления о завершении пробного периода пользователю {user.id}: {e}")
+        return False

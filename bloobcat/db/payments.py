@@ -3,7 +3,7 @@ from tortoise.contrib.pydantic import pydantic_model_creator # type: ignore
 
 
 class ProcessedPayments(models.Model):
-    id = fields.IntField(pk=True)
+    id = fields.IntField(primary_key=True)
     payment_id = fields.CharField(max_length=100, unique=True)
     provider = fields.CharField(max_length=32, default="yookassa")
     client_request_id = fields.CharField(max_length=100, null=True)
@@ -18,7 +18,13 @@ class ProcessedPayments(models.Model):
     amount_from_balance = fields.DecimalField(max_digits=10, decimal_places=2, default=0)
     processed_at = fields.DatetimeField(auto_now_add=True)
     status = fields.CharField(max_length=50)  # succeeded, refunded, canceled
-    
+    processing_state = fields.CharField(max_length=32, default="idle")
+    effect_applied = fields.BooleanField(default=False)
+    attempt_count = fields.IntField(default=0)
+    last_attempt_at = fields.DatetimeField(null=True)
+    last_source = fields.CharField(max_length=32, null=True)
+    last_error = fields.TextField(null=True)
+
     class Meta:
         table = "processed_payments"
 

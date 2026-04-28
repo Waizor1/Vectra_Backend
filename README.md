@@ -1,108 +1,114 @@
-# TVPN Backend
+# Vectra Backend
 
-Backend для Telegram-бота и WebApp. Поднимает HTTP API (FastAPI), админку FastAdmin,
-фоновые задачи и интеграции с RemnaWave и YooKassa.
+Backend for the Telegram bot, the public API, FastAdmin, background tasks, and Directus-backed operational tooling.
 
-## Требования
+## Requirements
 
-- Python 3.11+
-- Poetry
-- Docker (для Postgres и/или полного запуска)
+- Python 3.12
+- Docker with `docker compose`
+- Optional: Node/npm for Directus extension builds
 
-## Быстрый старт (локально)
-
-1. Установить зависимости:
-   ```bash
-   cd Blubcat_BACK_END
-   poetry install
-   ```
-2. Подготовить окружение:
-   ```bash
-   cp .env.example .env
-   ```
-   Заполните значения переменных (минимум: Telegram, RemnaWave, DB, админ-аккаунт).
-3. Поднять базу:
-   ```bash
-   docker compose up -d bloobcat_db
-   ```
-4. Запустить приложение:
-   ```bash
-   poetry run python -m bloobcat
-   ```
-
-Проверка: `http://localhost:33083/health`
-
-## Запуск через Docker Compose (приложение + БД)
+Recommended workspace bootstrap from repository root:
 
 ```bash
-cd Blubcat_BACK_END
+./scripts/bootstrap-mac.sh
+```
+
+Manual bootstrap from `Vectra_Backend/`:
+
+```bash
+python3.12 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m pip install pytest pytest-asyncio
+cp .env.example .env
+```
+
+## Docker-first local setup
+
+1. Prepare environment:
+
+```bash
+cp .env.example .env
+```
+
+2. Fill the required variables in `.env`:
+
+- `POSTGRES_PASSWORD`
+- `TELEGRAM_TOKEN`
+- `TELEGRAM_WEBHOOK_SECRET`
+- `TELEGRAM_MINIAPP_URL`
+- `TELEGRAM_WEBAPP_URL`
+- `REMNAWAVE_URL`
+- `REMNAWAVE_TOKEN`
+- `SCRIPT_API_URL`
+- `ADMIN_TELEGRAM_ID`
+- `ADMIN_LOGIN`
+- `ADMIN_PASSWORD`
+- `AUTH_JWT_SECRET`
+- `DIRECTUS_KEY`
+- `DIRECTUS_SECRET`
+- `DIRECTUS_ADMIN_EMAIL`
+- `DIRECTUS_ADMIN_PASSWORD`
+- `PROMO_HMAC_SECRET`
+
+3. Start infrastructure:
+
+```bash
+docker compose up -d bloobcat_db directus
+```
+
+4. Run the backend locally:
+
+```bash
+PYTHONPATH="$PWD" .venv/bin/python -m bloobcat
+```
+
+Health endpoint:
+
+```text
+http://localhost:33083/health
+```
+
+## Full Docker stack
+
+```bash
 docker compose up -d --build
 ```
 
 - API: `http://localhost:33083`
-- Логи приложения: `Blubcat_BACK_END/logs/`
-- `pgadmin` в compose без публикации порта (добавьте `ports`, если нужно).
+- Directus: `http://localhost:8055`
 
-## Переменные окружения
-
-Полный список смотрите в `.env.example`. Критичные для старта:
-
-- `TELEGRAM_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`, `TELEGRAM_MINIAPP_URL`, `TELEGRAM_WEBAPP_URL`
-- `REMNAWAVE_URL`, `REMNAWAVE_TOKEN`
-- `SCRIPT_DB` (строка подключения к Postgres)
-- `SCRIPT_API_URL` (используется для webhook URL)
-- `ADMIN_TELEGRAM_ID`, `ADMIN_LOGIN`, `ADMIN_PASSWORD`
-
-Дополнительно для Captain User Lookup:
-
-- `API_KEY` и `ALLOWLIST_DOMAINS` (пример в `.env.captain-user-lookup.example`)
-
-## Миграции
-
-Миграции применяются автоматически при старте приложения. Если нужно вручную:
+## Validation
 
 ```bash
-poetry run aerich upgrade
+.venv/bin/python -m pytest tests -q
+.venv/bin/python -m compileall bloobcat
+docker compose config
 ```
 
-## Диагностика роста БД
-
-Для безопасной проверки размера БД и потенциально "тяжёлых" таблиц:
+From repository root, the equivalent commands are:
 
 ```bash
-poetry run python scripts/db_growth_report.py
+PYTHONPATH=Vectra_Backend Vectra_Backend/.venv/bin/python -m pytest Vectra_Backend/tests -q
+Vectra_Backend/.venv/bin/python -m compileall Vectra_Backend
+docker compose -f Vectra_Backend/docker-compose.yml config
 ```
 
-Настраиваемые пороги через env:
-- `DB_GROWTH_WARN_MB` (по умолчанию `4096`)
-- `DB_GROWTH_TOP_N` (по умолчанию `30`)
+## Directus extensions
 
-Отправка алерта в админ-чат (использует настройки бота из `.env`):
+Build-capable extensions live in `directus/extensions/**` and are included in the root macOS bootstrap/predeploy scripts.
+
+Manual per-extension build example:
 
 ```bash
-poetry run python scripts/db_growth_notify.py --warn-mb 4096 --top-n 30 --top-lines 8
+cd directus/extensions/tvpn-home
+npm ci
+npm run build
 ```
 
-- По умолчанию отправляет сообщение только при warning.
-- Для принудительной отправки используйте `--send-always`.
-
-## TESTMODE
-
-`TESTMODE=TRUE` включает подготовку тестовых данных при старте (тарифы, промо и т.д.).
-
-## Основные эндпоинты
-
-- `GET /health` — healthcheck
-- `GET /admin` — админка FastAdmin
-- `POST /webhook/<TELEGRAM_WEBHOOK_SECRET>` — webhook Telegram
-- `GET /api/users/{telegram_id}` — Captain User Lookup (Bearer `API_KEY`)
-
-## Frontend (если нужен локально)
+Hook-only packages can be syntax-smoked without a build step:
 
 ```bash
-cd Blubcat_FRONT_END
-npm install
-npm run dev
+node --check directus/extensions/remnawave-sync/src/index.js
+node --check directus/extensions/remnawave-sync/dist/index.js
 ```
-
-Не забудьте выставить `TELEGRAM_WEBAPP_URL` и `TELEGRAM_MINIAPP_URL` на адрес фронтенда.

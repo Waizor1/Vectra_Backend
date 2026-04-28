@@ -2,11 +2,12 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from functools import partial
 
-from yookassa import Payment
+from yookassa import Configuration, Payment
 
 from bloobcat.db.payments import ProcessedPayments
 from bloobcat.db.users import Users
 from bloobcat.logger import get_logger
+from bloobcat.settings import yookassa_settings
 from bloobcat.services.platega import (
     PLATEGA_PROVIDER,
     PLATEGA_STATUS_CANCELED,
@@ -15,14 +16,26 @@ from bloobcat.services.platega import (
     PLATEGA_STATUS_CONFIRMED,
     PlategaAPIError,
     PlategaClient,
-    PlategaConfigError,
     map_platega_status_to_internal,
     normalize_platega_status,
-    parse_platega_payload,
 )
 
 
 logger = get_logger("payment_reconcile")
+
+
+def _configure_yookassa_if_available() -> bool:
+    shop_id = str(getattr(yookassa_settings, "shop_id", "") or "").strip()
+    secret_key = (
+        yookassa_settings.secret_key.get_secret_value()
+        if getattr(yookassa_settings, "secret_key", None)
+        else ""
+    ).strip()
+    if not shop_id or not secret_key:
+        return False
+    Configuration.account_id = shop_id
+    Configuration.secret_key = secret_key
+    return True
 
 
 async def _fetch_yookassa_payment(payment_id: str):
@@ -39,7 +52,7 @@ async def reconcile_pending_payments(batch_limit: int = 50) -> None:
 
     Strategy:
     - we persist "pending" records in `processed_payments` at payment creation time
-    - this task periodically checks their provider status
+    - this task periodically checks their YooKassa status
     - when status is final -> apply subscription (succeeded) or mark canceled
     """
     # Avoid checking too fresh payments: give webhooks a chance first.
@@ -56,91 +69,117 @@ async def reconcile_pending_payments(batch_limit: int = 50) -> None:
         return
 
     # Import lazily to avoid import cycles at startup.
-    from bloobcat.routes.payment import (  # noqa: WPS433
-        PAYMENT_PROVIDER_YOOKASSA,
+    from bloobcat.routes.payment import (
         _apply_confirmed_platega_payment,
         _apply_succeeded_payment_fallback,
-        _configure_yookassa_if_available,
         _metadata_from_processed_payment,
-        _provider_payload_json,
-        _validate_platega_amount_currency,
+        _send_manual_payment_canceled_notifications_if_needed,
         _upsert_processed_payment,
-    )
-    from bloobcat.bot.notifications.subscription.renewal import notify_payment_canceled_yookassa  # noqa: WPS433
+    )  # noqa: WPS433
 
     for row in pendings:
         pid = str(row.payment_id or "").strip()
         if not pid:
             continue
-        provider = str(getattr(row, "provider", "") or PAYMENT_PROVIDER_YOOKASSA).strip().lower()
+        provider = str(getattr(row, "provider", "") or "yookassa").strip().lower()
         if provider == PLATEGA_PROVIDER:
             try:
-                status_result = await PlategaClient(
-                    timeout_seconds=20.0
-                ).get_transaction_status(pid)
-            except (PlategaConfigError, PlategaAPIError) as e:
-                status_code = getattr(e, "status_code", None)
-                logger.warning(
-                    "Failed to fetch Platega payment %s status_code=%s",
-                    pid,
-                    status_code,
-                )
+                platega_status = await PlategaClient(timeout_seconds=20.0).get_transaction_status(pid)
+            except PlategaAPIError as e:
+                logger.warning("Failed to fetch Platega payment %s: %s", pid, e)
                 continue
 
-            provider_status = normalize_platega_status(status_result.status)
+            provider_status = normalize_platega_status(platega_status.status)
             internal_status = map_platega_status_to_internal(provider_status)
-            metadata = parse_platega_payload(status_result.payload)
-            if isinstance(metadata.get("metadata"), dict):
-                metadata = dict(metadata["metadata"])
-            if not metadata:
-                metadata = _metadata_from_processed_payment(row)
+            metadata = _metadata_from_processed_payment(row)
 
             if provider_status == PLATEGA_STATUS_CONFIRMED:
+                user_id = int(metadata.get("user_id") or row.user_id)
+                user = await Users.get_or_none(id=user_id)
+                if not user:
+                    continue
                 try:
-                    _validate_platega_amount_currency(
-                        provider_amount=status_result.amount,
-                        provider_currency=status_result.currency,
+                    await _apply_confirmed_platega_payment(
+                        payment_id=pid,
+                        user=user,
                         metadata=metadata,
+                        amount_external=float(platega_status.amount or row.amount_external or 0),
                     )
-                    user_id = int(metadata.get("user_id") or row.user_id)
-                    user = await Users.get_or_none(id=user_id)
-                    if user:
-                        await _apply_confirmed_platega_payment(
-                            payment_id=pid,
-                            user=user,
-                            metadata=metadata,
-                            amount_external=float(status_result.amount or row.amount_external or 0),
-                        )
                 except Exception as e:
-                    logger.error("Failed to apply Platega payment %s: %s", pid, e, exc_info=True)
+                    logger.error(
+                        "Failed to apply confirmed Platega payment %s: %s",
+                        pid,
+                        e,
+                        exc_info=True,
+                    )
                 continue
 
-            if provider_status in {
-                PLATEGA_STATUS_CANCELED,
-                PLATEGA_STATUS_CHARGEBACK,
-                PLATEGA_STATUS_CHARGEBACKED,
-            }:
-                await _upsert_processed_payment(
-                    payment_id=pid,
-                    user_id=int(row.user_id),
-                    amount=float(row.amount or 0),
-                    amount_external=float(status_result.amount or row.amount_external or 0),
-                    amount_from_balance=float(row.amount_from_balance or 0),
-                    status=internal_status,
-                    provider=PLATEGA_PROVIDER,
-                    provider_payload=_provider_payload_json(
-                        {
-                            "metadata": metadata,
-                            "provider_status": provider_status,
-                        }
-                    ),
+            if provider_status == PLATEGA_STATUS_CANCELED:
+                amount_external = float(platega_status.amount or row.amount_external or 0)
+                try:
+                    await _upsert_processed_payment(
+                        payment_id=pid,
+                        user_id=int(row.user_id),
+                        amount=float(amount_external) + float(row.amount_from_balance or 0),
+                        amount_external=float(amount_external),
+                        amount_from_balance=float(row.amount_from_balance or 0),
+                        status="canceled",
+                        provider=PLATEGA_PROVIDER,
+                        provider_payload=getattr(row, "provider_payload", None),
+                    )
+                except Exception as e:
+                    logger.error(
+                        "Failed to upsert canceled Platega payment %s during reconcile: %s",
+                        pid,
+                        e,
+                        exc_info=True,
+                    )
+                    continue
+                if not bool(metadata.get("is_auto", False)):
+                    user = await Users.get_or_none(id=int(row.user_id))
+                    if user:
+                        try:
+                            await _send_manual_payment_canceled_notifications_if_needed(
+                                user=user,
+                                payment_id=pid,
+                                amount_external=amount_external,
+                                method=PLATEGA_PROVIDER,
+                            )
+                        except Exception:
+                            pass
+                continue
+
+            if provider_status in {PLATEGA_STATUS_CHARGEBACK, PLATEGA_STATUS_CHARGEBACKED}:
+                try:
+                    await _upsert_processed_payment(
+                        payment_id=pid,
+                        user_id=int(row.user_id),
+                        amount=float(platega_status.amount or row.amount or 0),
+                        amount_external=float(platega_status.amount or row.amount_external or 0),
+                        amount_from_balance=float(row.amount_from_balance or 0),
+                        status="refunded",
+                        provider=PLATEGA_PROVIDER,
+                        provider_payload=getattr(row, "provider_payload", None),
+                    )
+                except Exception as e:
+                    logger.error(
+                        "Failed to upsert chargebacked Platega payment %s during reconcile: %s",
+                        pid,
+                        e,
+                        exc_info=True,
+                    )
+                continue
+
+            if internal_status != "pending":
+                logger.warning(
+                    "Unhandled Platega status during reconcile payment_id=%s status=%s",
+                    pid,
+                    provider_status,
                 )
-                continue
-
             continue
 
         if not _configure_yookassa_if_available():
-            logger.info("Skipping YooKassa reconcile because credentials are not configured")
+            logger.warning("Skipping YooKassa reconcile because provider credentials are not configured")
             continue
 
         try:
@@ -164,36 +203,55 @@ async def reconcile_pending_payments(batch_limit: int = 50) -> None:
             try:
                 await _apply_succeeded_payment_fallback(yk_payment, user, meta)
             except Exception as e:
-                logger.error("Failed to apply succeeded payment %s: %s", pid, e, exc_info=True)
+                logger.error(
+                    "Failed to apply succeeded payment %s: %s", pid, e, exc_info=True
+                )
             continue
 
         if status == "canceled":
             try:
-                amount_external = float(getattr(getattr(yk_payment, "amount", None), "value", 0) or 0)
+                amount_external = float(
+                    getattr(getattr(yk_payment, "amount", None), "value", 0) or 0
+                )
             except Exception:
                 amount_external = 0.0
             # Mark canceled (idempotent)
-            await _upsert_processed_payment(
-                payment_id=pid,
-                user_id=int(row.user_id),
-                amount=float(amount_external),
-                amount_external=float(amount_external),
-                amount_from_balance=0.0,
-                status="canceled",
-            )
+            try:
+                await _upsert_processed_payment(
+                    payment_id=pid,
+                    user_id=int(row.user_id),
+                    amount=float(amount_external),
+                    amount_external=float(amount_external),
+                    amount_from_balance=0.0,
+                    status="canceled",
+                )
+            except Exception as e:
+                logger.error(
+                    "Failed to upsert canceled payment %s during reconcile: %s",
+                    pid,
+                    e,
+                    exc_info=True,
+                )
+                continue
             # Notify only for manual payments.
             if not bool(meta.get("is_auto", False)):
                 user = await Users.get_or_none(id=int(row.user_id))
                 if user:
                     try:
-                        await notify_payment_canceled_yookassa(user=user)
+                        await _send_manual_payment_canceled_notifications_if_needed(
+                            user=user,
+                            payment_id=pid,
+                            amount_external=amount_external,
+                        )
                     except Exception:
                         pass
             continue
 
 
 async def run_payment_reconcile_scheduler(interval_seconds: int = 60) -> None:
-    logger.info("Starting payment reconcile scheduler (interval: %ss)", interval_seconds)
+    logger.info(
+        "Starting payment reconcile scheduler (interval: %ss)", interval_seconds
+    )
     while True:
         try:
             await reconcile_pending_payments()

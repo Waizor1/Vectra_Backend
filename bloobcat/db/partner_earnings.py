@@ -10,7 +10,7 @@ class PartnerEarnings(models.Model):
     Used to build partner profit chart, totals, and QR/source attribution.
     """
 
-    id = fields.UUIDField(pk=True)
+    id = fields.UUIDField(primary_key=True)
 
     # Payment id from ProcessedPayments.payment_id / YooKassa webhook / balance payment id.
     payment_id = fields.CharField(max_length=100, unique=True)
@@ -45,4 +45,3 @@ class PartnerEarnings(models.Model):
 
 
 PartnerEarnings_Pydantic = pydantic_model_creator(PartnerEarnings, name="PartnerEarnings")
-

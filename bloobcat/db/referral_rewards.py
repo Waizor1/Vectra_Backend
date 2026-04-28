@@ -9,7 +9,7 @@ class ReferralRewards(models.Model):
     - safe behavior under concurrent webhooks / retries
     """
 
-    id = fields.IntField(pk=True)
+    id = fields.IntField(primary_key=True)
 
     referred_user: fields.ForeignKeyRelation["Users"] = fields.ForeignKeyField(
         "models.Users",
@@ -40,3 +40,60 @@ class ReferralRewards(models.Model):
         indexes = ("referred_user_id", "referrer_user_id", "kind")
         unique_together = (("referred_user_id", "kind"),)
 
+
+class ReferralCashbackRewards(models.Model):
+    """Internal-balance cashback ledger for the ordinary referral program.
+
+    This is intentionally separate from PartnerEarnings: ordinary users earn only
+    in-service balance and never withdrawable partner income.
+    """
+
+    id = fields.IntField(primary_key=True)
+    payment_id = fields.CharField(max_length=128, unique=True)
+    referrer_user: fields.ForeignKeyRelation["Users"] = fields.ForeignKeyField(
+        "models.Users",
+        related_name="referral_cashback_rewards_referrer",
+        on_delete=fields.CASCADE,
+    )
+    referred_user: fields.ForeignKeyRelation["Users"] = fields.ForeignKeyField(
+        "models.Users",
+        related_name="referral_cashback_rewards_referred",
+        on_delete=fields.CASCADE,
+    )
+    amount_external_rub = fields.IntField(default=0)
+    cashback_percent = fields.IntField(default=0)
+    reward_rub = fields.IntField(default=0)
+    level_key = fields.CharField(max_length=32)
+    created_at = fields.DatetimeField(auto_now_add=True)
+
+    class Meta:
+        table = "referral_cashback_rewards"
+        indexes = (
+            "payment_id",
+            "referrer_user_id",
+            "referred_user_id",
+            "level_key",
+            "created_at",
+        )
+
+
+class ReferralLevelRewards(models.Model):
+    """One free level chest per reached ordinary referral level."""
+
+    id = fields.IntField(primary_key=True)
+    user: fields.ForeignKeyRelation["Users"] = fields.ForeignKeyField(
+        "models.Users",
+        related_name="referral_level_rewards",
+        on_delete=fields.CASCADE,
+    )
+    level_key = fields.CharField(max_length=32)
+    status = fields.CharField(max_length=16, default="available")
+    reward_type = fields.CharField(max_length=32, null=True)
+    reward_value = fields.IntField(null=True)
+    opened_at = fields.DatetimeField(null=True)
+    created_at = fields.DatetimeField(auto_now_add=True)
+
+    class Meta:
+        table = "referral_level_rewards"
+        indexes = ("user_id", "status", "level_key")
+        unique_together = (("user_id", "level_key"),)

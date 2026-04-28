@@ -3,7 +3,7 @@ from tortoise.contrib.pydantic import pydantic_model_creator
 
 
 class PartnerWithdrawals(models.Model):
-    id = fields.UUIDField(pk=True)
+    id = fields.UUIDField(primary_key=True)
     owner = fields.ForeignKeyField("models.Users", related_name="partner_withdrawals", on_delete=fields.CASCADE)
     amount_rub = fields.IntField()
     method = fields.CharField(max_length=16)

@@ -1,4 +1,4 @@
-# Deploy checklist (TVPN_BACK_END)
+# Deploy checklist (Vectra_Backend)
 
 Цель: выкатить бэкенд без регрессий, с применением миграций и проверкой реферальной системы (дни, не ₽).
 

@@ -2,25 +2,43 @@ from datetime import date, datetime, time, timezone
 from typing import Any, Dict, List
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from bloobcat.db.users import Users, normalize_date
 from bloobcat.db.tariff import Tariffs
 from bloobcat.db.active_tariff import ActiveTariffs
 from bloobcat.funcs.validate import validate
 from bloobcat.routes.payment import pay
+from bloobcat.bot.notifications.admin import (
+    cancel_subscription,
+    notify_frozen_base_activation,
+    notify_frozen_family_activation,
+)
+from bloobcat.bot.notifications.subscription.renewal import (
+    notify_frozen_base_activation_success,
+    notify_frozen_family_activation_success,
+)
 from bloobcat.settings import app_settings, payment_settings
 from bloobcat.logger import get_logger
+from bloobcat.services.subscription_limits import family_devices_threshold
+from bloobcat.services.tariff_quote import (
+    build_duration_offer,
+    build_subscription_quote,
+    quote_public_dict,
+    tariff_default_devices,
+)
+from bloobcat.services.subscription_overlay import (
+    FrozenBaseActivationError,
+    FrozenFamilyActivationError,
+    activate_frozen_family_with_current_freeze,
+    activate_frozen_base_with_current_freeze,
+    get_overlay_payload,
+    resume_frozen_base_if_due,
+)
 
 logger = get_logger("routes.subscription")
 
 router = APIRouter(prefix="/subscription", tags=["subscription"])
-
-
-def _auto_renewal_enabled_for_user(user: Users) -> bool:
-    return bool(user.renew_id) and str(
-        getattr(payment_settings, "auto_renewal_mode", "") or ""
-    ).strip().lower() == "yookassa"
 
 
 class SubscriptionStatusResponse(BaseModel):
@@ -29,6 +47,18 @@ class SubscriptionStatusResponse(BaseModel):
     devicesLimit: int
     isFamilyEligible: bool
     autoRenewEnabled: bool
+    has_frozen_base: bool | None = None
+    base_remaining_days: int | None = None
+    base_hwid_limit: int | None = None
+    base_resume_at: str | None = None
+    will_restore_base_after_family: bool | None = None
+    has_frozen_family: bool | None = None
+    frozen_family_remaining_days: int | None = None
+    frozen_family_hwid_limit: int | None = None
+    frozen_family_resume_at: str | None = None
+    reverse_migration_available_at: str | None = None
+    reverse_migration_retry_after_seconds: int | None = None
+    active_kind: str | None = None
 
 
 class SubscriptionPlanResponse(BaseModel):
@@ -38,13 +68,56 @@ class SubscriptionPlanResponse(BaseModel):
     months: int
     devicesLimit: int
     priceRub: int
+    priceFromRub: int | None = None
+    priceFromText: str | None = None
+    originalPriceRub: int | None = None
+    personalDiscountPercent: int | None = None
     perMonthText: str | None = None
     discountText: str | None = None
+    discountPercent: int | None = None
     badge: str | None = None
+    hint: str | None = None
+    devicesMin: int = 1
+    devicesMax: int = 30
+    defaultDevices: int = 1
+    familyThreshold: int = 2
+    lteEnabled: bool = False
+    lteAvailable: bool = False
+    ltePricePerGb: float = 0
+    lteMinGb: int = 0
+    lteMaxGb: int = 0
+    lteStepGb: int = 1
+    tariffKind: str = "base"
+    tariffType: str = "base"
+    familyVariant: bool = False
+
+
+class SubscriptionQuoteRequest(BaseModel):
+    tariff_id: int = Field(alias="tariffId")
+    device_count: int = Field(default=1, alias="deviceCount")
+    lte_gb: int = Field(default=0, alias="lteGb")
+    promo_code: str | None = Field(default=None, alias="promoCode")
+    client_context: dict[str, Any] | None = Field(default=None, alias="clientContext")
+
+    model_config = {"populate_by_name": True}
 
 
 class SubscriptionPurchaseRequest(BaseModel):
     planId: str
+
+
+class ActivateFrozenBaseResponse(BaseModel):
+    ok: bool
+    switched_until: str
+    frozen_current_days: int
+    activated_frozen_base_days: int
+
+
+class ActivateFrozenFamilyResponse(BaseModel):
+    ok: bool
+    switched_until: str
+    frozen_current_days: int
+    activated_frozen_family_days: int
 
 
 def _compute_devices_limit(user: Users) -> int:
@@ -77,131 +150,162 @@ def _end_at_ms(expired_at: date | None) -> int | None:
 def _plan_id_for_months(months: int, family: bool = False) -> str:
     if months == 1:
         return "1month"
-    if months == 3:
-        return "3months"
-    if months == 6:
-        return "6months"
-    if months == 12 and family:
-        return "12months_family"
-    if months == 12:
-        return "12months_promo"
     return f"{months}months"
 
 
-async def _build_plans() -> List[SubscriptionPlanResponse]:
-    tariffs = await Tariffs.filter(is_active=True).order_by("order")
-    for tariff in tariffs:
-        await tariff.sync_effective_pricing_fields()
-    by_months: Dict[int, Tariffs] = {int(t.months): t for t in tariffs}
-    plans: List[SubscriptionPlanResponse] = []
-
-    # Reference price for discount calculation: 1-month plan for default device count.
-    one_month_tariff = by_months.get(1)
-    one_month_price_ref: int | None = None
-    if one_month_tariff:
-        one_month_default_devices = max(1, int(one_month_tariff.devices_limit_default or 3))
-        one_month_price_ref = int(one_month_tariff.calculate_price(one_month_default_devices))
-
-    def add_plan(months: int, device_count: int, badge: str | None = None, family: bool = False):
-        tariff = by_months.get(months)
-        if not tariff:
-            return
-        if device_count < 1:
-            return
-        price = int(tariff.calculate_price(device_count))
-        per_month = int(round(price / months)) if months > 0 else price
-        plan_id = _plan_id_for_months(months, family=family)
-
-        discount_text: str | None = None
-        default_devices = max(1, int(tariff.devices_limit_default or 3))
-        if (
-            months > 1
-            and device_count == default_devices
-            and one_month_price_ref
-            and one_month_price_ref > 0
-        ):
-            full_price = one_month_price_ref * months
-            if full_price > 0:
-                pct = round((1 - price / full_price) * 100)
-                if 0 < pct < 100:
-                    discount_text = f"\u2212{pct}%"
-
-        plans.append(
-            SubscriptionPlanResponse(
-                id=plan_id,
-                tariffId=int(tariff.id),
-                title=f"{months} {'месяц' if months == 1 else 'месяцев'}",
-                months=months,
-                devicesLimit=device_count,
-                priceRub=price,
-                perMonthText=f"≈ {per_month} ₽/мес",
-                discountText=discount_text,
-                badge=badge,
-            )
+async def _notify_frozen_base_activation_success(
+    user: Users, result: dict[str, Any]
+) -> None:
+    try:
+        await notify_frozen_base_activation_success(
+            user,
+            switched_until=str(result["switched_until"]),
+            frozen_current_days=int(result["frozen_current_days"]),
+            activated_frozen_base_days=int(result["activated_frozen_base_days"]),
         )
+    except Exception as exc:
+        logger.error("Failed to notify user about frozen base activation: %s", exc)
 
-    def base_limit(months: int, default: int = 3) -> int:
+    try:
+        await notify_frozen_base_activation(
+            user,
+            switched_until=str(result["switched_until"]),
+            frozen_current_days=int(result["frozen_current_days"]),
+            activated_frozen_base_days=int(result["activated_frozen_base_days"]),
+        )
+    except Exception as exc:
+        logger.error("Failed to notify admin about frozen base activation: %s", exc)
+
+
+async def _notify_frozen_family_activation_success(
+    user: Users, result: dict[str, Any]
+) -> None:
+    try:
+        await notify_frozen_family_activation_success(
+            user,
+            switched_until=str(result["switched_until"]),
+            frozen_current_days=int(result["frozen_current_days"]),
+            activated_frozen_family_days=int(result["activated_frozen_family_days"]),
+        )
+    except Exception as exc:
+        logger.error("Failed to notify user about frozen family activation: %s", exc)
+
+    try:
+        await notify_frozen_family_activation(
+            user,
+            switched_until=str(result["switched_until"]),
+            frozen_current_days=int(result["frozen_current_days"]),
+            activated_frozen_family_days=int(result["activated_frozen_family_days"]),
+        )
+    except Exception as exc:
+        logger.error("Failed to notify admin about frozen family activation: %s", exc)
+
+
+async def _build_plans(user: Users) -> List[SubscriptionPlanResponse]:
+    tariffs = await Tariffs.filter(is_active=True).order_by("order", "months")
+    by_months: Dict[int, Tariffs] = {}
+    for tariff in tariffs:
+        months = int(getattr(tariff, "months", 0) or 0)
+        if months <= 0 or months in by_months:
+            continue
+        by_months[months] = tariff
+
+    one_month_tariff = by_months.get(1)
+    offers: List[SubscriptionPlanResponse] = []
+    for months in (1, 3, 6, 12):
         tariff = by_months.get(months)
         if not tariff:
-            return default
-        return max(1, int(tariff.devices_limit_default or default))
-
-    add_plan(1, base_limit(1))
-    add_plan(3, base_limit(3))
-    add_plan(6, base_limit(6))
-    add_plan(12, base_limit(12), badge="выгодно")
-
-    # Family is a 12-month variant with a higher device limit on the same tariff.
-    family_tariff = by_months.get(12)
-    if family_tariff and bool(getattr(family_tariff, "family_plan_enabled", True)):
-        family_limit = max(1, int(family_tariff.devices_limit_family or 10))
-        default_limit_12 = max(1, int(family_tariff.devices_limit_default or 3))
-        if family_limit > default_limit_12:
-            add_plan(12, family_limit, badge="семейная", family=True)
-    return plans
+            continue
+        offer = await build_duration_offer(
+            tariff=tariff,
+            user_id=int(user.id),
+            one_month_reference_tariff=one_month_tariff if months > 1 else None,
+        )
+        offers.append(SubscriptionPlanResponse(**offer))
+    return offers
 
 
 @router.get("/status", response_model=SubscriptionStatusResponse)
 async def get_status(user: Users = Depends(validate)) -> SubscriptionStatusResponse:
+    resumed = await resume_frozen_base_if_due(user)
+    if resumed:
+        user = await Users.get(id=user.id)
     end_at_ms = _end_at_ms(normalize_date(user.expired_at))
-    is_active = bool(end_at_ms and end_at_ms > int(datetime.now(timezone.utc).timestamp() * 1000))
+    is_active = bool(
+        end_at_ms and end_at_ms > int(datetime.now(timezone.utc).timestamp() * 1000)
+    )
     devices_limit = await _resolve_devices_limit(user)
-    family_limit = max(1, int(getattr(app_settings, "family_devices_limit", 10) or 10))
-    is_family_eligible = bool(is_active and devices_limit >= family_limit)
+    is_family_eligible = bool(is_active and devices_limit >= family_devices_threshold())
+    overlay = await get_overlay_payload(user)
     return SubscriptionStatusResponse(
         isActive=is_active,
         endAtMs=end_at_ms,
         devicesLimit=devices_limit,
         isFamilyEligible=is_family_eligible,
-        autoRenewEnabled=_auto_renewal_enabled_for_user(user),
+        autoRenewEnabled=(
+            bool(user.renew_id) and payment_settings.auto_renewal_mode == "yookassa"
+        ),
+        has_frozen_base=overlay.get("has_frozen_base"),
+        base_remaining_days=overlay.get("base_remaining_days"),
+        base_hwid_limit=overlay.get("base_hwid_limit"),
+        base_resume_at=overlay.get("base_resume_at"),
+        will_restore_base_after_family=overlay.get("will_restore_base_after_family"),
+        has_frozen_family=overlay.get("has_frozen_family"),
+        frozen_family_remaining_days=overlay.get("frozen_family_remaining_days"),
+        frozen_family_hwid_limit=overlay.get("frozen_family_hwid_limit"),
+        frozen_family_resume_at=overlay.get("frozen_family_resume_at"),
+        reverse_migration_available_at=overlay.get("reverse_migration_available_at"),
+        reverse_migration_retry_after_seconds=overlay.get(
+            "reverse_migration_retry_after_seconds"
+        ),
+        active_kind=overlay.get("active_kind"),
     )
 
 
 @router.get("/plans", response_model=List[SubscriptionPlanResponse])
-async def get_plans() -> List[SubscriptionPlanResponse]:
-    return await _build_plans()
+async def get_plans(user: Users = Depends(validate)) -> List[SubscriptionPlanResponse]:
+    return await _build_plans(user)
+
+
+@router.post("/quote")
+async def quote_subscription(
+    payload: SubscriptionQuoteRequest, user: Users = Depends(validate)
+) -> Dict[str, Any]:
+    tariff = await Tariffs.get_or_none(id=int(payload.tariff_id), is_active=True)
+    if not tariff:
+        raise HTTPException(status_code=404, detail="Tariff not found")
+    one_month_tariff = await Tariffs.filter(months=1, is_active=True).order_by("order").first()
+    quote = await build_subscription_quote(
+        tariff=tariff,
+        user_id=int(user.id),
+        device_count=payload.device_count,
+        lte_gb=payload.lte_gb,
+        one_month_reference_tariff=one_month_tariff if int(tariff.months or 0) > 1 else None,
+    )
+    data = quote_public_dict(quote, tariff)
+    data["copy"] = "Стоимость обновлена и будет проверена перед оплатой"
+    return data
 
 
 @router.post("/purchase", response_model=SubscriptionStatusResponse)
-async def purchase(payload: SubscriptionPurchaseRequest, user: Users = Depends(validate)) -> SubscriptionStatusResponse:
+async def purchase(
+    payload: SubscriptionPurchaseRequest, user: Users = Depends(validate)
+) -> SubscriptionStatusResponse:
     plan_id = payload.planId
     tariffs = await Tariffs.filter(is_active=True).all()
-    for tariff in tariffs:
-        await tariff.sync_effective_pricing_fields()
     by_months: Dict[int, Tariffs] = {int(t.months): t for t in tariffs}
-    family_tariff = by_months.get(12)
-    family_enabled = bool(getattr(family_tariff, "family_plan_enabled", True)) if family_tariff else False
-    plan_map = {
-        "1month": (1, max(1, int((by_months.get(1).devices_limit_default if by_months.get(1) else 3) or 3))),
-        "3months": (3, max(1, int((by_months.get(3).devices_limit_default if by_months.get(3) else 3) or 3))),
-        "6months": (6, max(1, int((by_months.get(6).devices_limit_default if by_months.get(6) else 3) or 3))),
-        "12months_promo": (12, max(1, int((by_months.get(12).devices_limit_default if by_months.get(12) else 3) or 3))),
+    plan_month_aliases = {
+        "1month": 1,
+        "3months": 3,
+        "6months": 6,
+        "12months": 12,
+        "12months_promo": 12,  # backward compatible legacy alias
     }
-    if family_enabled:
-        plan_map["12months_family"] = (
-            12,
-            max(1, int((by_months.get(12).devices_limit_family if by_months.get(12) else 10) or 10)),
-        )
+    plan_map: Dict[str, tuple[int, int]] = {}
+    for pid, months in plan_month_aliases.items():
+        tariff = by_months.get(months)
+        if tariff:
+            plan_map[pid] = (months, tariff_default_devices(tariff))
     if plan_id not in plan_map:
         raise HTTPException(status_code=400, detail="Unknown planId")
     months, device_count = plan_map[plan_id]
@@ -220,9 +324,65 @@ async def purchase(payload: SubscriptionPurchaseRequest, user: Users = Depends(v
         user=user,
     )
     if isinstance(result, dict) and result.get("redirect_to"):
-        raise HTTPException(status_code=409, detail={"code": "PAYMENT_REQUIRED", "redirect_to": result.get("redirect_to")})
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "PAYMENT_REQUIRED",
+                "redirect_to": result.get("redirect_to"),
+            },
+        )
 
     return await get_status(user)
+
+
+@router.post("/frozen-base/activate", response_model=ActivateFrozenBaseResponse)
+async def activate_frozen_base(
+    user: Users = Depends(validate),
+) -> ActivateFrozenBaseResponse:
+    try:
+        result = await activate_frozen_base_with_current_freeze(user)
+    except FrozenBaseActivationError as exc:
+        raise HTTPException(
+            status_code=409, detail={"code": exc.code, "message": exc.message}
+        ) from exc
+
+    await _notify_frozen_base_activation_success(user, result)
+
+    return ActivateFrozenBaseResponse(
+        ok=True,
+        switched_until=str(result["switched_until"]),
+        frozen_current_days=int(result["frozen_current_days"]),
+        activated_frozen_base_days=int(result["activated_frozen_base_days"]),
+    )
+
+
+@router.post("/frozen-family/activate", response_model=ActivateFrozenFamilyResponse)
+async def activate_frozen_family(
+    user: Users = Depends(validate),
+) -> ActivateFrozenFamilyResponse:
+    try:
+        result = await activate_frozen_family_with_current_freeze(user)
+    except FrozenFamilyActivationError as exc:
+        detail: Dict[str, Any] = {
+            "code": exc.code,
+            "message": exc.message,
+        }
+        if exc.retry_after_seconds is not None:
+            detail["retry_after_seconds"] = int(exc.retry_after_seconds)
+        if exc.reverse_migration_available_at is not None:
+            detail["reverse_migration_available_at"] = (
+                exc.reverse_migration_available_at
+            )
+        raise HTTPException(status_code=409, detail=detail) from exc
+
+    await _notify_frozen_family_activation_success(user, result)
+
+    return ActivateFrozenFamilyResponse(
+        ok=True,
+        switched_until=str(result["switched_until"]),
+        frozen_current_days=int(result["frozen_current_days"]),
+        activated_frozen_family_days=int(result["activated_frozen_family_days"]),
+    )
 
 
 @router.post("/cancel-renewal")
@@ -231,6 +391,13 @@ async def cancel_renewal(user: Users = Depends(validate)) -> Dict[str, Any]:
     if user.renew_id:
         user.renew_id = None
         await user.save(update_fields=["renew_id"])
+        try:
+            await cancel_subscription(
+                user,
+                reason="Пользователь отключил автопродление через /subscription/cancel-renewal",
+            )
+        except Exception as exc:
+            logger.error("Failed to notify admin about cancel-renewal: %s", exc)
     return {
         "ok": True,
         "autoRenewEnabled": False,

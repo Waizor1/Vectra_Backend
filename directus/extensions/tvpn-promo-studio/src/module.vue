@@ -3,7 +3,7 @@
     <template #navigation>
       <div class="nav nav--premium">
         <div class="nav__brand">
-          <div class="nav__brand-logo">TVPN</div>
+          <div class="nav__brand-logo">SVPN</div>
           <div>
             <div class="nav__brand-title">Promo Studio</div>
             <div class="nav__brand-subtitle">Промокоды и аналитика</div>
@@ -43,10 +43,10 @@
       <div class="page__main">
         <section class="hero">
           <div class="hero__left">
-            <div class="hero__kicker">TVPN Control Room</div>
+            <div class="hero__kicker">Vectra Connect</div>
             <h1 class="hero__title">Promo Studio</h1>
             <p class="hero__subtitle">
-              Премиальный рабочий стол промокодов: ручной ввод или генерация, быстрый выпуск и прозрачная аналитика по
+              Операционный рабочий стол промокодов: ручной ввод или генерация, быстрый выпуск и прозрачная аналитика по
               активациям и доходу.
             </p>
             <div class="hero__chips">
@@ -249,7 +249,7 @@
                 <div v-if="createForm.code_mode === 'generate'" class="fields">
                   <label class="field">
                     <span>Префикс кода</span>
-                    <input v-model.trim="createForm.code_prefix" class="input" placeholder="TVPN" />
+                    <input v-model.trim="createForm.code_prefix" class="input" placeholder="VECTRA" />
                   </label>
                   <label class="field">
                     <span>Сколько кодов создать</span>
@@ -543,7 +543,7 @@ const createForm = ref({
   campaign_notes: "",
   name: "",
   code_mode: "generate",
-  code_prefix: "TVPN",
+  code_prefix: "VECTRA",
   count: 1,
   manual_codes: "",
   max_activations: 1,
@@ -780,7 +780,7 @@ async function createPromoCodes() {
       payload.manual_codes = parsedManual.codes;
     } else {
       payload.count = Math.max(1, Math.min(MAX_CREATE_COUNT, Math.floor(toNum(createForm.value.count) || 1)));
-      payload.code_prefix = createForm.value.code_prefix || "TVPN";
+      payload.code_prefix = createForm.value.code_prefix || "VECTRA";
     }
 
     if (createForm.value.campaign_mode === "existing") {
@@ -894,6 +894,9 @@ onMounted(() => {
   display: grid;
   gap: 12px;
   min-width: 0;
+  width: 100%;
+  max-width: 1560px;
+  margin: 0 auto;
 }
 
 .page__main > * {
@@ -994,6 +997,16 @@ onMounted(() => {
   appearance: none;
 }
 
+.input--select option {
+  color: #0f172a;
+  background: #f8fafc;
+}
+
+.input--select option:checked {
+  color: #0b3d79;
+  background: #bfdbfe;
+}
+
 .input--textarea {
   resize: vertical;
   min-height: 68px;
@@ -1006,7 +1019,7 @@ onMounted(() => {
 
 .kpi-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
 }
 
@@ -1559,6 +1572,10 @@ onMounted(() => {
 }
 
 @media (max-width: 1400px) {
+  .kpi-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .split {
     grid-template-columns: 1fr;
   }

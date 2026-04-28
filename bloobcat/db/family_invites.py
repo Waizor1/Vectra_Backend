@@ -3,10 +3,10 @@ from tortoise.contrib.pydantic import pydantic_model_creator
 
 
 class FamilyInvites(models.Model):
-    id = fields.UUIDField(pk=True)
+    id = fields.UUIDField(primary_key=True)
     owner = fields.ForeignKeyField("models.Users", related_name="family_invites", on_delete=fields.CASCADE)
     allocated_devices = fields.IntField(default=1)
-    token_hash = fields.CharField(max_length=128, unique=True, index=True)
+    token_hash = fields.CharField(max_length=128, unique=True, db_index=True)
     expires_at = fields.DatetimeField(null=True)
     max_uses = fields.IntField(default=1)
     used_count = fields.IntField(default=0)

@@ -109,8 +109,6 @@ def main() -> None:
         "promo_batches": ["id", "created_at"],
         "promo_codes": ["id", "created_at"],
         "promo_usages": ["id", "used_at"],
-        "prize_wheel_history": ["id", "created_at"],
-        "prize_wheel_config": ["id", "created_at", "updated_at"],
         "connections": ["id", "user_id", "at"],
         "notification_marks": ["id", "sent_at"],
         "personal_discounts": ["id", "created_at"],

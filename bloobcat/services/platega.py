@@ -143,13 +143,7 @@ class PlategaClient:
 
         data = await self._request_json("POST", endpoint, json_body=body)
         transaction_id = str(data.get("transactionId") or data.get("id") or "").strip()
-        redirect_url = str(
-            data.get("redirect")
-            or data.get("redirectUrl")
-            or data.get("paymentUrl")
-            or data.get("url")
-            or ""
-        ).strip()
+        redirect_url = str(data.get("redirect") or data.get("url") or "").strip()
         status = normalize_platega_status(data.get("status"))
         if not transaction_id or not redirect_url:
             raise PlategaAPIError("Platega create response is missing transaction link")
@@ -169,19 +163,17 @@ class PlategaClient:
         if not isinstance(payment_details, dict):
             payment_details = {}
         amount = payment_details.get("amount")
-        if amount is None:
-            amount = data.get("amount")
         try:
             parsed_amount = float(amount) if amount is not None else None
         except (TypeError, ValueError):
             parsed_amount = None
         return PlategaStatusResult(
-            transaction_id=str(data.get("id") or data.get("transactionId") or clean_id),
+            transaction_id=str(data.get("id") or clean_id),
             status=normalize_platega_status(data.get("status")),
             amount=parsed_amount,
             currency=(
-                str(payment_details.get("currency") or data.get("currency")).upper()
-                if (payment_details.get("currency") or data.get("currency")) is not None
+                str(payment_details.get("currency")).upper()
+                if payment_details.get("currency") is not None
                 else None
             ),
             payload=data.get("payload"),

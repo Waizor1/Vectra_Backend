@@ -1,0 +1,744 @@
+from __future__ import annotations
+
+import base64
+import types
+from urllib.parse import parse_qs, urlparse
+
+import pytest
+
+from bloobcat.services import web_auth
+
+
+def test_web_auth_exception_response_uses_public_safe_message():
+    error = web_auth.WebAuthError(
+        "registration_sync_pending",
+        message="Failed to initialize user account.",
+        status_code=503,
+    )
+
+    response = web_auth.web_auth_exception_response(error)
+
+    assert response.status_code == 503
+    assert response.detail == {
+        "code": "registration_sync_pending",
+        "message": "Аккаунт ещё настраивается. Попробуйте снова через несколько секунд.",
+    }
+    assert "Failed to initialize" not in response.detail["message"]
+
+
+@pytest.mark.asyncio
+async def test_oauth_start_uses_pkce_nonce_and_hashed_state(monkeypatch):
+    created_rows: list[dict[str, object]] = []
+
+    class _FakeOAuthState:
+        @classmethod
+        async def create(cls, **kwargs):
+            created_rows.append(kwargs)
+            return types.SimpleNamespace(**kwargs)
+
+    provider_config = web_auth.ProviderConfig(
+        provider="google",
+        client_id="google-client-id",
+        client_secret="google-secret",
+        auth_url="https://accounts.example/auth",
+        token_url="https://accounts.example/token",
+        jwks_url="https://accounts.example/jwks",
+        issuer="https://accounts.example",
+        userinfo_url="https://accounts.example/userinfo",
+        scope="openid email profile",
+    )
+
+    monkeypatch.setattr(web_auth, "AuthOAuthState", _FakeOAuthState)
+    monkeypatch.setattr(web_auth, "get_provider_config", lambda provider: provider_config)
+    monkeypatch.setattr(web_auth.web_auth_settings, "web_auth_enabled", True)
+    monkeypatch.setattr(web_auth.web_auth_settings, "oauth_google_enabled", True)
+    monkeypatch.setattr(web_auth.oauth_settings, "enabled_providers", ["google"])
+
+    authorization_url = await web_auth.create_oauth_authorization_url(
+        provider="google",
+        mode="login",
+        return_to="/welcome?from=test",
+    )
+
+    parsed = urlparse(authorization_url)
+    params = parse_qs(parsed.query)
+
+    assert parsed.scheme == "https"
+    assert parsed.netloc == "accounts.example"
+    assert params["client_id"] == ["google-client-id"]
+    assert params["response_type"] == ["code"]
+    assert params["scope"] == ["openid email profile"]
+    assert params["code_challenge_method"] == ["S256"]
+    assert params["state"][0]
+    assert params["nonce"][0]
+    assert params["code_challenge"][0]
+
+    assert len(created_rows) == 1
+    row = created_rows[0]
+    assert row["provider"] == "google"
+    assert row["mode"] == "login"
+    assert row["return_to"] == "/welcome?from=test"
+    assert row["nonce"] == params["nonce"][0]
+    assert row["state_hash"] != params["state"][0]
+    assert len(str(row["state_hash"])) == 64
+    assert "pkce_verifier" in row
+
+
+@pytest.mark.asyncio
+async def test_complete_telegram_link_moves_empty_web_identities_to_existing_telegram_user(monkeypatch):
+    calls: list[tuple[str, object]] = []
+
+    class _User(types.SimpleNamespace):
+        async def save(self, update_fields=None, using_db=None):
+            calls.append(("source_save", update_fields))
+
+    source_user = _User(id=web_auth.WEB_USER_ID_FLOOR + 10, auth_token_version=0)
+    target_user = _User(id=123456, auth_token_version=2)
+    telegram_user = types.SimpleNamespace(id=123456, first_name="Tg", last_name="User")
+
+    class _UpdateQuery:
+        def __init__(self, name: str):
+            self.name = name
+
+        def exclude(self, **kwargs):
+            calls.append((f"{self.name}_exclude", kwargs))
+            return self
+
+        def using_db(self, _conn):
+            calls.append((f"{self.name}_using_db", True))
+            return self
+
+        async def update(self, **kwargs):
+            calls.append((f"{self.name}_update", kwargs))
+            return 1
+
+    class _FakeIdentity:
+        @classmethod
+        def filter(cls, **kwargs):
+            calls.append(("identity_filter", kwargs))
+            return _UpdateQuery("identity")
+
+    class _FakePasswordCredential:
+        @classmethod
+        def filter(cls, **kwargs):
+            calls.append(("password_filter", kwargs))
+            return _UpdateQuery("password")
+
+    async def _consume_link_request(user, token):
+        calls.append(("consume", (user.id, token)))
+        return types.SimpleNamespace(id=1)
+
+    async def _get_or_none(**kwargs):
+        assert kwargs == {"id": 123456}
+        return target_user
+
+    class _UserLockQuery:
+        def using_db(self, _conn):
+            return self
+
+        async def get(self, **kwargs):
+            if kwargs == {"id": source_user.id}:
+                return source_user
+            if kwargs == {"id": target_user.id}:
+                return target_user
+            raise AssertionError(kwargs)
+
+    class _FakeUsers:
+        @classmethod
+        async def get_or_none(cls, **kwargs):
+            return await _get_or_none(**kwargs)
+
+        @classmethod
+        def select_for_update(cls):
+            return _UserLockQuery()
+
+    class _FakeTransaction:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    async def _has_material_data(user_id: int, conn=None) -> bool:
+        assert user_id == source_user.id
+        return False
+
+    async def _ensure_telegram_identity(user, tg_user):
+        calls.append(("ensure_telegram", (user.id, tg_user.id)))
+
+    monkeypatch.setattr(web_auth, "_consume_link_request", _consume_link_request)
+    monkeypatch.setattr(web_auth, "Users", _FakeUsers)
+    monkeypatch.setattr(web_auth, "in_transaction", lambda: _FakeTransaction())
+    monkeypatch.setattr(web_auth, "user_has_material_data", _has_material_data)
+    monkeypatch.setattr(web_auth, "AuthIdentity", _FakeIdentity)
+    monkeypatch.setattr(web_auth, "AuthPasswordCredential", _FakePasswordCredential)
+    monkeypatch.setattr(web_auth, "ensure_telegram_identity", _ensure_telegram_identity)
+
+    result_user, merged = await web_auth.complete_telegram_link(
+        source_user,
+        "link-token",
+        telegram_user,
+    )
+
+    assert result_user is target_user
+    assert merged is True
+    assert source_user.auth_token_version == 1
+    assert ("consume", (source_user.id, "link-token")) in calls
+    assert ("identity_update", {"user_id": target_user.id}) in calls
+    assert ("password_update", {"user_id": target_user.id}) in calls
+    assert ("ensure_telegram", (target_user.id, telegram_user.id)) in calls
+    assert ("source_save", ["auth_token_version"]) in calls
+
+
+@pytest.mark.asyncio
+async def test_complete_telegram_link_blocks_auto_merge_when_source_has_material_data(monkeypatch):
+    source_user = types.SimpleNamespace(id=web_auth.WEB_USER_ID_FLOOR + 11)
+    target_user = types.SimpleNamespace(id=555)
+    telegram_user = types.SimpleNamespace(id=555, first_name="Tg", last_name=None)
+
+    async def _consume_link_request(_user, _token):
+        return types.SimpleNamespace(id=1)
+
+    async def _get_or_none(**kwargs):
+        assert kwargs == {"id": 555}
+        return target_user
+
+    async def _has_material_data(user_id: int) -> bool:
+        assert user_id == source_user.id
+        return True
+
+    monkeypatch.setattr(web_auth, "_consume_link_request", _consume_link_request)
+    monkeypatch.setattr(web_auth.Users, "get_or_none", _get_or_none)
+    monkeypatch.setattr(web_auth, "user_has_material_data", _has_material_data)
+
+    with pytest.raises(web_auth.WebAuthError) as exc_info:
+        await web_auth.complete_telegram_link(source_user, "link-token", telegram_user)
+
+    assert exc_info.value.code == "merge_requires_support"
+    assert exc_info.value.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_complete_registration_raises_when_remnawave_ensure_is_still_unavailable():
+    class _User(types.SimpleNamespace):
+        async def _ensure_remnawave_user(self):
+            return False
+
+    user = _User(id=web_auth.WEB_USER_ID_FLOOR + 12, remnawave_uuid=None)
+
+    with pytest.raises(web_auth.WebAuthError) as exc_info:
+        await web_auth.complete_registration_for_user(user)
+
+    assert exc_info.value.code == "registration_sync_pending"
+    assert exc_info.value.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_unlink_identity_rejects_last_working_login_method(monkeypatch):
+    class _IdentityQuery:
+        def __init__(self, *, exists: bool = False, count: int = 0):
+            self._exists = exists
+            self._count = count
+
+        async def exists(self):
+            return self._exists
+
+        def exclude(self, **kwargs):
+            assert kwargs == {"provider": "password"}
+            return _IdentityQuery(count=1)
+
+        async def count(self):
+            return self._count
+
+    class _FakeIdentity:
+        @classmethod
+        def filter(cls, **kwargs):
+            if kwargs == {"user_id": 42, "provider": "google"}:
+                return _IdentityQuery(exists=True)
+            assert kwargs == {"user_id": 42}
+            return _IdentityQuery(count=1)
+
+    class _FakePasswordCredential:
+        @classmethod
+        def filter(cls, **kwargs):
+            assert kwargs == {"user_id": 42, "email_verified": True}
+            return _IdentityQuery(exists=False)
+
+    monkeypatch.setattr(web_auth, "AuthIdentity", _FakeIdentity)
+    monkeypatch.setattr(web_auth, "AuthPasswordCredential", _FakePasswordCredential)
+
+    with pytest.raises(web_auth.WebAuthError) as exc_info:
+        await web_auth.unlink_identity(types.SimpleNamespace(id=42), "google")
+
+    assert exc_info.value.code == "last_identity"
+    assert exc_info.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_unlink_identity_rejects_password_when_it_is_last_verified_method(monkeypatch):
+    calls: list[tuple[str, object]] = []
+
+    class _IdentityQuery:
+        def __init__(self, *, exists: bool = False, count: int = 0, deleted: int = 0):
+            self._exists = exists
+            self._count = count
+            self._deleted = deleted
+
+        async def exists(self):
+            return self._exists
+
+        def exclude(self, **kwargs):
+            assert kwargs == {"provider": "password"}
+            return _IdentityQuery(count=0)
+
+        async def count(self):
+            return self._count
+
+        async def delete(self):
+            calls.append(("identity_delete", self._deleted))
+            return self._deleted
+
+    class _PasswordQuery:
+        def __init__(self, *, exists: bool = False, deleted: int = 0):
+            self._exists = exists
+            self._deleted = deleted
+
+        async def exists(self):
+            return self._exists
+
+        async def delete(self):
+            calls.append(("password_delete", self._deleted))
+            return self._deleted
+
+    class _FakeIdentity:
+        @classmethod
+        def filter(cls, **kwargs):
+            if kwargs == {"user_id": 42, "provider": "password"}:
+                return _IdentityQuery(exists=True, deleted=1)
+            assert kwargs == {"user_id": 42}
+            return _IdentityQuery(count=0)
+
+    class _FakePasswordCredential:
+        @classmethod
+        def filter(cls, **kwargs):
+            if kwargs == {"user_id": 42, "email_verified": True}:
+                return _PasswordQuery(exists=True)
+            assert kwargs == {"user_id": 42}
+            return _PasswordQuery(exists=True, deleted=1)
+
+    monkeypatch.setattr(web_auth, "AuthIdentity", _FakeIdentity)
+    monkeypatch.setattr(web_auth, "AuthPasswordCredential", _FakePasswordCredential)
+
+    with pytest.raises(web_auth.WebAuthError) as exc_info:
+        await web_auth.unlink_identity(types.SimpleNamespace(id=42), "password")
+
+    assert exc_info.value.code == "last_identity"
+    assert exc_info.value.status_code == 400
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_password_email_rate_limit_raises_generic_rate_limited_error(monkeypatch):
+    audit_calls: list[dict[str, object]] = []
+
+    class _FakeLimiter:
+        async def is_allowed(self, key: str):
+            assert key.startswith("password_login:")
+            return False, 42
+
+    async def _audit(**kwargs):
+        audit_calls.append(kwargs)
+
+    monkeypatch.setattr(web_auth, "password_email_limiter", _FakeLimiter())
+    monkeypatch.setattr(web_auth, "audit_auth_event", _audit)
+
+    with pytest.raises(web_auth.WebAuthError) as exc_info:
+        await web_auth.enforce_password_email_rate_limit(
+            "user@example.com",
+            action="password_login",
+        )
+
+    assert exc_info.value.code == "rate_limited"
+    assert exc_info.value.status_code == 429
+    assert audit_calls[0]["reason"] == "email_rate_limited"
+
+
+@pytest.mark.asyncio
+async def test_password_register_requires_email_delivery_before_creating_user(monkeypatch):
+    create_called = False
+
+    async def _rate_limit(*_args, **_kwargs):
+        return None
+
+    async def _create_web_user(**_kwargs):
+        nonlocal create_called
+        create_called = True
+        raise AssertionError("register_password_user must not create a dead-end account when SMTP is unavailable")
+
+    monkeypatch.setattr(web_auth.web_auth_settings, "web_auth_enabled", True)
+    monkeypatch.setattr(web_auth.web_auth_settings, "password_auth_enabled", True)
+    monkeypatch.setattr(web_auth.smtp_settings, "host", "")
+    monkeypatch.setattr(web_auth.smtp_settings, "from_email", "")
+    monkeypatch.setattr(web_auth, "enforce_password_email_rate_limit", _rate_limit)
+    monkeypatch.setattr(web_auth, "create_web_user", _create_web_user)
+
+    with pytest.raises(web_auth.WebAuthError) as exc_info:
+        await web_auth.register_password_user("new@example.com", "password-123")
+
+    assert exc_info.value.code == "password_email_delivery_disabled"
+    assert exc_info.value.status_code == 503
+    assert create_called is False
+
+
+@pytest.mark.asyncio
+async def test_password_register_resends_verification_for_existing_unverified_credential(monkeypatch):
+    sent: dict[str, str] = {}
+    saved_fields: list[list[str]] = []
+    old_hash = "old-token-hash"
+
+    class _ExistingCredential(types.SimpleNamespace):
+        async def save(self, update_fields=None):
+            saved_fields.append(list(update_fields or []))
+
+    existing = _ExistingCredential(
+        user_id=web_auth.WEB_USER_ID_FLOOR + 30,
+        email_verified=False,
+        verification_token_hash=old_hash,
+        verification_expires_at=None,
+    )
+
+    class _FakePasswordCredential:
+        @classmethod
+        async def get_or_none(cls, **kwargs):
+            assert kwargs == {"email_normalized": "new@example.com"}
+            return existing
+
+    async def _rate_limit(*_args, **_kwargs):
+        return None
+
+    async def _send_verification(email: str, token: str) -> bool:
+        sent["email"] = email
+        sent["token"] = token
+        return True
+
+    async def _audit(**_kwargs):
+        return None
+
+    monkeypatch.setattr(web_auth.web_auth_settings, "web_auth_enabled", True)
+    monkeypatch.setattr(web_auth.web_auth_settings, "password_auth_enabled", True)
+    monkeypatch.setattr(web_auth.smtp_settings, "host", "smtp.example.test")
+    monkeypatch.setattr(web_auth.smtp_settings, "from_email", "noreply@example.test")
+    monkeypatch.setattr(web_auth, "AuthPasswordCredential", _FakePasswordCredential)
+    monkeypatch.setattr(web_auth, "enforce_password_email_rate_limit", _rate_limit)
+    monkeypatch.setattr(web_auth, "_send_verification_email", _send_verification)
+    monkeypatch.setattr(web_auth, "audit_auth_event", _audit)
+
+    response = await web_auth.register_password_user("New@Example.COM", "password-123")
+
+    assert response == {"ok": True, "emailVerificationRequired": True, "emailSent": True}
+    assert sent["email"] == "new@example.com"
+    assert sent["token"]
+    assert existing.verification_token_hash != old_hash
+    assert existing.verification_expires_at is not None
+    assert saved_fields == [["verification_token_hash", "verification_expires_at", "updated_at"]]
+
+
+@pytest.mark.asyncio
+async def test_telegram_oauth_provider_is_disabled_by_default(monkeypatch):
+    monkeypatch.setattr(web_auth.web_auth_settings, "web_auth_enabled", True)
+    monkeypatch.setattr(web_auth.web_auth_settings, "oauth_telegram_enabled", False)
+    monkeypatch.setattr(web_auth.oauth_settings, "enabled_providers", ["telegram"])
+    monkeypatch.setattr(web_auth.oauth_settings, "telegram_client_id", "tg-client")
+    monkeypatch.setattr(
+        web_auth.oauth_settings,
+        "telegram_client_secret",
+        types.SimpleNamespace(get_secret_value=lambda: "tg-secret"),
+    )
+
+    assert web_auth.provider_is_enabled("telegram") is False
+
+
+@pytest.mark.asyncio
+async def test_telegram_oauth_start_uses_oidc_pkce_nonce(monkeypatch):
+    created_rows: list[dict[str, object]] = []
+
+    class _FakeOAuthState:
+        @classmethod
+        async def create(cls, **kwargs):
+            created_rows.append(kwargs)
+            return types.SimpleNamespace(**kwargs)
+
+    monkeypatch.setattr(web_auth, "AuthOAuthState", _FakeOAuthState)
+    monkeypatch.setattr(web_auth.web_auth_settings, "web_auth_enabled", True)
+    monkeypatch.setattr(web_auth.web_auth_settings, "oauth_telegram_enabled", True)
+    monkeypatch.setattr(web_auth.oauth_settings, "enabled_providers", ["telegram"])
+    monkeypatch.setattr(web_auth.oauth_settings, "telegram_client_id", "tg-client")
+    monkeypatch.setattr(
+        web_auth.oauth_settings,
+        "telegram_client_secret",
+        types.SimpleNamespace(get_secret_value=lambda: "tg-secret"),
+    )
+
+    authorization_url = await web_auth.create_oauth_authorization_url(
+        provider="telegram",
+        mode="login",
+        return_to="/account/security",
+    )
+
+    parsed = urlparse(authorization_url)
+    params = parse_qs(parsed.query)
+
+    assert parsed.scheme == "https"
+    assert parsed.netloc == "oauth.telegram.org"
+    assert params["client_id"] == ["tg-client"]
+    assert params["response_type"] == ["code"]
+    assert params["scope"] == ["openid profile"]
+    assert params["code_challenge_method"] == ["S256"]
+    assert params["state"][0]
+    assert params["nonce"][0]
+    assert created_rows[0]["provider"] == "telegram"
+    assert created_rows[0]["return_to"] == "/account/security"
+
+
+@pytest.mark.asyncio
+async def test_telegram_oauth_token_exchange_uses_basic_auth_pkce_and_client_id(monkeypatch):
+    captured: dict[str, object] = {}
+    config = web_auth.ProviderConfig(
+        provider="telegram",
+        client_id="tg-client",
+        client_secret="tg-secret",
+        auth_url="https://oauth.telegram.org/auth",
+        token_url="https://oauth.telegram.org/token",
+        jwks_url="https://oauth.telegram.org/.well-known/jwks.json",
+        issuer="https://oauth.telegram.org",
+        userinfo_url=None,
+        scope="openid profile",
+    )
+    state_row = types.SimpleNamespace(pkce_verifier="pkce-verifier")
+
+    class _Response:
+        status_code = 200
+
+        def json(self):
+            return {"id_token": "id-token"}
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, data=None, headers=None):
+            captured["url"] = url
+            captured["data"] = data
+            captured["headers"] = headers
+            return _Response()
+
+    monkeypatch.setattr(web_auth.httpx, "AsyncClient", _Client)
+
+    payload = await web_auth._exchange_oauth_code(config, state_row, "oauth-code")
+
+    expected_basic = base64.b64encode(b"tg-client:tg-secret").decode("ascii")
+    assert payload == {"id_token": "id-token"}
+    assert captured["url"] == "https://oauth.telegram.org/token"
+    assert captured["data"] == {
+        "grant_type": "authorization_code",
+        "code": "oauth-code",
+        "redirect_uri": web_auth.oauth_callback_url("telegram"),
+        "code_verifier": "pkce-verifier",
+        "client_id": "tg-client",
+    }
+    assert captured["headers"]["Authorization"] == f"Basic {expected_basic}"
+
+
+@pytest.mark.asyncio
+async def test_telegram_oauth_profile_requires_numeric_id(monkeypatch):
+    config = web_auth.ProviderConfig(
+        provider="telegram",
+        client_id="tg-client",
+        client_secret="tg-secret",
+        auth_url="https://oauth.telegram.org/auth",
+        token_url="https://oauth.telegram.org/token",
+        jwks_url="https://oauth.telegram.org/.well-known/jwks.json",
+        issuer="https://oauth.telegram.org",
+        userinfo_url=None,
+        scope="openid profile",
+    )
+    state_row = types.SimpleNamespace(nonce="nonce", pkce_verifier="verifier")
+
+    async def _exchange(*_args, **_kwargs):
+        return {"id_token": "token"}
+
+    monkeypatch.setattr(web_auth, "_exchange_oauth_code", _exchange)
+    monkeypatch.setattr(
+        web_auth,
+        "_decode_id_token",
+        lambda *_args: {"sub": "not-numeric", "nonce": "nonce"},
+    )
+
+    with pytest.raises(web_auth.WebAuthError) as exc_info:
+        await web_auth.resolve_provider_profile(config, state_row, "code")
+
+    assert exc_info.value.code == "missing_telegram_id"
+    assert exc_info.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_telegram_oauth_profile_does_not_treat_sub_as_telegram_id(monkeypatch):
+    config = web_auth.ProviderConfig(
+        provider="telegram",
+        client_id="tg-client",
+        client_secret="tg-secret",
+        auth_url="https://oauth.telegram.org/auth",
+        token_url="https://oauth.telegram.org/token",
+        jwks_url="https://oauth.telegram.org/.well-known/jwks.json",
+        issuer="https://oauth.telegram.org",
+        userinfo_url=None,
+        scope="openid profile",
+    )
+    state_row = types.SimpleNamespace(nonce="nonce", pkce_verifier="verifier")
+
+    async def _exchange(*_args, **_kwargs):
+        return {"id_token": "token"}
+
+    monkeypatch.setattr(web_auth, "_exchange_oauth_code", _exchange)
+    monkeypatch.setattr(
+        web_auth,
+        "_decode_id_token",
+        lambda *_args: {"sub": "123456789", "nonce": "nonce"},
+    )
+
+    with pytest.raises(web_auth.WebAuthError) as exc_info:
+        await web_auth.resolve_provider_profile(config, state_row, "code")
+
+    assert exc_info.value.code == "missing_telegram_id"
+    assert exc_info.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_telegram_oauth_link_returns_canonical_telegram_ticket(monkeypatch):
+    source_user = types.SimpleNamespace(id=web_auth.WEB_USER_ID_FLOOR + 20)
+    target_user = types.SimpleNamespace(id=123456, auth_token_version=0)
+    state_row = types.SimpleNamespace(mode="link", linking_user_id=source_user.id, return_to="/account/security")
+    profile = web_auth.ProviderProfile(provider="telegram", subject="123456", display_name="Telegram User")
+
+    async def _consume(provider, state):
+        assert provider == "telegram"
+        assert state == "state"
+        return state_row
+
+    async def _profile(_config, _state_row, code):
+        assert code == "code"
+        return profile
+
+    async def _get_or_none(**kwargs):
+        assert kwargs == {"id": source_user.id}
+        return source_user
+
+    async def _merge(user, telegram_user):
+        assert user is source_user
+        assert telegram_user.id == 123456
+        return target_user, True
+
+    async def _audit(**_kwargs):
+        return None
+
+    async def _ticket(user):
+        assert user is target_user
+        return "ticket-telegram"
+
+    monkeypatch.setattr(web_auth, "provider_is_enabled", lambda provider: provider == "telegram")
+    monkeypatch.setattr(web_auth, "get_provider_config", lambda provider: types.SimpleNamespace(provider=provider))
+    monkeypatch.setattr(web_auth, "_consume_oauth_state", _consume)
+    monkeypatch.setattr(web_auth, "resolve_provider_profile", _profile)
+    monkeypatch.setattr(web_auth.Users, "get_or_none", _get_or_none)
+    monkeypatch.setattr(web_auth, "merge_source_user_into_telegram_user", _merge)
+    monkeypatch.setattr(web_auth, "audit_auth_event", _audit)
+    monkeypatch.setattr(web_auth, "create_login_ticket", _ticket)
+
+    ticket, return_to = await web_auth.handle_oauth_callback("telegram", "code", "state")
+
+    assert ticket == "ticket-telegram"
+    assert return_to == "/account/security"
+
+
+@pytest.mark.asyncio
+async def test_consume_login_ticket_is_atomic(monkeypatch):
+    class _TicketQuery:
+        async def update(self, **kwargs):
+            assert "consumed_at" in kwargs
+            return 0
+
+    class _FakeLoginTicket:
+        @classmethod
+        def filter(cls, **kwargs):
+            assert kwargs["consumed_at__isnull"] is True
+            return _TicketQuery()
+
+        @classmethod
+        async def get_or_none(cls, **_kwargs):
+            return types.SimpleNamespace(consumed_at=None)
+
+    monkeypatch.setattr(web_auth, "AuthLoginTicket", _FakeLoginTicket)
+
+    with pytest.raises(web_auth.WebAuthError) as exc_info:
+        await web_auth.exchange_login_ticket("ticket")
+
+    assert exc_info.value.code == "invalid_ticket"
+
+
+@pytest.mark.asyncio
+async def test_material_data_blocks_partner_and_promo_state(monkeypatch):
+    async def _user_partner(**kwargs):
+        assert kwargs == {"id": 42}
+        return types.SimpleNamespace(id=42, is_partner=True)
+
+    monkeypatch.setattr(web_auth.Users, "get_or_none", _user_partner)
+    assert await web_auth.user_has_material_data(42) is True
+
+    async def _empty_user(**_kwargs):
+        return types.SimpleNamespace(id=42)
+
+    class _ExistsQuery:
+        def __init__(self, exists=False):
+            self._exists = exists
+
+        async def exists(self):
+            return self._exists
+
+    class _NoRows:
+        @classmethod
+        def filter(cls, **_kwargs):
+            return _ExistsQuery(False)
+
+    class _PromoRows:
+        @classmethod
+        def filter(cls, **kwargs):
+            assert kwargs == {"user_id": 42}
+            return _ExistsQuery(True)
+
+    monkeypatch.setattr(web_auth.Users, "get_or_none", _empty_user)
+    for attr in [
+        "ActiveTariffs",
+        "ProcessedPayments",
+        "FamilyMembers",
+        "FamilyInvites",
+        "FamilyDevices",
+        "PartnerEarnings",
+        "PartnerQr",
+        "PartnerWithdrawals",
+        "ReferralRewards",
+        "ReferralLevelRewards",
+        "PersonalDiscount",
+        "PrizeWheelHistory",
+        "SubscriptionFreezes",
+        "RemnaWaveRetryJobs",
+    ]:
+        monkeypatch.setattr(web_auth, attr, _NoRows)
+    monkeypatch.setattr(web_auth, "PromoUsage", _PromoRows)
+
+    assert await web_auth.user_has_material_data(42) is True

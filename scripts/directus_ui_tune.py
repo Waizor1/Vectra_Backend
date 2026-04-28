@@ -69,18 +69,6 @@ def main() -> None:
             "note": "История использования промокодов",
             "sort": 3,
         },
-        "prize_wheel_config": {
-            "group": "Колесо призов",
-            "icon": "casino",
-            "note": "Настройки призов и вероятностей",
-            "sort": 1,
-        },
-        "prize_wheel_history": {
-            "group": "Колесо призов",
-            "icon": "history_toggle_off",
-            "note": "История выпадения призов",
-            "sort": 2,
-        },
         "processed_payments": {
             "group": "Платежи",
             "icon": "payments",

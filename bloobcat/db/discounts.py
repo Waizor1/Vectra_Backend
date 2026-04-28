@@ -18,8 +18,8 @@ class PersonalDiscount(models.Model):
     - min_months/max_months: ограничения по длительности тарифа (если указаны)
     """
 
-    id = fields.IntField(pk=True)
-    user_id = fields.BigIntField(index=True)
+    id = fields.IntField(primary_key=True)
+    user_id = fields.BigIntField(db_index=True)
     percent = fields.IntField()
     is_permanent = fields.BooleanField(default=False)
     remaining_uses = fields.IntField(default=0)

@@ -1,9 +1,11 @@
 from random import randint
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, time, timezone
 from decimal import Decimal, ROUND_HALF_UP
 import json
 import asyncio
 import random
+import hashlib
 import hmac
 from functools import partial
 from types import SimpleNamespace
@@ -11,18 +13,30 @@ from urllib.parse import urlparse
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Header, Request # type: ignore
+from fastapi import APIRouter, Depends, HTTPException, Header, Request  # type: ignore
 from pydantic import BaseModel
 from yookassa import Configuration, Payment, Webhook
-from yookassa.domain.notification import WebhookNotification, WebhookNotificationEventType
+from yookassa.domain.notification import (
+    WebhookNotification,
+    WebhookNotificationEventType,
+)
 from urllib3.exceptions import ConnectTimeoutError, ReadTimeoutError
-from requests.exceptions import ConnectionError as RequestsConnectionError, Timeout as RequestsTimeout
+from requests.exceptions import (
+    ConnectionError as RequestsConnectionError,
+    Timeout as RequestsTimeout,
+)
 from tortoise.expressions import F
 from tortoise.exceptions import IntegrityError
 from tortoise.transactions import in_transaction
 
 from bloobcat.bot.bot import get_bot_username
-from bloobcat.bot.notifications.admin import on_payment, cancel_subscription, notify_lte_topup
+from bloobcat.bot.notifications.admin import (
+    on_payment,
+    cancel_subscription,
+    notify_lte_topup,
+    notify_manual_payment_canceled,
+)
+
 # Notifications module can be stubbed in tests. Keep imports resilient.
 try:
     from bloobcat.bot.notifications.general.referral import (
@@ -49,14 +63,15 @@ from bloobcat.bot.notifications.subscription.renewal import (
 from bloobcat.bot.notifications.prize_wheel import notify_spin_awarded
 from bloobcat.db.tariff import Tariffs
 from bloobcat.db.users import Users, normalize_date
+from bloobcat.funcs.referral_attribution import is_partner_source_utm
 from bloobcat.funcs.validate import validate
 from bloobcat.settings import (
     app_settings,
+    yookassa_settings,
     payment_settings,
     platega_settings,
     remnawave_settings,
     telegram_settings,
-    yookassa_settings,
 )
 from bloobcat.db.payments import ProcessedPayments
 from bloobcat.db.partner_earnings import PartnerEarnings
@@ -71,13 +86,19 @@ from bloobcat.routes.remnawave.lte_utils import set_lte_squad_status
 from bloobcat.services.discounts import (
     apply_personal_discount,
     consume_discount_if_needed,
+    is_discount_available_if_needed,
 )
+from bloobcat.utils.dates import add_months_safe
+from bloobcat.db.referral_rewards import ReferralRewards
+from bloobcat.services.tariff_quote import build_subscription_quote, validate_device_count_for_tariff, validate_lte_gb_for_tariff
+from bloobcat.services.referral_gamification import award_referral_cashback
 from bloobcat.services.platega import (
     PLATEGA_PROVIDER,
     PLATEGA_STATUS_CANCELED,
     PLATEGA_STATUS_CHARGEBACK,
     PLATEGA_STATUS_CHARGEBACKED,
     PLATEGA_STATUS_CONFIRMED,
+    PLATEGA_STATUS_PENDING,
     PlategaAPIError,
     PlategaClient,
     PlategaConfigError,
@@ -85,15 +106,17 @@ from bloobcat.services.platega import (
     normalize_platega_status,
     parse_platega_payload,
 )
-from bloobcat.utils.dates import add_months_safe
-from bloobcat.db.referral_rewards import ReferralRewards
-
-
-PAYMENT_PROVIDER_YOOKASSA = "yookassa"
-PAYMENT_PROVIDER_PLATEGA = PLATEGA_PROVIDER
-PAYMENT_CURRENCY_RUB = "RUB"
-CLIENT_REQUEST_ID_MAX_LENGTH = 100
-
+from bloobcat.services.subscription_overlay import (
+    apply_base_purchase_to_frozen_base_if_active,
+    family_devices_limit,
+    freeze_base_subscription_if_needed,
+    get_active_base_overlay,
+    get_overlay_payload,
+    has_active_family_overlay,
+    is_family_purchase,
+    normalize_tariff_kind,
+    resolve_tariff_kind_by_limits,
+)
 
 def _configure_yookassa_if_available() -> bool:
     shop_id = str(getattr(yookassa_settings, "shop_id", "") or "").strip()
@@ -109,15 +132,46 @@ def _configure_yookassa_if_available() -> bool:
     return True
 
 
+# YooKassa stays in the codebase as an operator-controlled rollback path.
+# It is configured only when credentials exist, so Platega-first deployments can
+# boot without YooKassa env vars and without accidental YooKassa API traffic.
+_configure_yookassa_if_available()
+
+router = APIRouter(prefix="/pay", tags=["pay"])
+# NOTE: YooKassa webhook URL is sometimes configured without "/pay" prefix.
+# We expose the same handler on both paths:
+# - /pay/webhook/yookassa/{secret}   (default, under /pay)
+# - /webhook/yookassa/{secret}       (alias, no /pay)
+webhook_router = APIRouter(tags=["pay"])
+logger = get_payment_logger()
+
+BYTES_IN_GB = 1024**3
+MSK_TZ = timezone(timedelta(hours=3))
+PAYMENT_PROCESSING_STALE_SECONDS = 420
+PAYMENT_EXTERNAL_CALL_TIMEOUT_SECONDS = 120
+PAYMENT_FAST_STATUS_REMNAWAVE_TIMEOUT_SECONDS = 2.0
+PAYMENT_NOTIFICATION_MARK_TYPE = "payment_notify"
+PAYMENT_NOTIFICATION_MARK_KEY_LIMIT = 64
+CLIENT_REQUEST_ID_MAX_LENGTH = 64
+CLIENT_REQUEST_ID_ALLOWED_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.:"
+)
+PAYMENT_PROVIDER_YOOKASSA = "yookassa"
+PAYMENT_PROVIDER_PLATEGA = PLATEGA_PROVIDER
+PAYMENT_CURRENCY_RUB = "RUB"
+
+
 def _active_payment_provider() -> str:
     provider = str(getattr(payment_settings, "provider", "") or "").strip().lower()
-    if provider == PAYMENT_PROVIDER_YOOKASSA:
-        return PAYMENT_PROVIDER_YOOKASSA
-    return PAYMENT_PROVIDER_PLATEGA
+    if provider == PAYMENT_PROVIDER_PLATEGA:
+        return PAYMENT_PROVIDER_PLATEGA
+    return PAYMENT_PROVIDER_YOOKASSA
 
 
 def _auto_renewal_uses_yookassa() -> bool:
-    mode = str(getattr(payment_settings, "auto_renewal_mode", "") or "").strip().lower()
+    mode = str(
+        getattr(payment_settings, "auto_renewal_mode", "") or ""
+    ).strip().lower()
     return mode == PAYMENT_PROVIDER_YOOKASSA
 
 
@@ -142,47 +196,7 @@ def _metadata_from_processed_payment(row: ProcessedPayments | None) -> dict[str,
         return {}
     provider_payload = _load_provider_payload(getattr(row, "provider_payload", None))
     metadata = provider_payload.get("metadata")
-    if isinstance(metadata, dict):
-        return dict(metadata)
-    return {}
-
-
-def _parse_platega_metadata_from_payload(payload: Any) -> dict[str, Any]:
-    parsed = parse_platega_payload(payload)
-    metadata = parsed.get("metadata")
-    if isinstance(metadata, dict):
-        return dict(metadata)
-    return parsed
-
-
-def _round_amount_for_compare(value: Any) -> Decimal:
-    try:
-        amount = Decimal(str(value))
-    except Exception:
-        amount = Decimal("0")
-    return amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-
-
-def _validate_platega_amount_currency(
-    *,
-    provider_amount: Any,
-    provider_currency: Any,
-    metadata: dict[str, Any],
-) -> None:
-    expected_currency = str(
-        metadata.get("expected_currency") or PAYMENT_CURRENCY_RUB
-    ).strip().upper()
-    received_currency = str(provider_currency or "").strip().upper()
-    if received_currency and received_currency != expected_currency:
-        raise HTTPException(status_code=400, detail="Payment currency mismatch")
-
-    expected_amount = metadata.get("expected_amount")
-    if expected_amount is None:
-        return
-    if _round_amount_for_compare(provider_amount) != _round_amount_for_compare(
-        expected_amount
-    ):
-        raise HTTPException(status_code=400, detail="Payment amount mismatch")
+    return dict(metadata) if isinstance(metadata, dict) else {}
 
 
 def _platega_payment_stub(
@@ -193,22 +207,11 @@ def _platega_payment_stub(
 ) -> SimpleNamespace:
     return SimpleNamespace(
         id=str(payment_id),
-        amount=SimpleNamespace(value=str(amount), currency=PAYMENT_CURRENCY_RUB),
+        amount=SimpleNamespace(value=str(amount)),
         status="succeeded",
         metadata=metadata,
         payment_method=None,
     )
-
-
-def _normalize_client_request_id(client_request_id: str | None) -> str | None:
-    if client_request_id is None:
-        return None
-    normalized = str(client_request_id).strip()
-    if not normalized:
-        return None
-    if len(normalized) > CLIENT_REQUEST_ID_MAX_LENGTH:
-        raise HTTPException(status_code=400, detail="Некорректный client_request_id")
-    return normalized
 
 
 class CreatePaymentRequest(BaseModel):
@@ -218,47 +221,93 @@ class CreatePaymentRequest(BaseModel):
     client_request_id: str | None = None
 
 
-# YooKassa remains available only as an operator-controlled rollback path.
-# Platega-first deployments can boot without YooKassa credentials.
-_configure_yookassa_if_available()
+@dataclass(frozen=True, slots=True)
+class PaymentNotificationContext:
+    days: int
+    amount_external: float
+    amount_from_balance: float
+    device_count: int
+    months: int
+    is_auto_payment: bool
+    discount_percent: int | None
+    old_expired_at: date | None
+    new_expired_at: date | None
+    lte_gb_total: int
+    method: str
+    migration_direction: str | None = None
 
-router = APIRouter(prefix="/pay", tags=["pay"])
-# NOTE: YooKassa webhook URL is sometimes configured without "/pay" prefix.
-# We expose the same handler on both paths:
-# - /pay/webhook/yookassa/{secret}   (default, under /pay)
-# - /webhook/yookassa/{secret}       (alias, no /pay)
-webhook_router = APIRouter(tags=["pay"])
-logger = get_payment_logger()
 
-BYTES_IN_GB = 1024 ** 3
-MSK_TZ = timezone(timedelta(hours=3))
+@dataclass(frozen=True, slots=True)
+class AutoPaymentPreview:
+    months: int
+    device_count: int
+    total_amount: float
+    amount_external: float
+    amount_from_balance: float
+    discount_percent: int | None
+    lte_gb_total: int
+    lte_cost: int
+    discount_id: int | None
+    base_full_price: int
+    discounted_price: float
+    lte_price_per_gb: float
+
+
+async def _await_payment_external_call(
+    awaitable, *, operation: str, timeout: float | None = None
+):
+    """Bound external await duration to avoid stale-lease reclaim races."""
+    effective_timeout = (
+        PAYMENT_EXTERNAL_CALL_TIMEOUT_SECONDS if timeout is None else timeout
+    )
+    try:
+        return await asyncio.wait_for(
+            awaitable,
+            timeout=effective_timeout,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Payment external call timed out: %s (timeout=%ss)",
+            operation,
+            effective_timeout,
+        )
+        raise
+
+
+def _normalize_client_request_id(client_request_id: str | None) -> str | None:
+    if client_request_id is None:
+        return None
+
+    normalized = str(client_request_id).strip()
+    if not normalized:
+        return None
+
+    if len(normalized) > CLIENT_REQUEST_ID_MAX_LENGTH:
+        raise HTTPException(status_code=400, detail="Некорректный client_request_id")
+
+    if any(ch not in CLIENT_REQUEST_ID_ALLOWED_CHARS for ch in normalized):
+        raise HTTPException(status_code=400, detail="Некорректный client_request_id")
+
+    return normalized
+
+
+def _build_balance_payment_id(*, user_id: int, client_request_id: str) -> str:
+    digest = hashlib.sha1(str(client_request_id).encode("utf-8")).hexdigest()[:20]
+    return f"balance_req_{int(user_id)}_{digest}"
+
 
 def _calc_referrer_bonus_days(months: int | None, device_count: int | None) -> int:
-    """Referral reward for the referrer, based on what the friend bought.
+    """Legacy helper retained for imports/tests.
 
-    Matches the Mini App rules (see ReferralsPage modal):
-    - 1 month -> +7 days
-    - 3 months -> +20 days
-    - 6 months -> +36 days
-    - 12 months -> +60 days
-    - 12 months family (10 devices) -> +120 days
+    The ordinary referral program no longer grants referrer subscription days;
+    referrers now receive internal-balance cashback via ReferralCashbackRewards.
     """
-    m = int(months or 0)
-    d = int(device_count or 0)
-    if m >= 12 and d >= 10:
-        return 120
-    if m >= 12:
-        return 60
-    if m >= 6:
-        return 36
-    if m >= 3:
-        return 20
-    # Default fallback: treat any "short" purchase as 1 month.
-    return 7
+    _ = months, device_count
+    return 0
 
 
 def _family_devices_limit() -> int:
-    return max(1, int(getattr(app_settings, "family_devices_limit", 10) or 10))
+    return family_devices_limit()
 
 
 def _is_active_subscription(user: Users) -> bool:
@@ -276,6 +325,72 @@ async def _resolve_base_devices_limit(user: Users) -> int:
     if getattr(user, "hwid_limit", None) is not None:
         limit = int(getattr(user, "hwid_limit", 0) or limit)
     return max(1, int(limit))
+
+
+def _resolve_auto_payment_device_count(
+    *, user: Users, active_tariff: ActiveTariffs
+) -> int:
+    return max(
+        1,
+        int(
+            getattr(active_tariff, "hwid_limit", 0)
+            or getattr(user, "hwid_limit", 0)
+            or 1
+        ),
+    )
+
+
+async def build_auto_payment_preview(
+    user: Users,
+    *,
+    active_tariff: ActiveTariffs | None = None,
+) -> AutoPaymentPreview | None:
+    resolved_active_tariff = active_tariff
+    if resolved_active_tariff is None:
+        tariff_id = getattr(user, "active_tariff_id", None)
+        if not tariff_id:
+            return None
+        resolved_active_tariff = await ActiveTariffs.get_or_none(id=tariff_id)
+        if resolved_active_tariff is None:
+            return None
+
+    months = int(getattr(resolved_active_tariff, "months", 0) or 0)
+    base_full_price = int(getattr(resolved_active_tariff, "price", 0) or 0)
+    lte_gb_total = int(getattr(resolved_active_tariff, "lte_gb_total", 0) or 0)
+    lte_price_per_gb = float(
+        getattr(resolved_active_tariff, "lte_price_per_gb", 0) or 0
+    )
+    lte_cost = 0
+    if not bool(getattr(resolved_active_tariff, "lte_autopay_free", False)):
+        lte_cost = _round_rub(lte_gb_total * lte_price_per_gb)
+
+    discounted_price, discount_id, discount_percent = await apply_personal_discount(
+        user.id, base_full_price, months
+    )
+    total_amount = int(discounted_price) + lte_cost
+    user_balance = float(getattr(user, "balance", 0) or 0)
+    amount_external = 0.0
+    amount_from_balance = float(total_amount)
+    if user_balance < total_amount:
+        amount_external = float(max(1.0, total_amount - user_balance))
+        amount_from_balance = float(total_amount - amount_external)
+
+    return AutoPaymentPreview(
+        months=months,
+        device_count=_resolve_auto_payment_device_count(
+            user=user, active_tariff=resolved_active_tariff
+        ),
+        total_amount=float(total_amount),
+        amount_external=float(amount_external),
+        amount_from_balance=float(amount_from_balance),
+        discount_percent=discount_percent,
+        lte_gb_total=lte_gb_total,
+        lte_cost=lte_cost,
+        discount_id=discount_id,
+        base_full_price=base_full_price,
+        discounted_price=float(discounted_price),
+        lte_price_per_gb=lte_price_per_gb,
+    )
 
 
 async def _has_active_family_entitlement(user: Users) -> bool:
@@ -331,17 +446,20 @@ async def _notify_successful_purchase(
     amount_paid_via_yookassa: float,
     amount_from_balance: float,
     device_count: int,
+    migration_direction: str | None = None,
 ) -> None:
     """
-    Sends purchase success notification with family-specific copy for 10-device plans.
+    Sends purchase success notification with family-specific copy for capacity-driven family plans.
     """
     normalized_device_count = int(device_count or 1)
-    if normalized_device_count >= 10:
+    if normalized_device_count >= _family_devices_limit():
         await notify_family_purchase_success_yookassa(
             user=user,
             days=days,
             amount_paid_via_yookassa=amount_paid_via_yookassa,
             amount_from_balance=amount_from_balance,
+            device_count=normalized_device_count,
+            migration_direction=migration_direction,
         )
         return
     await notify_renewal_success_yookassa(
@@ -349,7 +467,354 @@ async def _notify_successful_purchase(
         days=days,
         amount_paid_via_yookassa=amount_paid_via_yookassa,
         amount_from_balance=amount_from_balance,
+        migration_direction=migration_direction,
     )
+
+
+async def _resolve_payment_migration_direction(
+    *, user: Users, purchase_kind: str
+) -> str | None:
+    has_family_overlay = await has_active_family_overlay(user)
+    if purchase_kind == "family" and has_family_overlay:
+        return "base_to_family"
+    if purchase_kind == "base" and has_family_overlay:
+        return "family_to_base"
+    return None
+
+
+async def _build_payment_notification_context(
+    *,
+    user: Users,
+    days: int,
+    amount_external: float,
+    amount_from_balance: float,
+    device_count: int,
+    months: int,
+    is_auto_payment: bool,
+    discount_percent: int | None,
+    old_expired_at,
+    new_expired_at,
+    lte_gb_total: int,
+    method: str,
+    tariff_kind: str | None = None,
+) -> PaymentNotificationContext:
+    notification_metadata: dict[str, object] = {
+        "month": months,
+        "device_count": device_count,
+    }
+    normalized_tariff_kind = normalize_tariff_kind(tariff_kind)
+    if normalized_tariff_kind:
+        notification_metadata["tariff_kind"] = normalized_tariff_kind
+    purchase_kind = await resolve_purchase_kind(
+        metadata=notification_metadata,
+        months=months,
+        device_count=device_count,
+    )
+    migration_direction = await _resolve_payment_migration_direction(
+        user=user,
+        purchase_kind=purchase_kind,
+    )
+    return PaymentNotificationContext(
+        days=int(days),
+        amount_external=float(amount_external),
+        amount_from_balance=float(amount_from_balance),
+        device_count=int(device_count or 1),
+        months=int(months),
+        is_auto_payment=bool(is_auto_payment),
+        discount_percent=discount_percent,
+        old_expired_at=old_expired_at,
+        new_expired_at=new_expired_at,
+        lte_gb_total=int(lte_gb_total or 0),
+        method=str(method),
+        migration_direction=migration_direction,
+    )
+
+
+async def _send_manual_payment_canceled_notifications_if_needed(
+    *,
+    user: Users,
+    payment_id: str,
+    amount_external: float,
+    reason: str | None = None,
+    method: str = "yookassa",
+) -> None:
+    async def _send_user_notification():
+        await notify_payment_canceled_yookassa(user=user, reason=reason)
+
+    try:
+        await _send_payment_notification_if_needed(
+            user_id=int(user.id),
+            payment_id=str(payment_id),
+            effect="user_cancel",
+            sender=_send_user_notification,
+        )
+    except Exception as e:
+        logger.warning(
+            "Failed to send canceled user payment notification: %s",
+            e,
+            extra={
+                "payment_id": payment_id,
+                "user_id": user.id,
+                "effect": "user_cancel",
+            },
+        )
+
+    async def _send_admin_notification():
+        await notify_manual_payment_canceled(
+            user=user,
+            payment_id=str(payment_id),
+            amount=int(_round_rub(float(amount_external))),
+            method=str(method),
+            reason=reason,
+        )
+
+    try:
+        await _send_payment_notification_if_needed(
+            user_id=int(user.id),
+            payment_id=str(payment_id),
+            effect="admin_cancel",
+            sender=_send_admin_notification,
+        )
+    except Exception as e:
+        logger.warning(
+            "Failed to send canceled admin payment notification: %s",
+            e,
+            extra={
+                "payment_id": payment_id,
+                "user_id": user.id,
+                "effect": "admin_cancel",
+            },
+        )
+
+
+def _build_payment_notification_mark_key(*, effect: str, payment_id: str) -> str:
+    raw_payment_id = str(payment_id or "").strip()
+    digest = (
+        hashlib.sha1(raw_payment_id.encode("utf-8")).hexdigest()[:12]
+        if raw_payment_id
+        else "none"
+    )
+    raw_key = f"{str(effect).strip().lower()}:{raw_payment_id[:40]}:{digest}"
+    return raw_key[:PAYMENT_NOTIFICATION_MARK_KEY_LIMIT]
+
+
+async def _send_payment_notification_if_needed(
+    *,
+    user_id: int,
+    payment_id: str,
+    effect: str,
+    sender,
+) -> bool:
+    mark_key = _build_payment_notification_mark_key(
+        effect=effect, payment_id=payment_id
+    )
+    now = datetime.now(timezone.utc)
+    async with in_transaction() as conn:
+        # Lock processed payment row to serialize mark reservation under races.
+        await (
+            ProcessedPayments.select_for_update()
+            .using_db(conn)
+            .get_or_none(payment_id=str(payment_id))
+        )
+
+        existing_mark = (
+            await NotificationMarks.filter(
+                user_id=int(user_id),
+                type=PAYMENT_NOTIFICATION_MARK_TYPE,
+                key=mark_key,
+            )
+            .using_db(conn)
+            .first()
+        )
+        if existing_mark:
+            mark_meta = str(getattr(existing_mark, "meta", "") or "").strip().lower()
+            if mark_meta != "pending":
+                return False
+
+            sent_at = getattr(existing_mark, "sent_at", None)
+            age_seconds = PAYMENT_PROCESSING_STALE_SECONDS
+            if sent_at is not None:
+                ts = sent_at
+                if getattr(ts, "tzinfo", None) is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                age_seconds = max(0.0, (now - ts).total_seconds())
+            if age_seconds < PAYMENT_PROCESSING_STALE_SECONDS:
+                return False
+
+            await NotificationMarks.filter(id=existing_mark.id).using_db(conn).delete()
+
+        await NotificationMarks.create(
+            user_id=int(user_id),
+            type=PAYMENT_NOTIFICATION_MARK_TYPE,
+            key=mark_key,
+            meta="pending",
+            using_db=conn,
+        )
+
+    try:
+        await sender()
+    except Exception:
+        await NotificationMarks.filter(
+            user_id=int(user_id),
+            type=PAYMENT_NOTIFICATION_MARK_TYPE,
+            key=mark_key,
+            meta="pending",
+        ).delete()
+        raise
+
+    await NotificationMarks.filter(
+        user_id=int(user_id),
+        type=PAYMENT_NOTIFICATION_MARK_TYPE,
+        key=mark_key,
+        meta="pending",
+    ).update(meta="sent")
+    return True
+
+
+async def _should_replay_payment_notifications(
+    *, payment_id: str, user_id: int
+) -> bool:
+    row = await ProcessedPayments.get_or_none(payment_id=str(payment_id))
+    if row is None:
+        return False
+
+    if int(getattr(row, "user_id", 0) or 0) != int(user_id):
+        return False
+
+    now = datetime.now(timezone.utc)
+    state = str(getattr(row, "processing_state", "") or "").strip().lower()
+    last_attempt_at = getattr(row, "last_attempt_at", None)
+    if state == "processing" and last_attempt_at is not None:
+        ts = last_attempt_at
+        if getattr(ts, "tzinfo", None) is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        if (now - ts).total_seconds() < PAYMENT_PROCESSING_STALE_SECONDS:
+            return False
+
+    if bool(getattr(row, "effect_applied", False)):
+        return True
+
+    if state in {"applied", "applied_guarded"}:
+        return True
+
+    status = str(getattr(row, "status", "") or "").strip().lower()
+    return status == "succeeded"
+
+
+async def _repair_processed_payment_financials(
+    *,
+    payment_id: str,
+    user_id: int,
+    amount_external: float,
+    amount_from_balance: float,
+    provider: str = PAYMENT_PROVIDER_YOOKASSA,
+) -> None:
+    amount_total = float(amount_external) + float(amount_from_balance)
+    await _upsert_processed_payment(
+        payment_id=str(payment_id),
+        user_id=int(user_id),
+        amount=float(amount_total),
+        amount_external=float(amount_external),
+        amount_from_balance=float(amount_from_balance),
+        status="succeeded",
+        provider=provider,
+    )
+
+
+async def _replay_payment_notifications_if_needed(
+    *,
+    user: Users,
+    payment_id: str,
+    days: int,
+    amount_external: float,
+    amount_from_balance: float,
+    device_count: int,
+    months: int,
+    is_auto_payment: bool,
+    discount_percent: int | None,
+    old_expired_at,
+    new_expired_at,
+    lte_gb_total: int,
+    method: str,
+    tariff_kind: str | None = None,
+) -> None:
+    context = await _build_payment_notification_context(
+        user=user,
+        days=days,
+        amount_external=amount_external,
+        amount_from_balance=amount_from_balance,
+        device_count=device_count,
+        months=months,
+        is_auto_payment=is_auto_payment,
+        discount_percent=discount_percent,
+        old_expired_at=old_expired_at,
+        new_expired_at=new_expired_at,
+        lte_gb_total=lte_gb_total,
+        method=method,
+        tariff_kind=tariff_kind,
+    )
+
+    async def _send_user_notification():
+        await _notify_successful_purchase(
+            user=user,
+            days=context.days,
+            amount_paid_via_yookassa=context.amount_external,
+            amount_from_balance=context.amount_from_balance,
+            device_count=context.device_count,
+            migration_direction=context.migration_direction,
+        )
+
+    try:
+        await _send_payment_notification_if_needed(
+            user_id=int(user.id),
+            payment_id=str(payment_id),
+            effect="user",
+            sender=_send_user_notification,
+        )
+    except Exception as e:
+        logger.warning(
+            "Failed to replay user payment notification: %s",
+            e,
+            extra={"payment_id": payment_id, "user_id": user.id, "effect": "user"},
+        )
+
+    async def _send_admin_notification():
+        referrer = await user.referrer()
+        await on_payment(
+            user_id=user.id,
+            is_sub=user.is_subscribed,
+            referrer=referrer.name() if referrer else None,
+            amount=int(
+                _round_rub(
+                    float(context.amount_external) + float(context.amount_from_balance)
+                )
+            ),
+            months=context.months,
+            method=context.method,
+            payment_id=str(payment_id),
+            is_auto=context.is_auto_payment,
+            utm=user.utm if hasattr(user, "utm") else None,
+            discount_percent=context.discount_percent,
+            device_count=context.device_count,
+            old_expired_at=context.old_expired_at,
+            new_expired_at=context.new_expired_at,
+            lte_gb_total=context.lte_gb_total,
+            migration_direction=context.migration_direction,
+        )
+
+    try:
+        await _send_payment_notification_if_needed(
+            user_id=int(user.id),
+            payment_id=str(payment_id),
+            effect="admin",
+            sender=_send_admin_notification,
+        )
+    except Exception as e:
+        logger.error(
+            "Failed to replay admin payment notification: %s",
+            e,
+            extra={"payment_id": payment_id, "user_id": user.id},
+        )
 
 
 async def _apply_referral_first_payment_reward(
@@ -365,7 +830,7 @@ async def _apply_referral_first_payment_reward(
     Guarantees:
     - idempotent under webhook retries
     - safe under concurrent webhook deliveries (unique ledger key)
-    - no money-based rewards for normal users (days-based only)
+    - friend still gets +7 days once; referrer cashback is handled separately
     """
     today = date.today()
     m = int(months or 0)
@@ -373,7 +838,9 @@ async def _apply_referral_first_payment_reward(
 
     async with in_transaction() as conn:
         # Lock referred user to avoid races with other operations on the same user.
-        referred = await Users.select_for_update().using_db(conn).get(id=referred_user_id)
+        referred = (
+            await Users.select_for_update().using_db(conn).get(id=referred_user_id)
+        )
         ref_by = int(getattr(referred, "referred_by", 0) or 0)
         if not ref_by:
             logger.info(
@@ -381,6 +848,16 @@ async def _apply_referral_first_payment_reward(
                 referred_user_id,
                 payment_id,
                 ref_by,
+            )
+            return {"applied": False}
+
+        if is_partner_source_utm(getattr(referred, "utm", None)):
+            logger.info(
+                "referral_reward_skip_partner_source user=%s payment=%s referred_by=%s utm=%s",
+                referred_user_id,
+                payment_id,
+                ref_by,
+                getattr(referred, "utm", None),
             )
             return {"applied": False}
 
@@ -415,7 +892,9 @@ async def _apply_referral_first_payment_reward(
             )
             return {"applied": False}
 
-        referrer = await Users.filter(id=int(referred.referred_by)).using_db(conn).first()
+        referrer = (
+            await Users.filter(id=int(referred.referred_by)).using_db(conn).first()
+        )
         if not referrer:
             await ReferralRewards.filter(id=reward.id).using_db(conn).delete()
             logger.warning(
@@ -423,6 +902,15 @@ async def _apply_referral_first_payment_reward(
                 referred_user_id,
                 payment_id,
                 int(referred.referred_by),
+            )
+            return {"applied": False}
+        if bool(getattr(referrer, "is_partner", False)):
+            await ReferralRewards.filter(id=reward.id).using_db(conn).delete()
+            logger.info(
+                "referral_reward_skip_partner_referrer user=%s payment=%s referrer=%s",
+                referred_user_id,
+                payment_id,
+                int(referrer.id),
             )
             return {"applied": False}
 
@@ -439,41 +927,39 @@ async def _apply_referral_first_payment_reward(
         if not is_friend_family and friend_bonus_days > 0:
             start_friend = max(normalize_date(referred.expired_at) or today, today)
             new_friend_expired_at = start_friend + timedelta(days=friend_bonus_days)
-            await Users.filter(id=referred.id).using_db(conn).update(
-                expired_at=new_friend_expired_at,
-                referral_first_payment_rewarded=True,
+            await (
+                Users.filter(id=referred.id)
+                .using_db(conn)
+                .update(
+                    expired_at=new_friend_expired_at,
+                    referral_first_payment_rewarded=True,
+                )
             )
             friend_applied_to_subscription = True
         else:
-            await Users.filter(id=referred.id).using_db(conn).update(
-                referral_first_payment_rewarded=True,
+            await (
+                Users.filter(id=referred.id)
+                .using_db(conn)
+                .update(
+                    referral_first_payment_rewarded=True,
+                )
             )
             # Keep rewards transparent for notifications/UI: +7 exists, but not applied to family expiry.
             friend_applied_to_subscription = False
 
-        # Referrer bonus counter always accumulates (UI uses this).
-        if referrer_bonus_days > 0:
-            await Users.filter(id=referrer.id).using_db(conn).update(
-                referral_bonus_days_total=F("referral_bonus_days_total") + int(referrer_bonus_days)
-            )
-
+        # The referrer no longer receives subscription days from the ordinary
+        # program. Cashback is awarded separately from real external payments.
         applied_to_subscription = False
-        try:
-            is_family = await _has_active_family_entitlement(referrer)
-            if not is_family and referrer_bonus_days > 0:
-                start_ref = max(normalize_date(referrer.expired_at) or today, today)
-                new_ref_expired_at = start_ref + timedelta(days=referrer_bonus_days)
-                await Users.filter(id=referrer.id).using_db(conn).update(expired_at=new_ref_expired_at)
-                applied_to_subscription = True
-        except Exception:
-            # Best-effort: even if family check fails, we still keep the earned days counter.
-            applied_to_subscription = False
 
         # Update ledger with actual computed values.
-        await ReferralRewards.filter(id=reward.id).using_db(conn).update(
-            friend_bonus_days=friend_bonus_days,
-            referrer_bonus_days=referrer_bonus_days,
-            applied_to_subscription=applied_to_subscription,
+        await (
+            ReferralRewards.filter(id=reward.id)
+            .using_db(conn)
+            .update(
+                friend_bonus_days=friend_bonus_days,
+                referrer_bonus_days=referrer_bonus_days,
+                applied_to_subscription=applied_to_subscription,
+            )
         )
 
         return {
@@ -505,22 +991,23 @@ async def _upsert_processed_payment(
     Idempotent write to `processed_payments`.
     Webhooks can be retried and we also have a fallback processor, so this must be safe to call multiple times.
     """
-    existing = await ProcessedPayments.get_or_none(payment_id=payment_id)
-    if existing:
-        existing.user_id = int(user_id)
-        existing.amount = float(amount)
-        existing.amount_external = float(amount_external)
-        existing.amount_from_balance = float(amount_from_balance)
-        existing.status = str(status)
-        existing.provider = str(provider or PAYMENT_PROVIDER_YOOKASSA)
+
+    async def _update_existing(existing: ProcessedPayments) -> ProcessedPayments:
         update_fields = [
             "user_id",
+            "provider",
             "amount",
             "amount_external",
             "amount_from_balance",
             "status",
-            "provider",
+            "processing_state",
         ]
+        existing.user_id = int(user_id)
+        existing.provider = str(provider)
+        existing.amount = float(amount)
+        existing.amount_external = float(amount_external)
+        existing.amount_from_balance = float(amount_from_balance)
+        existing.status = str(status)
         if client_request_id is not None:
             existing.client_request_id = str(client_request_id)
             update_fields.append("client_request_id")
@@ -530,19 +1017,223 @@ async def _upsert_processed_payment(
         if provider_payload is not None:
             existing.provider_payload = str(provider_payload)
             update_fields.append("provider_payload")
+        if str(status).lower() == "pending" and not existing.effect_applied:
+            existing.processing_state = "pending"
+        elif str(status).lower() in {"canceled", "refunded"}:
+            existing.processing_state = str(status).lower()
         await existing.save(update_fields=update_fields)
         return existing
-    return await ProcessedPayments.create(
-        payment_id=payment_id,
-        provider=str(provider or PAYMENT_PROVIDER_YOOKASSA),
-        client_request_id=client_request_id,
-        payment_url=payment_url,
-        provider_payload=provider_payload,
+
+    existing = await ProcessedPayments.get_or_none(payment_id=payment_id)
+    if existing:
+        return await _update_existing(existing)
+
+    initial_state = (
+        "pending" if str(status).lower() == "pending" else str(status).lower()
+    )
+    try:
+        return await ProcessedPayments.create(
+            payment_id=payment_id,
+            user_id=int(user_id),
+            provider=str(provider),
+            client_request_id=client_request_id,
+            payment_url=payment_url,
+            provider_payload=provider_payload,
+            amount=float(amount),
+            amount_external=float(amount_external),
+            amount_from_balance=float(amount_from_balance),
+            status=str(status),
+            processing_state=initial_state,
+        )
+    except IntegrityError:
+        # Concurrent create race on unique(payment_id): fallback to read+update.
+        existing_after_race = await ProcessedPayments.get_or_none(payment_id=payment_id)
+        if existing_after_race is None:
+            raise
+        return await _update_existing(existing_after_race)
+
+
+async def _claim_payment_effect_once(
+    *,
+    payment_id: str,
+    user_id: int,
+    source: str,
+    provider: str = PAYMENT_PROVIDER_YOOKASSA,
+) -> bool:
+    now = datetime.now(timezone.utc)
+    async with in_transaction() as conn:
+        row = (
+            await ProcessedPayments.select_for_update()
+            .using_db(conn)
+            .get_or_none(payment_id=payment_id)
+        )
+        if row is None:
+            try:
+                row = await ProcessedPayments.create(
+                    payment_id=str(payment_id),
+                    user_id=int(user_id),
+                    provider=str(provider),
+                    amount=0,
+                    amount_external=0,
+                    amount_from_balance=0,
+                    status="pending",
+                    processing_state="pending",
+                    using_db=conn,
+                )
+            except IntegrityError:
+                # Concurrent create race: another worker inserted the row first.
+                row = (
+                    await ProcessedPayments.select_for_update()
+                    .using_db(conn)
+                    .get_or_none(payment_id=payment_id)
+                )
+                if row is None:
+                    return False
+
+        if bool(getattr(row, "effect_applied", False)):
+            return False
+
+        state = str(getattr(row, "processing_state", "") or "").lower()
+        last_attempt_at = getattr(row, "last_attempt_at", None)
+        if (
+            last_attempt_at is not None
+            and getattr(last_attempt_at, "tzinfo", None) is None
+        ):
+            last_attempt_at = last_attempt_at.replace(tzinfo=timezone.utc)
+        if (
+            state == "processing"
+            and last_attempt_at is not None
+            and (now - last_attempt_at).total_seconds()
+            < PAYMENT_PROCESSING_STALE_SECONDS
+        ):
+            return False
+
+        row.attempt_count = int(getattr(row, "attempt_count", 0) or 0) + 1
+        row.last_attempt_at = now
+        row.last_source = str(source)[:32]
+        row.last_error = None
+        row.processing_state = "processing"
+        row.provider = str(provider)
+        row.user_id = int(user_id)
+        await row.save(
+            using_db=conn,
+            update_fields=[
+                "provider",
+                "attempt_count",
+                "last_attempt_at",
+                "last_source",
+                "last_error",
+                "processing_state",
+                "user_id",
+            ],
+        )
+    return True
+
+
+async def _refresh_payment_processing_lease(
+    *, payment_id: str, user_id: int, source: str
+) -> None:
+    """Best-effort heartbeat for long-running payment processing sections."""
+    await ProcessedPayments.filter(
+        payment_id=str(payment_id),
         user_id=int(user_id),
-        amount=float(amount),
-        amount_external=float(amount_external),
+        effect_applied=False,
+        processing_state="processing",
+    ).update(
+        last_attempt_at=datetime.now(timezone.utc),
+        last_source=str(source)[:32],
+    )
+
+
+async def _mark_payment_effect_success(
+    *,
+    payment_id: str,
+    user_id: int,
+    amount: float,
+    amount_external: float,
+    amount_from_balance: float,
+    status: str = "succeeded",
+    provider: str = PAYMENT_PROVIDER_YOOKASSA,
+) -> None:
+    now = datetime.now(timezone.utc)
+    async with in_transaction() as conn:
+        row = (
+            await ProcessedPayments.select_for_update()
+            .using_db(conn)
+            .get_or_none(payment_id=payment_id)
+        )
+        if row is None:
+            row = await ProcessedPayments.create(
+                payment_id=str(payment_id),
+                user_id=int(user_id),
+                provider=str(provider),
+                amount=float(amount),
+                amount_external=float(amount_external),
+                amount_from_balance=float(amount_from_balance),
+                status=str(status),
+                processing_state="applied",
+                effect_applied=True,
+                last_attempt_at=now,
+                using_db=conn,
+            )
+            return
+        row.user_id = int(user_id)
+        row.provider = str(provider)
+        row.amount = float(amount)
+        row.amount_external = float(amount_external)
+        row.amount_from_balance = float(amount_from_balance)
+        row.status = str(status)
+        row.processing_state = "applied"
+        row.effect_applied = True
+        row.last_error = None
+        row.last_attempt_at = now
+        await row.save(
+            using_db=conn,
+            update_fields=[
+                "user_id",
+                "provider",
+                "amount",
+                "amount_external",
+                "amount_from_balance",
+                "status",
+                "processing_state",
+                "effect_applied",
+                "last_error",
+                "last_attempt_at",
+            ],
+        )
+
+
+async def _mark_payment_effect_failed(*, payment_id: str, error: str) -> None:
+    await ProcessedPayments.filter(payment_id=payment_id).update(
+        processing_state="failed",
+        last_error=str(error)[:2000],
+        last_attempt_at=datetime.now(timezone.utc),
+    )
+
+
+async def _was_balance_debit_applied(
+    *, payment_id: str, expected_amount: float
+) -> bool:
+    row = await ProcessedPayments.get_or_none(payment_id=str(payment_id))
+    if row is None:
+        return False
+    try:
+        recorded_amount = float(getattr(row, "amount_from_balance", 0) or 0)
+    except (TypeError, ValueError):
+        recorded_amount = 0.0
+    return recorded_amount >= float(expected_amount) - 1e-6
+
+
+async def _mark_balance_debit_applied(
+    *, payment_id: str, amount_from_balance: float
+) -> None:
+    await ProcessedPayments.filter(payment_id=str(payment_id)).update(
+        amount=float(amount_from_balance),
+        amount_external=0,
         amount_from_balance=float(amount_from_balance),
-        status=str(status),
+        status="pending",
+        last_attempt_at=datetime.now(timezone.utc),
     )
 
 
@@ -566,7 +1257,11 @@ async def _award_partner_cashback(
 
         # Partner percent: can be configured per-user or tiered by referrals count.
         try:
-            percent = int(referrer.referral_percent()) if hasattr(referrer, "referral_percent") else int(getattr(referrer, "custom_referral_percent", 0) or 0)
+            percent = (
+                int(referrer.referral_percent())
+                if hasattr(referrer, "referral_percent")
+                else int(getattr(referrer, "custom_referral_percent", 0) or 0)
+            )
         except Exception:
             percent = int(getattr(referrer, "custom_referral_percent", 0) or 0)
         percent = max(0, percent)
@@ -582,7 +1277,9 @@ async def _award_partner_cashback(
                 token = utm[3:]
                 source = "qr"
                 try:
-                    qr_uuid = uuid.UUID(token) if len(token) != 32 else uuid.UUID(hex=token)
+                    qr_uuid = (
+                        uuid.UUID(token) if len(token) != 32 else uuid.UUID(hex=token)
+                    )
                     qr = await PartnerQr.get_or_none(id=qr_uuid)
                 except Exception:
                     qr = None
@@ -632,7 +1329,84 @@ async def _award_partner_cashback(
                     e_notify_partner,
                 )
     except Exception as e:
-        logger.warning("Partner cashback award failed for payment %s: %s", payment_id, e)
+        logger.warning(
+            "Partner cashback award failed for payment %s: %s", payment_id, e
+        )
+
+
+async def _send_referral_cashback_notification(
+    *,
+    cashback_res: dict,
+    referral_user: Users,
+    amount_rub: int,
+    first_payment_res: dict | None = None,
+) -> None:
+    if not cashback_res.get("applied"):
+        return
+    referrer_id = int(cashback_res.get("referrer_id") or 0)
+    if not referrer_id:
+        return
+    referrer = await Users.get_or_none(id=referrer_id)
+    if not referrer:
+        return
+    created_chests = cashback_res.get("created_chests") or []
+    try:
+        await on_referral_payment(
+            user=referrer,
+            referral=referral_user,
+            amount=int(amount_rub or 0),
+            bonus_days=int((first_payment_res or {}).get("referrer_bonus_days", 0) or 0),
+            friend_bonus_days=int((first_payment_res or {}).get("friend_bonus_days", 0) or 0),
+            months=int((first_payment_res or {}).get("months", 0) or 0),
+            device_count=int((first_payment_res or {}).get("device_count", 1) or 1),
+            applied_to_subscription=bool((first_payment_res or {}).get("applied_to_subscription", False)),
+            cashback_rub=int(cashback_res.get("reward_rub") or 0),
+            cashback_percent=int(cashback_res.get("cashback_percent") or 0),
+            level_name=str(cashback_res.get("level_name") or ""),
+            level_up_name=(
+                str(created_chests[-1].get("levelName"))
+                if created_chests and isinstance(created_chests[-1], dict)
+                else None
+            ),
+        )
+    except Exception as e_ref_notify:
+        logger.warning(
+            "referral_cashback_notification_failed referrer=%s referral=%s err=%s",
+            referrer_id,
+            getattr(referral_user, "id", None),
+            e_ref_notify,
+        )
+
+
+async def _award_standard_referral_cashback(
+    *,
+    payment_id: str,
+    referral_user: Users,
+    amount_external_rub: int,
+    first_payment_res: dict | None = None,
+) -> dict:
+    try:
+        cashback_res = await award_referral_cashback(
+            payment_id=str(payment_id),
+            referral_user=referral_user,
+            amount_external_rub=int(amount_external_rub or 0),
+        )
+        await _send_referral_cashback_notification(
+            cashback_res=cashback_res,
+            referral_user=referral_user,
+            amount_rub=int(amount_external_rub or 0),
+            first_payment_res=first_payment_res,
+        )
+        return cashback_res
+    except Exception as e_cashback:
+        logger.warning(
+            "standard_referral_cashback_failed user=%s payment=%s err=%s",
+            getattr(referral_user, "id", None),
+            payment_id,
+            e_cashback,
+        )
+        return {"applied": False, "reason": "error", "error": str(e_cashback)}
+
 
 def _bot_chat_url_from_webapp_url(webapp_url: str | None) -> str | None:
     """
@@ -719,11 +1493,15 @@ async def _resolve_payment_return_url() -> str:
         #   https://t.me/<bot>/<miniapp_short_name>?startapp=...
         # If we ignore it completely, YooKassa can end up with a useless return_url fallback.
         if _is_telegram_https_link(raw):
-            logger.info("TELEGRAM_PAYMENT_RETURN_URL is not a bot chat link; using as-is for YooKassa return_url")
+            logger.info(
+                "TELEGRAM_PAYMENT_RETURN_URL is not a bot chat link; using as-is for YooKassa return_url"
+            )
             return raw
         logger.warning("TELEGRAM_PAYMENT_RETURN_URL ignored: not a Telegram HTTPS link")
 
-    parsed = _bot_chat_url_from_webapp_url(getattr(telegram_settings, "webapp_url", None))
+    parsed = _bot_chat_url_from_webapp_url(
+        getattr(telegram_settings, "webapp_url", None)
+    )
     if parsed:
         return parsed
 
@@ -745,6 +1523,7 @@ async def _resolve_payment_return_url() -> str:
     except Exception:
         pass
     return "https://t.me/"
+
 
 def _round_rub(value: float) -> int:
     try:
@@ -768,6 +1547,184 @@ def _meta_bool(value: Any, default: bool = False) -> bool:
         if normalized in {"0", "false", "no", "n", "off", ""}:
             return False
     return default
+
+
+def _to_positive_int(value: Any, default: int = 1) -> int:
+    try:
+        parsed = int(value)
+    except Exception:
+        return max(1, int(default or 1))
+    return parsed if parsed > 0 else max(1, int(default or 1))
+
+
+def _build_base_tariff_snapshot(
+    *,
+    tariff: Tariffs | None,
+    device_count: int,
+    lte_gb: int,
+    lte_price_per_gb: float | None = None,
+) -> dict[str, Any] | None:
+    if tariff is None:
+        return None
+
+    _, effective_multiplier = tariff.get_effective_pricing()
+    price_snapshot = tariff.calculate_price(max(1, int(device_count or 1)))
+    resolved_lte_price = (
+        float(lte_price_per_gb)
+        if lte_price_per_gb is not None
+        else float(getattr(tariff, "lte_price_per_gb", 0) or 0.0)
+    )
+    return {
+        "base_tariff_name": str(tariff.name),
+        "base_tariff_months": int(tariff.months),
+        "base_tariff_price": int(price_snapshot),
+        "base_hwid_limit": max(1, int(device_count or 1)),
+        "base_lte_gb_total": max(0, int(lte_gb or 0)),
+        "base_lte_gb_used": 0.0,
+        "base_lte_price_per_gb": resolved_lte_price,
+        "base_progressive_multiplier": float(effective_multiplier or 0.0),
+        "base_residual_day_fraction": 0.0,
+    }
+
+
+def _build_active_base_tariff_snapshot(
+    *,
+    active_tariff: ActiveTariffs | None,
+    device_count: int,
+    lte_gb: int,
+    lte_price_per_gb: float,
+) -> dict[str, Any] | None:
+    if active_tariff is None:
+        return None
+
+    return {
+        "base_tariff_name": str(active_tariff.name),
+        "base_tariff_months": int(active_tariff.months),
+        "base_tariff_price": int(getattr(active_tariff, "price", 0) or 0),
+        "base_hwid_limit": max(1, int(device_count or 1)),
+        "base_lte_gb_total": max(0, int(lte_gb or 0)),
+        "base_lte_gb_used": 0.0,
+        "base_lte_price_per_gb": float(lte_price_per_gb or 0.0),
+        "base_progressive_multiplier": float(
+            getattr(active_tariff, "progressive_multiplier", 0.0) or 0.0
+        ),
+        "base_residual_day_fraction": float(
+            getattr(active_tariff, "residual_day_fraction", 0.0) or 0.0
+        ),
+    }
+
+
+async def resolve_purchase_kind(
+    *,
+    metadata: dict | None = None,
+    months: int | None = None,
+    device_count: int | None = None,
+    tariff_id: int | None = None,
+    tariff: Tariffs | None = None,
+) -> str:
+    meta = metadata or {}
+    explicit_kind = normalize_tariff_kind(meta.get("tariff_kind"))
+    if explicit_kind:
+        return explicit_kind
+
+    normalized_device_count = _to_positive_int(
+        device_count if device_count is not None else meta.get("device_count"),
+        default=1,
+    )
+
+    resolved_tariff = tariff
+    resolved_tariff_id = tariff_id
+    if resolved_tariff_id is None and meta.get("tariff_id") is not None:
+        try:
+            resolved_tariff_id = int(meta.get("tariff_id"))
+        except Exception:
+            resolved_tariff_id = None
+
+    if resolved_tariff is None and resolved_tariff_id is not None:
+        resolved_tariff = await Tariffs.get_or_none(id=resolved_tariff_id)
+        if resolved_tariff:
+            await resolved_tariff.sync_effective_pricing_fields()
+
+    if resolved_tariff is not None:
+        return resolve_tariff_kind_by_limits(
+            months=int(getattr(resolved_tariff, "months", months or 0) or 0),
+            device_count=normalized_device_count,
+            default_devices_limit=int(
+                getattr(resolved_tariff, "devices_limit_default", 1) or 1
+            ),
+            family_devices=int(
+                getattr(
+                    resolved_tariff,
+                    "devices_limit_family",
+                    _family_devices_limit(),
+                )
+                or _family_devices_limit()
+            ),
+            family_plan_enabled=bool(
+                getattr(resolved_tariff, "family_plan_enabled", True)
+            ),
+        )
+
+    resolved_months = _to_positive_int(
+        months if months is not None else meta.get("month"),
+        default=0,
+    )
+    return (
+        "family"
+        if is_family_purchase(
+            months=resolved_months, device_count=normalized_device_count
+        )
+        else "base"
+    )
+
+
+async def _apply_purchase_extension_by_kind(
+    *,
+    user: Users,
+    purchase_kind: str,
+    purchased_days: int,
+    base_tariff_snapshot: dict[str, Any] | None = None,
+) -> tuple[bool, date | None]:
+    normalized_days = max(0, int(purchased_days or 0))
+    if purchase_kind == "family":
+        family_expires_at = await _compute_family_overlay_expiry(
+            user=user,
+            purchased_days=normalized_days,
+        )
+        await freeze_base_subscription_if_needed(
+            user, family_expires_at=family_expires_at
+        )
+        user.expired_at = family_expires_at
+        return False, family_expires_at
+
+    added_to_frozen_base = await apply_base_purchase_to_frozen_base_if_active(
+        user,
+        purchased_days=normalized_days,
+        base_tariff_snapshot=base_tariff_snapshot,
+    )
+    if not added_to_frozen_base:
+        await user.extend_subscription(normalized_days)
+    return added_to_frozen_base, None
+
+
+async def _compute_family_overlay_expiry(*, user: Users, purchased_days: int) -> date:
+    today = date.today()
+    extension_days = max(0, int(purchased_days or 0))
+    active_base_overlay = await get_active_base_overlay(user)
+    current_base_expiry = normalize_date(user.expired_at)
+    if active_base_overlay and current_base_expiry and current_base_expiry >= today:
+        carryover_family_days = max(
+            0, int(active_base_overlay.base_remaining_days or 0)
+        )
+        return today + timedelta(days=carryover_family_days + extension_days)
+
+    if not await has_active_family_overlay(user):
+        return today + timedelta(days=extension_days)
+
+    current_family_expiry = normalize_date(user.expired_at)
+    extension_start = max(current_family_expiry or today, today)
+    return extension_start + timedelta(days=extension_days)
+
 
 def _format_range_start(start_date: date) -> str:
     start_dt = datetime.combine(start_date, time.min, tzinfo=MSK_TZ)
@@ -811,6 +1768,7 @@ async def _apply_succeeded_payment_fallback(
     user: Users,
     meta: dict,
     *,
+    fast_status: bool = False,
     provider: str = PAYMENT_PROVIDER_YOOKASSA,
 ) -> bool:
     """
@@ -820,35 +1778,16 @@ async def _apply_succeeded_payment_fallback(
     pid = str(getattr(yk_payment, "id", "") or "").strip()
     if not pid:
         return False
-    existing = await ProcessedPayments.get_or_none(payment_id=pid)
-    if existing and (existing.status or "").strip().lower() != "pending":
-        # Already finalized by webhook / previous reconciliation.
-        return True
-
-    old_expired_at = user.expired_at
 
     try:
-        months = int(meta.get("month"))
-    except Exception:
-        return False
-
-    try:
-        amount_external = float(getattr(getattr(yk_payment, "amount", None), "value", 0) or 0)
+        amount_external = float(
+            getattr(getattr(yk_payment, "amount", None), "value", 0) or 0
+        )
     except Exception:
         amount_external = 0.0
 
     amount_from_balance = _round_rub(meta.get("amount_from_balance", 0))
-    if amount_from_balance > 0:
-        user.balance = max(0, int(user.balance or 0) - int(amount_from_balance))
 
-    # Extend subscription days.
-    current_date = date.today()
-    target_date = add_months_safe(current_date, months)
-    days = max(0, (target_date - current_date).days)
-    await user.extend_subscription(days)
-
-    # Persist tariff snapshot + device limit when metadata contains tariff_id.
-    tariff_id = meta.get("tariff_id")
     device_count = 1
     try:
         device_count = int(meta.get("device_count", 1))
@@ -865,10 +1804,138 @@ async def _apply_succeeded_payment_fallback(
     if lte_gb < 0:
         lte_gb = 0
 
-    if tariff_id is not None:
-        original = await Tariffs.get_or_none(id=tariff_id)
-        if original:
-            await original.sync_effective_pricing_fields()
+    is_auto_payment = _meta_bool(meta.get("is_auto"), False)
+    discount_percent = None
+    try:
+        if meta.get("discount_percent") is not None:
+            discount_percent = int(meta.get("discount_percent"))
+    except Exception:
+        discount_percent = None
+    discount_id = meta.get("discount_id")
+
+    claimed = await _claim_payment_effect_once(
+        payment_id=pid,
+        user_id=int(user.id),
+        source="fallback",
+        provider=provider,
+    )
+    if not claimed:
+        replay_eligible = await _should_replay_payment_notifications(
+            payment_id=pid,
+            user_id=int(user.id),
+        )
+        if not replay_eligible:
+            return True
+
+        await _repair_processed_payment_financials(
+            payment_id=pid,
+            user_id=int(user.id),
+            amount_external=float(amount_external),
+            amount_from_balance=float(amount_from_balance),
+            provider=provider,
+        )
+        try:
+            replay_months = int(meta.get("month") or 0)
+        except Exception:
+            replay_months = 0
+
+        if replay_months > 0:
+            await _replay_payment_notifications_if_needed(
+                user=user,
+                payment_id=pid,
+                days=max(
+                    0,
+                    (add_months_safe(date.today(), replay_months) - date.today()).days,
+                ),
+                amount_external=float(amount_external),
+                amount_from_balance=float(amount_from_balance),
+                device_count=int(device_count or 1),
+                months=int(replay_months),
+                is_auto_payment=bool(is_auto_payment),
+                discount_percent=discount_percent,
+                old_expired_at=user.expired_at,
+                new_expired_at=user.expired_at,
+                lte_gb_total=int(getattr(user, "lte_gb_total", 0) or lte_gb),
+                method=f"{provider}_fallback",
+                tariff_kind=meta.get("tariff_kind"),
+            )
+        return True
+
+    try:
+        months = int(meta.get("month"))
+    except Exception:
+        await _mark_payment_effect_failed(
+            payment_id=pid, error="Invalid or missing month in metadata"
+        )
+        return False
+
+    await _refresh_payment_processing_lease(
+        payment_id=pid,
+        user_id=int(user.id),
+        source="fallback",
+    )
+
+    old_expired_at = user.expired_at
+
+    if amount_from_balance > 0:
+        user.balance = max(0, int(user.balance or 0) - int(amount_from_balance))
+
+    # Extend subscription days.
+    current_date = date.today()
+    target_date = add_months_safe(current_date, months)
+    days = max(0, (target_date - current_date).days)
+
+    # Persist tariff snapshot + device limit when metadata contains tariff_id.
+    raw_tariff_id = meta.get("tariff_id")
+    tariff_id = None
+    if raw_tariff_id is not None:
+        try:
+            tariff_id = int(raw_tariff_id)
+        except Exception:
+            tariff_id = None
+
+    original = (
+        await Tariffs.get_or_none(id=tariff_id) if tariff_id is not None else None
+    )
+    if original:
+        await original.sync_effective_pricing_fields()
+
+    base_tariff_snapshot = _build_base_tariff_snapshot(
+        tariff=original,
+        device_count=device_count,
+        lte_gb=lte_gb,
+        lte_price_per_gb=(
+            float(meta.get("lte_price_per_gb")) if "lte_price_per_gb" in meta else None
+        ),
+    )
+
+    purchase_kind = await resolve_purchase_kind(
+        metadata=meta,
+        months=months,
+        device_count=device_count,
+        tariff_id=tariff_id,
+        tariff=original,
+    )
+    added_to_frozen_base, _ = await _apply_purchase_extension_by_kind(
+        user=user,
+        purchase_kind=purchase_kind,
+        purchased_days=days,
+        base_tariff_snapshot=base_tariff_snapshot,
+    )
+    preserve_active_tariff_state = purchase_kind == "base" and added_to_frozen_base
+    if tariff_id is not None and preserve_active_tariff_state:
+        logger.info(
+            "Fallback base purchase during active family overlay preserved current entitlement state user=%s payment_id=%s",
+            user.id,
+            pid,
+        )
+
+    if tariff_id is not None and not preserve_active_tariff_state:
+        await _refresh_payment_processing_lease(
+            payment_id=pid,
+            user_id=int(user.id),
+            source="fallback",
+        )
         if user.active_tariff_id:
             old_active = await ActiveTariffs.get_or_none(id=user.active_tariff_id)
             if old_active:
@@ -878,14 +1945,35 @@ async def _apply_succeeded_payment_fallback(
             try:
                 lte_price_snapshot = float(meta.get("lte_price_per_gb") or 0)
             except Exception:
-                lte_price_snapshot = float(original.lte_price_per_gb or 0) if original else 0.0
+                lte_price_snapshot = (
+                    float(original.lte_price_per_gb or 0) if original else 0.0
+                )
         else:
-            lte_price_snapshot = float(original.lte_price_per_gb or 0) if original else 0.0
+            lte_price_snapshot = (
+                float(original.lte_price_per_gb or 0) if original else 0.0
+            )
 
         msk_today = datetime.now(MSK_TZ).date()
         usage_snapshot = None
-        if user.remnawave_uuid:
-            usage_snapshot = await _fetch_today_lte_usage_gb(str(user.remnawave_uuid))
+        if user.remnawave_uuid and not fast_status:
+            await _refresh_payment_processing_lease(
+                payment_id=pid,
+                user_id=int(user.id),
+                source="fallback_usage_pre",
+            )
+            try:
+                usage_snapshot = await _await_payment_external_call(
+                    _fetch_today_lte_usage_gb(str(user.remnawave_uuid)),
+                    operation="fallback_fetch_today_lte_usage_gb",
+                )
+            except asyncio.TimeoutError:
+                usage_snapshot = None
+            finally:
+                await _refresh_payment_processing_lease(
+                    payment_id=pid,
+                    user_id=int(user.id),
+                    source="fallback_usage_post",
+                )
 
         if original and bool(getattr(original, "is_active", True)):
             _, effective_multiplier = original.get_effective_pricing()
@@ -914,7 +2002,9 @@ async def _apply_succeeded_payment_fallback(
             lte_gb_used=0.0,
             lte_price_per_gb=lte_price_snapshot,
             lte_usage_last_date=msk_today,
-            lte_usage_last_total_gb=usage_snapshot if usage_snapshot is not None else 0.0,
+            lte_usage_last_total_gb=usage_snapshot
+            if usage_snapshot is not None
+            else 0.0,
             progressive_multiplier=active_multiplier,
             residual_day_fraction=0.0,
         )
@@ -923,33 +2013,93 @@ async def _apply_succeeded_payment_fallback(
         user.lte_gb_total = lte_gb
 
     is_auto_payment = _meta_bool(meta.get("is_auto"), False)
-    if not is_auto_payment and provider == PAYMENT_PROVIDER_YOOKASSA and _auto_renewal_uses_yookassa():
+    if provider == PAYMENT_PROVIDER_YOOKASSA and not is_auto_payment:
         payment_method = getattr(yk_payment, "payment_method", None)
-        saved_method_id = getattr(payment_method, "id", None) if payment_method else None
-        saved_flag = _meta_bool(getattr(payment_method, "saved", None), False) if payment_method else False
+        saved_method_id = (
+            getattr(payment_method, "id", None) if payment_method else None
+        )
+        saved_flag = (
+            _meta_bool(getattr(payment_method, "saved", None), False)
+            if payment_method
+            else False
+        )
         # In fallback flow we may receive stringified flags from provider metadata.
         # Keep renew_id when provider marks method as saved, or when id is present.
-        if saved_method_id and (saved_flag or getattr(payment_method, "saved", None) is None):
+        if saved_method_id and (
+            saved_flag or getattr(payment_method, "saved", None) is None
+        ):
             user.renew_id = str(saved_method_id)
             user.is_subscribed = True
 
     if user.is_trial:
         user.is_trial = False
 
-    await user.save()
+    await user.save(skip_remnawave_sync=fast_status)
+
+    # Mark processed (idempotent) right after core DB mutations are persisted.
+    total_amount = float(amount_external) + float(amount_from_balance)
+    await _mark_payment_effect_success(
+        payment_id=pid,
+        user_id=user.id,
+        amount=total_amount,
+        amount_external=float(amount_external),
+        amount_from_balance=float(amount_from_balance),
+        status="succeeded",
+        provider=provider,
+    )
+
+    try:
+        await consume_discount_if_needed(discount_id)
+    except Exception as discount_exc:
+        logger.warning(
+            "Failed to consume discount after committed fallback payment: user=%s payment_id=%s err=%s",
+            user.id,
+            pid,
+            discount_exc,
+        )
 
     # Best-effort RemnaWave sync for HWID limit.
-    if user.remnawave_uuid and user.hwid_limit:
+    if user.remnawave_uuid and user.hwid_limit and not preserve_active_tariff_state:
+        await _refresh_payment_processing_lease(
+            payment_id=pid,
+            user_id=int(user.id),
+            source="fallback",
+        )
         remnawave_client = None
         try:
             remnawave_client = RemnaWaveClient(
                 remnawave_settings.url,
                 remnawave_settings.token.get_secret_value(),
             )
-            await remnawave_client.users.update_user(
-                uuid=user.remnawave_uuid,
-                expireAt=user.expired_at,
-                hwidDeviceLimit=int(user.hwid_limit),
+            if fast_status:
+                await asyncio.wait_for(
+                    remnawave_client.users.update_user(
+                        uuid=user.remnawave_uuid,
+                        expireAt=user.expired_at,
+                        hwidDeviceLimit=int(user.hwid_limit),
+                    ),
+                    timeout=PAYMENT_FAST_STATUS_REMNAWAVE_TIMEOUT_SECONDS,
+                )
+            else:
+                await _await_payment_external_call(
+                    remnawave_client.users.update_user(
+                        uuid=user.remnawave_uuid,
+                        expireAt=user.expired_at,
+                        hwidDeviceLimit=int(user.hwid_limit),
+                    ),
+                    operation="fallback_remnawave_update_user",
+                )
+            await _refresh_payment_processing_lease(
+                payment_id=pid,
+                user_id=int(user.id),
+                source="fallback_remna_post",
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Fast status RemnaWave sync timed out: payment_id=%s user_id=%s timeout=%ss",
+                pid,
+                user.id,
+                PAYMENT_FAST_STATUS_REMNAWAVE_TIMEOUT_SECONDS,
             )
         except Exception:
             pass
@@ -959,28 +2109,11 @@ async def _apply_succeeded_payment_fallback(
                     await remnawave_client.close()
                 except Exception:
                     pass
-
-    # Mark processed (idempotent).
-    total_amount = float(amount_external) + float(amount_from_balance)
-    await _upsert_processed_payment(
-        payment_id=pid,
-        user_id=user.id,
-        amount=total_amount,
-        amount_external=float(amount_external),
-        amount_from_balance=float(amount_from_balance),
-        status="succeeded",
-        provider=provider,
-        client_request_id=(
-            str(meta.get("client_request_id"))
-            if meta.get("client_request_id") is not None
-            else None
-        ),
-        provider_payload=(
-            _provider_payload_json({"metadata": meta})
-            if provider == PAYMENT_PROVIDER_PLATEGA
-            else None
-        ),
-    )
+    elif user.remnawave_uuid and preserve_active_tariff_state:
+        logger.info(
+            "Fallback base purchase during active family overlay: skipped RemnaWave entitlement update for user %s",
+            user.id,
+        )
 
     # Apply referral rewards / partner cashback that normally happen in webhook.
     # This is critical for the "webhook didn't arrive" scenario: otherwise partners won't see earnings,
@@ -1001,7 +2134,8 @@ async def _apply_succeeded_payment_fallback(
         # Keep fallback resilient: this must not block subscription activation.
         pass
 
-    # Referral rewards (days-based) for standard referral program.
+    # Standard referral program: friend +7 days on first external payment,
+    # referrer gets internal-balance cashback from real external RUB only.
     if getattr(user, "referred_by", 0):
         try:
             reward_res = await _apply_referral_first_payment_reward(
@@ -1011,99 +2145,142 @@ async def _apply_succeeded_payment_fallback(
                 months=int(months or 0),
                 device_count=int(device_count or 1),
             )
-            if reward_res.get("applied"):
+            amount_external_rub = int(_round_rub(float(amount_external or 0)))
+            await _award_standard_referral_cashback(
+                payment_id=str(pid),
+                referral_user=user,
+                amount_external_rub=amount_external_rub,
+                first_payment_res=reward_res if reward_res.get("applied") else None,
+            )
+            if reward_res.get("applied") and on_referral_friend_bonus is not None:
                 referrer = await Users.get(id=int(reward_res["referrer_id"]))
                 try:
-                    await on_referral_payment(
-                        user=referrer,
-                        referral=user,
-                        amount=int(amount_total_rub) if amount_total_rub else 0,
-                        bonus_days=int(reward_res["referrer_bonus_days"]),
+                    await on_referral_friend_bonus(
+                        user=user,
+                        referrer=referrer,
                         friend_bonus_days=int(reward_res["friend_bonus_days"]),
                         months=int(reward_res["months"]),
                         device_count=int(reward_res["device_count"]),
-                        applied_to_subscription=bool(reward_res["applied_to_subscription"]),
                     )
-                except Exception as e_ref_notify:
-                    logger.warning("referral_payment_notification_failed referrer=%s err=%s", referrer.id, e_ref_notify)
-                if on_referral_friend_bonus is not None:
-                    try:
-                        await on_referral_friend_bonus(
-                            user=user,
-                            referrer=referrer,
-                            friend_bonus_days=int(reward_res["friend_bonus_days"]),
-                            months=int(reward_res["months"]),
-                            device_count=int(reward_res["device_count"]),
-                        )
-                    except Exception as e_friend_notify:
-                        logger.warning("referral_friend_bonus_notification_failed user=%s err=%s", user.id, e_friend_notify)
+                except Exception as e_friend_notify:
+                    logger.warning(
+                        "referral_friend_bonus_notification_failed user=%s err=%s",
+                        user.id,
+                        e_friend_notify,
+                    )
         except Exception as e_reward:
-            logger.warning("referral_reward_failed user=%s payment=%s err=%s", user.id, pid, e_reward)
+            logger.warning(
+                "referral_reward_failed user=%s payment=%s err=%s",
+                user.id,
+                pid,
+                e_reward,
+            )
 
-    # Notify user in bot (so they see the outcome even if webhook failed).
-    try:
-        await _notify_successful_purchase(
-            user=user,
-            days=days,
-            amount_paid_via_yookassa=float(amount_external),
-            amount_from_balance=float(amount_from_balance),
-            device_count=int(device_count or 1),
-        )
-    except Exception:
-        pass
-
-    # Notify admin log channel as webhook path does.
-    # This keeps admin logs complete when webhook delivery is delayed/missed.
-    try:
-        referrer = await user.referrer()
-        discount_percent = None
-        try:
-            if meta.get("discount_percent") is not None:
-                discount_percent = int(meta.get("discount_percent"))
-        except Exception:
-            discount_percent = None
-
-        await on_payment(
-            user_id=user.id,
-            is_sub=user.is_subscribed,
-            referrer=referrer.name() if referrer else None,
-            amount=int(_round_rub(total_amount)),
-            months=months,
-            method=f"{provider}_fallback",
-            payment_id=pid,
-            is_auto=is_auto_payment,
-            utm=user.utm if hasattr(user, "utm") else None,
-            discount_percent=discount_percent,
-            device_count=device_count,
-            old_expired_at=old_expired_at,
-            new_expired_at=user.expired_at,
-            lte_gb_total=lte_gb,
-        )
-    except Exception as e:
-        logger.error(
-            f"Ошибка fallback-отправки уведомления о платеже: {e}",
-            extra={"payment_id": pid, "user_id": user.id},
-        )
+    await _replay_payment_notifications_if_needed(
+        user=user,
+        payment_id=pid,
+        days=int(days),
+        amount_external=float(amount_external),
+        amount_from_balance=float(amount_from_balance),
+        device_count=int(device_count or 1),
+        months=int(months),
+        is_auto_payment=bool(is_auto_payment),
+        discount_percent=discount_percent,
+        old_expired_at=old_expired_at,
+        new_expired_at=user.expired_at,
+        lte_gb_total=int(lte_gb),
+        method=f"{provider}_fallback",
+        tariff_kind=meta.get("tariff_kind"),
+    )
 
     return True
 
 
-def _platega_amount_currency_from_body(body: dict[str, Any]) -> tuple[float, str | None]:
-    payment_details = body.get("paymentDetails")
-    if not isinstance(payment_details, dict):
-        payment_details = {}
-    raw_amount = body.get("amount")
-    if raw_amount is None:
-        raw_amount = payment_details.get("amount")
+def _payment_row_provider(row: ProcessedPayments | None) -> str:
+    provider = str(getattr(row, "provider", "") or "").strip().lower() if row else ""
+    if provider == PAYMENT_PROVIDER_PLATEGA:
+        return PAYMENT_PROVIDER_PLATEGA
+    return PAYMENT_PROVIDER_YOOKASSA
+
+
+def _parse_platega_metadata_from_payload(payload: Any) -> dict[str, Any]:
+    parsed = parse_platega_payload(payload)
+    metadata = parsed.get("metadata")
+    if isinstance(metadata, dict):
+        return dict(metadata)
+    return parsed
+
+
+def _round_amount_for_compare(value: Any) -> Decimal:
     try:
-        amount = float(raw_amount or 0)
-    except (TypeError, ValueError):
-        amount = 0.0
-    raw_currency = body.get("currency")
-    if raw_currency is None:
-        raw_currency = payment_details.get("currency")
-    currency = str(raw_currency).strip().upper() if raw_currency is not None else None
-    return amount, currency
+        amount = Decimal(str(value))
+    except Exception:
+        amount = Decimal("0")
+    return amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
+def _validate_platega_amount_currency(
+    *,
+    provider_amount: Any,
+    provider_currency: Any,
+    metadata: dict[str, Any],
+) -> None:
+    expected_currency = str(
+        metadata.get("expected_currency") or PAYMENT_CURRENCY_RUB
+    ).strip().upper()
+    received_currency = str(provider_currency or "").strip().upper()
+    if received_currency and received_currency != expected_currency:
+        raise HTTPException(status_code=400, detail="Payment currency mismatch")
+
+    expected_amount = metadata.get("expected_amount")
+    if expected_amount is None:
+        return
+    if _round_amount_for_compare(provider_amount) != _round_amount_for_compare(
+        expected_amount
+    ):
+        raise HTTPException(status_code=400, detail="Payment amount mismatch")
+
+
+async def _ensure_platega_pending_row(
+    *,
+    payment_id: str,
+    user_id: int,
+    amount_external: float,
+    amount_from_balance: float,
+    status: str,
+    metadata: dict[str, Any],
+    provider_status: str,
+    payment_url: str | None = None,
+) -> ProcessedPayments:
+    existing = await ProcessedPayments.get_or_none(payment_id=payment_id)
+    if existing and (
+        bool(getattr(existing, "effect_applied", False))
+        or str(getattr(existing, "status", "") or "").strip().lower() == "succeeded"
+    ):
+        return existing
+
+    provider_payload = _provider_payload_json(
+        {
+            "metadata": metadata,
+            "provider_status": normalize_platega_status(provider_status),
+        }
+    )
+    return await _upsert_processed_payment(
+        payment_id=payment_id,
+        user_id=int(user_id),
+        amount=float(amount_external) + float(amount_from_balance),
+        amount_external=float(amount_external),
+        amount_from_balance=float(amount_from_balance),
+        status=status,
+        provider=PAYMENT_PROVIDER_PLATEGA,
+        client_request_id=(
+            str(metadata.get("client_request_id"))
+            if metadata.get("client_request_id") is not None
+            else None
+        ),
+        payment_url=payment_url,
+        provider_payload=provider_payload,
+    )
 
 
 async def _apply_confirmed_platega_payment(
@@ -1112,31 +2289,17 @@ async def _apply_confirmed_platega_payment(
     user: Users,
     metadata: dict[str, Any],
     amount_external: float,
+    fast_status: bool = False,
 ) -> bool:
-    existing = await ProcessedPayments.get_or_none(payment_id=payment_id)
-    if existing and str(existing.status or "").strip().lower() == "succeeded":
-        return True
-
     amount_from_balance = _round_rub(metadata.get("amount_from_balance", 0))
-    await _upsert_processed_payment(
+    await _ensure_platega_pending_row(
         payment_id=payment_id,
         user_id=int(user.id),
-        amount=float(amount_external) + float(amount_from_balance),
         amount_external=float(amount_external),
         amount_from_balance=float(amount_from_balance),
         status="pending",
-        provider=PAYMENT_PROVIDER_PLATEGA,
-        client_request_id=(
-            str(metadata.get("client_request_id"))
-            if metadata.get("client_request_id") is not None
-            else None
-        ),
-        provider_payload=_provider_payload_json(
-            {
-                "metadata": metadata,
-                "provider_status": PLATEGA_STATUS_CONFIRMED,
-            }
-        ),
+        metadata=metadata,
+        provider_status=PLATEGA_STATUS_CONFIRMED,
     )
     return await _apply_succeeded_payment_fallback(
         _platega_payment_stub(
@@ -1146,6 +2309,7 @@ async def _apply_confirmed_platega_payment(
         ),
         user,
         metadata,
+        fast_status=fast_status,
         provider=PAYMENT_PROVIDER_PLATEGA,
     )
 
@@ -1181,16 +2345,18 @@ async def _get_platega_payment_status_response(
     if not metadata:
         metadata = _metadata_from_processed_payment(processed)
 
-    raw_meta_user_id = metadata.get("user_id")
     meta_user_id: int | None = None
+    raw_meta_user_id = metadata.get("user_id")
     if raw_meta_user_id is not None and str(raw_meta_user_id).strip():
         try:
             meta_user_id = int(raw_meta_user_id)
         except (TypeError, ValueError):
             raise HTTPException(status_code=404, detail="Payment not found")
-    if meta_user_id is not None and meta_user_id != int(user.id):
-        raise HTTPException(status_code=404, detail="Payment not found")
-    if meta_user_id is None and processed is None:
+
+    if meta_user_id is not None:
+        if meta_user_id != int(user.id):
+            raise HTTPException(status_code=404, detail="Payment not found")
+    elif processed is None:
         raise HTTPException(status_code=404, detail="Payment not found")
 
     if provider_status == PLATEGA_STATUS_CONFIRMED:
@@ -1210,57 +2376,70 @@ async def _get_platega_payment_status_response(
                 user=user,
                 metadata=metadata,
                 amount_external=float(status_result.amount or 0),
+                fast_status=True,
             )
             if applied:
                 processed = await ProcessedPayments.get_or_none(payment_id=payment_id)
-    elif provider_status in {
-        PLATEGA_STATUS_CANCELED,
-        PLATEGA_STATUS_CHARGEBACK,
-        PLATEGA_STATUS_CHARGEBACKED,
-    } and processed:
-        next_status = "canceled" if provider_status == PLATEGA_STATUS_CANCELED else "refunded"
+    elif provider_status == PLATEGA_STATUS_CANCELED and processed:
         await _upsert_processed_payment(
             payment_id=payment_id,
             user_id=int(user.id),
             amount=float(status_result.amount or processed.amount or 0),
             amount_external=float(status_result.amount or processed.amount_external or 0),
             amount_from_balance=float(processed.amount_from_balance or 0),
-            status=next_status,
+            status="canceled",
             provider=PAYMENT_PROVIDER_PLATEGA,
-            provider_payload=_provider_payload_json(
-                {
-                    "metadata": metadata,
-                    "provider_status": provider_status,
-                }
-            ),
+            provider_payload=getattr(processed, "provider_payload", None),
         )
         processed = await ProcessedPayments.get_or_none(payment_id=payment_id)
 
     processed_status = (
         str(getattr(processed, "status", "") or "").strip().lower() if processed else ""
     )
-    amount_value = None
-    if status_result.amount is not None:
-        amount_value = str(status_result.amount)
-    return {
+    entitlements_ready = bool(
+        internal_status == "succeeded"
+        and processed
+        and processed_status == "succeeded"
+        and bool(getattr(processed, "effect_applied", False))
+    )
+
+    overlay_snapshot: dict[str, Any] | None = None
+    if internal_status == "succeeded":
+        try:
+            overlay_snapshot = await get_overlay_payload(user)
+        except Exception as e:
+            logger.warning(
+                "Failed to include overlay snapshot in Platega payment status response: payment_id=%s user_id=%s err=%s",
+                payment_id,
+                user.id,
+                e,
+            )
+
+    response: dict[str, Any] = {
         "payment_id": payment_id,
         "provider": PAYMENT_PROVIDER_PLATEGA,
         "provider_status": provider_status,
-        # Backward-compatible field for older frontend code.
+        # Backward-compatible normalized status for existing frontend code.
         "yookassa_status": internal_status,
         "is_final": internal_status in ("succeeded", "canceled", "refunded"),
         "is_paid": internal_status == "succeeded",
-        "amount": amount_value,
+        "amount": (
+            str(status_result.amount) if status_result.amount is not None else None
+        ),
         "currency": status_result.currency,
         "processed": bool(processed),
-        "processed_status": processed_status or None,
-        "entitlements_ready": bool(internal_status == "succeeded" and processed_status == "succeeded"),
+        "processed_status": (processed.status if processed else None),
+        "entitlements_ready": entitlements_ready,
     }
+    if overlay_snapshot is not None:
+        response["overlay_snapshot"] = overlay_snapshot
+    return response
 
 
 @router.get("/tariffs")
 async def get_tariffs():
     return await Tariffs.filter(is_active=True).order_by("order")
+
 
 @router.get("/status/{payment_id}")
 async def get_payment_status(
@@ -1288,12 +2467,12 @@ async def get_payment_status(
         # Don't leak existence of foreign payment IDs.
         raise HTTPException(status_code=404, detail="Payment not found")
 
-    processed_provider = (
-        str(getattr(processed, "provider", "") or "").strip().lower()
+    provider = (
+        _payment_row_provider(processed)
         if processed
-        else ""
+        else _active_payment_provider()
     )
-    if processed_provider == PAYMENT_PROVIDER_PLATEGA:
+    if provider == PAYMENT_PROVIDER_PLATEGA:
         return await _get_platega_payment_status_response(
             payment_id=payment_id,
             user=user,
@@ -1301,7 +2480,7 @@ async def get_payment_status(
         )
 
     if not _configure_yookassa_if_available():
-        raise HTTPException(status_code=503, detail="Payment provider is not configured")
+        raise HTTPException(status_code=503, detail="YooKassa provider is not configured")
 
     try:
         yk_payment = await asyncio.wait_for(
@@ -1316,7 +2495,9 @@ async def get_payment_status(
             extra={"payment_id": payment_id, "user_id": user.id},
             exc_info=True,
         )
-        raise HTTPException(status_code=503, detail="Payment status service unavailable")
+        raise HTTPException(
+            status_code=503, detail="Payment status service unavailable"
+        )
 
     if not yk_payment:
         raise HTTPException(status_code=404, detail="Payment not found")
@@ -1333,29 +2514,48 @@ async def get_payment_status(
         currency = None
 
     meta_user_id: int | None = None
-    try:
-        meta = getattr(yk_payment, "metadata", None)
-        if isinstance(meta, dict):
-            raw = meta.get("user_id")
-            if raw is not None:
-                meta_user_id = int(raw)
-    except Exception:
-        meta_user_id = None
+    meta_user_id_present = False
+    meta = getattr(yk_payment, "metadata", None)
+    if isinstance(meta, dict):
+        raw_meta_user_id = meta.get("user_id")
+        meta_user_id_present = (
+            raw_meta_user_id is not None and str(raw_meta_user_id).strip() != ""
+        )
+        if meta_user_id_present:
+            try:
+                meta_user_id = int(raw_meta_user_id)
+            except (TypeError, ValueError):
+                # Fail closed when provider explicitly sends owner, but value is invalid.
+                raise HTTPException(status_code=404, detail="Payment not found")
 
-    if meta_user_id is not None and int(meta_user_id) != int(user.id):
-        raise HTTPException(status_code=403, detail="Payment does not belong to user")
+    if meta_user_id_present:
+        if int(meta_user_id) != int(user.id):
+            # Don't leak existence of foreign payment IDs.
+            raise HTTPException(status_code=404, detail="Payment not found")
+    elif not processed:
+        # Metadata owner is missing: allow only when local processed row proves ownership.
+        raise HTTPException(status_code=404, detail="Payment not found")
 
     # Reliability fallback:
     # If YooKassa says the payment is succeeded but our webhook didn't process it,
     # try to apply subscription here (idempotent via ProcessedPayments unique constraint).
-    if status == "succeeded" and (not processed or (processed.status or "").strip().lower() == "pending"):
+    if status == "succeeded" and (
+        not processed or (processed.status or "").strip().lower() == "pending"
+    ):
         try:
             meta = getattr(yk_payment, "metadata", None)
             if isinstance(meta, dict) and str(meta.get("user_id", "")).strip():
                 if int(meta.get("user_id")) == int(user.id):
-                    applied = await _apply_succeeded_payment_fallback(yk_payment, user, meta)
+                    applied = await _apply_succeeded_payment_fallback(
+                        yk_payment,
+                        user,
+                        meta,
+                        fast_status=True,
+                    )
                     if applied:
-                        processed = await ProcessedPayments.get_or_none(payment_id=payment_id)
+                        processed = await ProcessedPayments.get_or_none(
+                            payment_id=payment_id
+                        )
         except Exception as e:
             logger.error(
                 f"Fallback processing failed for succeeded payment {payment_id}: {e}",
@@ -1363,7 +2563,29 @@ async def get_payment_status(
                 exc_info=True,
             )
 
-    return {
+    processed_status = (
+        str(getattr(processed, "status", "") or "").strip().lower() if processed else ""
+    )
+    entitlements_ready = bool(
+        status == "succeeded"
+        and processed
+        and processed_status == "succeeded"
+        and bool(getattr(processed, "effect_applied", False))
+    )
+
+    overlay_snapshot: dict[str, Any] | None = None
+    if status == "succeeded":
+        try:
+            overlay_snapshot = await get_overlay_payload(user)
+        except Exception as e:
+            logger.warning(
+                "Failed to include overlay snapshot in payment status response: payment_id=%s user_id=%s err=%s",
+                payment_id,
+                user.id,
+                e,
+            )
+
+    response = {
         "payment_id": payment_id,
         "provider": PAYMENT_PROVIDER_YOOKASSA,
         "provider_status": status,
@@ -1374,8 +2596,13 @@ async def get_payment_status(
         "currency": currency,
         "processed": bool(processed),
         "processed_status": (processed.status if processed else None),
+        # Additive readiness signal for clients that need post-payment
+        # entitlement coherence (overlay/freeze-safe success confirmation).
+        "entitlements_ready": entitlements_ready,
     }
-
+    if overlay_snapshot is not None:
+        response["overlay_snapshot"] = overlay_snapshot
+    return response
 
 
 @router.post("/webhook/platega")
@@ -1411,7 +2638,13 @@ async def platega_webhook(request: Request):
         raise HTTPException(status_code=400, detail="Missing transaction id")
 
     provider_status = normalize_platega_status(body.get("status"))
-    amount_external, currency = _platega_amount_currency_from_body(body)
+    internal_status = map_platega_status_to_internal(provider_status)
+    try:
+        amount_external = float(body.get("amount") or 0)
+    except (TypeError, ValueError):
+        amount_external = 0.0
+    currency = str(body.get("currency") or PAYMENT_CURRENCY_RUB).strip().upper()
+
     processed = await ProcessedPayments.get_or_none(payment_id=payment_id)
     metadata = _parse_platega_metadata_from_payload(body.get("payload"))
     if not metadata:
@@ -1427,12 +2660,6 @@ async def platega_webhook(request: Request):
             extra={"payment_id": payment_id, "provider_status": provider_status},
         )
         return {"status": "error", "message": "Invalid metadata"}
-    if processed and int(processed.user_id) != int(user_id):
-        logger.error(
-            "Platega webhook user mismatch",
-            extra={"payment_id": payment_id, "provider_status": provider_status},
-        )
-        raise HTTPException(status_code=400, detail="Payment metadata mismatch")
 
     user = await Users.get_or_none(id=user_id)
     if not user:
@@ -1457,6 +2684,15 @@ async def platega_webhook(request: Request):
             provider_currency=currency,
             metadata=metadata,
         )
+        await _ensure_platega_pending_row(
+            payment_id=payment_id,
+            user_id=user_id,
+            amount_external=float(amount_external),
+            amount_from_balance=float(amount_from_balance),
+            status="pending",
+            metadata=metadata,
+            provider_status=provider_status,
+        )
         await _apply_confirmed_platega_payment(
             payment_id=payment_id,
             user=user,
@@ -1466,9 +2702,6 @@ async def platega_webhook(request: Request):
         return {"status": "ok"}
 
     if provider_status == PLATEGA_STATUS_CANCELED:
-        already_canceled = bool(
-            processed and str(processed.status or "").strip().lower() == "canceled"
-        )
         await _upsert_processed_payment(
             payment_id=payment_id,
             user_id=user_id,
@@ -1484,15 +2717,13 @@ async def platega_webhook(request: Request):
             ),
             provider_payload=provider_payload,
         )
-        if not already_canceled and not _meta_bool(metadata.get("is_auto"), False):
-            try:
-                await notify_payment_canceled_yookassa(user=user)
-            except Exception as notify_exc:
-                logger.error(
-                    "Ошибка при отправке уведомления об отмене Platega-платежа: %s",
-                    notify_exc,
-                    extra={"payment_id": payment_id, "user_id": user_id},
-                )
+        if not _meta_bool(metadata.get("is_auto"), False):
+            await _send_manual_payment_canceled_notifications_if_needed(
+                user=user,
+                payment_id=payment_id,
+                amount_external=float(amount_external),
+                method=PAYMENT_PROVIDER_PLATEGA,
+            )
         return {"status": "ok"}
 
     if provider_status in {PLATEGA_STATUS_CHARGEBACK, PLATEGA_STATUS_CHARGEBACKED}:
@@ -1507,18 +2738,21 @@ async def platega_webhook(request: Request):
             amount_from_balance=float(amount_from_balance),
             status="refunded",
             provider=PAYMENT_PROVIDER_PLATEGA,
-            client_request_id=(
-                str(metadata.get("client_request_id"))
-                if metadata.get("client_request_id") is not None
-                else None
-            ),
             provider_payload=provider_payload,
+        )
+        logger.info(
+            "Platega chargeback processed",
+            extra={"payment_id": payment_id, "user_id": user_id},
         )
         return {"status": "ok"}
 
     logger.warning(
         "Unknown Platega webhook status",
-        extra={"payment_id": payment_id, "provider_status": provider_status},
+        extra={
+            "payment_id": payment_id,
+            "provider_status": provider_status,
+            "internal_status": internal_status,
+        },
     )
     return {"status": "ok"}
 
@@ -1526,37 +2760,40 @@ async def platega_webhook(request: Request):
 @router.post("/webhook/yookassa/{secret}")
 @webhook_router.post("/webhook/yookassa/{secret}")
 async def yookassa_webhook(request: Request, secret: str):
+    payment = None
     expected_secret = str(getattr(yookassa_settings, "webhook_secret", "") or "").strip()
     if not expected_secret:
-        logger.error("YooKassa webhook received but YooKassa is not configured")
-        raise HTTPException(status_code=503, detail="Payment provider is not configured")
+        logger.warning("YooKassa webhook received but provider is not configured")
+        raise HTTPException(status_code=503, detail="YooKassa provider is not configured")
     if secret != expected_secret:
         logger.error("Получен webhook с неверным секретным ключом")
         raise HTTPException(status_code=403, detail="Invalid secret")
-    
+
     try:
         # Получаем тело запроса
         body = await request.json()
         # Получаем заголовки
         headers = dict(request.headers)
-        
+
         # Проверяем подпись и создаем объект уведомления
         notification = WebhookNotification(body, headers)
-        
+
         event = notification.event
         payment = notification.object
-        
+
         # Логируем событие
         logger.info(
             f"Получен webhook от YooKassa: {event}",
             extra={
-                'payment_id': payment.id if payment else 'unknown',
-                'user_id': payment.metadata.get("user_id", "unknown") if payment else "unknown",
-                'amount': payment.amount.value if payment else "unknown",
-                'status': payment.status if payment else "unknown"
-            }
+                "payment_id": payment.id if payment else "unknown",
+                "user_id": payment.metadata.get("user_id", "unknown")
+                if payment
+                else "unknown",
+                "amount": payment.amount.value if payment else "unknown",
+                "status": payment.status if payment else "unknown",
+            },
         )
-        
+
         try:
             data = payment.metadata
             user = await Users.get(id=data["user_id"])
@@ -1564,17 +2801,17 @@ async def yookassa_webhook(request: Request, secret: str):
             logger.error(
                 f"Некорректные метаданные в webhook'е YooKassa: {e}",
                 extra={
-                    'payment_id': payment.id if payment else 'unknown',
-                    'user_id': "unknown",
-                    'amount': payment.amount.value if payment else "unknown",
-                    'status': payment.status if payment else "unknown"
-                }
+                    "payment_id": payment.id if payment else "unknown",
+                    "user_id": "unknown",
+                    "amount": payment.amount.value if payment else "unknown",
+                    "status": payment.status if payment else "unknown",
+                },
             )
             return {"status": "error", "message": "Invalid metadata"}
         except Exception as e:
             logger.error(
                 f"Ошибка при получении пользователя в webhook'е YooKassa: {e}",
-                extra={'payment_id': payment.id if payment else 'unknown'}
+                extra={"payment_id": payment.id if payment else "unknown"},
             )
             return {"status": "error", "message": "User not found"}
 
@@ -1582,29 +2819,45 @@ async def yookassa_webhook(request: Request, secret: str):
 
         # Вычисляем will_retry для уведомлений об ошибках
         user_expired_at = normalize_date(user.expired_at)
-        will_retry = user_expired_at is not None and (user_expired_at - date.today()).days >= 0
+        will_retry = (
+            user_expired_at is not None and (user_expired_at - date.today()).days >= 0
+        )
 
         # Проверяем, не обработан ли уже этот платеж
         if not payment.id:
             logger.error(
                 "Отсутствует payment_id в webhook'е YooKassa",
-                extra={'payment_id': 'missing'}
+                extra={"payment_id": "missing"},
             )
             return {"status": "error", "message": "Missing payment_id"}
 
         processed_payment = await ProcessedPayments.get_or_none(payment_id=payment.id)
-        if processed_payment and processed_payment.status != "pending":
+        processed_status = (
+            str(getattr(processed_payment, "status", "") or "").strip().lower()
+            if processed_payment
+            else ""
+        )
+        allow_safe_replay_on_webhook_duplicate = (
+            processed_status == "succeeded"
+            and event == WebhookNotificationEventType.PAYMENT_SUCCEEDED
+            and payment.status == "succeeded"
+        )
+        if (
+            processed_payment
+            and processed_status != "pending"
+            and not allow_safe_replay_on_webhook_duplicate
+        ):
             logger.info(
                 f"Платеж {payment.id} уже был обработан ранее",
                 extra={
-                    'payment_id': payment.id,
-                    'user_id': user.id,
-                    'amount': payment.amount.value,
-                    'status': processed_payment.status
-                }
+                    "payment_id": payment.id,
+                    "user_id": user.id,
+                    "amount": payment.amount.value,
+                    "status": processed_status,
+                },
             )
             return {"status": "ok"}
-        
+
         # Обработка разных типов событий
         if event == WebhookNotificationEventType.REFUND_SUCCEEDED:
             # При возврате средств отключаем автопродление
@@ -1612,7 +2865,7 @@ async def yookassa_webhook(request: Request, secret: str):
             user.renew_id = None
             await user.save()
             # Резервации отключены
-            
+
             # Сохраняем информацию о возврате (идемпотентно)
             await _upsert_processed_payment(
                 payment_id=payment.id,
@@ -1622,18 +2875,18 @@ async def yookassa_webhook(request: Request, secret: str):
                 amount_from_balance=0,
                 status="refunded",
             )
-            
+
             logger.info(
                 f"Автопродление отключено для пользователя {user.id} из-за возврата средств",
                 extra={
-                    'payment_id': payment.id,
-                    'user_id': user.id,
-                    'amount': payment.amount.value,
-                    'status': "refunded"
-                }
+                    "payment_id": payment.id,
+                    "user_id": user.id,
+                    "amount": payment.amount.value,
+                    "status": "refunded",
+                },
             )
             return {"status": "ok"}
-        
+
         if event == WebhookNotificationEventType.PAYMENT_CANCELED:
             # Сохраняем информацию об отмене (идемпотентно)
             await _upsert_processed_payment(
@@ -1645,27 +2898,25 @@ async def yookassa_webhook(request: Request, secret: str):
                 status="canceled",
             )
             # Резервации отключены
-            
+
             logger.info(
                 f"Автопродление отключено для пользователя {user.id} из-за отмены платежа",
                 extra={
-                    'payment_id': payment.id,
-                    'user_id': user.id,
-                    'amount': payment.amount.value,
-                    'status': "canceled"
-                }
+                    "payment_id": payment.id,
+                    "user_id": user.id,
+                    "amount": payment.amount.value,
+                    "status": "canceled",
+                },
             )
             # Ручные платежи: сообщаем пользователю outcome в боте,
             # чтобы после return_url он видел “успех/ошибка” без UI-поллинга в Mini App.
             is_auto_payment = _meta_bool(data.get("is_auto"), False)
             if not is_auto_payment:
-                try:
-                    await notify_payment_canceled_yookassa(user=user)
-                except Exception as notify_exc:
-                    logger.error(
-                        f"Ошибка при отправке уведомления об отмене оплаты (YooKassa) для {user.id}: {notify_exc}",
-                        extra={'payment_id': payment.id, 'user_id': user.id},
-                    )
+                await _send_manual_payment_canceled_notifications_if_needed(
+                    user=user,
+                    payment_id=str(payment.id),
+                    amount_external=float(payment.amount.value),
+                )
             if is_auto_payment:
                 disable = _meta_bool(data.get("disable_on_fail"), False)
                 if disable:
@@ -1674,14 +2925,18 @@ async def yookassa_webhook(request: Request, secret: str):
                     await user.save()
                     # Уведомляем админа об отключении автопродления из-за отмены платежа
                     await cancel_subscription(user, reason="Автоплатеж был отменен")
-                await notify_auto_renewal_failure(user, reason="Платеж был отменен", will_retry=will_retry)
+                await notify_auto_renewal_failure(
+                    user, reason="Платеж был отменен", will_retry=will_retry
+                )
             return {"status": "ok"}
-        
+
         if event != WebhookNotificationEventType.PAYMENT_SUCCEEDED:
             return {"status": "ok"}
-        
+
         if payment.status != "succeeded":
-            logger.warning(f"Автоплатеж {payment.id} для пользователя {user.id} завершился со статусом {payment.status}")
+            logger.warning(
+                f"Автоплатеж {payment.id} для пользователя {user.id} завершился со статусом {payment.status}"
+            )
             is_auto_payment = _meta_bool(data.get("is_auto"), False)
             if is_auto_payment:
                 disable = _meta_bool(data.get("disable_on_fail"), False)
@@ -1690,21 +2945,123 @@ async def yookassa_webhook(request: Request, secret: str):
                     user.renew_id = None
                     await user.save()
                     # Уведомляем админа об отключении автопродления из-за неуспешного платежа
-                    await cancel_subscription(user, reason=f"Автоплатеж завершился со статусом: {payment.status}")
-                await notify_auto_renewal_failure(user, reason=f"Платеж не прошел (статус: {payment.status})", will_retry=will_retry)
+                    await cancel_subscription(
+                        user,
+                        reason=f"Автоплатеж завершился со статусом: {payment.status}",
+                    )
+                await notify_auto_renewal_failure(
+                    user,
+                    reason=f"Платеж не прошел (статус: {payment.status})",
+                    will_retry=will_retry,
+                )
             return {"status": "ok"}
 
+        claimed = await _claim_payment_effect_once(
+            payment_id=str(payment.id),
+            user_id=int(user.id),
+            source="webhook",
+        )
+        if not claimed:
+            logger.info("Payment %s effect already claimed/applied", payment.id)
+            replay_eligible = await _should_replay_payment_notifications(
+                payment_id=str(payment.id),
+                user_id=int(user.id),
+            )
+
+            if replay_eligible:
+                replay_amount_from_balance = _round_rub(
+                    data.get("amount_from_balance", 0)
+                )
+                await _repair_processed_payment_financials(
+                    payment_id=str(payment.id),
+                    user_id=int(user.id),
+                    amount_external=float(payment.amount.value),
+                    amount_from_balance=float(replay_amount_from_balance),
+                )
+
+            try:
+                replay_months = int(data.get("month") or 0)
+            except Exception:
+                replay_months = 0
+
+            if replay_months > 0 and replay_eligible:
+                try:
+                    replay_device_count = int(data.get("device_count", 1) or 1)
+                except Exception:
+                    replay_device_count = 1
+                if replay_device_count < 1:
+                    replay_device_count = 1
+
+                replay_discount_percent = None
+                try:
+                    if data.get("discount_percent") is not None:
+                        replay_discount_percent = int(data.get("discount_percent"))
+                except Exception:
+                    replay_discount_percent = None
+
+                replay_lte_gb = 0
+                try:
+                    replay_lte_gb = int(data.get("lte_gb") or 0)
+                except Exception:
+                    replay_lte_gb = 0
+
+                await _replay_payment_notifications_if_needed(
+                    user=user,
+                    payment_id=str(payment.id),
+                    days=max(
+                        0,
+                        (
+                            add_months_safe(date.today(), replay_months) - date.today()
+                        ).days,
+                    ),
+                    amount_external=float(payment.amount.value),
+                    amount_from_balance=float(replay_amount_from_balance),
+                    device_count=int(replay_device_count),
+                    months=int(replay_months),
+                    is_auto_payment=_meta_bool(data.get("is_auto"), False),
+                    discount_percent=replay_discount_percent,
+                    old_expired_at=old_expired_at,
+                    new_expired_at=user.expired_at,
+                    lte_gb_total=int(getattr(user, "lte_gb_total", 0) or replay_lte_gb),
+                    method="yookassa",
+                    tariff_kind=data.get("tariff_kind"),
+                )
+            return {"status": "ok"}
+
+        await _refresh_payment_processing_lease(
+            payment_id=str(payment.id),
+            user_id=int(user.id),
+            source="webhook",
+        )
+
         if data.get("lte_topup"):
+            # TODO(lte-launch): this webhook branch is a future LTE top-up scaffold.
+            # Keep it independent from Standard/Family overlay preservation logic for now.
+            preserve_active_tariff_state = False
             lte_gb_delta = int(data.get("lte_gb_delta") or 0)
             lte_price_per_gb = float(data.get("lte_price_per_gb") or 0)
             amount_from_balance = _round_rub(data.get("amount_from_balance", 0))
-            active_tariff = await ActiveTariffs.get_or_none(id=user.active_tariff_id) if user.active_tariff_id else None
+            active_tariff = (
+                await ActiveTariffs.get_or_none(id=user.active_tariff_id)
+                if user.active_tariff_id
+                else None
+            )
             if not active_tariff:
-                logger.error(f"LTE пополнение: активный тариф не найден для пользователя {user.id}")
+                logger.error(
+                    f"LTE пополнение: активный тариф не найден для пользователя {user.id}"
+                )
+                await _mark_payment_effect_failed(
+                    payment_id=str(payment.id),
+                    error="Active tariff not found for LTE topup",
+                )
                 return {"status": "error", "message": "Active tariff not found"}
 
             lte_before = int(active_tariff.lte_gb_total or 0)
-            old_hwid_limit = int(active_tariff.hwid_limit or 0) if getattr(active_tariff, "hwid_limit", None) is not None else None
+            old_hwid_limit = (
+                int(active_tariff.hwid_limit or 0)
+                if getattr(active_tariff, "hwid_limit", None) is not None
+                else None
+            )
             old_expired_at_for_log = user.expired_at
 
             if amount_from_balance > 0:
@@ -1718,17 +3075,34 @@ async def yookassa_webhook(request: Request, secret: str):
 
             update_fields = []
             if lte_gb_delta > 0:
-                active_tariff.lte_gb_total = int(active_tariff.lte_gb_total or 0) + lte_gb_delta
+                active_tariff.lte_gb_total = (
+                    int(active_tariff.lte_gb_total or 0) + lte_gb_delta
+                )
                 update_fields.append("lte_gb_total")
                 user.lte_gb_total = int(active_tariff.lte_gb_total or 0)
                 await user.save(update_fields=["lte_gb_total"])
 
             msk_today = datetime.now(MSK_TZ).date()
             usage_snapshot = None
-            if user.remnawave_uuid:
-                usage_snapshot = await _fetch_today_lte_usage_gb(
-                    str(user.remnawave_uuid)
+            if user.remnawave_uuid and not preserve_active_tariff_state:
+                await _refresh_payment_processing_lease(
+                    payment_id=str(payment.id),
+                    user_id=int(user.id),
+                    source="webhook_lte_usage_pre",
                 )
+                try:
+                    usage_snapshot = await _await_payment_external_call(
+                        _fetch_today_lte_usage_gb(str(user.remnawave_uuid)),
+                        operation="webhook_lte_fetch_today_lte_usage_gb",
+                    )
+                except asyncio.TimeoutError:
+                    usage_snapshot = None
+                finally:
+                    await _refresh_payment_processing_lease(
+                        payment_id=str(payment.id),
+                        user_id=int(user.id),
+                        source="webhook_lte_usage_post",
+                    )
             if usage_snapshot is not None:
                 active_tariff.lte_usage_last_date = msk_today
                 active_tariff.lte_usage_last_total_gb = usage_snapshot
@@ -1754,38 +3128,54 @@ async def yookassa_webhook(request: Request, secret: str):
                 pending_expired_at_raw = data.get("pending_expired_at")
                 if pending_expired_at_raw:
                     try:
-                        pending_expired_at = date.fromisoformat(str(pending_expired_at_raw))
+                        pending_expired_at = date.fromisoformat(
+                            str(pending_expired_at_raw)
+                        )
                     except Exception:
                         pending_expired_at = None
 
                 pending_active_tariff_price = data.get("pending_active_tariff_price")
                 try:
                     pending_active_tariff_price = (
-                        int(pending_active_tariff_price) if pending_active_tariff_price is not None else None
+                        int(pending_active_tariff_price)
+                        if pending_active_tariff_price is not None
+                        else None
                     )
                 except (TypeError, ValueError):
                     pending_active_tariff_price = None
 
-                pending_progressive_multiplier = data.get("pending_progressive_multiplier")
+                pending_progressive_multiplier = data.get(
+                    "pending_progressive_multiplier"
+                )
                 try:
                     pending_progressive_multiplier = (
-                        float(pending_progressive_multiplier) if pending_progressive_multiplier is not None else None
+                        float(pending_progressive_multiplier)
+                        if pending_progressive_multiplier is not None
+                        else None
                     )
                 except (TypeError, ValueError):
                     pending_progressive_multiplier = None
 
-                pending_residual_day_fraction = data.get("pending_residual_day_fraction")
+                pending_residual_day_fraction = data.get(
+                    "pending_residual_day_fraction"
+                )
                 try:
                     pending_residual_day_fraction = (
-                        float(pending_residual_day_fraction) if pending_residual_day_fraction is not None else None
+                        float(pending_residual_day_fraction)
+                        if pending_residual_day_fraction is not None
+                        else None
                     )
                 except (TypeError, ValueError):
                     pending_residual_day_fraction = None
 
-                pending_devices_decrease_count = data.get("pending_devices_decrease_count")
+                pending_devices_decrease_count = data.get(
+                    "pending_devices_decrease_count"
+                )
                 try:
                     pending_devices_decrease_count = (
-                        int(pending_devices_decrease_count) if pending_devices_decrease_count is not None else None
+                        int(pending_devices_decrease_count)
+                        if pending_devices_decrease_count is not None
+                        else None
                     )
                 except (TypeError, ValueError):
                     pending_devices_decrease_count = None
@@ -1798,27 +3188,46 @@ async def yookassa_webhook(request: Request, secret: str):
                 if pending_active_tariff_price is not None:
                     active_tariff.price = pending_active_tariff_price
                 if pending_progressive_multiplier is not None:
-                    active_tariff.progressive_multiplier = pending_progressive_multiplier
+                    active_tariff.progressive_multiplier = (
+                        pending_progressive_multiplier
+                    )
                 if pending_residual_day_fraction is not None:
                     active_tariff.residual_day_fraction = pending_residual_day_fraction
                 if pending_devices_decrease_count is not None:
-                    active_tariff.devices_decrease_count = pending_devices_decrease_count
+                    active_tariff.devices_decrease_count = (
+                        pending_devices_decrease_count
+                    )
                 await active_tariff.save()
 
                 if user.remnawave_uuid:
                     remnawave_client = None
                     try:
+                        await _refresh_payment_processing_lease(
+                            payment_id=str(payment.id),
+                            user_id=int(user.id),
+                            source="webhook_lte_remna_pre",
+                        )
                         remnawave_client = RemnaWaveClient(
                             remnawave_settings.url,
                             remnawave_settings.token.get_secret_value(),
                         )
-                        await remnawave_client.users.update_user(
-                            uuid=user.remnawave_uuid,
-                            expireAt=user.expired_at,
-                            hwidDeviceLimit=pending_device_count
+                        await _await_payment_external_call(
+                            remnawave_client.users.update_user(
+                                uuid=user.remnawave_uuid,
+                                expireAt=user.expired_at,
+                                hwidDeviceLimit=pending_device_count,
+                            ),
+                            operation="webhook_lte_remnawave_update_user",
+                        )
+                        await _refresh_payment_processing_lease(
+                            payment_id=str(payment.id),
+                            user_id=int(user.id),
+                            source="webhook_lte_remna_post",
                         )
                     except Exception as e:
-                        logger.error(f"LTE пополнение: ошибка обновления RemnaWave при изменении устройств для {user.id}: {e}")
+                        logger.error(
+                            f"LTE пополнение: ошибка обновления RemnaWave при изменении устройств для {user.id}: {e}"
+                        )
                     finally:
                         if remnawave_client:
                             try:
@@ -1826,28 +3235,37 @@ async def yookassa_webhook(request: Request, secret: str):
                             except Exception:
                                 pass
 
-            if user.remnawave_uuid:
-                try:
-                    effective_lte_total = (
-                        user.lte_gb_total
-                        if user.lte_gb_total is not None
-                        else (active_tariff.lte_gb_total or 0)
-                    )
-                    should_enable_lte = effective_lte_total > (active_tariff.lte_gb_used or 0)
-                    await set_lte_squad_status(str(user.remnawave_uuid), enable=should_enable_lte)
-                except Exception as e:
-                    logger.error(f"LTE пополнение: ошибка обновления LTE-сквада для {user.id}: {e}")
-
             amount_external = float(payment.amount.value)
             total_amount = amount_external + amount_from_balance
-            await _upsert_processed_payment(
-                payment_id=payment.id,
+            await _mark_payment_effect_success(
+                payment_id=str(payment.id),
                 user_id=user.id,
                 amount=total_amount,
                 amount_external=amount_external,
                 amount_from_balance=amount_from_balance,
                 status="succeeded",
             )
+
+            if user.remnawave_uuid and not preserve_active_tariff_state:
+                try:
+                    effective_lte_total = (
+                        user.lte_gb_total
+                        if user.lte_gb_total is not None
+                        else (active_tariff.lte_gb_total or 0)
+                    )
+                    should_enable_lte = effective_lte_total > (
+                        active_tariff.lte_gb_used or 0
+                    )
+                    await _await_payment_external_call(
+                        set_lte_squad_status(
+                            str(user.remnawave_uuid), enable=should_enable_lte
+                        ),
+                        operation="webhook_lte_set_lte_squad_status",
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"LTE пополнение: ошибка обновления LTE-сквада для {user.id}: {e}"
+                    )
 
             logger.info(
                 f"LTE пополнение успешно: user={user.id}, delta={lte_gb_delta}, price={lte_price_per_gb}"
@@ -1866,12 +3284,18 @@ async def yookassa_webhook(request: Request, secret: str):
                     amount_external=_round_rub(amount_external),
                     amount_from_balance=int(amount_from_balance),
                     old_hwid_limit=old_hwid_limit,
-                    new_hwid_limit=(int(active_tariff.hwid_limit) if getattr(active_tariff, "hwid_limit", None) is not None else None),
+                    new_hwid_limit=(
+                        int(active_tariff.hwid_limit)
+                        if getattr(active_tariff, "hwid_limit", None) is not None
+                        else None
+                    ),
                     old_expired_at=old_expired_at_for_log,
                     new_expired_at=user.expired_at,
                 )
             except Exception as notify_exc:
-                logger.error(f"LTE пополнение: не удалось отправить админ-уведомление: {notify_exc}")
+                logger.error(
+                    f"LTE пополнение: не удалось отправить админ-уведомление: {notify_exc}"
+                )
             try:
                 await _award_partner_cashback(
                     payment_id=str(payment.id),
@@ -1884,14 +3308,29 @@ async def yookassa_webhook(request: Request, secret: str):
                     payment.id,
                     e_partner,
                 )
+            try:
+                await _award_standard_referral_cashback(
+                    payment_id=str(payment.id),
+                    referral_user=user,
+                    amount_external_rub=int(_round_rub(amount_external)),
+                )
+            except Exception as e_ref_cashback:
+                logger.warning(
+                    "LTE пополнение: не удалось начислить обычный реферальный кэшбек для payment %s: %s",
+                    payment.id,
+                    e_ref_cashback,
+                )
             return {"status": "ok"}
-        
+
         try:
             months = int(data["month"])
         except (KeyError, ValueError) as e:
             logger.error(
                 f"Некорректное значение месяцев в webhook'е YooKassa: {e}",
-                extra={'payment_id': payment.id}
+                extra={"payment_id": payment.id},
+            )
+            await _mark_payment_effect_failed(
+                payment_id=str(payment.id), error="Invalid month value"
             )
             return {"status": "error", "message": "Invalid month value"}
 
@@ -1903,63 +3342,104 @@ async def yookassa_webhook(request: Request, secret: str):
             base_paid_price = float(data.get("base_full_price") or 0)
         else:
             base_paid_price = float(discounted_raw)
-        
+
         # Достаём скидку, применённую при создании платежа (если была)
         discount_id = data.get("discount_id")
         discount_percent = int(data.get("discount_percent") or 0)
 
-        # Сразу пытаемся списать скидку: если списалась, пропорциональная коррекция не нужна
+        # Read-only probe: do not decrement discount usage before entitlement commits
+        discount_available = False
         consumed = False
         try:
-            consumed = await consume_discount_if_needed(discount_id)
+            discount_available = await is_discount_available_if_needed(discount_id)
         except Exception:
-            consumed = False
+            discount_available = False
 
-        # Новый тариф из webhook
+        # ????? ????? ?? webhook
         active_tariff_for_lte = None
-        tariff_id = data.get("tariff_id")
+        raw_tariff_id = data.get("tariff_id")
+        tariff_id = None
+        if raw_tariff_id is not None:
+            try:
+                tariff_id = int(raw_tariff_id)
+            except (TypeError, ValueError):
+                tariff_id = None
+        try:
+            payment_device_count = int(data.get("device_count", 1) or 1)
+        except (TypeError, ValueError):
+            payment_device_count = 1
+        if payment_device_count < 1:
+            payment_device_count = 1
+        new_tariff = None
         if tariff_id is not None:
-            # Получаем новый тариф
             new_tariff = await Tariffs.get_or_none(id=tariff_id)
             if new_tariff:
                 await new_tariff.sync_effective_pricing_fields()
-            if not new_tariff:
+            else:
                 logger.error(f"Не найден тариф {tariff_id} при обработке платежа")
+                await _mark_payment_effect_failed(
+                    payment_id=str(payment.id), error=f"Tariff not found: {tariff_id}"
+                )
                 return {"status": "error", "message": "Tariff not found"}
-                
+        purchase_kind = await resolve_purchase_kind(
+            metadata=data,
+            months=months,
+            device_count=payment_device_count,
+            tariff_id=tariff_id,
+            tariff=new_tariff,
+        )
+        base_tariff_snapshot = _build_base_tariff_snapshot(
+            tariff=new_tariff,
+            device_count=payment_device_count,
+            lte_gb=lte_gb,
+            lte_price_per_gb=lte_price_per_gb,
+        )
+        is_family_overlay_purchase = purchase_kind == "family"
+        is_active_family_overlay = await has_active_family_overlay(user)
+        if tariff_id is not None:
             # Проверяем, есть ли у пользователя активная подписка и активный тариф
             current_date = date.today()
             additional_days = 0
             user_expired_at = normalize_date(user.expired_at)
 
-            if user_expired_at and user_expired_at > current_date and user.active_tariff_id:
+            if (
+                (not is_family_overlay_purchase)
+                and (not is_active_family_overlay)
+                and user_expired_at
+                and user_expired_at > current_date
+                and user.active_tariff_id
+            ):
                 # У пользователя есть действующая подписка
                 try:
                     # Получаем активный тариф
                     active_tariff = await ActiveTariffs.get(id=user.active_tariff_id)
-                    
+
                     # Вычисляем оставшиеся дни подписки
                     days_remaining = (user_expired_at - current_date).days
-                    logger.info(f"У пользователя {user.id} осталось {days_remaining} дней подписки")
-                    
+                    logger.info(
+                        f"У пользователя {user.id} осталось {days_remaining} дней подписки"
+                    )
+
                     # Рассчитываем количество дней, которое давал старый тариф
                     old_months = int(active_tariff.months)
                     old_target_date = add_months_safe(current_date, old_months)
                     old_total_days = (old_target_date - current_date).days
-                    
+
                     # Рассчитываем процент неиспользованной подписки
-                    unused_percent = days_remaining / old_total_days if old_total_days > 0 else 0
+                    unused_percent = (
+                        days_remaining / old_total_days if old_total_days > 0 else 0
+                    )
                     unused_value = unused_percent * active_tariff.price
-                    
+
                     logger.info(
-                        f"Неиспользованная часть подписки пользователя {user.id}: " 
-                        f"{days_remaining}/{old_total_days} дней ({unused_percent:.2%}), " 
+                        f"Неиспользованная часть подписки пользователя {user.id}: "
+                        f"{days_remaining}/{old_total_days} дней ({unused_percent:.2%}), "
                         f"стоимость: {unused_value:.2f} руб."
                     )
-                    
+
                     # ИСПРАВЛЕННАЯ ЛОГИКА: рассчитываем через пропорцию от общей суммы
                     # Выполняем ТОЛЬКО если скидка не была списана (например, повторная оплата без скидки)
-                    if new_tariff.price > 0 and not consumed:
+                    if new_tariff.price > 0 and not discount_available:
                         # Получаем device_count и рассчитываем правильную цену
                         try:
                             device_count = int(data.get("device_count", 1))
@@ -1967,40 +3447,48 @@ async def yookassa_webhook(request: Request, secret: str):
                             device_count = 1
                         if device_count < 1:
                             device_count = 1
-                        
+
                         # Рассчитываем итоговую цену для указанного количества устройств
-                        correct_new_tariff_price = new_tariff.calculate_price(device_count)
-                        
+                        correct_new_tariff_price = new_tariff.calculate_price(
+                            device_count
+                        )
+
                         # Общая сумма = заплачено пользователем + компенсация за старый тариф
                         total_paid = max(0.0, base_paid_price)
                         total_amount = total_paid + unused_value
-                        
+
                         # Рассчитываем новый период подписки (стандартный для тарифа)
                         tariff_months = int(new_tariff.months)
                         new_target_date = add_months_safe(current_date, tariff_months)
                         new_total_days = (new_target_date - current_date).days
-                        
+
                         # Пропорция: x дней / общая_сумма = полный_период_тарифа / цена_тарифа
                         # x = общая_сумма * полный_период_тарифа / цена_тарифа
-                        calculated_days = int(total_amount * new_total_days / correct_new_tariff_price)
-                        
+                        calculated_days = int(
+                            total_amount * new_total_days / correct_new_tariff_price
+                        )
+
                         logger.info(
                             f"ИСПРАВЛЕННЫЙ расчёт для пользователя {user.id}: "
                             f"Заплачено: {total_paid:.2f} руб + Компенсация: {unused_value:.2f} руб = "
                             f"Общая сумма: {total_amount:.2f} руб. "
                             f"Пропорция: {calculated_days} дней = {total_amount:.2f} * {new_total_days} / {correct_new_tariff_price:.2f}"
                         )
-                        
+
                         # Устанавливаем рассчитанные дни как итоговые (без additional_days)
-                        additional_days = 0  # Сбрасываем, так как используем calculated_days
+                        additional_days = (
+                            0  # Сбрасываем, так как используем calculated_days
+                        )
                         days = calculated_days  # Переопределяем days
                 except Exception as e:
-                    logger.error(f"Ошибка при расчете переноса подписки для {user.id}: {str(e)}")
+                    logger.error(
+                        f"Ошибка при расчете переноса подписки для {user.id}: {str(e)}"
+                    )
                     additional_days = 0  # При ошибке не добавляем дополнительные дни
-            
+
             # Рассчитываем точное количество дней для указанного количества месяцев
             # При смене тарифа days уже рассчитано через пропорцию
-            if 'calculated_days' not in locals():
+            if "calculated_days" not in locals():
                 # Обычная покупка нового тарифа без смены
                 current_date = date.today()
                 target_date = add_months_safe(current_date, months)
@@ -2008,18 +3496,64 @@ async def yookassa_webhook(request: Request, secret: str):
                 logger.info(f"Стандартное количество дней подписки: {days}")
             else:
                 # days уже рассчитано через пропорцию при смене тарифа
-                logger.info(f"Итоговое количество дней подписки (через пропорцию): {days}")
+                logger.info(
+                    f"Итоговое количество дней подписки (через пропорцию): {days}"
+                )
         else:
             # Если нет tariff_id, значит это автоплатеж или другой тип платежа, просто рассчитываем дни как обычно
             current_date = date.today()
             target_date = add_months_safe(current_date, months)
             days = (target_date - current_date).days
             logger.info(f"Стандартное количество дней подписки: {days}")
-        
+
         # Рассчитываем точное количество дней для указанного количества месяцев
+        # и выполняем пропорциональную коррекцию до применения entitlement,
+        # если скидка не была списана.
+        if not discount_available and tariff_id is not None:
+            try:
+                if new_tariff:
+                    correct_new_tariff_price = new_tariff.calculate_price(
+                        payment_device_count
+                    )
+                    amount_paid_by_user = float(payment.amount.value)
+                    amount_from_balance_preview = _round_rub(
+                        data.get("amount_from_balance", 0)
+                    )
+                    total_paid_now = amount_paid_by_user + amount_from_balance_preview
+                    base_paid_now = max(0.0, total_paid_now - lte_cost)
+                    current_date = date.today()
+                    original_months = int(new_tariff.months)
+                    new_target_date = add_months_safe(current_date, original_months)
+                    new_total_days = (new_target_date - current_date).days
+                    proportional_days = int(
+                        base_paid_now
+                        * new_total_days
+                        / max(1, correct_new_tariff_price)
+                    )
+                    if proportional_days > 0 and proportional_days < days:
+                        logger.info(
+                            "Pre-entitlement days cap applied for payment %s user %s: %s -> %s (discount not consumed)",
+                            payment.id,
+                            user.id,
+                            days,
+                            proportional_days,
+                        )
+                        days = proportional_days
+            except Exception:
+                pass
+
+        should_preserve_active_tariff_state = (
+            purchase_kind == "base" and is_active_family_overlay
+        )
         try:
-            if tariff_id is not None and user.active_tariff_id:
-                old_active_tariff = await ActiveTariffs.get_or_none(id=user.active_tariff_id)
+            if (
+                tariff_id is not None
+                and user.active_tariff_id
+                and not should_preserve_active_tariff_state
+            ):
+                old_active_tariff = await ActiveTariffs.get_or_none(
+                    id=user.active_tariff_id
+                )
                 if old_active_tariff:
                     remaining_gb = max(
                         0.0,
@@ -2035,6 +3569,15 @@ async def yookassa_webhook(request: Request, secret: str):
                             f"Начислен бонус за остаток LTE-трафика {remaining_gb:.2f} GB "
                             f"({lte_refund_amount:.2f} руб.) пользователю {user.id}"
                         )
+            elif (
+                tariff_id is not None
+                and user.active_tariff_id
+                and should_preserve_active_tariff_state
+            ):
+                logger.info(
+                    "Webhook base purchase during active family overlay: skip LTE refund and active tariff replacement user=%s",
+                    user.id,
+                )
 
             amount_from_balance = _round_rub(data.get("amount_from_balance", 0))
             if amount_from_balance > 0:
@@ -2044,42 +3587,99 @@ async def yookassa_webhook(request: Request, secret: str):
                     f"Списание с бонусного баланса пользователя {user.id}. "
                     f"Сумма: {amount_from_balance}. Баланс до: {initial_balance}, После: {user.balance}",
                     extra={
-                        'payment_id': payment.id,
-                        'user_id': user.id,
-                        'amount_from_balance': amount_from_balance
-                    }
+                        "payment_id": payment.id,
+                        "user_id": user.id,
+                        "amount_from_balance": amount_from_balance,
+                    },
                 )
-            
+
             # Устанавливаем новую дату окончания подписки
             # В случае автопродления переходим на новый тариф, сбрасывая старую подписку
             is_auto = _meta_bool(data.get("is_auto"), False)
+            added_to_frozen_base = False
             if is_auto:
-                # Для автопродления используем extend_subscription вместо прямой установки даты
-                await user.extend_subscription(days)
-                logger.info(
-                    f"Автопродление: подписка пользователя {user.id} продлена на {days} дней, новая дата истечения: {user.expired_at}"
+                (
+                    added_to_frozen_base,
+                    family_expires_at,
+                ) = await _apply_purchase_extension_by_kind(
+                    user=user,
+                    purchase_kind=purchase_kind,
+                    purchased_days=days,
+                    base_tariff_snapshot=base_tariff_snapshot,
                 )
-            else:
-                # При смене тарифа (когда calculated_days определено) устанавливаем от текущей даты
-                # чтобы избежать двойного учёта компенсации
-                if 'calculated_days' in locals():
-                    # Смена тарифа с компенсацией - устанавливаем от текущей даты
-                    user.expired_at = current_date + timedelta(days=days)
+                if purchase_kind == "family":
                     logger.info(
-                        f"Смена тарифа для пользователя {user.id}: установлена дата {user.expired_at} "
-                        f"({days} дней от текущей даты, рассчитано через пропорцию)"
+                        "Webhook auto family purchase: updated overlay expiry user=%s family_expires_at=%s",
+                        user.id,
+                        family_expires_at,
+                    )
+                elif added_to_frozen_base:
+                    logger.info(
+                        "Webhook auto base purchase during active family overlay moved to frozen base days for user %s",
+                        user.id,
                     )
                 else:
-                    # Обычное продление или новая подписка без смены тарифа
-                    await user.extend_subscription(days)
                     logger.info(
-                        f"Подписка пользователя {user.id} продлена на {days} дней, новая дата истечения: {user.expired_at} "
-                        f"(с учетом оставшихся дней предыдущей подписки/триала)"
+                        f"Автопродление: подписка пользователя {user.id} продлена на {days} дней, новая дата истечения: {user.expired_at}"
                     )
-                
+            else:
+                if (
+                    purchase_kind == "base"
+                    and ("calculated_days" in locals())
+                    and (not is_active_family_overlay)
+                ):
+                    added_to_frozen_base = (
+                        await apply_base_purchase_to_frozen_base_if_active(
+                            user,
+                            purchased_days=days,
+                            base_tariff_snapshot=base_tariff_snapshot,
+                        )
+                    )
+                    if added_to_frozen_base:
+                        logger.info(
+                            "Base purchase during active family overlay moved to frozen base days for user %s",
+                            user.id,
+                        )
+                    else:
+                        user.expired_at = current_date + timedelta(days=days)
+                        logger.info(
+                            f"Смена base-тарифа для пользователя {user.id}: установлена дата {user.expired_at} "
+                            f"({days} дней от текущей даты, рассчитано через пропорцию)"
+                        )
+                else:
+                    (
+                        added_to_frozen_base,
+                        family_expires_at,
+                    ) = await _apply_purchase_extension_by_kind(
+                        user=user,
+                        purchase_kind=purchase_kind,
+                        purchased_days=days,
+                        base_tariff_snapshot=base_tariff_snapshot,
+                    )
+                    if purchase_kind == "family":
+                        logger.info(
+                            "Webhook family purchase: updated overlay expiry user=%s family_expires_at=%s",
+                            user.id,
+                            family_expires_at,
+                        )
+                    elif added_to_frozen_base:
+                        logger.info(
+                            "Base purchase during active family overlay moved to frozen base days for user %s",
+                            user.id,
+                        )
+                    else:
+                        logger.info(
+                            f"Подписка пользователя {user.id} продлена на {days} дней, новая дата истечения: {user.expired_at} "
+                            f"(с учетом оставшихся дней предыдущей подписки/триала)"
+                        )
+
+            preserve_active_tariff_state = (
+                purchase_kind == "base" and added_to_frozen_base
+            )
+
             # If a tariff_id is provided in metadata, ensure it's created in ActiveTariffs and assign to user
-            if tariff_id is not None:
-                original = await Tariffs.get_or_none(id=tariff_id)
+            original = new_tariff if tariff_id is not None else None
+            if tariff_id is not None and not preserve_active_tariff_state:
                 if original:
                     await original.sync_effective_pricing_fields()
                     _, effective_multiplier = original.get_effective_pricing()
@@ -2090,29 +3690,50 @@ async def yookassa_webhook(request: Request, secret: str):
                         device_count = 1
                     if device_count < 1:
                         device_count = 1
-                    
+
                     # Рассчитываем итоговую цену для указанного количества устройств
                     calculated_price = original.calculate_price(device_count)
-                    
+
                     # Удаляем предыдущий активный тариф, если он есть
                     if user.active_tariff_id:
-                        old_active_tariff = await ActiveTariffs.get_or_none(id=user.active_tariff_id)
+                        old_active_tariff = await ActiveTariffs.get_or_none(
+                            id=user.active_tariff_id
+                        )
                         if old_active_tariff:
-                            logger.info(f"Удаляем предыдущий активный тариф {user.active_tariff_id} пользователя {user.id}")
+                            logger.info(
+                                f"Удаляем предыдущий активный тариф {user.active_tariff_id} пользователя {user.id}"
+                            )
                             await old_active_tariff.delete()
                         else:
-                            logger.warning(f"Не найден активный тариф {user.active_tariff_id} для удаления у пользователя {user.id}")
-                    
+                            logger.warning(
+                                f"Не найден активный тариф {user.active_tariff_id} для удаления у пользователя {user.id}"
+                            )
+
                     # код по сбросу HWID временно отключен
                     # if user.remnawave_uuid:
-                        # await cleanup_user_hwid_devices(user.id, user.remnawave_uuid)
-                    
+                    # await cleanup_user_hwid_devices(user.id, user.remnawave_uuid)
+
                     msk_today = datetime.now(MSK_TZ).date()
                     usage_snapshot = None
                     if user.remnawave_uuid:
-                        usage_snapshot = await _fetch_today_lte_usage_gb(
-                            str(user.remnawave_uuid)
+                        await _refresh_payment_processing_lease(
+                            payment_id=str(payment.id),
+                            user_id=int(user.id),
+                            source="webhook_usage_pre",
                         )
+                        try:
+                            usage_snapshot = await _await_payment_external_call(
+                                _fetch_today_lte_usage_gb(str(user.remnawave_uuid)),
+                                operation="webhook_fetch_today_lte_usage_gb",
+                            )
+                        except asyncio.TimeoutError:
+                            usage_snapshot = None
+                        finally:
+                            await _refresh_payment_processing_lease(
+                                payment_id=str(payment.id),
+                                user_id=int(user.id),
+                                source="webhook_usage_post",
+                            )
                     # Create a new active tariff entry with random ID
                     if "lte_price_per_gb" in data:
                         lte_price_snapshot = float(data.get("lte_price_per_gb") or 0)
@@ -2128,9 +3749,11 @@ async def yookassa_webhook(request: Request, secret: str):
                         lte_gb_used=0.0,
                         lte_price_per_gb=lte_price_snapshot,
                         lte_usage_last_date=msk_today,
-                        lte_usage_last_total_gb=usage_snapshot if usage_snapshot is not None else 0.0,
+                        lte_usage_last_total_gb=usage_snapshot
+                        if usage_snapshot is not None
+                        else 0.0,
                         progressive_multiplier=effective_multiplier,
-                        residual_day_fraction=0.0
+                        residual_day_fraction=0.0,
                     )
                     active_tariff_for_lte = active_tariff
                     # Link user to this active tariff
@@ -2139,42 +3762,110 @@ async def yookassa_webhook(request: Request, secret: str):
 
                     # Устанавливаем hwid_limit пользователю из выбранного количества устройств
                     user.hwid_limit = device_count
-                    logger.info(f"Created ActiveTariff {active_tariff.id} for user {user.id} based on tariff {original.id}, device_count={device_count}, установлен hwid_limit={device_count}")
+                    logger.info(
+                        f"Created ActiveTariff {active_tariff.id} for user {user.id} based on tariff {original.id}, device_count={device_count}, установлен hwid_limit={device_count}"
+                    )
 
                     # ВАЖНО: сохраняем active_tariff_id и hwid_limit в БД как можно раньше
                     # чтобы минимизировать race condition с remnawave_updater
                     try:
-                        await user.save(update_fields=["active_tariff_id", "hwid_limit"])
-                        logger.debug(f"Ранее сохранены active_tariff_id={active_tariff.id} и hwid_limit={device_count} для пользователя {user.id}")
+                        await user.save(
+                            update_fields=["active_tariff_id", "hwid_limit"]
+                        )
+                        logger.debug(
+                            f"Ранее сохранены active_tariff_id={active_tariff.id} и hwid_limit={device_count} для пользователя {user.id}"
+                        )
                     except Exception as persist_exc:
-                        logger.warning(f"Не удалось рано сохранить active_tariff_id/hwid_limit для {user.id}: {persist_exc}")
+                        logger.warning(
+                            f"Не удалось рано сохранить active_tariff_id/hwid_limit для {user.id}: {persist_exc}"
+                        )
                 else:
-                    logger.error(f"Original tariff {tariff_id} not found; skipping ActiveTariffs")
-            
+                    logger.error(
+                        f"Original tariff {tariff_id} not found; skipping ActiveTariffs"
+                    )
+            elif tariff_id is not None and preserve_active_tariff_state:
+                logger.info(
+                    "Webhook base purchase during active family overlay preserved active_tariff/hwid for user %s",
+                    user.id,
+                )
+
             # После успешной оплаты сбрасываем счётчик уменьшений лимита устройств
             if user.active_tariff_id:
-                await ActiveTariffs.filter(id=user.active_tariff_id).update(devices_decrease_count=0)
-            
+                await ActiveTariffs.filter(id=user.active_tariff_id).update(
+                    devices_decrease_count=0
+                )
+
+            # Если это автоплатеж и он успешен, обновляем статус подписки
+            payment_method = getattr(payment, "payment_method", None)
+            saved_method_id = (
+                getattr(payment_method, "id", None) if payment_method else None
+            )
+            saved_flag = (
+                _meta_bool(getattr(payment_method, "saved", None), False)
+                if payment_method
+                else False
+            )
+            if (
+                not is_auto
+                and saved_method_id
+                and (saved_flag or getattr(payment_method, "saved", None) is None)
+            ):
+                user.renew_id = str(saved_method_id)
+                user.is_subscribed = True
+
+            # Если это автоплатеж и он успешен, обновляем статус подписки
+            if is_auto and payment.status == "succeeded":
+                user.is_subscribed = True
+
+            # Если у пользователя был пробный период, сбрасываем флаг
+            if user.is_trial:
+                user.is_trial = False
+                logger.info(
+                    f"Сброшен флаг пробного периода для пользователя {user.id} после оплаты подписки",
+                    extra={"payment_id": payment.id, "user_id": user.id},
+                )
+
+            await user.save()  # Сохраняем пользователя (включая обновленный баланс)
+
+            amount_paid_via_yookassa = float(payment.amount.value)
+            full_tariff_price_for_history = (
+                amount_paid_via_yookassa + amount_from_balance
+            )
+            await _mark_payment_effect_success(
+                payment_id=str(payment.id),
+                user_id=user.id,
+                amount=full_tariff_price_for_history,
+                amount_external=amount_paid_via_yookassa,
+                amount_from_balance=amount_from_balance,
+                status="succeeded",
+            )
+
             # Синхронизируем данные с RemnaWave
-            if user.remnawave_uuid:
+            if user.remnawave_uuid and not preserve_active_tariff_state:
                 # Настройки бесконечных повторных попыток с ограничением по времени
-                max_total_time = 60  # Максимальное время в секундах для всех попыток (1 минута)
+                max_total_time = (
+                    60  # Максимальное время в секундах для всех попыток (1 минута)
+                )
                 start_time = datetime.now()
                 retry_count = 0
                 remnawave_client = None
                 success = False
-                
+
                 try:
                     # Подготавливаем параметры для обновления
                     update_params = {}
 
                     # Передаём дату в формате date; клиент внутри сам форматирует expireAt
                     update_params["expireAt"] = user.expired_at
-                    
+
                     # Определяем hwid_limit ТОЛЬКО для новых подписок (когда есть tariff_id),
                     # при автопродлении hwid_limit не меняем
                     hwid_limit = None
-                    if tariff_id is not None and original:
+                    if (
+                        tariff_id is not None
+                        and original
+                        and not preserve_active_tariff_state
+                    ):
                         try:
                             device_count = int(data.get("device_count", 1))
                         except (ValueError, TypeError):
@@ -2182,79 +3873,154 @@ async def yookassa_webhook(request: Request, secret: str):
                         if device_count < 1:
                             device_count = 1
                         hwid_limit = device_count
-                        logger.info(f"Новая подписка: устанавливаем hwid_limit={hwid_limit} из device_count для тарифа ID={original.id}")
+                        logger.info(
+                            f"Новая подписка: устанавливаем hwid_limit={hwid_limit} из device_count для тарифа ID={original.id}"
+                        )
                         update_params["hwidDeviceLimit"] = hwid_limit
+                    elif preserve_active_tariff_state:
+                        logger.info(
+                            "Base purchase during active family overlay: skip RemnaWave hwid update for user %s",
+                            user.id,
+                        )
                     else:
-                        logger.info(f"Автопродление: hwid_limit не меняем, обновляем только дату истечения")
-                    
+                        logger.info(
+                            f"Автопродление: hwid_limit не меняем, обновляем только дату истечения"
+                        )
+
                     # Цикл повторных попыток обновления информации в RemnaWave
                     while not success:
+                        await _refresh_payment_processing_lease(
+                            payment_id=str(payment.id),
+                            user_id=int(user.id),
+                            source="webhook",
+                        )
                         # Проверяем, не превысили ли мы общее время попыток
                         elapsed_time = (datetime.now() - start_time).total_seconds()
-                        if elapsed_time > max_total_time:
+                        remaining_budget = max_total_time - elapsed_time
+                        if remaining_budget <= 0:
                             logger.error(
                                 f"Превышено максимальное время ({max_total_time} сек) для обновления пользователя {user.id} в RemnaWave. "
                                 f"Выполнено {retry_count} попыток за {elapsed_time:.1f} сек."
                             )
                             break
-                            
+
                         try:
                             retry_count += 1
-                            
+
                             # Создаем клиент RemnaWave для каждой попытки
                             if remnawave_client:
                                 await remnawave_client.close()
                             remnawave_client = RemnaWaveClient(
-                                remnawave_settings.url, 
-                                remnawave_settings.token.get_secret_value()
+                                remnawave_settings.url,
+                                remnawave_settings.token.get_secret_value(),
                             )
-                            
+
                             # Обновляем пользователя в RemnaWave
                             logger.info(
                                 f"Попытка #{retry_count} [{elapsed_time:.1f} сек]: Обновляем пользователя {user.id} в RemnaWave (UUID: {user.remnawave_uuid}). "
-                                f"Новая дата: {user.expired_at}" + 
-                                (f", hwid_limit: {hwid_limit}" if hwid_limit is not None else ", hwid_limit без изменений")
+                                f"Новая дата: {user.expired_at}"
+                                + (
+                                    f", hwid_limit: {hwid_limit}"
+                                    if hwid_limit is not None
+                                    else ", hwid_limit без изменений"
+                                )
                             )
-                            
+
                             try:
-                                await remnawave_client.users.update_user(
-                                    uuid=user.remnawave_uuid,
-                                    **update_params
+                                await _refresh_payment_processing_lease(
+                                    payment_id=str(payment.id),
+                                    user_id=int(user.id),
+                                    source="webhook_remna_pre",
+                                )
+                                await _await_payment_external_call(
+                                    remnawave_client.users.update_user(
+                                        uuid=user.remnawave_uuid,
+                                        **update_params,
+                                    ),
+                                    operation="webhook_remnawave_update_user",
+                                    timeout=remaining_budget,
                                 )
                             except Exception as update_err:
                                 # Если юзер удален в RemnaWave – пересоздаём и пытаемся снова
-                                if any(token in str(update_err) for token in ["User not found", "A039", "Update user error"]):
+                                if any(
+                                    token in str(update_err)
+                                    for token in [
+                                        "User not found",
+                                        "A039",
+                                        "Update user error",
+                                    ]
+                                ):
                                     recreated = await user.recreate_remnawave_user()
                                     if recreated and user.remnawave_uuid:
-                                        await remnawave_client.users.update_user(
-                                            uuid=user.remnawave_uuid,
-                                            **update_params
+                                        elapsed_time = (
+                                            datetime.now() - start_time
+                                        ).total_seconds()
+                                        remaining_budget = max_total_time - elapsed_time
+                                        if remaining_budget <= 0:
+                                            logger.error(
+                                                f"Превышено максимальное время ({max_total_time} сек) для обновления пользователя {user.id} в RemnaWave. "
+                                                f"Выполнено {retry_count} попыток за {elapsed_time:.1f} сек."
+                                            )
+                                            break
+                                        await _await_payment_external_call(
+                                            remnawave_client.users.update_user(
+                                                uuid=user.remnawave_uuid,
+                                                **update_params,
+                                            ),
+                                            operation="webhook_remnawave_update_user_recreated",
+                                            timeout=remaining_budget,
                                         )
                                 else:
                                     raise
-                            
-                            logger.info(f"УСПЕХ! Пользователь {user.id} обновлен в RemnaWave с попытки #{retry_count} за {elapsed_time:.1f} сек")
+                                await _refresh_payment_processing_lease(
+                                    payment_id=str(payment.id),
+                                    user_id=int(user.id),
+                                    source="webhook_remna_post",
+                                )
+
+                            logger.info(
+                                f"УСПЕХ! Пользователь {user.id} обновлен в RemnaWave с попытки #{retry_count} за {elapsed_time:.1f} сек"
+                            )
                             success = True
                             break  # Успешное обновление, выходим из цикла
-                            
+
                         except Exception as retry_exc:
+                            await _refresh_payment_processing_lease(
+                                payment_id=str(payment.id),
+                                user_id=int(user.id),
+                                source="webhook_remna_err",
+                            )
                             # Ограничиваем экспоненциальный рост задержки
-                            backoff_time = min(10, 0.5 * (2 ** min(retry_count, 5)) + random.uniform(0, 0.5))
+                            backoff_time = min(
+                                10,
+                                0.5 * (2 ** min(retry_count, 5))
+                                + random.uniform(0, 0.5),
+                            )
                             logger.warning(
                                 f"Ошибка при обновлении пользователя {user.id} в RemnaWave (попытка {retry_count}, прошло {elapsed_time:.1f} сек): {str(retry_exc)}. "
                                 f"Повторная попытка через {backoff_time:.2f} сек."
                             )
-                            await asyncio.sleep(backoff_time)
-                    
+                            elapsed_time = (datetime.now() - start_time).total_seconds()
+                            remaining_budget = max_total_time - elapsed_time
+                            if remaining_budget <= 0:
+                                logger.error(
+                                    f"Превышено максимальное время ({max_total_time} сек) для обновления пользователя {user.id} в RemnaWave. "
+                                    f"Выполнено {retry_count} попыток за {elapsed_time:.1f} сек."
+                                )
+                                break
+                            await asyncio.sleep(min(backoff_time, remaining_budget))
+
                     # Если не удалось обновить после всех попыток
                     if not success:
                         logger.error(
                             f"НЕ УДАЛОСЬ обновить пользователя {user.id} в RemnaWave даже после {retry_count} попыток. "
                             f"Общее время: {(datetime.now() - start_time).total_seconds():.1f} сек."
                         )
-                    
+
                 except Exception as e:
-                    logger.error(f"Ошибка при обновлении пользователя {user.id} в RemnaWave: {str(e)}")
+                    logger.error(
+                        f"Ошибка при обновлении пользователя {user.id} в RemnaWave: {str(e)}"
+                    )
                     # Продолжаем обработку платежа, несмотря на ошибку синхронизации с RemnaWave
                 finally:
                     # Закрываем клиент в любом случае
@@ -2262,47 +4028,45 @@ async def yookassa_webhook(request: Request, secret: str):
                         try:
                             await remnawave_client.close()
                         except Exception as close_exc:
-                            logger.warning(f"Ошибка при закрытии клиента RemnaWave: {str(close_exc)}")
-
-            # Если это автоплатеж и он успешен, обновляем статус подписки
-            payment_method = getattr(payment, "payment_method", None)
-            saved_method_id = getattr(payment_method, "id", None) if payment_method else None
-            saved_flag = _meta_bool(getattr(payment_method, "saved", None), False) if payment_method else False
-            if not is_auto and saved_method_id and (saved_flag or getattr(payment_method, "saved", None) is None):
-                user.renew_id = str(saved_method_id)
-                user.is_subscribed = True
-            
-            # Если это автоплатеж и он успешен, обновляем статус подписки
-            if is_auto and payment.status == "succeeded":
-                user.is_subscribed = True
-            
-            # Если у пользователя был пробный период, сбрасываем флаг
-            if user.is_trial:
-                user.is_trial = False
+                            logger.warning(
+                                f"Ошибка при закрытии клиента RemnaWave: {str(close_exc)}"
+                            )
+            elif user.remnawave_uuid and preserve_active_tariff_state:
                 logger.info(
-                    f"Сброшен флаг пробного периода для пользователя {user.id} после оплаты подписки",
-                    extra={
-                        'payment_id': payment.id,
-                        'user_id': user.id
-                    }
+                    "Webhook base purchase during active family overlay: skipped RemnaWave entitlement update for user %s",
+                    user.id,
                 )
-            
-            await user.save()  # Сохраняем пользователя (включая обновленный баланс)
 
             active_tariff_current = active_tariff_for_lte
             if active_tariff_current is None and user.active_tariff_id:
-                active_tariff_current = await ActiveTariffs.get_or_none(id=user.active_tariff_id)
-
+                active_tariff_current = await ActiveTariffs.get_or_none(
+                    id=user.active_tariff_id
+                )
             if active_tariff_current:
-                if is_auto:
+                if is_auto and not preserve_active_tariff_state:
                     active_tariff_current.lte_gb_used = 0.0
                     msk_today = datetime.now(MSK_TZ).date()
                     update_fields = ["lte_gb_used"]
                     usage_snapshot = None
                     if user.remnawave_uuid:
-                        usage_snapshot = await _fetch_today_lte_usage_gb(
-                            str(user.remnawave_uuid)
+                        await _refresh_payment_processing_lease(
+                            payment_id=str(payment.id),
+                            user_id=int(user.id),
+                            source="webhook_auto_usage_pre",
                         )
+                        try:
+                            usage_snapshot = await _await_payment_external_call(
+                                _fetch_today_lte_usage_gb(str(user.remnawave_uuid)),
+                                operation="webhook_auto_fetch_today_lte_usage_gb",
+                            )
+                        except asyncio.TimeoutError:
+                            usage_snapshot = None
+                        finally:
+                            await _refresh_payment_processing_lease(
+                                payment_id=str(payment.id),
+                                user_id=int(user.id),
+                                source="webhook_auto_usage_post",
+                            )
                     if usage_snapshot is not None:
                         active_tariff_current.lte_usage_last_date = msk_today
                         active_tariff_current.lte_usage_last_total_gb = usage_snapshot
@@ -2316,105 +4080,75 @@ async def yookassa_webhook(request: Request, secret: str):
                             ["lte_usage_last_date", "lte_usage_last_total_gb"]
                         )
                     await active_tariff_current.save(update_fields=update_fields)
-                await NotificationMarks.filter(user_id=user.id, type="lte_usage").delete()
-                if user.remnawave_uuid:
-                    try:
-                        effective_lte_total = (
-                            user.lte_gb_total
-                            if user.lte_gb_total is not None
-                            else (active_tariff_current.lte_gb_total or 0)
-                        )
-                        should_enable_lte = effective_lte_total > (active_tariff_current.lte_gb_used or 0)
-                        await set_lte_squad_status(str(user.remnawave_uuid), enable=should_enable_lte)
-                    except Exception as e:
-                        logger.error(f"Ошибка обновления LTE-сквада после оплаты для {user.id}: {e}")
-            
-            amount_paid_via_yookassa = float(payment.amount.value)
-            full_tariff_price_for_history = amount_paid_via_yookassa + amount_from_balance
-            
-            # Сохраняем информацию об успешном платеже (идемпотентно)
-            await _upsert_processed_payment(
-                payment_id=payment.id,
-                user_id=user.id,
-                amount=full_tariff_price_for_history,  # Используем полную стоимость тарифа
-                amount_external=amount_paid_via_yookassa,
-                amount_from_balance=amount_from_balance,
-                status="succeeded",
-            )
+                elif is_auto and preserve_active_tariff_state:
+                    logger.info(
+                        "Webhook auto base purchase during active family overlay preserved active LTE usage state user=%s",
+                        user.id,
+                    )
+
+                if not preserve_active_tariff_state:
+                    await NotificationMarks.filter(
+                        user_id=user.id, type="lte_usage"
+                    ).delete()
+                    if user.remnawave_uuid:
+                        try:
+                            effective_lte_total = (
+                                user.lte_gb_total
+                                if user.lte_gb_total is not None
+                                else (active_tariff_current.lte_gb_total or 0)
+                            )
+                            should_enable_lte = effective_lte_total > (
+                                active_tariff_current.lte_gb_used or 0
+                            )
+                            await _await_payment_external_call(
+                                set_lte_squad_status(
+                                    str(user.remnawave_uuid), enable=should_enable_lte
+                                ),
+                                operation="webhook_set_lte_squad_status",
+                            )
+                        except Exception as e:
+                            logger.error(
+                                f"Ошибка обновления LTE-сквада после оплаты для {user.id}: {e}"
+                            )
+                elif user.remnawave_uuid:
+                    logger.info(
+                        "Webhook base purchase during active family overlay: skipped LTE state sync for user %s",
+                        user.id,
+                    )
 
             # Partner program: award cashback to partner referrer (money-based).
             try:
                 await _award_partner_cashback(
                     payment_id=str(payment.id),
                     referral_user=user,
-                    amount_rub_total=int(_round_rub(float(full_tariff_price_for_history))),
+                    amount_rub_total=int(
+                        _round_rub(float(full_tariff_price_for_history))
+                    ),
                 )
             except Exception:
                 # best-effort, do not affect payment flow
                 pass
-            
+
             logger.info(
                 f"Успешно продлена подписка для пользователя {user.id} на {days} дней",
                 extra={
-                    'payment_id': payment.id,
-                    'user_id': user.id,
-                    'amount': payment.amount.value, # Сумма платежа Yookassa
-                    'amount_from_balance': amount_from_balance, # Сумма списания с баланса
-                    'status': "succeeded",
-                    'is_auto': is_auto,
-                    'discount_percent': discount_percent,
-                    'discount_id': discount_id,
-                }
+                    "payment_id": payment.id,
+                    "user_id": user.id,
+                    "amount": payment.amount.value,  # Сумма платежа Yookassa
+                    "amount_from_balance": amount_from_balance,  # Сумма списания с баланса
+                    "status": "succeeded",
+                    "is_auto": is_auto,
+                    "discount_percent": discount_percent,
+                    "discount_id": discount_id,
+                },
             )
 
             # Списываем использование скидки напрямую, если не списали ранее
-            if not consumed:
+            if discount_available and not consumed:
                 try:
                     consumed = await consume_discount_if_needed(discount_id)
                 except Exception:
                     consumed = False
-
-            # Если скидка не была списана (например, второй платёж без доступной скидки),
-            # корректируем дни пропорционально фактически оплаченной сумме
-            if not consumed and tariff_id is not None:
-                try:
-                    original = await Tariffs.get_or_none(id=tariff_id)
-                    if original:
-                        await original.sync_effective_pricing_fields()
-                        try:
-                            device_count = int(data.get("device_count", 1))
-                        except (ValueError, TypeError):
-                            device_count = 1
-                        if device_count < 1:
-                            device_count = 1
-                        correct_new_tariff_price = original.calculate_price(device_count)
-                        amount_paid_by_user = float(payment.amount.value)
-                        amount_from_balance = _round_rub(data.get("amount_from_balance", 0))
-                        total_paid_now = amount_paid_by_user + amount_from_balance
-                        base_paid_now = max(0.0, total_paid_now - lte_cost)
-                        current_date = date.today()
-                        original_months = int(original.months)
-                        new_target_date = add_months_safe(current_date, original_months)
-                        new_total_days = (new_target_date - current_date).days
-                        proportional_days = int(base_paid_now * new_total_days / max(1, correct_new_tariff_price))
-                        # Берём минимум, чтобы не подарить лишние дни
-                        days = min(days, proportional_days)
-                except Exception:
-                    pass
-            
-            # IMPORTANT: всегда сообщаем пользователю результат оплаты в боте (и для ручных оплат тоже).
-            try:
-                await _notify_successful_purchase(
-                    user=user,
-                    days=days,
-                    amount_paid_via_yookassa=amount_paid_via_yookassa,
-                    amount_from_balance=amount_from_balance,
-                    device_count=int(device_count or 1),
-                )
-            except Exception as notify_exc:
-                logger.error(
-                    f"Ошибка при отправке уведомления об успешной оплате (YooKassa) для {user.id}: {notify_exc}"
-                )
 
             if is_auto:
                 # Начисление круток за автосписание: 1 крутка за каждый месяц
@@ -2427,7 +4161,9 @@ async def yookassa_webhook(request: Request, secret: str):
                             f"Начислено {months} круток за автосписание пользователю {user.id}. Было: {attempts_before}, стало: {user.prize_wheel_attempts}"
                         )
                 except Exception as award_exc:
-                    logger.error(f"Не удалось начислить крутки за автосписание для {user.id}: {award_exc}")
+                    logger.error(
+                        f"Не удалось начислить крутки за автосписание для {user.id}: {award_exc}"
+                    )
                 # Сообщение пользователю о начислении круток
                 try:
                     await notify_spin_awarded(
@@ -2436,19 +4172,22 @@ async def yookassa_webhook(request: Request, secret: str):
                         total_attempts=int(user.prize_wheel_attempts or 0),
                     )
                 except Exception as e_notify_spins:
-                    logger.error(f"Ошибка уведомления о крутках (вебхук) для {user.id}: {e_notify_spins}")
-            
+                    logger.error(
+                        f"Ошибка уведомления о крутках (вебхук) для {user.id}: {e_notify_spins}"
+                    )
+
         except Exception as e:
             logger.error(
                 f"Ошибка при продлении подписки в webhook'е YooKassa: {e}",
-                extra={'payment_id': payment.id}
+                extra={"payment_id": payment.id},
             )
+            await _mark_payment_effect_failed(payment_id=str(payment.id), error=str(e))
             return {"status": "error", "message": "Error extending subscription"}
 
         amount = payment.amount.value
-        referrer = None
 
-        # Referral rewards (days-based, not money): apply ONLY once per referred user.
+        # Standard referral program: apply first-payment friend bonus once, then
+        # award referrer cashback from the YooKassa external amount only.
         if user.referred_by:
             try:
                 device_count = 1
@@ -2458,91 +4197,81 @@ async def yookassa_webhook(request: Request, secret: str):
                     except (TypeError, ValueError):
                         device_count = 1
 
+                amount_external_rub = int(_round_rub(float(amount or 0)))
                 reward_res = await _apply_referral_first_payment_reward(
                     referred_user_id=user.id,
                     payment_id=str(payment.id),
-                    amount_rub=int(float(amount)) if amount is not None else None,
+                    amount_rub=amount_external_rub if amount is not None else None,
                     months=int(months or 0),
                     device_count=device_count,
                 )
 
-                if reward_res.get("applied"):
+                await _award_standard_referral_cashback(
+                    payment_id=str(payment.id),
+                    referral_user=user,
+                    amount_external_rub=amount_external_rub,
+                    first_payment_res=reward_res if reward_res.get("applied") else None,
+                )
+
+                if reward_res.get("applied") and on_referral_friend_bonus is not None:
                     referrer = await Users.get(id=int(reward_res["referrer_id"]))
                     try:
-                        await on_referral_payment(
-                            user=referrer,
-                            referral=user,
-                            amount=int(float(amount)) if amount is not None else 0,
-                            bonus_days=int(reward_res["referrer_bonus_days"]),
+                        await on_referral_friend_bonus(
+                            user=user,
+                            referrer=referrer,
                             friend_bonus_days=int(reward_res["friend_bonus_days"]),
                             months=int(reward_res["months"]),
                             device_count=int(reward_res["device_count"]),
-                            applied_to_subscription=bool(reward_res["applied_to_subscription"]),
                         )
-                    except Exception as e_notify:
-                        logger.error(f"Ошибка уведомления реферера {referrer.id} о бонусных днях: {e_notify}")
-                    # Also notify the referred user about +7 days (requested UX).
-                    if on_referral_friend_bonus is not None:
-                        try:
-                            await on_referral_friend_bonus(
-                                user=user,
-                                referrer=referrer,
-                                friend_bonus_days=int(reward_res["friend_bonus_days"]),
-                                months=int(reward_res["months"]),
-                                device_count=int(reward_res["device_count"]),
-                            )
-                        except Exception as e_friend_notify:
-                            logger.error(
-                                "Ошибка уведомления реферала %s о +%s днях: %s",
-                                user.id,
-                                reward_res.get("friend_bonus_days"),
-                                e_friend_notify,
-                            )
+                    except Exception as e_friend_notify:
+                        logger.error(
+                            "Ошибка уведомления реферала %s о +%s днях: %s",
+                            user.id,
+                            reward_res.get("friend_bonus_days"),
+                            e_friend_notify,
+                        )
             except Exception as e:
                 logger.error(
-                    f"Ошибка при обработке реферала (ledger) в webhook'е YooKassa: {e}",
-                    extra={'payment_id': payment.id}
+                    f"Ошибка при обработке реферала (ledger/cashback) в webhook'е YooKassa: {e}",
+                    extra={"payment_id": payment.id},
                 )
 
-        try:
-            lte_gb_for_log = None
-            if isinstance(data, dict) and data.get("lte_gb") is not None:
-                try:
-                    lte_gb_for_log = int(data.get("lte_gb"))
-                except (TypeError, ValueError):
-                    lte_gb_for_log = None
-            if lte_gb_for_log is None:
-                lte_gb_for_log = user.lte_gb_total if hasattr(user, "lte_gb_total") else None
+        lte_gb_for_log = None
+        if isinstance(data, dict) and data.get("lte_gb") is not None:
+            try:
+                lte_gb_for_log = int(data.get("lte_gb"))
+            except (TypeError, ValueError):
+                lte_gb_for_log = None
+        if lte_gb_for_log is None:
+            lte_gb_for_log = (
+                user.lte_gb_total if hasattr(user, "lte_gb_total") else None
+            )
 
-            await on_payment(
-                user_id=user.id,
-                is_sub=user.is_subscribed,
-                referrer=referrer.name() if referrer else None,
-                amount=amount,
-                months=months,
-                method="yookassa",
-                payment_id=payment.id,
-                is_auto=is_auto,
-                utm=user.utm if hasattr(user, "utm") else None,
-                discount_percent=discount_percent,
-                device_count=(int(data.get("device_count", 1)) if isinstance(data.get("device_count"), (int, str)) else None),
-                old_expired_at=old_expired_at,
-                new_expired_at=user.expired_at,
-                lte_gb_total=lte_gb_for_log,
-            )
-        except Exception as e:
-            logger.error(
-                f"Ошибка при отправке уведомления о платеже: {e}",
-                extra={'payment_id': payment.id}
-            )
+        await _replay_payment_notifications_if_needed(
+            user=user,
+            payment_id=str(payment.id),
+            days=int(days),
+            amount_external=float(amount_paid_via_yookassa),
+            amount_from_balance=float(amount_from_balance),
+            device_count=int(payment_device_count or 1),
+            months=int(months),
+            is_auto_payment=bool(is_auto),
+            discount_percent=discount_percent,
+            old_expired_at=old_expired_at,
+            new_expired_at=user.expired_at,
+            lte_gb_total=int(lte_gb_for_log or 0),
+            method="yookassa",
+            tariff_kind=data.get("tariff_kind"),
+        )
 
         return {"status": "ok"}
     except Exception as e:
         logger.error(
             f"Непредвиденная ошибка в webhook'е YooKassa: {e}",
-            extra={'payment_id': payment.id if payment else 'unknown'}
+            extra={"payment_id": payment.id if payment else "unknown"},
         )
         raise HTTPException(status_code=500, detail="Internal server error")
+
 
 @router.post("/{tariff_id}")
 async def pay_post(
@@ -2575,30 +4304,34 @@ async def pay(
     await tariff.sync_effective_pricing_fields()
     normalized_client_request_id = _normalize_client_request_id(client_request_id)
 
-    # Проверяем количество устройств
-    if device_count < 1:
-        device_count = 1
-    
-    months = int(tariff.months)
-    if lte_gb is None:
-        lte_gb = 0
-    try:
-        lte_gb = int(lte_gb)
-    except (ValueError, TypeError):
-        raise HTTPException(status_code=400, detail="Некорректное значение LTE лимита")
-    if lte_gb < 0:
-        raise HTTPException(status_code=400, detail="Некорректное значение LTE лимита")
-    if lte_gb > 0 and not tariff.lte_enabled:
-        raise HTTPException(status_code=400, detail="LTE недоступен для выбранного тарифа")
-
-    lte_price_per_gb = float(tariff.lte_price_per_gb or 0) if tariff.lte_enabled else 0.0
-    lte_cost = _round_rub(lte_gb * lte_price_per_gb)
-
-    # Рассчитываем цену для указанного количества устройств (без LTE)
-    base_full_price = int(tariff.calculate_price(device_count))
-    discounted_price, discount_id, discount_percent = await apply_personal_discount(
-        user.id, base_full_price, months
+    one_month_reference_tariff = None
+    if int(getattr(tariff, "months", 1) or 1) > 1:
+        one_month_reference_tariff = await Tariffs.filter(months=1, is_active=True).order_by("order").first()
+    quote = await build_subscription_quote(
+        tariff=tariff,
+        user_id=int(user.id),
+        device_count=device_count,
+        lte_gb=lte_gb,
+        one_month_reference_tariff=one_month_reference_tariff,
     )
+    device_count = int(quote.device_count)
+    lte_gb = int(quote.lte_gb)
+    months = int(quote.months)
+    lte_price_per_gb = float(quote.lte_price_per_gb)
+    lte_cost = int(quote.lte_price_rub)
+    base_full_price = int(quote.subscription_price_rub)
+    discounted_price = int(quote.discounted_subscription_price_rub)
+    discount_id = quote.discount_id
+    discount_percent = int(quote.discount_percent) if quote.discount_percent else None
+    purchase_kind = quote.tariff_kind
+    base_tariff_snapshot = _build_base_tariff_snapshot(
+        tariff=tariff,
+        device_count=device_count,
+        lte_gb=lte_gb,
+        lte_price_per_gb=lte_price_per_gb,
+    )
+    is_family_overlay_purchase = purchase_kind == "family"
+    is_active_family_overlay = await has_active_family_overlay(user)
     full_price = int(discounted_price) + lte_cost
     user_balance = float(user.balance)
     old_expired_at = user.expired_at
@@ -2606,7 +4339,9 @@ async def pay(
     lte_refund_amount = 0
     if user.active_tariff_id:
         old_active_tariff = await ActiveTariffs.get_or_none(id=user.active_tariff_id)
-        if old_active_tariff:
+        if old_active_tariff and not (
+            purchase_kind == "base" and is_active_family_overlay
+        ):
             remaining_gb = max(
                 0.0,
                 float(old_active_tariff.lte_gb_total or 0)
@@ -2623,203 +4358,430 @@ async def pay(
     except Exception as e:
         logger.error(
             f"Ошибка при расчете дней подписки для пользователя {user.id} и тарифа {tariff_id}: {e}",
-            extra={'user_id': user.id, 'tariff_id': tariff_id, 'months': months}
+            extra={"user_id": user.id, "tariff_id": tariff_id, "months": months},
         )
-        raise HTTPException(status_code=500, detail="Error calculating subscription days")
+        raise HTTPException(
+            status_code=500, detail="Error calculating subscription days"
+        )
 
-    # Проверка полной оплаты с баланса
+    # Проверка полной оплаты с баланса.
+    # Для retry после post-debit сбоя допускаем повторный вход в balance-ветку,
+    # даже если текущий баланс уже уменьшен до нуля.
+    balance_retry_payment_id = (
+        _build_balance_payment_id(
+            user_id=int(user.id), client_request_id=normalized_client_request_id
+        )
+        if normalized_client_request_id is not None
+        else None
+    )
+    recovered_balance_retry = False
+    if balance_retry_payment_id is not None:
+        recovered_balance_retry = await _was_balance_debit_applied(
+            payment_id=balance_retry_payment_id,
+            expected_amount=float(full_price),
+        )
+
     effective_balance = user_balance + lte_refund_amount
-    if effective_balance >= full_price:
+    if effective_balance >= full_price or recovered_balance_retry:
         logger.info(
             f"Оплата тарифа {tariff_id} для пользователя {user.id} полностью с баланса. "
             f"Цена: {full_price}, Баланс: {user_balance}, Скидка: {discount_percent}% (id={discount_id}), "
             f"LTE: {lte_gb} GB"
         )
+
+        payment_id = (
+            balance_retry_payment_id
+            if balance_retry_payment_id is not None
+            else f"balance_{user.id}_{int(datetime.now().timestamp())}_{randint(100, 999)}"
+        )
+
+        if normalized_client_request_id is not None:
+            claimed_balance_effect = await _claim_payment_effect_once(
+                payment_id=payment_id,
+                user_id=int(user.id),
+                source="balance",
+            )
+            if not claimed_balance_effect:
+                existing_balance_payment = await ProcessedPayments.get_or_none(
+                    payment_id=payment_id
+                )
+                if existing_balance_payment and (
+                    bool(getattr(existing_balance_payment, "effect_applied", False))
+                    or str(
+                        getattr(existing_balance_payment, "status", "") or ""
+                    ).lower()
+                    == "succeeded"
+                ):
+                    user_after_retry = await Users.get(id=user.id)
+                    await _replay_payment_notifications_if_needed(
+                        user=user_after_retry,
+                        payment_id=payment_id,
+                        days=int(days),
+                        amount_external=0.0,
+                        amount_from_balance=float(full_price),
+                        device_count=int(device_count or 1),
+                        months=int(months),
+                        is_auto_payment=False,
+                        discount_percent=discount_percent,
+                        old_expired_at=old_expired_at,
+                        new_expired_at=user_after_retry.expired_at,
+                        lte_gb_total=int(
+                            getattr(user_after_retry, "lte_gb_total", lte_gb) or 0
+                        ),
+                        method="balance",
+                        tariff_kind=purchase_kind,
+                    )
+                    return {
+                        "status": "success",
+                        "message": "Оплачено с бонусного баланса",
+                        "already_processed": True,
+                        "provider": "balance",
+                    }
+                raise HTTPException(status_code=409, detail="Платёж уже обрабатывается")
+
+        balance_debit_already_applied = recovered_balance_retry
+        if (
+            normalized_client_request_id is not None
+            and not balance_debit_already_applied
+        ):
+            balance_debit_already_applied = await _was_balance_debit_applied(
+                payment_id=payment_id,
+                expected_amount=float(full_price),
+            )
+
+        net_debit = float(full_price) - float(lte_refund_amount)
+        if net_debit > 0:
+            if not balance_debit_already_applied:
+                updated_rows = await Users.filter(
+                    id=user.id, balance__gte=net_debit
+                ).update(balance=F("balance") - net_debit)
+                if updated_rows == 0:
+                    if normalized_client_request_id is not None:
+                        await _mark_payment_effect_failed(
+                            payment_id=payment_id,
+                            error="Insufficient balance during debit",
+                        )
+                    raise HTTPException(
+                        status_code=409, detail="Недостаточно средств на балансе"
+                    )
+                if normalized_client_request_id is not None:
+                    await _mark_balance_debit_applied(
+                        payment_id=payment_id,
+                        amount_from_balance=float(full_price),
+                    )
+            else:
+                logger.info(
+                    "Skipping debit for recovered balance retry payment_id=%s user_id=%s",
+                    payment_id,
+                    user.id,
+                )
+        elif net_debit < 0:
+            await Users.filter(id=user.id).update(balance=F("balance") + abs(net_debit))
+
         if lte_refund_amount > 0:
-            user.balance += lte_refund_amount
             logger.info(
                 f"Начислен бонус за остаток LTE-трафика "
                 f"({lte_refund_amount:.2f} руб.) пользователю {user.id} перед списанием"
             )
 
-        current_date = date.today()
-        additional_days = 0
-        user_expired_at = normalize_date(user.expired_at)
-        # --- NEW: перерасчёт остатка по старому тарифу ---
-        if user_expired_at and user_expired_at > current_date and user.active_tariff_id:
-            try:
-                active_tariff = await ActiveTariffs.get(id=user.active_tariff_id)
-                days_remaining = (user_expired_at - current_date).days
-                logger.info(f"У пользователя {user.id} осталось {days_remaining} дней подписки")
-                old_months = int(active_tariff.months)
-                old_target_date = add_months_safe(current_date, old_months)
-                old_total_days = (old_target_date - current_date).days
-                unused_percent = days_remaining / old_total_days if old_total_days > 0 else 0
-                unused_value = unused_percent * active_tariff.price
-                logger.info(
-                    f"Неиспользованная часть подписки пользователя {user.id}: "
-                    f"{days_remaining}/{old_total_days} дней (стоимость: {unused_value:.2f} руб.)"
-                )
-                if discounted_price > 0:
-                    # ИСПРАВЛЕННАЯ ЛОГИКА: рассчитываем через пропорцию от общей суммы
-                    # Общая сумма = оплата базового тарифа + компенсация за старый тариф
-                    total_amount = float(discounted_price) + unused_value
-                    
-                    # Рассчитываем новый период подписки (стандартный для тарифа)
-                    tariff_months = int(tariff.months)
-                    new_target_date = add_months_safe(current_date, tariff_months)
-                    new_total_days = (new_target_date - current_date).days
-                    
-                    # Пропорция: x дней / общая_сумма = полный_период_тарифа / цена_тарифа
-                    # x = общая_сумма * полный_период_тарифа / цена_тарифа
-                    calculated_days = int(total_amount * new_total_days / float(discounted_price))
-                    
-                    logger.info(
-                        f"ИСПРАВЛЕННЫЙ расчёт (баланс) для пользователя {user.id}: "
-                        f"Заплачено: {float(discounted_price):.2f} руб + Компенсация: {unused_value:.2f} руб = "
-                        f"Общая сумма: {total_amount:.2f} руб. "
-                        f"Пропорция: {calculated_days} дней = {total_amount:.2f} * {new_total_days} / {float(discounted_price):.2f}"
-                    )
-                    
-                    # Устанавливаем рассчитанные дни как итоговые
-                    additional_days = 0  # Сбрасываем, так как используем calculated_days
-                    days = calculated_days  # Переопределяем days
-            except Exception as e:
-                logger.error(f"Ошибка при расчете переноса подписки для {user.id}: {str(e)}")
-                additional_days = 0
-        # При смене тарифа days уже рассчитано через пропорцию
-        if 'calculated_days' not in locals():
-            # Обычная покупка без смены тарифа - days уже рассчитано выше
-            logger.info(f"Стандартное количество дней подписки: {days}")
-        else:
-            # days уже рассчитано через пропорцию при смене тарифа
-            logger.info(f"Итоговое количество дней подписки (через пропорцию): {days}")
-
-        user.balance -= full_price
-        
-        # При смене тарифа компенсация уже учтена в calculated_days
-        # Поэтому устанавливаем дату от текущего дня, чтобы избежать двойного учёта
-        if 'calculated_days' in locals():
-            # Смена тарифа с компенсацией - устанавливаем от текущей даты
-            user.expired_at = current_date + timedelta(days=days)
-            logger.info(
-                f"Смена тарифа (баланс) для пользователя {user.id}: установлена дата {user.expired_at} "
-                f"({days} дней от текущей даты, рассчитано через пропорцию)"
-            )
-        else:
-            # Обычное продление без смены тарифа
-            await user.extend_subscription(days)
-            logger.info(
-                f"Продление (баланс) для пользователя {user.id}: дата {user.expired_at} "
-                f"(с учетом оставшихся дней предыдущей подписки/триала)"
-            )
-
-        # Если у пользователя был пробный период, сбрасываем флаг
-        if user.is_trial:
-            user.is_trial = False
-            logger.info(f"Сброшен флаг пробного периода для пользователя {user.id} после оплаты с баланса")
-
-        # --- NEW: Создаём/обновляем ActiveTariffs и лимит устройств ---
-        # Удаляем предыдущий активный тариф, если есть
-        if user.active_tariff_id:
-            if old_active_tariff is None:
-                old_active_tariff = await ActiveTariffs.get_or_none(id=user.active_tariff_id)
-            if old_active_tariff:
-                logger.info(f"Удаляем предыдущий активный тариф {user.active_tariff_id} пользователя {user.id}")
-                await old_active_tariff.delete()
-            else:
-                logger.warning(f"Не найден активный тариф {user.active_tariff_id} для удаления у пользователя {user.id}")
-
-        # код по сбросу HWID временно отключен
-        # if user.remnawave_uuid:
-            # await cleanup_user_hwid_devices(user.id, user.remnawave_uuid)
-
-        msk_today = datetime.now(MSK_TZ).date()
-        usage_snapshot = None
-        if user.remnawave_uuid:
-            usage_snapshot = await _fetch_today_lte_usage_gb(
-                str(user.remnawave_uuid)
-            )
-        # Создаём новый активный тариф
-        # ВАЖНО: сохраняем в price базовую стоимость тарифа без персональной скидки,
-        # чтобы автоплатежи не применяли скидку дважды
-        _, effective_multiplier = tariff.get_effective_pricing()
-        base_calculated_price = tariff.calculate_price(device_count)
-        active_tariff = await ActiveTariffs.create(
-            user=user,
-            name=tariff.name,
-            months=tariff.months,
-            price=base_calculated_price,  # Цена без персональной скидки
-            hwid_limit=device_count,  # Используем выбранное количество устройств
-            lte_gb_total=lte_gb,
-            lte_gb_used=0.0,
-            lte_price_per_gb=lte_price_per_gb,
-            lte_usage_last_date=msk_today,
-            lte_usage_last_total_gb=usage_snapshot if usage_snapshot is not None else 0.0,
-            progressive_multiplier=effective_multiplier,
-            residual_day_fraction=0.0
-        )
-        user.active_tariff_id = active_tariff.id
-        user.lte_gb_total = lte_gb
-
-        # Устанавливаем hwid_limit пользователю из выбранного количества устройств
-        user.hwid_limit = device_count
-        logger.info(f"При покупке с баланса установлен hwid_limit={device_count} для пользователя {user.id}")
-
-        # ВАЖНО: сохраняем active_tariff_id и hwid_limit в БД как можно раньше
-        # чтобы минимизировать race condition с remnawave_updater
         try:
-            await user.save(update_fields=["active_tariff_id", "hwid_limit"])
-            logger.debug(f"Ранее сохранены active_tariff_id={active_tariff.id} и hwid_limit={device_count} для пользователя {user.id}")
-        except Exception as persist_exc:
-            logger.warning(f"Не удалось рано сохранить active_tariff_id/hwid_limit для {user.id}: {persist_exc}")
+            user = await Users.get(id=user.id)
 
-        # Сохраняем ВСЕ изменения пользователя (баланс, дата, is_trial и т.д.)
-        await user.save()
-        await NotificationMarks.filter(user_id=user.id, type="lte_usage").delete()
+            current_date = date.today()
+            additional_days = 0
+            user_expired_at = normalize_date(user.expired_at)
+            # --- NEW: перерасчёт остатка по старому тарифу ---
+            if (
+                (not is_family_overlay_purchase)
+                and (not is_active_family_overlay)
+                and user_expired_at
+                and user_expired_at > current_date
+                and user.active_tariff_id
+            ):
+                try:
+                    active_tariff = await ActiveTariffs.get(id=user.active_tariff_id)
+                    days_remaining = (user_expired_at - current_date).days
+                    logger.info(
+                        f"У пользователя {user.id} осталось {days_remaining} дней подписки"
+                    )
+                    old_months = int(active_tariff.months)
+                    old_target_date = add_months_safe(current_date, old_months)
+                    old_total_days = (old_target_date - current_date).days
+                    unused_percent = (
+                        days_remaining / old_total_days if old_total_days > 0 else 0
+                    )
+                    unused_value = unused_percent * active_tariff.price
+                    logger.info(
+                        f"Неиспользованная часть подписки пользователя {user.id}: "
+                        f"{days_remaining}/{old_total_days} дней (стоимость: {unused_value:.2f} руб.)"
+                    )
+                    if discounted_price > 0:
+                        # ИСПРАВЛЕННАЯ ЛОГИКА: рассчитываем через пропорцию от общей суммы
+                        # Общая сумма = оплата базового тарифа + компенсация за старый тариф
+                        total_amount = float(discounted_price) + unused_value
 
-        # После оплаты с баланса также обнуляем счётчик уменьшений
-        if user.active_tariff_id:
-            await ActiveTariffs.filter(id=user.active_tariff_id).update(devices_decrease_count=0)
+                        # Рассчитываем новый период подписки (стандартный для тарифа)
+                        tariff_months = int(tariff.months)
+                        new_target_date = add_months_safe(current_date, tariff_months)
+                        new_total_days = (new_target_date - current_date).days
 
-        # Синхронизируем лимит устройств и дату окончания с RemnaWave
-        if user.remnawave_uuid:
-            remnawave_client = None
-            try:
-                remnawave_client = RemnaWaveClient(
-                    remnawave_settings.url,
-                    remnawave_settings.token.get_secret_value()
+                        # Пропорция: x дней / общая_сумма = полный_период_тарифа / цена_тарифа
+                        # x = общая_сумма * полный_период_тарифа / цена_тарифа
+                        calculated_days = int(
+                            total_amount * new_total_days / float(discounted_price)
+                        )
+
+                        logger.info(
+                            f"ИСПРАВЛЕННЫЙ расчёт (баланс) для пользователя {user.id}: "
+                            f"Заплачено: {float(discounted_price):.2f} руб + Компенсация: {unused_value:.2f} руб = "
+                            f"Общая сумма: {total_amount:.2f} руб. "
+                            f"Пропорция: {calculated_days} дней = {total_amount:.2f} * {new_total_days} / {float(discounted_price):.2f}"
+                        )
+
+                        # Устанавливаем рассчитанные дни как итоговые
+                        additional_days = (
+                            0  # Сбрасываем, так как используем calculated_days
+                        )
+                        days = calculated_days  # Переопределяем days
+                except Exception as e:
+                    logger.error(
+                        f"Ошибка при расчете переноса подписки для {user.id}: {str(e)}"
+                    )
+                    additional_days = 0
+            # При смене тарифа days уже рассчитано через пропорцию
+            if "calculated_days" not in locals():
+                # Обычная покупка без смены тарифа - days уже рассчитано выше
+                logger.info(f"Стандартное количество дней подписки: {days}")
+            else:
+                # days уже рассчитано через пропорцию при смене тарифа
+                logger.info(
+                    f"Итоговое количество дней подписки (через пропорцию): {days}"
                 )
-                await remnawave_client.users.update_user(
-                    uuid=user.remnawave_uuid,
-                    expireAt=user.expired_at,
-                    hwidDeviceLimit=device_count
+
+            # Balance was debited atomically before entitlement updates.
+
+            # При смене тарифа компенсация уже учтена в calculated_days.
+            # Поэтому для base-ветки без overlay фиксируем дату от текущего дня.
+            added_to_frozen_base = False
+            if (
+                purchase_kind == "base"
+                and ("calculated_days" in locals())
+                and (not is_active_family_overlay)
+            ):
+                added_to_frozen_base = (
+                    await apply_base_purchase_to_frozen_base_if_active(
+                        user,
+                        purchased_days=days,
+                        base_tariff_snapshot=base_tariff_snapshot,
+                    )
                 )
-                logger.info(f"Синхронизирован hwid_limit={device_count} и expireAt={user.expired_at} для пользователя {user.id} в RemnaWave")
-            except Exception as e:
-                logger.error(f"Ошибка при синхронизации hwid_limit/expireAt с RemnaWave для пользователя {user.id}: {e}")
-            finally:
-                if remnawave_client:
-                    try:
-                        await remnawave_client.close()
-                    except Exception as close_exc:
-                        logger.warning(f"Ошибка при закрытии клиента RemnaWave: {close_exc}")
-            try:
-                should_enable_lte = lte_gb > 0
-                await set_lte_squad_status(str(user.remnawave_uuid), enable=should_enable_lte)
-            except Exception as e:
-                logger.error(f"Ошибка обновления LTE-сквада для {user.id}: {e}")
+                if added_to_frozen_base:
+                    logger.info(
+                        "Base purchase during active family overlay (balance) moved to frozen base days for user %s",
+                        user.id,
+                    )
+                else:
+                    user.expired_at = current_date + timedelta(days=days)
+                    logger.info(
+                        f"Смена base-тарифа (баланс) для пользователя {user.id}: установлена дата {user.expired_at} "
+                        f"({days} дней от текущей даты, рассчитано через пропорцию)"
+                    )
+            else:
+                (
+                    added_to_frozen_base,
+                    family_expires_at,
+                ) = await _apply_purchase_extension_by_kind(
+                    user=user,
+                    purchase_kind=purchase_kind,
+                    purchased_days=days,
+                    base_tariff_snapshot=base_tariff_snapshot,
+                )
+                if purchase_kind == "family":
+                    logger.info(
+                        "Family purchase (balance): overlay expiry updated for user %s to %s",
+                        user.id,
+                        family_expires_at,
+                    )
+                elif added_to_frozen_base:
+                    logger.info(
+                        "Base purchase during active family overlay (balance) moved to frozen base days for user %s",
+                        user.id,
+                    )
+                else:
+                    logger.info(
+                        "Base purchase (balance) extended active subscription for user %s to %s",
+                        user.id,
+                        user.expired_at,
+                    )
 
-        payment_id = f"balance_{user.id}_{int(datetime.now().timestamp())}_{randint(100, 999)}"
+            preserve_active_tariff_state = (
+                purchase_kind == "base" and added_to_frozen_base
+            )
 
-        await _upsert_processed_payment(
-            payment_id=payment_id,
-            user_id=user.id,
-            amount=full_price,  # Итоговая стоимость (с учетом скидки)
-            amount_external=0,
-            amount_from_balance=full_price,
-            status="succeeded",  # Статус как при обычной успешной оплате
-        )
+            # Если у пользователя был пробный период, сбрасываем флаг
+            if user.is_trial:
+                user.is_trial = False
+                logger.info(
+                    f"Сброшен флаг пробного периода для пользователя {user.id} после оплаты с баланса"
+                )
+
+            # --- NEW: Создаём/обновляем ActiveTariffs и лимит устройств ---
+            if preserve_active_tariff_state:
+                logger.info(
+                    "Base purchase during active family overlay preserved entitlement snapshot for user %s",
+                    user.id,
+                )
+            else:
+                # Удаляем предыдущий активный тариф, если есть
+                if user.active_tariff_id:
+                    if old_active_tariff is None:
+                        old_active_tariff = await ActiveTariffs.get_or_none(
+                            id=user.active_tariff_id
+                        )
+                    if old_active_tariff:
+                        logger.info(
+                            f"Удаляем предыдущий активный тариф {user.active_tariff_id} пользователя {user.id}"
+                        )
+                        await old_active_tariff.delete()
+                    else:
+                        logger.warning(
+                            f"Не найден активный тариф {user.active_tariff_id} для удаления у пользователя {user.id}"
+                        )
+
+                # код по сбросу HWID временно отключен
+                # if user.remnawave_uuid:
+                # await cleanup_user_hwid_devices(user.id, user.remnawave_uuid)
+
+                msk_today = datetime.now(MSK_TZ).date()
+                usage_snapshot = None
+                if user.remnawave_uuid:
+                    usage_snapshot = await _fetch_today_lte_usage_gb(
+                        str(user.remnawave_uuid)
+                    )
+                # Создаём новый активный тариф
+                # ВАЖНО: сохраняем в price базовую стоимость тарифа без персональной скидки,
+                # чтобы автоплатежи не применяли скидку дважды
+                _, effective_multiplier = tariff.get_effective_pricing()
+                base_calculated_price = tariff.calculate_price(device_count)
+                active_tariff = await ActiveTariffs.create(
+                    user=user,
+                    name=tariff.name,
+                    months=tariff.months,
+                    price=base_calculated_price,  # Цена без персональной скидки
+                    hwid_limit=device_count,  # Используем выбранное количество устройств
+                    lte_gb_total=lte_gb,
+                    lte_gb_used=0.0,
+                    lte_price_per_gb=lte_price_per_gb,
+                    lte_usage_last_date=msk_today,
+                    lte_usage_last_total_gb=usage_snapshot
+                    if usage_snapshot is not None
+                    else 0.0,
+                    progressive_multiplier=effective_multiplier,
+                    residual_day_fraction=0.0,
+                )
+                user.active_tariff_id = active_tariff.id
+                user.lte_gb_total = lte_gb
+
+                # Устанавливаем hwid_limit пользователю из выбранного количества устройств
+                user.hwid_limit = device_count
+                logger.info(
+                    f"При покупке с баланса установлен hwid_limit={device_count} для пользователя {user.id}"
+                )
+
+                # ВАЖНО: сохраняем active_tariff_id и hwid_limit в БД как можно раньше
+                # чтобы минимизировать race condition с remnawave_updater
+                try:
+                    await user.save(update_fields=["active_tariff_id", "hwid_limit"])
+                    logger.debug(
+                        f"Ранее сохранены active_tariff_id={active_tariff.id} и hwid_limit={device_count} для пользователя {user.id}"
+                    )
+                except Exception as persist_exc:
+                    logger.warning(
+                        f"Не удалось рано сохранить active_tariff_id/hwid_limit для {user.id}: {persist_exc}"
+                    )
+
+            # Сохраняем ВСЕ изменения пользователя (баланс, дата, is_trial и т.д.)
+            await user.save()
+            await NotificationMarks.filter(user_id=user.id, type="lte_usage").delete()
+
+            # После оплаты с баланса также обнуляем счётчик уменьшений
+            if user.active_tariff_id:
+                await ActiveTariffs.filter(id=user.active_tariff_id).update(
+                    devices_decrease_count=0
+                )
+
+            # Синхронизируем лимит устройств и дату окончания с RemnaWave
+            if user.remnawave_uuid and not preserve_active_tariff_state:
+                remnawave_client = None
+                try:
+                    remnawave_client = RemnaWaveClient(
+                        remnawave_settings.url,
+                        remnawave_settings.token.get_secret_value(),
+                    )
+                    await _await_payment_external_call(
+                        remnawave_client.users.update_user(
+                            uuid=user.remnawave_uuid,
+                            expireAt=user.expired_at,
+                            hwidDeviceLimit=device_count,
+                        ),
+                        operation="balance_remnawave_update_user",
+                    )
+                    logger.info(
+                        f"Синхронизирован hwid_limit={device_count} и expireAt={user.expired_at} для пользователя {user.id} в RemnaWave"
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"Ошибка при синхронизации hwid_limit/expireAt с RemnaWave для пользователя {user.id}: {e}"
+                    )
+                finally:
+                    if remnawave_client:
+                        try:
+                            await remnawave_client.close()
+                        except Exception as close_exc:
+                            logger.warning(
+                                f"Ошибка при закрытии клиента RemnaWave: {close_exc}"
+                            )
+                try:
+                    effective_lte_total = (
+                        user.lte_gb_total
+                        if user.lte_gb_total is not None
+                        else int(lte_gb or 0)
+                    )
+                    active_lte_used = (
+                        float(active_tariff.lte_gb_used or 0)
+                        if "active_tariff" in locals() and active_tariff is not None
+                        else 0.0
+                    )
+                    should_enable_lte = float(effective_lte_total or 0) > active_lte_used
+                    await _await_payment_external_call(
+                        set_lte_squad_status(
+                            str(user.remnawave_uuid), enable=should_enable_lte
+                        ),
+                        operation="balance_set_lte_squad_status",
+                    )
+                except Exception as e:
+                    logger.error(f"Ошибка обновления LTE-сквада для {user.id}: {e}")
+            elif user.remnawave_uuid and preserve_active_tariff_state:
+                logger.info(
+                    "Skipped RemnaWave hwid update for base purchase during active family overlay user=%s",
+                    user.id,
+                )
+
+            await _mark_payment_effect_success(
+                payment_id=payment_id,
+                user_id=user.id,
+                amount=full_price,  # Итоговая стоимость (с учетом скидки)
+                amount_external=0,
+                amount_from_balance=full_price,
+                status="succeeded",
+            )
+        except Exception as balance_flow_exc:
+            if normalized_client_request_id is not None:
+                await _mark_payment_effect_failed(
+                    payment_id=payment_id,
+                    error=f"balance_flow_failed:{type(balance_flow_exc).__name__}:{balance_flow_exc}",
+                )
+            raise
 
         # Partner program: award cashback on "balance" payments too.
         try:
@@ -2832,40 +4794,32 @@ async def pay(
             pass
 
         # Списываем одно использование скидки (если не постоянная)
-        await consume_discount_if_needed(discount_id)
+        try:
+            await consume_discount_if_needed(discount_id)
+        except Exception as discount_exc:
+            logger.warning(
+                "Failed to consume discount after committed balance payment: user=%s payment_id=%s err=%s",
+                user.id,
+                payment_id,
+                discount_exc,
+            )
 
-        referrer = await user.referrer() # Получаем реферера для уведомления админу
-        try:
-            await on_payment(
-                user_id=user.id,
-                is_sub=user.is_subscribed, # Передаем текущий статус автопродления
-                referrer=referrer.name() if referrer else None,
-                amount=full_price, # Сумма уведомления - итоговая цена с учетом скидки
-                months=months,
-                method="balance", # Указываем метод оплаты
-                payment_id=payment_id,
-                utm=user.utm if hasattr(user, "utm") else None,
-                discount_percent=discount_percent,
-                device_count=device_count,
-                old_expired_at=old_expired_at,
-                new_expired_at=user.expired_at,
-                lte_gb_total=lte_gb,
-            )
-        except Exception as e:
-            logger.error(
-                f"Ошибка при отправке уведомления о платеже с баланса: {e}",
-                extra={'payment_id': payment_id, 'user_id': user.id}
-            )
-        try:
-            await _notify_successful_purchase(
-                user=user,
-                days=days,
-                amount_paid_via_yookassa=0.0,
-                amount_from_balance=float(full_price),
-                device_count=int(device_count or 1),
-            )
-        except Exception:
-            pass
+        await _replay_payment_notifications_if_needed(
+            user=user,
+            payment_id=payment_id,
+            days=int(days),
+            amount_external=0.0,
+            amount_from_balance=float(full_price),
+            device_count=int(device_count or 1),
+            months=int(months),
+            is_auto_payment=False,
+            discount_percent=discount_percent,
+            old_expired_at=old_expired_at,
+            new_expired_at=user.expired_at,
+            lte_gb_total=int(lte_gb),
+            method="balance",
+            tariff_kind=purchase_kind,
+        )
 
         return {
             "status": "success",
@@ -2875,7 +4829,9 @@ async def pay(
 
     else:
         # Логика частичной оплаты
-        amount_to_pay = max(1.0, full_price - user_balance) # Минимум 1 рубль для Yookassa
+        amount_to_pay = max(
+            1.0, full_price - user_balance
+        )  # Минимум 1 рубль для Yookassa
         amount_from_balance = full_price - amount_to_pay
 
         logger.info(
@@ -2887,9 +4843,10 @@ async def pay(
         metadata = {
             "user_id": user.id,
             "month": months,
-            "amount_from_balance": amount_from_balance, # Добавляем сумму списания с баланса
+            "amount_from_balance": amount_from_balance,  # Добавляем сумму списания с баланса
             "tariff_id": tariff.id,
             "device_count": device_count,  # Добавляем количество устройств
+            "tariff_kind": purchase_kind,
             "base_full_price": base_full_price,
             "discounted_price": discounted_price,
             "discount_percent": discount_percent,
@@ -2897,6 +4854,7 @@ async def pay(
             "lte_gb": lte_gb,
             "lte_price_per_gb": lte_price_per_gb,
             "lte_cost": lte_cost,
+            **quote.metadata_dict(),
         }
         if normalized_client_request_id is not None:
             metadata["client_request_id"] = normalized_client_request_id
@@ -2922,7 +4880,7 @@ async def pay(
                 if existing_payment:
                     existing_status = str(
                         getattr(existing_payment, "status", "") or ""
-                    ).strip().lower()
+                    ).lower()
                     existing_url = str(
                         getattr(existing_payment, "payment_url", "") or ""
                     ).strip()
@@ -2932,7 +4890,9 @@ async def pay(
                             "payment_id": existing_payment.payment_id,
                             "provider": PAYMENT_PROVIDER_PLATEGA,
                         }
-                    if existing_status == "succeeded":
+                    if existing_status == "succeeded" and bool(
+                        getattr(existing_payment, "effect_applied", False)
+                    ):
                         return {
                             "status": "success",
                             "message": "Платёж уже обработан",
@@ -3015,10 +4975,7 @@ async def pay(
             )
         try:
             payment_data = {
-                "amount": {
-                    "value": str(amount_to_pay),
-                    "currency": "RUB"
-                },
+                "amount": {"value": str(amount_to_pay), "currency": "RUB"},
                 "confirmation": {
                     "type": "redirect",
                     # Return URL after the payment is completed in YooKassa.
@@ -3039,56 +4996,78 @@ async def pay(
                 "save_payment_method": True,
                 "receipt": {
                     "customer": {"email": email},
-                    "items": [{
-                        "description": f"Подписка пользователя {user.id} ({tariff.name})",
-                        "quantity": "1",
-                        "amount": {
-                            "value": str(amount_to_pay),
-                            "currency": "RUB"
-                        },
-                        "vat_code": 1, # TODO: Проверить НДС
-                        "payment_subject": "service",
-                        "payment_mode": "full_payment"
-                    }]
-                }
+                    "items": [
+                        {
+                            "description": f"Подписка пользователя {user.id} ({tariff.name})",
+                            "quantity": "1",
+                            "amount": {"value": str(amount_to_pay), "currency": "RUB"},
+                            "vat_code": 1,  # TODO: Проверить НДС
+                            "payment_subject": "service",
+                            "payment_mode": "full_payment",
+                        }
+                    ],
+                },
             }
 
-            idempotence_key = str(randint(100000, 999999999999))
+            idempotence_key = normalized_client_request_id or str(
+                randint(100000, 999999999999)
+            )
 
             # Используем asyncio.to_thread для неблокирующего вызова с таймаутом
             payment = await asyncio.wait_for(
-                asyncio.to_thread(partial(Payment.create, payment_data, idempotence_key)),
-                timeout=30.0
+                asyncio.to_thread(
+                    partial(Payment.create, payment_data, idempotence_key)
+                ),
+                timeout=30.0,
             )
 
         except asyncio.TimeoutError:
             logger.error(
                 f"Таймаут при создании платежа YooKassa для пользователя {user.id}. "
                 f"Тариф: {tariff_id}, Сумма: {amount_to_pay}",
-                extra={'user_id': user.id, 'tariff_id': tariff_id, 'amount': amount_to_pay}
+                extra={
+                    "user_id": user.id,
+                    "tariff_id": tariff_id,
+                    "amount": amount_to_pay,
+                },
             )
             raise HTTPException(
                 status_code=503,
-                detail="Сервис оплаты временно недоступен. Пожалуйста, попробуйте позже."
+                detail="Сервис оплаты временно недоступен. Пожалуйста, попробуйте позже.",
             )
-        except (ConnectTimeoutError, ReadTimeoutError, RequestsConnectionError, RequestsTimeout) as network_err:
+        except (
+            ConnectTimeoutError,
+            ReadTimeoutError,
+            RequestsConnectionError,
+            RequestsTimeout,
+        ) as network_err:
             logger.error(
                 f"Сетевая ошибка при создании платежа YooKassa для пользователя {user.id}: {network_err}",
-                extra={'user_id': user.id, 'tariff_id': tariff_id, 'amount': amount_to_pay, 'error_type': type(network_err).__name__}
+                extra={
+                    "user_id": user.id,
+                    "tariff_id": tariff_id,
+                    "amount": amount_to_pay,
+                    "error_type": type(network_err).__name__,
+                },
             )
             raise HTTPException(
                 status_code=503,
-                detail="Сервис оплаты временно недоступен. Пожалуйста, попробуйте позже."
+                detail="Сервис оплаты временно недоступен. Пожалуйста, попробуйте позже.",
             )
         except Exception as e:
             logger.error(
                 f"Неожиданная ошибка при создании платежа YooKassa для пользователя {user.id}: {e}",
-                extra={'user_id': user.id, 'tariff_id': tariff_id, 'amount': amount_to_pay, 'error_type': type(e).__name__},
-                exc_info=True
+                extra={
+                    "user_id": user.id,
+                    "tariff_id": tariff_id,
+                    "amount": amount_to_pay,
+                    "error_type": type(e).__name__,
+                },
+                exc_info=True,
             )
             raise HTTPException(
                 status_code=500,
-                detail="Ошибка при создании платежа. Пожалуйста, попробуйте позже."
+                detail="Ошибка при создании платежа. Пожалуйста, попробуйте позже.",
             )
 
         # Резервации отключены
@@ -3108,7 +5087,7 @@ async def pay(
         except Exception as e:
             logger.warning(
                 f"Не удалось сохранить pending payment {getattr(payment, 'id', None)}: {e}",
-                extra={'user_id': user.id, 'tariff_id': tariff_id},
+                extra={"user_id": user.id, "tariff_id": tariff_id},
             )
 
         return {
@@ -3116,6 +5095,7 @@ async def pay(
             "payment_id": payment.id,
             "provider": PAYMENT_PROVIDER_YOOKASSA,
         }
+
 
 async def create_auto_payment(user: Users, disable_on_fail: bool = True) -> bool:
     """
@@ -3132,19 +5112,29 @@ async def create_auto_payment(user: Users, disable_on_fail: bool = True) -> bool
 
     # Вычисляем will_retry один раз для всех уведомлений об ошибках
     user_expired_at = normalize_date(user.expired_at)
-    will_retry = user_expired_at is not None and (user_expired_at - date.today()).days >= 0
+    will_retry = (
+        user_expired_at is not None and (user_expired_at - date.today()).days >= 0
+    )
 
     try:
         # --- Modify auto-payment logic to use active_tariff_id ---
         if not user.active_tariff_id:
-            logger.error(f"У пользователя {user.id} не установлен active_tariff_id. Автопродление невозможно.")
-            await notify_auto_renewal_failure(user, reason="Отсутствует информация о последнем активном тарифе", will_retry=will_retry)
+            logger.error(
+                f"У пользователя {user.id} не установлен active_tariff_id. Автопродление невозможно."
+            )
+            await notify_auto_renewal_failure(
+                user,
+                reason="Отсутствует информация о последнем активном тарифе",
+                will_retry=will_retry,
+            )
             # Отключаем подписку, если нет активного тарифа
             user.is_subscribed = False
             user.renew_id = None
             await user.save()
             # Уведомляем админа об отключении автопродления из-за отсутствия тарифа
-            await cancel_subscription(user, reason="Отсутствует информация о последнем активном тарифе")
+            await cancel_subscription(
+                user, reason="Отсутствует информация о последнем активном тарифе"
+            )
             return False
 
         # Получаем детали тарифа из ActiveTariffs
@@ -3152,31 +5142,54 @@ async def create_auto_payment(user: Users, disable_on_fail: bool = True) -> bool
         if not active_tariff:
             logger.error(
                 f"Не найден активный тариф с ID {user.active_tariff_id} для пользователя {user.id}",
-                extra={'user_id': user.id, 'active_tariff_id': user.active_tariff_id}
+                extra={"user_id": user.id, "active_tariff_id": user.active_tariff_id},
             )
             # Отключаем автопродление, если активный тариф не найден
             user.is_subscribed = False
             user.renew_id = None
             await user.save()
-            logger.warning(f"Автопродление отключено для {user.id} из-за отсутствия активного тарифа ID={user.active_tariff_id} в базе.")
-            await notify_auto_renewal_failure(user, reason=f"Не найден активный тариф (ID: {user.active_tariff_id}) для автопродления", will_retry=will_retry)
+            logger.warning(
+                f"Автопродление отключено для {user.id} из-за отсутствия активного тарифа ID={user.active_tariff_id} в базе."
+            )
+            await notify_auto_renewal_failure(
+                user,
+                reason=f"Не найден активный тариф (ID: {user.active_tariff_id}) для автопродления",
+                will_retry=will_retry,
+            )
             # Уведомляем админа об отключении автопродления из-за отсутствия тарифа в базе
-            await cancel_subscription(user, reason=f"Не найден активный тариф (ID: {user.active_tariff_id}) в базе")
+            await cancel_subscription(
+                user,
+                reason=f"Не найден активный тариф (ID: {user.active_tariff_id}) в базе",
+            )
             return False
 
-        logger.info(f"Автопродление для пользователя {user.id}. Используется активный тариф ID={active_tariff.id} (Name: {active_tariff.name}, Price: {active_tariff.price})")
+        logger.info(
+            f"Автопродление для пользователя {user.id}. Используется активный тариф ID={active_tariff.id} (Name: {active_tariff.name}, Price: {active_tariff.price})"
+        )
 
-        months = int(active_tariff.months)
-        base_full_price = int(active_tariff.price)
-        lte_gb_total = int(active_tariff.lte_gb_total or 0)
-        lte_price_per_gb = float(active_tariff.lte_price_per_gb or 0)
-        lte_cost = 0
-        if not bool(getattr(active_tariff, "lte_autopay_free", False)):
-            lte_cost = _round_rub(lte_gb_total * lte_price_per_gb)
-        # Применяем персональную скидку (если есть)
-        discounted_price, discount_id, discount_percent = await apply_personal_discount(user.id, base_full_price, months)
-        full_price = int(discounted_price) + lte_cost
-        user_balance = float(user.balance)
+        preview = await build_auto_payment_preview(user, active_tariff=active_tariff)
+        if preview is None:
+            logger.error(
+                "Не удалось собрать preview автосписания для пользователя %s: отсутствует активный тариф",
+                user.id,
+            )
+            await notify_auto_renewal_failure(
+                user,
+                reason="Не удалось подготовить расчет автопродления",
+                will_retry=will_retry,
+            )
+            return False
+
+        months = int(preview.months)
+        base_full_price = int(preview.base_full_price)
+        lte_gb_total = int(preview.lte_gb_total)
+        lte_price_per_gb = float(preview.lte_price_per_gb)
+        lte_cost = int(preview.lte_cost)
+        discounted_price = float(preview.discounted_price)
+        discount_id = preview.discount_id
+        discount_percent = preview.discount_percent
+        full_price = int(preview.total_amount)
+        user_balance = float(user.balance or 0)
 
         try:
             current_date = date.today()
@@ -3185,14 +5198,20 @@ async def create_auto_payment(user: Users, disable_on_fail: bool = True) -> bool
         except Exception as e:
             logger.error(
                 f"Ошибка при расчете дней подписки для автоплатежа {user.id}, тариф {active_tariff.id}: {e}",
-                extra={'user_id': user.id, 'tariff_id': active_tariff.id, 'months': months}
+                extra={
+                    "user_id": user.id,
+                    "tariff_id": active_tariff.id,
+                    "months": months,
+                },
             )
             # Уведомляем пользователя о неудаче (здесь маловероятно, но все же)
-            await notify_auto_renewal_failure(user, reason="Ошибка при расчете срока продления", will_retry=will_retry)
+            await notify_auto_renewal_failure(
+                user, reason="Ошибка при расчете срока продления", will_retry=will_retry
+            )
             return False
 
         # Проверка полной оплаты с баланса
-        if user_balance >= full_price:
+        if preview.amount_external <= 0:
             old_expired_at = user.expired_at
             logger.info(
                 f"Автопродление тарифа {active_tariff.id} для пользователя {user.id} полностью с баланса. "
@@ -3201,35 +5220,105 @@ async def create_auto_payment(user: Users, disable_on_fail: bool = True) -> bool
 
             initial_balance = user.balance
             user.balance -= full_price
-            await user.extend_subscription(days)
-            active_tariff.lte_gb_used = 0.0
-            update_fields = ["lte_gb_used"]
-            usage_snapshot = None
-            msk_today = datetime.now(MSK_TZ).date()
-            if user.remnawave_uuid:
-                usage_snapshot = await _fetch_today_lte_usage_gb(
-                    str(user.remnawave_uuid)
+            payment_hwid_limit = int(preview.device_count)
+            purchase_kind = await resolve_purchase_kind(
+                metadata={
+                    "month": months,
+                    "device_count": payment_hwid_limit,
+                },
+                months=months,
+                device_count=payment_hwid_limit,
+            )
+            base_tariff_snapshot = _build_active_base_tariff_snapshot(
+                active_tariff=active_tariff,
+                device_count=payment_hwid_limit,
+                lte_gb=lte_gb_total,
+                lte_price_per_gb=lte_price_per_gb,
+            )
+            (
+                added_to_frozen_base,
+                family_expires_at,
+            ) = await _apply_purchase_extension_by_kind(
+                user=user,
+                purchase_kind=purchase_kind,
+                purchased_days=days,
+                base_tariff_snapshot=base_tariff_snapshot,
+            )
+            if purchase_kind == "family":
+                logger.info(
+                    "Auto-renew family purchase: updated overlay expiry user=%s family_expires_at=%s",
+                    user.id,
+                    family_expires_at,
                 )
-            if usage_snapshot is not None:
-                active_tariff.lte_usage_last_date = msk_today
-                active_tariff.lte_usage_last_total_gb = usage_snapshot
-                update_fields.extend(["lte_usage_last_date", "lte_usage_last_total_gb"])
-            elif active_tariff.lte_usage_last_date != msk_today:
-                active_tariff.lte_usage_last_date = msk_today
-                active_tariff.lte_usage_last_total_gb = 0.0
-                update_fields.extend(["lte_usage_last_date", "lte_usage_last_total_gb"])
-            await active_tariff.save(update_fields=update_fields)
-            await NotificationMarks.filter(user_id=user.id, type="lte_usage").delete()
-            if user.remnawave_uuid:
-                try:
-                    should_enable_lte = lte_gb_total > 0
-                    await set_lte_squad_status(str(user.remnawave_uuid), enable=should_enable_lte)
-                except Exception as e:
-                    logger.error(f"Ошибка обновления LTE-сквада при автопродлении для {user.id}: {e}")
+            elif added_to_frozen_base:
+                logger.info(
+                    "Auto-renew base purchase during active family overlay moved to frozen base days for user %s",
+                    user.id,
+                )
+            else:
+                logger.info(
+                    "Auto-renew base purchase extended active subscription user=%s new_expired_at=%s",
+                    user.id,
+                    user.expired_at,
+                )
+            preserve_active_tariff_state = (
+                purchase_kind == "base" and added_to_frozen_base
+            )
+            if not preserve_active_tariff_state:
+                active_tariff.lte_gb_used = 0.0
+                update_fields = ["lte_gb_used"]
+                usage_snapshot = None
+                msk_today = datetime.now(MSK_TZ).date()
+                if user.remnawave_uuid:
+                    try:
+                        usage_snapshot = await _await_payment_external_call(
+                            _fetch_today_lte_usage_gb(str(user.remnawave_uuid)),
+                            operation="balance_auto_fetch_today_lte_usage_gb",
+                        )
+                    except asyncio.TimeoutError:
+                        usage_snapshot = None
+                if usage_snapshot is not None:
+                    active_tariff.lte_usage_last_date = msk_today
+                    active_tariff.lte_usage_last_total_gb = usage_snapshot
+                    update_fields.extend(
+                        ["lte_usage_last_date", "lte_usage_last_total_gb"]
+                    )
+                elif active_tariff.lte_usage_last_date != msk_today:
+                    active_tariff.lte_usage_last_date = msk_today
+                    active_tariff.lte_usage_last_total_gb = 0.0
+                    update_fields.extend(
+                        ["lte_usage_last_date", "lte_usage_last_total_gb"]
+                    )
+                await active_tariff.save(update_fields=update_fields)
+                await NotificationMarks.filter(
+                    user_id=user.id, type="lte_usage"
+                ).delete()
+                if user.remnawave_uuid:
+                    try:
+                        should_enable_lte = float(lte_gb_total or 0) > float(
+                            active_tariff.lte_gb_used or 0
+                        )
+                        await _await_payment_external_call(
+                            set_lte_squad_status(
+                                str(user.remnawave_uuid), enable=should_enable_lte
+                            ),
+                            operation="balance_auto_set_lte_squad_status",
+                        )
+                    except Exception as e:
+                        logger.error(
+                            f"Ошибка обновления LTE-сквада при автопродлении для {user.id}: {e}"
+                        )
+            else:
+                logger.info(
+                    "Auto-renew base purchase during active family overlay preserved active tariff LTE state user=%s",
+                    user.id,
+                )
             # Сбрасываем триал, если был (маловероятно для автоплатежа, но на всякий случай)
             if user.is_trial:
                 user.is_trial = False
-                logger.info(f"Сброшен флаг пробного периода для {user.id} при автооплате с баланса")
+                logger.info(
+                    f"Сброшен флаг пробного периода для {user.id} при автооплате с баланса"
+                )
             await user.save()
 
             payment_id = f"balance_auto_{user.id}_{int(datetime.now().timestamp())}_{randint(100, 999)}"
@@ -3252,66 +5341,111 @@ async def create_auto_payment(user: Users, disable_on_fail: bool = True) -> bool
                 )
             except Exception:
                 pass
-            
+
             logger.info(
-                 f"Автоплатеж для пользователя {user.id} успешно выполнен с баланса. "
-                 f"Списано: {full_price}. Баланс до: {initial_balance}, После: {user.balance}, Скидка: {discount_percent}% (id={discount_id})"
+                f"Автоплатеж для пользователя {user.id} успешно выполнен с баланса. "
+                f"Списано: {full_price}. Баланс до: {initial_balance}, После: {user.balance}, Скидка: {discount_percent}% (id={discount_id})"
             )
 
-            # Уведомления (админу)
-            referrer = await user.referrer()
-            try:
-                await on_payment(
-                    user_id=user.id,
-                    is_sub=user.is_subscribed,
-                    referrer=referrer.name() if referrer else None,
-                    amount=full_price,
-                    months=months,
-                    method="balance_auto", # Указываем метод
-                    payment_id=payment_id,
-                    is_auto=True,
-                    utm=user.utm if hasattr(user, "utm") else None,
-                    discount_percent=discount_percent,
-                    device_count=active_tariff.hwid_limit if hasattr(active_tariff, "hwid_limit") else None,
-                    old_expired_at=old_expired_at,
-                    new_expired_at=user.expired_at,
-                    lte_gb_total=lte_gb_total,
-                )
-            except Exception as e:
-                logger.error(
-                    f"Ошибка при отправке уведомления об автоплатеже с баланса: {e}",
-                    extra={'payment_id': payment_id, 'user_id': user.id}
-                )
-            
             # Списываем использование скидки (если не постоянная)
-            await consume_discount_if_needed(discount_id)
-
-            # Уведомляем пользователя об успешном автопродлении с баланса
-            await notify_auto_renewal_success_balance(user, days=days, amount=full_price)
-            # Сообщение пользователю о начислении круток
             try:
-                await notify_spin_awarded(user=user, added_attempts=int(months), total_attempts=int(user.prize_wheel_attempts or 0))
-            except Exception as e_notify_spins:
-                logger.error(f"Ошибка уведомления о крутках (баланс) для {user.id}: {e_notify_spins}")
+                await consume_discount_if_needed(discount_id)
+            except Exception as discount_exc:
+                logger.warning(
+                    "Failed to consume discount after committed auto-balance payment: user=%s payment_id=%s err=%s",
+                    user.id,
+                    payment_id,
+                    discount_exc,
+                )
+
+            await _replay_payment_notifications_if_needed(
+                user=user,
+                payment_id=payment_id,
+                days=int(days),
+                amount_external=0.0,
+                amount_from_balance=float(full_price),
+                device_count=int(payment_hwid_limit),
+                months=int(months),
+                is_auto_payment=True,
+                discount_percent=discount_percent,
+                old_expired_at=old_expired_at,
+                new_expired_at=user.expired_at,
+                lte_gb_total=int(lte_gb_total),
+                method="balance_auto",
+                tariff_kind=purchase_kind,
+            )
 
             # Начисление круток за автосписание с баланса: 1 крутка за каждый месяц
+            attempts_before = int(getattr(user, "prize_wheel_attempts", 0) or 0)
+            attempts_after = attempts_before
             try:
-                attempts_before = int(getattr(user, "prize_wheel_attempts", 0) or 0)
                 if months and months > 0:
-                    user.prize_wheel_attempts = attempts_before + int(months)
+                    attempts_after = attempts_before + int(months)
+                    user.prize_wheel_attempts = attempts_after
                     await user.save()
                     logger.info(
                         f"Начислено {months} круток за автосписание (баланс) пользователю {user.id}. Было: {attempts_before}, стало: {user.prize_wheel_attempts}"
                     )
             except Exception as award_exc:
-                logger.error(f"Не удалось начислить крутки за автосписание (баланс) для {user.id}: {award_exc}")
-            
-            return True # Автоплатеж успешен
+                logger.error(
+                    f"Не удалось начислить крутки за автосписание (баланс) для {user.id}: {award_exc}"
+                )
+
+            # Сообщение пользователю о начислении круток
+            try:
+                await notify_spin_awarded(
+                    user=user,
+                    added_attempts=int(months),
+                    total_attempts=int(attempts_after),
+                )
+            except Exception as e_notify_spins:
+                logger.error(
+                    f"Ошибка уведомления о крутках (баланс) для {user.id}: {e_notify_spins}"
+                )
+
+            return True  # Автоплатеж успешен
 
         else:
             # Логика частичной оплаты
-            amount_to_pay = max(1.0, full_price - user_balance)
-            amount_from_balance = full_price - amount_to_pay
+            amount_to_pay = float(preview.amount_external)
+            amount_from_balance = float(preview.amount_from_balance)
+            payment_hwid_limit = int(preview.device_count)
+            metadata_tariffs = await Tariffs.filter(
+                months=months,
+                is_active=True,
+            ).order_by("order")
+            metadata_tariff = None
+            if metadata_tariffs:
+                active_name = (
+                    str(getattr(active_tariff, "name", "") or "").strip().lower()
+                )
+                if active_name:
+                    metadata_tariff = next(
+                        (
+                            candidate
+                            for candidate in metadata_tariffs
+                            if str(getattr(candidate, "name", "") or "").strip().lower()
+                            == active_name
+                        ),
+                        None,
+                    )
+                if metadata_tariff is None:
+                    metadata_tariff = metadata_tariffs[0]
+            if metadata_tariff is not None:
+                await metadata_tariff.sync_effective_pricing_fields()
+            resolved_auto_tariff_id = (
+                int(metadata_tariff.id) if metadata_tariff else None
+            )
+            auto_tariff_kind = await resolve_purchase_kind(
+                metadata={
+                    "month": months,
+                    "device_count": payment_hwid_limit,
+                },
+                months=months,
+                device_count=payment_hwid_limit,
+                tariff_id=resolved_auto_tariff_id,
+                tariff=metadata_tariff,
+            )
 
             logger.info(
                 f"Создание автоплатежа Yookassa для пользователя {user.id}. "
@@ -3324,6 +5458,8 @@ async def create_auto_payment(user: Users, disable_on_fail: bool = True) -> bool
                 "month": months,
                 "is_auto": True,
                 "amount_from_balance": amount_from_balance,
+                "device_count": payment_hwid_limit,
+                "tariff_kind": auto_tariff_kind,
                 "disable_on_fail": disable_on_fail,
                 "base_full_price": base_full_price,
                 "discounted_price": discounted_price,
@@ -3333,81 +5469,105 @@ async def create_auto_payment(user: Users, disable_on_fail: bool = True) -> bool
                 "lte_price_per_gb": lte_price_per_gb,
                 "lte_cost": lte_cost,
             }
+            if resolved_auto_tariff_id is not None:
+                metadata["tariff_id"] = int(resolved_auto_tariff_id)
 
             # Создаем автоплатеж Yookassa с таймаутом
             if not _configure_yookassa_if_available():
-                logger.error(
-                    "YooKassa auto-payment requested but provider credentials are not configured",
+                logger.warning(
+                    "YooKassa auto payment skipped because provider credentials are not configured",
                     extra={"user_id": user.id, "tariff_id": active_tariff.id},
                 )
                 await notify_auto_renewal_failure(
                     user,
-                    reason="Сервис оплаты не настроен",
+                    reason="Сервис автопродления временно недоступен",
                     will_retry=will_retry,
                 )
                 return False
             try:
                 payment_data = {
-                    "amount": {
-                        "value": str(amount_to_pay),
-                        "currency": "RUB"
-                    },
+                    "amount": {"value": str(amount_to_pay), "currency": "RUB"},
                     "payment_method_id": user.renew_id,
                     "metadata": metadata,
                     "capture": True,
                     "description": f"Автопродление подписки пользователя {user.id} ({active_tariff.name})",
                     "receipt": {
-                        "customer": {"email": user.email if user.email else "auto@bloopcat.ru"},
-                        "items": [{
-                            "description": f"Автопродление подписки пользователя {user.id} ({active_tariff.name})",
-                            "quantity": "1",
-                            "amount": {
-                                "value": str(amount_to_pay),
-                                "currency": "RUB"
-                            },
-                            "vat_code": 1, # TODO: Проверить НДС
-                            "payment_subject": "service",
-                            "payment_mode": "full_payment"
-                        }]
-                    }
+                        "customer": {
+                            "email": user.email if user.email else "auto@vectraconnect.app"
+                        },
+                        "items": [
+                            {
+                                "description": f"Автопродление подписки пользователя {user.id} ({active_tariff.name})",
+                                "quantity": "1",
+                                "amount": {
+                                    "value": str(amount_to_pay),
+                                    "currency": "RUB",
+                                },
+                                "vat_code": 1,  # TODO: Проверить НДС
+                                "payment_subject": "service",
+                                "payment_mode": "full_payment",
+                            }
+                        ],
+                    },
                 }
 
                 idempotence_key = str(randint(100000, 999999999999))
 
                 # Используем asyncio.to_thread для неблокирующего вызова с таймаутом
                 payment = await asyncio.wait_for(
-                    asyncio.to_thread(partial(Payment.create, payment_data, idempotence_key)),
-                    timeout=30.0
+                    asyncio.to_thread(
+                        partial(Payment.create, payment_data, idempotence_key)
+                    ),
+                    timeout=30.0,
                 )
 
             except asyncio.TimeoutError:
                 logger.error(
                     f"Таймаут при создании автоплатежа YooKassa для пользователя {user.id}. "
                     f"Тариф: {active_tariff.id}, Сумма: {amount_to_pay}",
-                    extra={'user_id': user.id, 'tariff_id': active_tariff.id, 'amount': amount_to_pay}
+                    extra={
+                        "user_id": user.id,
+                        "tariff_id": active_tariff.id,
+                        "amount": amount_to_pay,
+                    },
                 )
                 await notify_auto_renewal_failure(
                     user,
                     reason="Сервис оплаты временно недоступен (таймаут)",
-                    will_retry=will_retry
+                    will_retry=will_retry,
                 )
                 return False
-            except (ConnectTimeoutError, ReadTimeoutError, RequestsConnectionError, RequestsTimeout) as network_err:
+            except (
+                ConnectTimeoutError,
+                ReadTimeoutError,
+                RequestsConnectionError,
+                RequestsTimeout,
+            ) as network_err:
                 logger.error(
                     f"Сетевая ошибка при создании автоплатежа YooKassa для пользователя {user.id}: {network_err}",
-                    extra={'user_id': user.id, 'tariff_id': active_tariff.id, 'amount': amount_to_pay, 'error_type': type(network_err).__name__}
+                    extra={
+                        "user_id": user.id,
+                        "tariff_id": active_tariff.id,
+                        "amount": amount_to_pay,
+                        "error_type": type(network_err).__name__,
+                    },
                 )
                 await notify_auto_renewal_failure(
                     user,
                     reason="Сервис оплаты временно недоступен (ошибка сети)",
-                    will_retry=will_retry
+                    will_retry=will_retry,
                 )
                 return False
             except Exception as create_exc:
                 logger.error(
                     f"Неожиданная ошибка при создании автоплатежа YooKassa для пользователя {user.id}: {create_exc}",
-                    extra={'user_id': user.id, 'tariff_id': active_tariff.id, 'amount': amount_to_pay, 'error_type': type(create_exc).__name__},
-                    exc_info=True
+                    extra={
+                        "user_id": user.id,
+                        "tariff_id": active_tariff.id,
+                        "amount": amount_to_pay,
+                        "error_type": type(create_exc).__name__,
+                    },
+                    exc_info=True,
                 )
                 # Для непредвиденных ошибок пробрасываем дальше
                 raise
@@ -3418,20 +5578,17 @@ async def create_auto_payment(user: Users, disable_on_fail: bool = True) -> bool
                 await user.save()
                 logger.info(
                     f"Сброшен флаг пробного периода для {user.id} при создании автоплатежа Yookassa",
-                    extra={
-                        'payment_id': payment.id,
-                        'user_id': user.id
-                    }
+                    extra={"payment_id": payment.id, "user_id": user.id},
                 )
 
             logger.info(
                 f"Создан автоплатеж Yookassa для пользователя {user.id}",
                 extra={
-                    'payment_id': payment.id,
-                    'user_id': user.id,
-                    'amount': payment.amount.value,
-                    'status': payment.status
-                }
+                    "payment_id": payment.id,
+                    "user_id": user.id,
+                    "amount": payment.amount.value,
+                    "status": payment.status,
+                },
             )
             # Persist as "pending" so the server can reconcile even if webhook delivery fails.
             try:
@@ -3447,14 +5604,14 @@ async def create_auto_payment(user: Users, disable_on_fail: bool = True) -> bool
             except Exception as e:
                 logger.warning(
                     f"Не удалось сохранить pending auto payment {getattr(payment, 'id', None)}: {e}",
-                    extra={'user_id': user.id},
+                    extra={"user_id": user.id},
                 )
-            return True # Автоплатеж создан (результат будет в вебхуке)
+            return True  # Автоплатеж создан (результат будет в вебхуке)
 
     except Exception as e:
         logger.error(
             f"Ошибка при создании автоплатежа для пользователя {user.id}: {e}",
-            extra={'user_id': user.id}
+            extra={"user_id": user.id},
         )
         # Отключаем автопродление только если это последняя попытка
         if disable_on_fail:
@@ -3462,7 +5619,15 @@ async def create_auto_payment(user: Users, disable_on_fail: bool = True) -> bool
             user.renew_id = None
             await user.save()
             # Уведомляем админа об отключении автопродления из-за ошибки
-            await cancel_subscription(user, reason=f"Ошибка при создании автоплатежа: {str(e)}")
-        logger.warning(f"Автопродление отключено для {user.id} из-за ошибки при создании автоплатежа: {e}")
-        await notify_auto_renewal_failure(user, reason=f"Внутренняя ошибка сервера при попытке автопродления", will_retry=will_retry)
+            await cancel_subscription(
+                user, reason=f"Ошибка при создании автоплатежа: {str(e)}"
+            )
+        logger.warning(
+            f"Автопродление отключено для {user.id} из-за ошибки при создании автоплатежа: {e}"
+        )
+        await notify_auto_renewal_failure(
+            user,
+            reason=f"Внутренняя ошибка сервера при попытке автопродления",
+            will_retry=will_retry,
+        )
         return False

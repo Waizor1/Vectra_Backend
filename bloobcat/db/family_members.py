@@ -3,7 +3,7 @@ from tortoise.contrib.pydantic import pydantic_model_creator
 
 
 class FamilyMembers(models.Model):
-    id = fields.UUIDField(pk=True)
+    id = fields.UUIDField(primary_key=True)
     owner = fields.ForeignKeyField("models.Users", related_name="family_members_owner", on_delete=fields.CASCADE)
     member = fields.ForeignKeyField("models.Users", related_name="family_members_member", on_delete=fields.CASCADE)
     allocated_devices = fields.IntField(default=1)

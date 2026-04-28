@@ -13,7 +13,7 @@ logger = get_logger("prize_wheel_models")
 
 class PrizeWheelHistory(models.Model):
     """История выигрышей на колесе призов"""
-    id = fields.IntField(pk=True)
+    id = fields.IntField(primary_key=True)
     user_id = fields.BigIntField(description="ID пользователя")
     prize_type = fields.CharField(max_length=64, description="Тип выигранного приза (строка)")
     prize_name = fields.CharField(max_length=255, description="Название приза")
@@ -50,7 +50,7 @@ class PrizeWheelHistory(models.Model):
 
 class PrizeWheelConfig(models.Model):
     """Конфигурация колеса призов"""
-    id = fields.IntField(pk=True)
+    id = fields.IntField(primary_key=True)
     prize_type = fields.CharField(max_length=64, description="Тип приза: subscription | extra_spin | material_prize")
     prize_name = fields.CharField(max_length=255, description="Название приза")
     prize_value = fields.CharField(max_length=255, description="Значение приза")
@@ -204,5 +204,4 @@ class PrizeWheelConfigModelAdmin(TortoiseModelAdmin):
 
         # Все ок — сохраняем
         return await super().save_model(pk, form_data)
-
 

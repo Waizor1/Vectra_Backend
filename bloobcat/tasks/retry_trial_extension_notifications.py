@@ -7,6 +7,7 @@ from bloobcat.db.notifications import NotificationMarks
 from bloobcat.bot.notifications.trial.extended import notify_trial_extended
 from bloobcat.logger import get_logger
 from bloobcat.settings import app_settings
+from bloobcat.tasks.quiet_hours import is_quiet_hours
 
 MOSCOW = ZoneInfo("Europe/Moscow")
 logger = get_logger("tasks.retry_trial_extension_notifications")
@@ -19,11 +20,13 @@ async def retry_trial_extension_notifications_once() -> tuple[int, int]:
     """
     logger.debug("Starting retry for missing trial extension notifications")
 
-    users = await Users.filter(is_trial=True, is_subscribed=False)
+    users = await Users.filter(is_trial=True, is_subscribed=False, is_blocked=False)
     processed = 0
     notified = 0
     now = datetime.now(MOSCOW)
-    _ = now  # quiet linter about unused
+    if is_quiet_hours(now):
+        logger.debug("Skipping retry for trial extension notifications during quiet hours")
+        return processed, notified
 
     for user in users:
         processed += 1
@@ -83,6 +86,4 @@ async def run_retry_trial_extension_notifications_scheduler(interval_seconds: in
         except Exception as e:
             logger.error(f"Error in retry trial extension notifications scheduler: {e}")
         await asyncio.sleep(interval_seconds)
-
-
 

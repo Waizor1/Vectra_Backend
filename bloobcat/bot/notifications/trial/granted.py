@@ -13,12 +13,20 @@ if TYPE_CHECKING:
     from bloobcat.db.users import Users # For type hinting only
 
 logger = get_logger("notifications.trial.granted")
+WEB_USER_ID_FLOOR = 8_000_000_000_000_000
 
 async def notify_trial_granted(user: 'Users'): # Changed Users to 'Users'
     """
     Уведомляет пользователя о том, что ему был предоставлен триальный период.
     Отправляется сразу после назначения триала.
     """
+    if int(user.id) >= WEB_USER_ID_FLOOR:
+        logger.info(
+            "Пропуск Telegram-уведомления о триале для web-only пользователя %s",
+            user.id,
+        )
+        return
+
     lang = get_user_locale(user)
     logger.info(f"Подготовка уведомления о предоставлении триала для пользователя {user.id}")
 
@@ -26,17 +34,17 @@ async def notify_trial_granted(user: 'Users'): # Changed Users to 'Users'
 
     if lang == 'ru':
         text = (
-            f"Поздравляем, {user.full_name}! Вам предоставлен бесплатный {trial_duration_days}-дневный доступ к TVPN.\n\n"
-            "Оцените все преимущества нашего сервиса прямо сейчас!"
+            f"{user.full_name}, пробный доступ активирован.\n\n"
+            f"Срок действия: {trial_duration_days} дня."
         )
-        button_text = "В кабинет"
+        button_text = "Личный кабинет"
     else:
         text = (
-            f"Congratulations, {user.full_name}! You've been granted a free {trial_duration_days}-day access to TVPN.\n\n"
+            f"Congratulations, {user.full_name}! You've been granted a free {trial_duration_days}-day access to Vectra Connect.\n\n"
             "Explore all the benefits of our service right now!"
         )
         button_text = "To Dashboard"
-    
+
     button = await webapp_inline_button(button_text) # Assuming default WebApp URL is fine
 
     try:
@@ -50,4 +58,4 @@ async def notify_trial_granted(user: 'Users'): # Changed Users to 'Users'
         logger.error(f"Bad request error for user {user.id}: {e}")
         await handle_telegram_bad_request(user.id, e)
     except Exception as e:
-        logger.error(f"Ошибка при отправке уведомления о предоставлении триала пользователю {user.id}: {e}") 
+        logger.error(f"Ошибка при отправке уведомления о предоставлении триала пользователю {user.id}: {e}")

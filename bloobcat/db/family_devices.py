@@ -3,7 +3,7 @@ from tortoise.contrib.pydantic import pydantic_model_creator
 
 
 class FamilyDevices(models.Model):
-    id = fields.UUIDField(pk=True)
+    id = fields.UUIDField(primary_key=True)
     user = fields.ForeignKeyField("models.Users", related_name="family_devices", on_delete=fields.CASCADE)
     client_id = fields.CharField(max_length=64, null=True)
     title = fields.CharField(max_length=100)

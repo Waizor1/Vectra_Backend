@@ -1,7 +1,11 @@
+import os
+from typing import Annotated
+from ipaddress import ip_address
+from uuid import UUID
+
 from dotenv import load_dotenv
 from pydantic import SecretStr, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
-import os
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 load_dotenv()
 
@@ -11,11 +15,42 @@ class TelegramSettings(BaseSettings):
 
     token: SecretStr
     webhook_secret: str
+    webhook_enabled: bool = True
+    username: str | None = None
     webapp_url: str
-    miniapp_url: str 
+    miniapp_url: str
+    logs_channel: int | None = None
+    api_fallback_ips: Annotated[list[str], NoDecode] = []
     # Optional: where to return the user after YooKassa redirect flow.
     # Useful when payment is opened in an external browser and we want to jump back to Telegram.
     payment_return_url: str | None = None
+
+    @field_validator("logs_channel", mode="before")
+    @classmethod
+    def parse_logs_channel(cls, value):
+        if value in (None, ""):
+            return None
+        return int(value)
+
+    @field_validator("api_fallback_ips", mode="before")
+    @classmethod
+    def parse_api_fallback_ips(cls, value):
+        if not value:
+            return []
+        if isinstance(value, str):
+            raw_values = value.split(",")
+        elif isinstance(value, (list, tuple, set)):
+            raw_values = value
+        else:
+            return value
+
+        parsed: list[str] = []
+        for raw in raw_values:
+            text = str(raw).strip()
+            if not text:
+                continue
+            parsed.append(str(ip_address(text)))
+        return parsed
 
 
 class YookassaSettings(BaseSettings):
@@ -25,7 +60,7 @@ class YookassaSettings(BaseSettings):
     secret_key: SecretStr | None = None
     webhook_secret: str | None = None
 
-    @field_validator("shop_id", "secret_key", "webhook_secret", mode="before")
+    @field_validator("shop_id", "webhook_secret", mode="before")
     @classmethod
     def normalize_optional_text(cls, value):
         if value is None:
@@ -70,19 +105,13 @@ class PlategaSettings(BaseSettings):
     base_url: str = "https://app.platega.io"
     payment_method: int | None = None
 
-    @field_validator("merchant_id", "secret_key", mode="before")
+    @field_validator("merchant_id", "base_url", mode="before")
     @classmethod
     def normalize_optional_text(cls, value):
         if value is None:
             return None
         cleaned = str(value).strip()
         return cleaned or None
-
-    @field_validator("base_url", mode="before")
-    @classmethod
-    def normalize_base_url(cls, value):
-        cleaned = str(value or "").strip()
-        return cleaned or "https://app.platega.io"
 
     @field_validator("payment_method", mode="before")
     @classmethod
@@ -107,6 +136,21 @@ class RemnaWaveSettings(BaseSettings):
     lte_internal_squad_uuid: str | None = None
     # Маркер LTE-нод в названии (например, CHTF)
     lte_node_marker: str = "CHTF"
+
+    @field_validator(
+        "default_internal_squad_uuid",
+        "default_external_squad_uuid",
+        "lte_internal_squad_uuid",
+        mode="before",
+    )
+    @classmethod
+    def normalize_optional_uuid(cls, value):
+        if value in (None, ""):
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        return str(UUID(text))
 
 
 class ScriptSettings(BaseSettings):
@@ -154,22 +198,68 @@ class AuthSettings(BaseSettings):
     access_token_ttl_seconds: int = 86400
     jwt_leeway_seconds: int = 30
 
+
+class CORSSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="CORS_")
+
+    allow_origins: str | list[str] | None = None
+    allow_origin_regex: str | None = None
+    strict_allowlist: bool = True
+    allow_loopback_http: bool = False
+
+    @field_validator("allow_origins", mode="before")
+    @classmethod
+    def parse_allow_origins(cls, value):
+        if not value:
+            return []
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        if isinstance(value, (list, tuple, set)):
+            return [str(item).strip() for item in value if str(item).strip()]
+        return value
+
+    @field_validator("allow_origin_regex", mode="before")
+    @classmethod
+    def parse_allow_origin_regex(cls, value):
+        if value is None:
+            return None
+        cleaned = str(value).strip()
+        return cleaned or None
+
+
 # New settings class for application-specific configurations
 class AppSettings(BaseSettings):
-    trial_days: int = 10  # Default to 10 days, will be overridden by TRIAL_DAYS from .env
-    
+    trial_days: int = (
+        3  # Default to 3 days, will be overridden by TRIAL_DAYS from .env
+    )
+
     # Настройки для блокированных пользователей
-    blocked_user_cleanup_days: int = 7  # Через сколько дней удалять заблокированных пользователей
-    blocked_user_max_failed_attempts: int = 5  # Максимальное количество неудачных попыток до блокировки
-    cleanup_blocked_users_enabled: bool = True  # Включить/выключить автоочистку заблокированных пользователей
+    blocked_user_cleanup_days: int = (
+        7  # Через сколько дней удалять заблокированных пользователей
+    )
+    blocked_user_max_failed_attempts: int = (
+        5  # Максимальное количество неудачных попыток до блокировки
+    )
+    cleanup_blocked_users_enabled: bool = (
+        True  # Включить/выключить автоочистку заблокированных пользователей
+    )
     cleanup_blocked_users_interval_hours: int = 24  # Интервал очистки в часах
     # model_config = SettingsConfigDict(env_prefix="APP_") # If we want APP_TRIAL_DAYS
     # No env_prefix means it will look for TRIAL_DAYS directly.
 
     # Колесо призов
-    prize_wheel_spin_bonus_price: int = 50  # Стоимость одной крутки при оплате бонусным балансом (₽)
-    devices_decrease_limit: int = 1  # Сколько раз можно уменьшить лимит устройств за период
+    prize_wheel_spin_bonus_price: int = (
+        50  # Стоимость одной крутки при оплате бонусным балансом (₽)
+    )
+    devices_decrease_limit: int = (
+        1  # Сколько раз можно уменьшить лимит устройств за период
+    )
     family_devices_limit: int = 10  # Базовый лимит устройств family-подписки
+    family_devices_threshold: int = 2
+    subscription_devices_max: int = 30
+    lte_default_price_per_gb: float = 1.5
+    lte_default_max_gb: int = 500
+    lte_default_step_gb: int = 1
     # Family alerts and anomaly protection
     family_alerts_enabled: bool = True
     family_alerts_webhook_url: str | None = None
@@ -178,7 +268,9 @@ class AppSettings(BaseSettings):
     family_anomaly_block_window_hours: int = 6
     family_anomaly_block_duration_minutes: int = 60
 
+
 app_settings = AppSettings()
+
 
 # Promo settings
 class PromoSettings(BaseSettings):
@@ -187,11 +279,111 @@ class PromoSettings(BaseSettings):
     # Секрет для HMAC промокодов; делаем необязательным, чтобы не падать при отсутствии
     hmac_secret: SecretStr | None = None
 
+
 promo_settings = PromoSettings()
 
 
 admin_integration_settings = AdminIntegrationSettings()
 auth_settings = AuthSettings()
+cors_settings = CORSSettings()
+
+
+class WebAuthSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="")
+
+    web_auth_enabled: bool = False
+    password_auth_enabled: bool = False
+    oauth_google_enabled: bool = False
+    oauth_apple_enabled: bool = False
+    oauth_yandex_enabled: bool = False
+    oauth_telegram_enabled: bool = False
+
+
+class OAuthSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="OAUTH_")
+
+    public_base_url: str | None = None
+    frontend_app_url: str = "https://app.vectra-pro.net"
+    enabled_providers: Annotated[list[str], NoDecode] = ["google", "apple", "yandex", "telegram"]
+    google_client_id: str | None = None
+    google_client_secret: SecretStr | None = None
+    apple_client_id: str | None = None
+    apple_team_id: str | None = None
+    apple_key_id: str | None = None
+    apple_private_key: SecretStr | None = None
+    # Optional pre-generated Apple client secret for environments where
+    # private-key signing is handled by the secret manager.
+    apple_client_secret: SecretStr | None = None
+    yandex_client_id: str | None = None
+    yandex_client_secret: SecretStr | None = None
+    telegram_client_id: str | None = None
+    telegram_client_secret: SecretStr | None = None
+
+    @field_validator("enabled_providers", mode="before")
+    @classmethod
+    def parse_enabled_providers(cls, value):
+        if not value:
+            return []
+        if isinstance(value, str):
+            raw_values = value.split(",")
+        elif isinstance(value, (list, tuple, set)):
+            raw_values = value
+        else:
+            return value
+        allowed = {"google", "apple", "yandex", "telegram"}
+        return [
+            item.strip().lower()
+            for item in raw_values
+            if str(item).strip().lower() in allowed
+        ]
+
+
+class SMTPSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="SMTP_")
+
+    host: str | None = None
+    port: int = 465
+    username: str | None = None
+    password: SecretStr | None = None
+    from_email: str | None = None
+    from_name: str = "Vectra Connect"
+    use_tls: bool = True
+
+
+web_auth_settings = WebAuthSettings()
+oauth_settings = OAuthSettings()
+smtp_settings = SMTPSettings()
+
+
+class LocalDevAuthSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="LOCAL_DEV_AUTH_")
+
+    enabled: bool = False
+    allowed_telegram_ids: list[int] | str | None = None
+
+    @field_validator("allowed_telegram_ids", mode="before")
+    @classmethod
+    def parse_allowed_telegram_ids(cls, value):
+        if not value:
+            return []
+        if isinstance(value, str):
+            raw_values = value.split(",")
+        elif isinstance(value, int):
+            raw_values = [value]
+        elif isinstance(value, (list, tuple, set)):
+            raw_values = value
+        else:
+            return value
+        parsed: list[int] = []
+        for raw in raw_values:
+            text = str(raw).strip()
+            if not text:
+                continue
+            parsed.append(int(text))
+        return parsed
+
+
+local_dev_auth_settings = LocalDevAuthSettings()
 
 
 class CaptainUserLookupSettings(BaseSettings):
@@ -206,7 +398,9 @@ class CaptainUserLookupSettings(BaseSettings):
         if not value:
             return []
         if isinstance(value, str):
-            cleaned = [item.strip().lower() for item in value.split(",") if item.strip()]
+            cleaned = [
+                item.strip().lower() for item in value.split(",") if item.strip()
+            ]
             return cleaned
         if isinstance(value, (list, tuple, set)):
             cleaned = [str(item).strip().lower() for item in value if str(item).strip()]

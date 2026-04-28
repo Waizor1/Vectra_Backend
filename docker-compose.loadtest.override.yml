@@ -1,0 +1,4 @@
+services:
+  bloobcat:
+    environment:
+      RATE_LIMIT_TRUSTED_PROXIES: ${RATE_LIMIT_TRUSTED_PROXIES:-}

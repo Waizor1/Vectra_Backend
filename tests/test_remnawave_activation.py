@@ -276,6 +276,44 @@ def test_activation_no_online_at_no_registration():
     ) is False
 
 
+def test_activation_requires_hwid_when_key_flag_is_available():
+    """Новый путь: onlineAt без HWID больше не отправляет activation log."""
+    assert should_trigger_registration(
+        online_at="2025-02-20T12:00:00Z",
+        old_connected_at=None,
+        is_registered=False,
+        block_registration=False,
+        is_antitwink_sanction=False,
+        key_activated=False,
+        has_hwid_device=False,
+    ) is False
+
+
+def test_activation_with_hwid_ignores_existing_connected_at_until_key_activated():
+    """Если connected_at уже появился раньше HWID, первый HWID всё равно активирует ключ."""
+    assert should_trigger_registration(
+        online_at="2025-02-20T12:00:00Z",
+        old_connected_at="2025-02-19T10:00:00",
+        is_registered=False,
+        block_registration=False,
+        is_antitwink_sanction=False,
+        key_activated=False,
+        has_hwid_device=True,
+    ) is True
+
+
+def test_activation_key_activated_blocks_duplicate_admin_log():
+    assert should_trigger_registration(
+        online_at="2025-02-20T12:00:00Z",
+        old_connected_at=None,
+        is_registered=False,
+        block_registration=False,
+        is_antitwink_sanction=False,
+        key_activated=True,
+        has_hwid_device=True,
+    ) is False
+
+
 def test_extract_online_at_prefers_top_level():
     data = {
         "onlineAt": "2026-02-20T12:00:00Z",

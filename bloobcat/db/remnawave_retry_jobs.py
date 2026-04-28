@@ -2,7 +2,7 @@ from tortoise import fields, models
 
 
 class RemnaWaveRetryJobs(models.Model):
-    id = fields.IntField(pk=True)
+    id = fields.IntField(primary_key=True)
     job_type = fields.CharField(max_length=64)
     user_id = fields.BigIntField()
     remnawave_uuid = fields.CharField(max_length=64)

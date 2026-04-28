@@ -1,11 +1,14 @@
 import aiohttp
 import json
 import asyncio
+import time as time_module
+import inspect
 from typing import Dict, Any, Optional, List
-from datetime import datetime, date, time, timezone, timedelta
+from datetime import datetime, date, time as datetime_time, timezone, timedelta
 from urllib.parse import quote
 from bloobcat.logger import get_logger
 from bloobcat.db.users import Users  # Добавляем импорт Users
+from bloobcat.routes.remnawave.happ_crypto import normalize_happ_crypto_link
 from zoneinfo import ZoneInfo
 
 logger = get_logger("remnawave_client")
@@ -14,11 +17,12 @@ class RemnaWaveClient:
     def __init__(self, base_url: str, token: str):
         self.base_url = base_url.rstrip('/')
         self.token = token
+        self.request_timeout = aiohttp.ClientTimeout(total=15)
         self.headers = {
             'Content-Type': 'application/json',
             'Authorization': f'Bearer {self.token}',
         }
-        self.session = None
+        self.session: Optional[aiohttp.ClientSession] = None
         self.users = UsersAPI(self)
         self.nodes = NodesAPI(self)
         self.inbounds = InboundsAPI(self)
@@ -26,7 +30,7 @@ class RemnaWaveClient:
 
     async def _ensure_session(self):
         if not self.session:
-            self.session = aiohttp.ClientSession(headers=self.headers)
+            self.session = aiohttp.ClientSession(headers=self.headers, timeout=self.request_timeout)
 
     async def close(self):
         if self.session:
@@ -35,7 +39,15 @@ class RemnaWaveClient:
 
     async def _request(self, method: str, endpoint: str, **kwargs) -> Dict[str, Any]:
         await self._ensure_session()
+        if self.session is None:
+            raise Exception("RemnaWave session is not initialized")
+
+        session = self.session
+        assert session is not None
         url = f"{self.base_url}{endpoint}"
+
+        # Всегда передаём явный timeout и не полагаемся на неявные значения aiohttp.
+        kwargs.setdefault("timeout", self.request_timeout)
         
         # Обрабатываем JSON данные для сериализации UUID
         if 'json' in kwargs:
@@ -45,7 +57,7 @@ class RemnaWaveClient:
         logger.debug(f"Sending {method} request to {url} with data: {json.dumps(request_data_log, indent=2, default=str)}")
         
         try:
-            async with self.session.request(method, url, **kwargs) as response:
+            async with session.request(method, url, **kwargs) as response:
                 if response.status == 401:
                     raise Exception("Unauthorized - Invalid API token")
                 
@@ -71,12 +83,14 @@ class RemnaWaveClient:
                     raise Exception(f"API error [{response.status}]: {error_msg}")
                 
                 return response_json
+        except asyncio.TimeoutError as e:
+            logger.error(f"Timeout while calling {url}: {str(e)}")
+            raise Exception(f"Timeout error: {str(e)}")
         except aiohttp.ClientError as e:
             logger.error(f"Network error while calling {url}: {str(e)}")
             raise Exception(f"Network error: {str(e)}")
         except json.JSONDecodeError as e:
             logger.error(f"Failed to decode JSON response from {url}: {str(e)}")
-            logger.error(f"Raw response text: {await response.text()}")
             raise Exception("Failed to decode API response")
             
     def _prepare_json_data(self, data):
@@ -97,24 +111,73 @@ class UsersAPI:
     def __init__(self, client: RemnaWaveClient):
         self.client = client
 
+    @staticmethod
+    def _callable_accepts_timeout(func) -> bool:
+        """Возвращает True, если callable поддерживает timeout как kwarg."""
+        try:
+            signature = inspect.signature(func)
+        except (TypeError, ValueError):
+            return False
+
+        for parameter in signature.parameters.values():
+            if parameter.kind == inspect.Parameter.VAR_KEYWORD:
+                return True
+            if parameter.name == "timeout" and parameter.kind in (
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            ):
+                return True
+        return False
+
+    def _build_attempt_timeout(self, func, call_kwargs: Dict[str, Any], remaining_time: float) -> Optional[aiohttp.ClientTimeout]:
+        """Возвращает timeout для попытки, ограниченный оставшимся retry-бюджетом."""
+        if "timeout" in call_kwargs:
+            return None
+
+        client_timeout = getattr(self.client, "request_timeout", None)
+        default_total = getattr(client_timeout, "total", None)
+        if isinstance(default_total, (int, float)) and default_total > 0:
+            capped_total = min(float(default_total), remaining_time)
+        else:
+            capped_total = remaining_time
+
+        return aiohttp.ClientTimeout(total=capped_total)
+
     def _format_expire_at(self, expire_at: date) -> str:
         """Форматируем expireAt как 00:00 в зоне Europe/Moscow и конвертим в UTC для API"""
         local_tz = ZoneInfo("Europe/Moscow")
         # начало дня по МСК
-        local_midnight = datetime.combine(expire_at, time.min, tzinfo=local_tz)
+        local_midnight = datetime.combine(expire_at, datetime_time.min, tzinfo=local_tz)
         # переводим в UTC
         expire_at_dt = local_midnight.astimezone(timezone.utc)
         return expire_at_dt.strftime('%Y-%m-%dT%H:%M:%S.%fZ')[:-4] + 'Z'
 
     async def _execute_with_retry(self, func, *args, **kwargs) -> Dict[str, Any]:
         """Выполняет функцию с повторными попытками в течение 60 сек, пропускает валидационные ошибки"""
-        start_time = datetime.now()
-        retry_interval = 3
-        max_total_time = 60
+        start_time = time_module.monotonic()
+        retry_interval = 3.0
+        max_total_time = 60.0
+        attempt_count = 0
+        last_error: Optional[Exception] = None
         while True:
+            elapsed = time_module.monotonic() - start_time
+            remaining_time = max_total_time - elapsed
+            if remaining_time <= 0:
+                if last_error is None:
+                    raise Exception("Retry budget exhausted")
+                raise last_error
+
             try:
-                return await func(*args, **kwargs)
+                attempt_count += 1
+                call_kwargs = kwargs
+                timeout = self._build_attempt_timeout(func, kwargs, remaining_time)
+                if timeout is not None and self._callable_accepts_timeout(func):
+                    call_kwargs = dict(kwargs)
+                    call_kwargs["timeout"] = timeout
+
+                return await func(*args, **call_kwargs)
             except Exception as e:
+                last_error = e
                 # Не повторяем, если у этой панели нет эндпоинта статистики usage
                 if "api/users/stats/usage" in str(e) and "404" in str(e):
                     raise
@@ -133,16 +196,29 @@ class UsersAPI:
                     logger.debug(f"Пропускаем повторные попытки для ошибки дублирующегося username: {e}")
                     raise
 
-                # Не повторяем для "пользователь не найден" (404/A063), чтобы быстрее перейти к пересозданию
-                if 'A063' in str(e) or 'User with specified params not found' in str(e):
+                # Не повторяем для "пользователь не найден" (A063/A025),
+                # включая case/format варианты (например a025, A-063 и т.п.)
+                error_text = str(e)
+                normalized_error = ''.join(ch for ch in error_text.lower() if ch.isalnum())
+                if (
+                    'a063' in normalized_error
+                    or 'a025' in normalized_error
+                    or 'userwithspecifiedparamsnotfound' in normalized_error
+                    or 'usernotfound' in normalized_error
+                ):
                     logger.debug(f"Пропускаем повторные попытки для ошибки не найденного пользователя: {e}")
                     raise
                 
-                elapsed = (datetime.now() - start_time).total_seconds()
-                if elapsed > max_total_time:
+                elapsed = time_module.monotonic() - start_time
+                remaining_time = max_total_time - elapsed
+                if remaining_time <= 0:
                     raise
-                logger.warning(f"Ошибка RemnaWave API: {e}. Повторная попытка через {retry_interval} сек.")
-                await asyncio.sleep(retry_interval)
+
+                sleep_for = min(retry_interval, remaining_time)
+                logger.warning(
+                    f"Ошибка RemnaWave API: {e}. Повторная попытка через {sleep_for:.2f} сек."
+                )
+                await asyncio.sleep(sleep_for)
 
     async def create_user(
         self,
@@ -238,7 +314,7 @@ class UsersAPI:
             expire_date = expire_val.date() if isinstance(expire_val, datetime) else expire_val
             if expire_date <= today:
                 # Формируем новое время: текущее +1 минута по МСК и конвертим в UTC
-                async def _bump_expire():
+                async def _bump_expire(timeout: Optional[aiohttp.ClientTimeout] = None):
                     now_msk = datetime.now(moscow_tz)
                     future_msk = now_msk + timedelta(minutes=1)
                     future_utc = future_msk.astimezone(timezone.utc)
@@ -246,7 +322,7 @@ class UsersAPI:
                     # Преобразуем uuid в строку для сериализации
                     u = str(uuid) if hasattr(uuid, 'hex') else uuid
                     return await self.client._request(
-                        "PATCH", "/api/users", json={"uuid": u, "expireAt": expire_str}
+                        "PATCH", "/api/users", json={"uuid": u, "expireAt": expire_str}, timeout=timeout
                     )
                 return await self._execute_with_retry(_bump_expire)
         # Преобразуем UUID
@@ -296,7 +372,7 @@ class UsersAPI:
                 logger.error(f"В данных пользователя {user_db.id} (UUID: {user_db.remnawave_uuid}) отсутствует ссылка. Данные: {user_data}")
                 raise ValueError("Subscription URL not found in user data")
             
-            return subscription_url
+            return normalize_happ_crypto_link(subscription_url)
         except Exception as e:
             if "User not found" in str(e) or "404" in str(e):
                 # UUID есть, но пользователь не найден в RemnaWave - это ошибка синхронизации
@@ -398,4 +474,4 @@ class ToolsAPI:
         encrypted = (raw_resp.get("response") or {}).get("encryptedLink") or ""
         if not encrypted:
             raise ValueError("Encrypted link not found in encrypt tool response")
-        return encrypted
+        return normalize_happ_crypto_link(encrypted)

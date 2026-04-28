@@ -38,8 +38,6 @@ def main() -> None:
         "promo_batches",
         "promo_codes",
         "promo_usages",
-        "prize_wheel_config",
-        "prize_wheel_history",
         "connections",
         "notification_marks",
         "personal_discounts",
@@ -73,7 +71,6 @@ def main() -> None:
         "users": ["lte_gb_total", "expired_at", "hwid_limit", "balance", "is_blocked", "username", "full_name"],
         "active_tariffs": ["lte_gb_total", "lte_gb_used", "months", "price"],
         "promo_codes": ["code_hmac", "effects", "disabled", "batch_id"],
-        "prize_wheel_config": ["probability", "prize_value", "prize_type", "prize_name"],
         "connections": ["at"],
     }
 
@@ -90,7 +87,6 @@ def main() -> None:
     group_collections = [
         "grp_main",
         "grp_promo",
-        "grp_prizes",
         "grp_analytics",
         "grp_payments",
         "grp_service",

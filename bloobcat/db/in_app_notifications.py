@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 class InAppNotification(models.Model):
     """Dynamic in-app notification (banner/toast) with scheduling and limits."""
 
-    id = fields.IntField(pk=True)
+    id = fields.IntField(primary_key=True)
     title = fields.CharField(max_length=255)
     body = fields.TextField()
     start_at = fields.DatetimeField(description="Show from (inclusive)")
@@ -98,7 +98,7 @@ class InAppNotificationAdmin(TortoiseModelAdmin):
 class NotificationView(models.Model):
     """Record of a notification being shown to a user in a session."""
 
-    id = fields.IntField(pk=True)
+    id = fields.IntField(primary_key=True)
     user: fields.ForeignKeyRelation["Users"] = fields.ForeignKeyField(
         "models.Users", related_name="in_app_notification_views", on_delete=fields.CASCADE
     )

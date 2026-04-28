@@ -8,6 +8,12 @@ from bloobcat.logger import get_logger
 logger = get_logger("keyboard")
 
 
+def public_app_url(path: str = "") -> str:
+    base_url = telegram_settings.miniapp_url.rstrip("/")
+    normalized_path = path.lstrip("/")
+    return f"{base_url}/{normalized_path}" if normalized_path else base_url
+
+
 async def webapp_inline_button(
     text: str = "Личный кабинет", url: str = ""
 ) -> InlineKeyboardMarkup:
@@ -35,4 +41,36 @@ async def webapp_inline_button(
     keyboard.button(
         text=text, web_app=WebAppInfo(url=final_url)
     )
+    return keyboard.as_markup()
+
+
+async def start_inline_keyboard(
+    launch_text: str,
+    docs_text: str,
+    launch_url: str = "",
+) -> InlineKeyboardMarkup:
+    keyboard = InlineKeyboardBuilder()
+
+    raw_launch_url = (launch_url or "").strip() or telegram_settings.miniapp_url
+    keyboard.button(text=launch_text, web_app=WebAppInfo(url=raw_launch_url))
+    keyboard.button(text=docs_text, url=public_app_url("/legal/"))
+    keyboard.adjust(1)
+    return keyboard.as_markup()
+
+
+async def legal_documents_inline_keyboard(lang: str = "ru") -> InlineKeyboardMarkup:
+    keyboard = InlineKeyboardBuilder()
+    if lang == "ru":
+        privacy_text = "Политика конфиденциальности"
+        terms_text = "Пользовательское соглашение"
+        support_text = "Поддержка"
+    else:
+        privacy_text = "Privacy Policy"
+        terms_text = "Terms of Use"
+        support_text = "Support"
+
+    keyboard.button(text=privacy_text, url=public_app_url("/legal/privacy/"))
+    keyboard.button(text=terms_text, url=public_app_url("/legal/terms/"))
+    keyboard.button(text=support_text, url="https://t.me/VectraConnect_support_bot")
+    keyboard.adjust(1)
     return keyboard.as_markup()

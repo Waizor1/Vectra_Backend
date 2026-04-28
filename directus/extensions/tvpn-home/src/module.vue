@@ -3,11 +3,11 @@
 		<template #navigation>
 			<div class="nav nav--premium">
 				<div class="nav__brand">
-					<div class="nav__brand-logo">TVPN</div>
-					<div>
-						<div class="nav__brand-title">Control Room</div>
-						<div class="nav__brand-subtitle">Премиальная админка</div>
-					</div>
+					<div class="nav__brand-logo">SVPN</div>
+						<div>
+							<div class="nav__brand-title">Операционная панель</div>
+							<div class="nav__brand-subtitle">Панель управления</div>
+						</div>
 				</div>
 
 				<div v-for="section in navSections" :key="section.id" class="nav__section">
@@ -36,38 +36,38 @@
 
 		<div class="page">
 			<div class="page__main">
-				<div class="hero">
-					<div class="hero__left">
-						<div class="hero__kicker">TVPN Control Room</div>
-						<div class="hero__title">TVPN Admin</div>
-						<div class="hero__subtitle">
-							Премиальный обзор проекта: ключевые метрики, крупные графики и удобные админ-инструменты в одном экране.
-						</div>
-						<div class="hero__cta-row">
-							<router-link class="hero__cta hero__cta--primary" :to="{ path: '/content/users' }">
+				<div class="home-hero">
+					<div class="home-hero__left">
+							<div class="home-hero__kicker">Vectra Connect</div>
+							<div class="home-hero__title">Админ-панель Vectra Connect</div>
+							<div class="home-hero__subtitle">
+								Операционный обзор проекта: ключевые метрики, графики и основные инструменты управления в одном экране.
+							</div>
+						<div class="home-hero__cta-row">
+							<router-link class="home-hero__cta home-hero__cta--primary" :to="{ path: '/content/users' }">
 								<v-icon name="manage_accounts" />
 								<span>Пользователи</span>
 							</router-link>
-							<router-link class="hero__cta hero__cta--ghost" :to="{ path: '/insights' }">
-								<v-icon name="query_stats" />
-								<span>Insights</span>
-							</router-link>
+								<router-link class="home-hero__cta home-hero__cta--ghost" :to="{ path: '/insights' }">
+									<v-icon name="query_stats" />
+									<span>Аналитика</span>
+								</router-link>
 						</div>
 					</div>
-					<div class="hero__right">
-						<div class="hero__meta">
-							<div class="hero__meta-label">Последнее обновление</div>
-							<div class="hero__meta-value">{{ lastUpdatedLabel }}</div>
-							<div class="hero__meta-stats">
-								<div class="hero__meta-stat">
+					<div class="home-hero__right">
+						<div class="home-hero__meta">
+							<div class="home-hero__meta-label">Последнее обновление</div>
+							<div class="home-hero__meta-value">{{ lastUpdatedLabel }}</div>
+							<div class="home-hero__meta-stats">
+								<div class="home-hero__meta-stat">
 									<span>Подключения 7д</span>
 									<strong>{{ fmt(stats.connections7d) }}</strong>
 								</div>
-								<div class="hero__meta-stat">
+								<div class="home-hero__meta-stat">
 									<span>Регистрации 7д</span>
 									<strong>{{ fmt(stats.registrations7d) }}</strong>
 								</div>
-								<div class="hero__meta-stat">
+								<div class="home-hero__meta-stat">
 									<span>Платежи сегодня</span>
 									<strong>{{ fmtMoney(trends.paymentsSumToday) }}</strong>
 								</div>
@@ -674,272 +674,464 @@
 				/>
 			</v-card>
 
-			<v-card class="panel">
-				<div class="panel__title">События</div>
-				<div class="panel__subtitle">Последние изменения, чтобы видеть жизнь проекта.</div>
+			<v-card class="panel panel--activity">
+				<RecentActivityBoard
+					:users="events.users"
+					:payments="events.payments"
+					:promo="events.promo"
+					:fmt-money="fmtMoney"
+					:short-date="shortDate"
+					:from-now="fromNow"
+				/>
+			</v-card>
 
-				<div class="events">
-					<div class="events__col">
-						<div class="events__title">
-							<v-icon name="people" />
-							<span>Новые пользователи</span>
-							<router-link class="events__all" :to="{ path: '/content/users' }">все</router-link>
+			<div class="ops-grid">
+				<v-card class="panel panel--ops-summary">
+					<div class="panel__title">Админ-инструменты</div>
+					<div class="panel__subtitle">Оперативный контроль состояния и ключевых параметров проекта.</div>
+					<div class="ops-toolbar">
+						<div class="ops-toolbar__meta">
+							Один refresh: ~{{ refreshRequestEstimate }} API-запросов (оптимизировано для меньшей burst-нагрузки).
 						</div>
-						<div v-if="events.users.length" class="events__list">
-							<router-link v-for="u in events.users" :key="u.id" class="event" :to="{ path: `/content/users/${u.id}` }">
-								<div class="event__main">
-									<div class="event__title">{{ u.username || u.full_name || u.id }}</div>
-									<div class="event__meta">
-										<span v-if="u.is_blocked" class="pill pill--bad">blocked</span>
-										<span v-if="u.expired_at" class="pill">exp {{ shortDate(u.expired_at) }}</span>
-									</div>
-								</div>
-								<div class="event__time">{{ fromNow(u.registration_date) }}</div>
-							</router-link>
+						<v-button x-small secondary :loading="loading" :disabled="loading" @click="refresh">
+							<v-icon name="refresh" left />
+							Обновить данные
+						</v-button>
+					</div>
+					<div class="ops-health">
+						<div class="ops-health__item">
+							<div class="ops-health__label">Техработы</div>
+							<div class="ops-badge" :class="settings.maintenance_mode ? 'ops-badge--warn' : 'ops-badge--ok'">
+								{{ settings.maintenance_mode ? 'Включены' : 'Выключены' }}
+							</div>
 						</div>
-						<div v-else class="events__empty">Нет данных</div>
+						<div class="ops-health__item">
+							<div class="ops-health__label">Алерты</div>
+							<div class="ops-badge" :class="settings.alerts_enabled ? 'ops-badge--ok' : 'ops-badge--muted'">
+								{{ settings.alerts_enabled ? 'Активны' : 'Отключены' }}
+							</div>
+						</div>
+						<div class="ops-health__item">
+							<div class="ops-health__label">Истечения (окно)</div>
+							<div class="ops-health__value">{{ settings.expiring_days }} дн</div>
+						</div>
+						<div class="ops-health__item">
+							<div class="ops-health__label">Блокировки (окно)</div>
+							<div class="ops-health__value">{{ settings.suspicious_block_days }} дн</div>
+						</div>
+					</div>
+				</v-card>
+
+				<v-card class="panel panel--ops-notify">
+					<div class="panel__head panel__head--compact">
+						<div>
+							<div class="panel__title">Создать уведомление</div>
+							<div class="panel__subtitle">Быстрое создание In-App уведомления для Mini App прямо с главной.</div>
+						</div>
+						<router-link class="inline-link" :to="{ path: '/content/in_app_notifications' }">
+							Все уведомления
+						</router-link>
 					</div>
 
-					<div class="events__col">
-						<div class="events__title">
-							<v-icon name="payments" />
-							<span>Платежи</span>
-							<router-link class="events__all" :to="{ path: '/content/processed_payments' }">все</router-link>
-						</div>
-						<div v-if="events.payments.length" class="events__list">
+					<v-notice v-if="notificationError" type="danger">
+						{{ notificationError }}
+					</v-notice>
+					<v-notice v-if="notificationSuccess" type="success">
+						<div class="notification-result">
+							<span>{{ notificationSuccess }}</span>
 							<router-link
-								v-for="p in events.payments"
-								:key="p.id"
-								class="event"
-								:to="{ path: `/content/processed_payments/${p.id}` }"
+								v-if="notificationLastId"
+								class="inline-link"
+								:to="{ path: `/content/in_app_notifications/${notificationLastId}` }"
 							>
-								<div class="event__main">
-									<div class="event__title">#{{ p.payment_id || p.id }}</div>
-									<div class="event__meta">
-										<span class="pill">{{ fmtMoney(p.amount) }}</span>
-										<span v-if="p.status" class="pill">{{ String(p.status) }}</span>
-									</div>
-								</div>
-								<div class="event__time">{{ fromNow(p.processed_at) }}</div>
+								Открыть карточку
 							</router-link>
 						</div>
-						<div v-else class="events__empty">Нет данных</div>
+					</v-notice>
+
+					<div class="notification-presets">
+						<button type="button" class="notification-presets__btn" @click="applyNotificationWindow(24)">Окно 24ч</button>
+						<button type="button" class="notification-presets__btn" @click="applyNotificationWindow(72)">Окно 3 дня</button>
+						<button type="button" class="notification-presets__btn" @click="applyNotificationWindow(168)">Окно 7 дней</button>
 					</div>
 
-					<div class="events__col">
-						<div class="events__title">
-							<v-icon name="confirmation_number" />
-							<span>Промо-активность</span>
-							<router-link class="events__all" :to="{ path: '/content/promo_usages' }">все</router-link>
+					<div class="notification-form">
+						<label class="notification-form__field notification-form__field--wide">
+							<span>Заголовок</span>
+							<input
+								v-model.trim="notificationForm.title"
+								class="notification-form__input"
+								type="text"
+								maxlength="255"
+								placeholder="Например: Техработы завершены"
+							/>
+						</label>
+						<label class="notification-form__field notification-form__field--wide">
+							<span>Текст уведомления</span>
+							<textarea
+								v-model.trim="notificationForm.body"
+								class="notification-form__textarea"
+								rows="3"
+								placeholder="Например: Обновление завершено, приложение работает в штатном режиме."
+							/>
+						</label>
+						<label class="notification-form__field">
+							<span>Показывать с</span>
+							<input v-model="notificationForm.start_at" class="notification-form__input" type="datetime-local" />
+						</label>
+						<label class="notification-form__field">
+							<span>Показывать до</span>
+							<input v-model="notificationForm.end_at" class="notification-form__input" type="datetime-local" />
+						</label>
+						<label class="notification-form__field notification-form__field--checkbox">
+							<span>Активно сразу</span>
+							<input v-model="notificationForm.is_active" class="notification-form__toggle" type="checkbox" />
+						</label>
+						<label class="notification-form__field">
+							<span>Макс. показов на пользователя</span>
+							<input
+								v-model="notificationForm.max_per_user"
+								class="notification-form__input"
+								type="number"
+								min="1"
+								placeholder="пусто = без лимита"
+							/>
+						</label>
+						<label class="notification-form__field">
+							<span>Макс. показов за сессию</span>
+							<input
+								v-model="notificationForm.max_per_session"
+								class="notification-form__input"
+								type="number"
+								min="1"
+								placeholder="пусто = без лимита"
+							/>
+						</label>
+						<label class="notification-form__field">
+							<span>Автоскрытие (сек)</span>
+							<input
+								v-model="notificationForm.auto_hide_seconds"
+								class="notification-form__input"
+								type="number"
+								min="1"
+								placeholder="пусто = закрытие вручную"
+							/>
+						</label>
+					</div>
+					<div class="notification-form__hint">
+						Пустые лимиты означают «без ограничений». Время указывается в локальной timezone браузера.
+					</div>
+					<div class="settings__actions">
+						<v-button small :loading="notificationSaving" :disabled="notificationSaving" @click="createInAppNotification">
+							Создать уведомление
+						</v-button>
+						<v-button small secondary :disabled="notificationSaving" @click="resetNotificationForm">
+							Очистить
+						</v-button>
+					</div>
+				</v-card>
+
+				<v-card class="panel panel--ops-maintenance">
+					<div class="panel__title">Режим обслуживания</div>
+					<div class="panel__subtitle">Управление техработами и сообщением для клиентов приложения.</div>
+					<v-notice v-if="settingsAccessHint" type="warning">
+						{{ settingsAccessHint }}
+					</v-notice>
+					<v-notice v-if="settingsSaveError" type="danger">
+						{{ settingsSaveError }}
+					</v-notice>
+					<div class="settings settings--wide">
+						<label class="settings__row">
+							<span>Режим техработ включён</span>
+							<input v-model="settings.maintenance_mode" class="settings__input" type="checkbox" />
+						</label>
+						<label class="settings__row settings__row--textarea">
+							<span>Текст для пользователей</span>
+							<textarea
+								v-model="settings.maintenance_message"
+								class="settings__input settings__input--textarea"
+								rows="3"
+								placeholder="Например: обновляем серверы, ориентировочно до 15:00 МСК"
+							/>
+						</label>
+					</div>
+					<div class="settings__actions">
+						<v-button small :loading="settingsSaving" :disabled="settingsSaving || settingsReadOnly" @click="saveSettings">Сохранить параметры</v-button>
+					</div>
+				</v-card>
+
+				<v-card class="panel panel--ops-thresholds">
+					<div class="panel__title">Пороги мониторинга и очереди</div>
+					<div class="panel__subtitle">Чувствительность алертов и окна выборок для оперативных виджетов.</div>
+					<div class="settings settings--wide">
+						<label class="settings__row">
+							<span>Алерты включены</span>
+							<input v-model="settings.alerts_enabled" class="settings__input" type="checkbox" />
+						</label>
+						<label class="settings__row">
+							<span>Всплеск регистраций (x)</span>
+							<input v-model.number="settings.reg_spike_factor" class="settings__input settings__input--num" type="number" step="0.1" min="1" />
+						</label>
+						<label class="settings__row">
+							<span>Мин. регистраций</span>
+							<input v-model.number="settings.reg_spike_min" class="settings__input settings__input--num" type="number" step="1" min="0" />
+						</label>
+						<label class="settings__row">
+							<span>Падение подключений (≤ %)</span>
+							<input v-model.number="settings.conn_drop_factor" class="settings__input settings__input--num" type="number" step="0.05" min="0" max="1" />
+						</label>
+						<label class="settings__row">
+							<span>Мин. среднее (7д)</span>
+							<input v-model.number="settings.conn_drop_min_avg" class="settings__input settings__input--num" type="number" step="1" min="0" />
+						</label>
+						<label class="settings__row">
+							<span>Аномалия платежей (x)</span>
+							<input v-model.number="settings.pay_spike_factor" class="settings__input settings__input--num" type="number" step="0.1" min="1" />
+						</label>
+						<label class="settings__row">
+							<span>Мин. сумма (день)</span>
+							<input v-model.number="settings.pay_spike_min_sum" class="settings__input settings__input--num" type="number" step="100" min="0" />
+						</label>
+						<label class="settings__row">
+							<span>Истекает (дни)</span>
+							<input v-model.number="settings.expiring_days" class="settings__input settings__input--num" type="number" step="1" min="1" max="90" />
+						</label>
+						<label class="settings__row">
+							<span>Блокировки (дни)</span>
+							<input v-model.number="settings.suspicious_block_days" class="settings__input settings__input--num" type="number" step="1" min="1" max="30" />
+						</label>
+					</div>
+					<div class="settings__actions">
+						<v-button small :loading="settingsSaving" :disabled="settingsSaving || settingsReadOnly" @click="saveSettings">Сохранить параметры</v-button>
+					</div>
+				</v-card>
+
+				<v-card class="panel panel--ops-hwid">
+					<div class="panel__head panel__head--compact">
+						<div>
+							<div class="panel__title">Очистить HWID</div>
+							<div class="panel__subtitle">Break-glass инструмент: удаляет HWID из локальной anti-twink истории и из известных привязок RemnaWave.</div>
 						</div>
-						<div v-if="events.promo.length" class="events__list">
-							<router-link v-for="p in events.promo" :key="p.id" class="event" :to="{ path: `/content/promo_usages/${p.id}` }">
-								<div class="event__main">
-									<div class="event__title">Promo usage</div>
-									<div class="event__meta">
-										<span v-if="p.user_id" class="pill">user {{ p.user_id }}</span>
-										<span v-if="p.promo_code_id" class="pill">code {{ p.promo_code_id }}</span>
-									</div>
-								</div>
-								<div class="event__time">{{ fromNow(p.used_at) }}</div>
-							</router-link>
+						<div class="ops-badge ops-badge--warn">Осторожно</div>
+					</div>
+
+					<v-notice type="warning">
+						Используйте только когда нужно вручную разблокировать конкретное устройство после удаления пользователя или зависших HWID-следов.
+					</v-notice>
+
+					<v-notice v-if="hwidPreviewError" type="danger">
+						{{ hwidPreviewError }}
+					</v-notice>
+					<v-notice v-if="hwidPurgeError" type="danger">
+						{{ hwidPurgeError }}
+					</v-notice>
+					<v-notice v-if="hwidPurgeSummary" :type="hwidPurgeResult?.partial ? 'warning' : 'success'">
+						<div class="hwid-tool__notice">
+							<span>
+								{{ hwidPurgeResult?.partial ? 'Очистка выполнена частично.' : 'Очистка выполнена.' }}
+								Локально удалено {{ fmt(hwidPurgeSummary.local_history_deleted) }},
+								в RemnaWave: {{ fmt(hwidPurgeSummary.remnawave_deleted) }} удалено,
+								{{ fmt(hwidPurgeSummary.remnawave_already_absent) }} уже отсутствовало,
+								{{ fmt(hwidPurgeSummary.remnawave_user_missing) }} пользователей уже не найдено.
+							</span>
 						</div>
-						<div v-else class="events__empty">Нет данных</div>
+					</v-notice>
+
+					<div class="notification-form hwid-tool__form">
+						<label class="notification-form__field notification-form__field--wide">
+							<span>HWID</span>
+							<input
+								v-model.trim="hwidTool.hwid"
+								class="notification-form__input"
+								type="text"
+								maxlength="255"
+								placeholder="Например: m42usbkzlcie4x4f"
+								@input="handleHwidInputChange"
+							/>
+						</label>
+						<label class="notification-form__field notification-form__field--wide">
+							<span>Причина (опционально)</span>
+							<textarea
+								v-model.trim="hwidTool.reason"
+								class="notification-form__textarea"
+								rows="3"
+								placeholder="Например: stale anti-twink block after admin delete"
+							/>
+						</label>
 					</div>
-				</div>
-			</v-card>
 
-			<v-card class="panel panel--ops-accordion">
-				<div class="panel__title">Админ-инструменты</div>
-				<div class="panel__subtitle">Единый продвинутый модуль управления состоянием проекта и ключевыми параметрами.</div>
-				<div class="ops-toolbar">
-					<div class="ops-toolbar__meta">
-						Один refresh: ~{{ refreshRequestEstimate }} API-запросов (оптимизировано для меньшей burst-нагрузки).
+					<label class="hwid-tool__confirm">
+						<input v-model="hwidTool.confirm" class="hwid-tool__confirm-input" type="checkbox" />
+						<span>Понимаю, что это удалит историю anti-twink для этого HWID.</span>
+					</label>
+
+					<div class="hwid-tool__actions">
+						<v-button small secondary :loading="hwidPreviewLoading" :disabled="!hwidCanPreview" @click="previewHwidPurge">
+							Проверить
+						</v-button>
+						<v-button small :loading="hwidPurgeLoading" :disabled="!hwidCanPurge" @click="purgeHwidEverywhere">
+							Очистить везде
+						</v-button>
 					</div>
-					<v-button x-small secondary :loading="loading" :disabled="loading" @click="refresh">
-						<v-icon name="refresh" left />
-						Обновить данные
-					</v-button>
-				</div>
-				<v-expansion-panels multiple>
-					<v-expansion-panel>
-						<v-expansion-panel-title>Control Center</v-expansion-panel-title>
-						<v-expansion-panel-text>
-							<v-notice v-if="settingsSaveError" type="danger">
-								{{ settingsSaveError }}
-							</v-notice>
-							<div class="ops-stack">
-								<div class="ops-health">
-									<div class="ops-health__item">
-										<div class="ops-health__label">Техработы</div>
-										<div class="ops-badge" :class="settings.maintenance_mode ? 'ops-badge--warn' : 'ops-badge--ok'">
-											{{ settings.maintenance_mode ? 'Включены' : 'Выключены' }}
-										</div>
-									</div>
-									<div class="ops-health__item">
-										<div class="ops-health__label">Алерты</div>
-										<div class="ops-badge" :class="settings.alerts_enabled ? 'ops-badge--ok' : 'ops-badge--muted'">
-											{{ settings.alerts_enabled ? 'Активны' : 'Отключены' }}
-										</div>
-									</div>
-									<div class="ops-health__item">
-										<div class="ops-health__label">Истечения (окно)</div>
-										<div class="ops-health__value">{{ settings.expiring_days }} дн</div>
-									</div>
-									<div class="ops-health__item">
-										<div class="ops-health__label">Блокировки (окно)</div>
-										<div class="ops-health__value">{{ settings.suspicious_block_days }} дн</div>
-									</div>
-								</div>
 
-								<div class="ops-section">
-									<div class="ops-section__title">Режим обслуживания</div>
-									<div class="ops-section__subtitle">Управление техработами и сообщением для клиентов приложения.</div>
-									<div class="settings settings--wide">
-										<label class="settings__row">
-											<span>Режим техработ включён</span>
-											<input v-model="settings.maintenance_mode" class="settings__input" type="checkbox" />
-										</label>
-										<label class="settings__row settings__row--textarea">
-											<span>Текст для пользователей</span>
-											<textarea
-												v-model="settings.maintenance_message"
-												class="settings__input settings__input--textarea"
-												rows="3"
-												placeholder="Например: обновляем серверы, ориентировочно до 15:00 МСК"
-											/>
-										</label>
-									</div>
-								</div>
+					<div v-if="hwidPreview" class="hwid-tool__preview">
+						<div class="hwid-tool__preview-head">
+							<div class="hwid-tool__preview-title">Предпросмотр для {{ hwidPreview.hwid }}</div>
+							<div class="hwid-tool__preview-subtitle">Ниже показан контекст, найденный перед очисткой.</div>
+						</div>
 
-								<div class="ops-section">
-									<div class="ops-section__title">Пороги мониторинга и очереди</div>
-									<div class="ops-section__subtitle">Чувствительность алертов и окна выборок для оперативных виджетов.</div>
-									<div class="settings settings--wide">
-										<label class="settings__row">
-											<span>Алерты включены</span>
-											<input v-model="settings.alerts_enabled" class="settings__input" type="checkbox" />
-										</label>
-										<label class="settings__row">
-											<span>Всплеск регистраций (x)</span>
-											<input v-model.number="settings.reg_spike_factor" class="settings__input settings__input--num" type="number" step="0.1" min="1" />
-										</label>
-										<label class="settings__row">
-											<span>Мин. регистраций</span>
-											<input v-model.number="settings.reg_spike_min" class="settings__input settings__input--num" type="number" step="1" min="0" />
-										</label>
-										<label class="settings__row">
-											<span>Падение подключений (≤ %)</span>
-											<input v-model.number="settings.conn_drop_factor" class="settings__input settings__input--num" type="number" step="0.05" min="0" max="1" />
-										</label>
-										<label class="settings__row">
-											<span>Мин. среднее (7д)</span>
-											<input v-model.number="settings.conn_drop_min_avg" class="settings__input settings__input--num" type="number" step="1" min="0" />
-										</label>
-										<label class="settings__row">
-											<span>Аномалия платежей (x)</span>
-											<input v-model.number="settings.pay_spike_factor" class="settings__input settings__input--num" type="number" step="0.1" min="1" />
-										</label>
-										<label class="settings__row">
-											<span>Мин. сумма (день)</span>
-											<input v-model.number="settings.pay_spike_min_sum" class="settings__input settings__input--num" type="number" step="100" min="0" />
-										</label>
-										<label class="settings__row">
-											<span>Истекает (дни)</span>
-											<input v-model.number="settings.expiring_days" class="settings__input settings__input--num" type="number" step="1" min="1" max="90" />
-										</label>
-										<label class="settings__row">
-											<span>Блокировки (дни)</span>
-											<input v-model.number="settings.suspicious_block_days" class="settings__input settings__input--num" type="number" step="1" min="1" max="30" />
-										</label>
-									</div>
-								</div>
+						<div class="ops-health">
+							<div class="ops-health__item">
+								<div class="ops-health__label">Локальных записей</div>
+								<div class="ops-health__value">{{ fmt(hwidPreview.summary?.local_history_rows ?? 0) }}</div>
+							</div>
+							<div class="ops-health__item">
+								<div class="ops-health__label">Live совпадений RemnaWave</div>
+								<div class="ops-health__value">{{ fmt(hwidPreview.summary?.remnawave_live_matches ?? 0) }}</div>
+							</div>
+							<div class="ops-health__item">
+								<div class="ops-health__label">Найдено владельцев</div>
+								<div class="ops-health__value">{{ fmt(hwidPreview.summary?.owners ?? 0) }}</div>
+							</div>
+							<div class="ops-health__item">
+								<div class="ops-health__label">Связанных локальных users</div>
+								<div class="ops-health__value">{{ fmt(hwidPreview.summary?.local_users ?? 0) }}</div>
+							</div>
+						</div>
 
-								<div class="settings__actions">
-									<v-button small :loading="settingsSaving" :disabled="settingsSaving" @click="saveSettings">Сохранить параметры</v-button>
+						<div v-if="!hwidPreview.summary?.has_matches" class="hwid-tool__empty">
+							По текущему preview совпадения не найдены.
+						</div>
+
+						<v-notice v-if="hwidPreview.remnawave_scan && hwidPreview.remnawave_scan.ok === false" type="warning">
+							Live-скан RemnaWave завершился с ошибкой:
+							{{ hwidPreview.remnawave_scan.error || 'unknown error' }}.
+							Локальная история всё равно была проверена.
+						</v-notice>
+
+						<div v-if="hwidOwners.length" class="hwid-tool__owners">
+							<div v-for="owner in hwidOwners" :key="owner.user_uuid" class="hwid-tool__owner">
+								<div class="hwid-tool__owner-head">
+									<div>
+										<div class="hwid-tool__owner-title">{{ formatHwidOwnerTitle(owner) }}</div>
+										<div class="hwid-tool__owner-meta">{{ formatHwidOwnerMeta(owner) }}</div>
+									</div>
+									<div class="hwid-tool__owner-badges">
+										<span v-if="owner.source_local_history" class="hwid-tool__badge">local history</span>
+										<span v-if="owner.source_remnawave_live" class="hwid-tool__badge hwid-tool__badge--accent">RemnaWave live</span>
+										<span v-if="owner.used_trial" class="hwid-tool__badge hwid-tool__badge--warn">used trial</span>
+										<span v-if="owner.is_trial" class="hwid-tool__badge">trial</span>
+									</div>
 								</div>
-							</div>
-						</v-expansion-panel-text>
-					</v-expansion-panel>
-					<v-expansion-panel>
-						<v-expansion-panel-title>Ops Console</v-expansion-panel-title>
-						<v-expansion-panel-text>
-							<v-notice v-if="opsError" type="danger">
-								{{ opsError }}
-							</v-notice>
-							<div class="ops-section">
-								<div class="ops-section__title">Безопасные серверные команды</div>
-								<div class="ops-section__subtitle">Только whitelisted операции без shell-доступа и с проверкой прав Directus.</div>
-								<div class="ops-console">
-									<label class="ops-console__label">
-										<span>Команда</span>
-										<select v-model="opsCommandId" class="ops-console__select">
-											<option v-for="cmd in opsCommands" :key="cmd.id" :value="cmd.id">
-												{{ cmd.label }}
-											</option>
-										</select>
-									</label>
-									<div class="ops-console__actions">
-										<v-button small :loading="opsLoading" :disabled="opsLoading || !opsCommandId" @click="runOpsCommand">Выполнить</v-button>
+								<div class="hwid-tool__owner-grid">
+									<div class="hwid-tool__owner-row">
+										<span>Локальных строк</span>
+										<strong>{{ fmt(owner.local_history_rows ?? 0) }}</strong>
 									</div>
-									<pre v-if="opsOutput" class="ops-console__output">{{ opsOutput }}</pre>
-								</div>
-							</div>
-						</v-expansion-panel-text>
-					</v-expansion-panel>
-					<v-expansion-panel>
-						<v-expansion-panel-title>Управление основными параметрами</v-expansion-panel-title>
-						<v-expansion-panel-text>
-							<div class="ops-section">
-								<div class="ops-section__title">Launchpad ключевых сущностей</div>
-								<div class="ops-section__subtitle">
-									Основные параметры проекта доступны из этого модуля, но ручное управление в `/content/*` остаётся.
-								</div>
-								<div class="control-links">
-									<router-link v-for="item in controlLinks" :key="item.path" class="control-link" :to="{ path: item.path }">
-										<div class="control-link__head">
-											<v-icon :name="item.icon" />
-											<span>{{ item.title }}</span>
-										</div>
-										<div class="control-link__desc">{{ item.desc }}</div>
-										<div class="control-link__path">{{ item.path }}</div>
-									</router-link>
-								</div>
-							</div>
-						</v-expansion-panel-text>
-					</v-expansion-panel>
-					<v-expansion-panel>
-						<v-expansion-panel-title>Что где находится</v-expansion-panel-title>
-						<v-expansion-panel-text>
-							<div class="ops-section">
-								<div class="ops-section__title">Короткая карта разделов</div>
-								<div class="help">
-									<div class="help__row">
-										<div class="help__k">Пользователи</div>
-										<div class="help__v">Подписка/лимиты/баланс/блокировки, быстрый поиск и карточка.</div>
+									<div class="hwid-tool__owner-row">
+										<span>Live совпадений</span>
+										<strong>{{ fmt(owner.live_matches ?? 0) }}</strong>
 									</div>
-									<div class="help__row">
-										<div class="help__k">Активные тарифы</div>
-										<div class="help__v">Ограничения, usage, мультипликатор, связанные статусы.</div>
+									<div class="hwid-tool__owner-row">
+										<span>Последний local seen</span>
+										<strong>{{ owner.local_last_seen_at || '—' }}</strong>
 									</div>
-									<div class="help__row">
-										<div class="help__k">Промо</div>
-										<div class="help__v">Коды и использования; HMAC генерируется автоматически.</div>
+									<div class="hwid-tool__owner-row">
+										<span>Последний live seen</span>
+										<strong>{{ owner.live_last_seen_at || '—' }}</strong>
 									</div>
-									<div class="help__row">
-										<div class="help__k">Колесо призов</div>
-										<div class="help__v">Конфиг и история; сумма вероятностей валидируется.</div>
+									<div class="hwid-tool__owner-row">
+										<span>Платформы</span>
+										<strong>{{ formatListInline(owner.live_platforms) }}</strong>
 									</div>
-									<div class="help__row">
-										<div class="help__k">Платежи</div>
-										<div class="help__v">Processed payments + статусы, чтобы ловить аномалии.</div>
+									<div class="hwid-tool__owner-row">
+										<span>Устройства</span>
+										<strong>{{ formatListInline(owner.live_device_models) }}</strong>
+									</div>
+									<div class="hwid-tool__owner-row">
+										<span>expireAt</span>
+										<strong>{{ owner.expired_at || '—' }}</strong>
+									</div>
+									<div class="hwid-tool__owner-row">
+										<span>Active tariff</span>
+										<strong>{{ owner.active_tariff_id || '—' }}</strong>
 									</div>
 								</div>
 							</div>
-						</v-expansion-panel-text>
-					</v-expansion-panel>
-				</v-expansion-panels>
-			</v-card>
+						</div>
+
+						<div v-if="Array.isArray(hwidPurgeResult?.remnawave_results) && hwidPurgeResult.remnawave_results.length" class="hwid-tool__results">
+							<div class="hwid-tool__results-title">Результат попыток удаления в RemnaWave</div>
+							<div class="hwid-tool__results-list">
+								<div v-for="item in hwidPurgeResult.remnawave_results" :key="`${item.user_uuid}-${item.status}`" class="hwid-tool__result-row">
+									<span>{{ item.user_uuid }}</span>
+									<strong>{{ formatHwidPurgeStatus(item.status) }}</strong>
+								</div>
+							</div>
+						</div>
+					</div>
+				</v-card>
+
+				<v-card class="panel panel--ops-console">
+				<div class="panel__title">Сервисные команды</div>
+					<div class="panel__subtitle">Безопасные серверные команды (whitelisted) без shell-доступа.</div>
+					<v-notice v-if="opsError" type="danger">
+						{{ opsError }}
+					</v-notice>
+					<div class="ops-console">
+						<label class="ops-console__label">
+							<span>Команда</span>
+							<select v-model="opsCommandId" class="ops-console__select">
+								<option v-for="cmd in opsCommands" :key="cmd.id" :value="cmd.id">
+									{{ cmd.label }}
+								</option>
+							</select>
+						</label>
+						<div class="ops-console__actions">
+							<v-button small :loading="opsLoading" :disabled="opsLoading || !opsCommandId" @click="runOpsCommand">Выполнить</v-button>
+						</div>
+						<pre v-if="opsOutput" class="ops-console__output">{{ opsOutput }}</pre>
+					</div>
+				</v-card>
+
+				<v-card class="panel panel--ops-wide panel--ops-links">
+					<div class="panel__title">Управление основными параметрами</div>
+					<div class="panel__subtitle">Основные параметры проекта доступны отсюда, ручное управление в `/content/*` сохраняется.</div>
+					<div class="control-links">
+						<router-link v-for="item in controlLinks" :key="item.path" class="control-link" :to="{ path: item.path }">
+							<div class="control-link__head">
+								<v-icon :name="item.icon" />
+								<span>{{ item.title }}</span>
+							</div>
+							<div class="control-link__desc">{{ item.desc }}</div>
+							<div class="control-link__path">{{ item.path }}</div>
+						</router-link>
+					</div>
+				</v-card>
+
+				<v-card class="panel panel--ops-wide panel--ops-map">
+					<div class="panel__title">Что где находится</div>
+					<div class="panel__subtitle">Короткая карта разделов.</div>
+					<div class="help">
+						<div class="help__row">
+							<div class="help__k">Пользователи</div>
+							<div class="help__v">Подписка/лимиты/баланс/блокировки, быстрый поиск и карточка.</div>
+						</div>
+						<div class="help__row">
+							<div class="help__k">Активные тарифы</div>
+							<div class="help__v">Ограничения, usage, мультипликатор, связанные статусы.</div>
+						</div>
+						<div class="help__row">
+							<div class="help__k">Промо</div>
+							<div class="help__v">Коды и использования; HMAC генерируется автоматически.</div>
+						</div>
+						<div class="help__row">
+							<div class="help__k">Платежи</div>
+							<div class="help__v">Processed payments + статусы, чтобы ловить аномалии.</div>
+						</div>
+					</div>
+				</v-card>
+			</div>
 			</div>
 
 			<div class="page__side">
@@ -1031,11 +1223,11 @@
 							</div>
 						</router-link>
 
-						<router-link class="action" :to="{ path: '/content/prize_wheel_config' }">
-							<v-icon name="casino" />
+						<router-link class="action" :to="{ path: '/content/in_app_notifications' }">
+							<v-icon name="notifications_active" />
 							<div>
-								<div class="action__title">Настроить колесо призов</div>
-								<div class="action__desc">Валидации вероятностей включены</div>
+								<div class="action__title">In-App уведомления</div>
+								<div class="action__desc">Список и ручная правка уведомлений Mini App</div>
 							</div>
 						</router-link>
 
@@ -1107,7 +1299,7 @@
 				</v-card>
 
 				<v-card v-if="false" class="panel panel--legacy">
-					<div class="panel__title">Ops Console</div>
+					<div class="panel__title">Сервисные команды</div>
 					<div class="panel__subtitle">Безопасные серверные операции из Directus (без полного shell-доступа).</div>
 
 					<v-notice v-if="opsError" type="danger">
@@ -1212,10 +1404,6 @@
 							<div class="help__v">Коды и использования; HMAC генерируется автоматически.</div>
 						</div>
 						<div class="help__row">
-							<div class="help__k">Колесо призов</div>
-							<div class="help__v">Конфиг и история; сумма вероятностей валидируется.</div>
-						</div>
-						<div class="help__row">
 							<div class="help__k">Платежи</div>
 							<div class="help__v">Processed payments + статусы, чтобы ловить аномалии.</div>
 						</div>
@@ -1231,6 +1419,7 @@ import { computed, onMounted, ref } from 'vue';
 import { useRoute } from 'vue-router';
 import { useApi } from '@directus/extensions-sdk';
 import PremiumLineChart from './components/PremiumLineChart.vue';
+import RecentActivityBoard from './components/RecentActivityBoard.vue';
 
 const api = useApi();
 const route = useRoute();
@@ -1255,17 +1444,100 @@ const settings = ref({
 });
 const settingsSaving = ref(false);
 const settingsSaveError = ref('');
+const settingsAccess = ref({
+	checked: false,
+	canRead: true,
+	canUpdate: true,
+});
 const opsLoading = ref(false);
 const opsError = ref('');
 const opsOutput = ref('');
+const hwidTool = ref({
+	hwid: '',
+	reason: '',
+	confirm: false,
+});
+const hwidPreviewLoading = ref(false);
+const hwidPreviewError = ref('');
+const hwidPreview = ref(null);
+const hwidPurgeLoading = ref(false);
+const hwidPurgeError = ref('');
+const hwidPurgeResult = ref(null);
+const notificationSaving = ref(false);
+const notificationError = ref('');
+const notificationSuccess = ref('');
+const notificationLastId = ref(null);
 const opsCommandId = ref('fk_active_tariffs');
 const opsCommands = [
 	{ id: 'fk_users_overview', label: 'Проверить все FK -> users' },
 	{ id: 'fk_active_tariffs', label: 'Проверить fk_active_tariffs_user' },
 	{ id: 'fix_fk_active_tariffs', label: 'Исправить fk_active_tariffs_user (CASCADE)' },
-	{ id: 'family_quick_health', label: 'Family quick health (counts)' },
+	{ id: 'family_quick_health', label: 'Проверить Family-раздел (счётчики)' },
 ];
 const refreshRequestEstimate = 19;
+const NOTIFICATION_DEFAULT_WINDOW_HOURS = 24;
+
+const settingsReadOnly = computed(() => settingsAccess.value.checked && !settingsAccess.value.canUpdate);
+const normalizedHwidInput = computed(() => String(hwidTool.value.hwid || '').trim());
+const hwidPreviewIsCurrent = computed(() => {
+	return Boolean(hwidPreview.value && hwidPreview.value.hwid === normalizedHwidInput.value);
+});
+const hwidCanPreview = computed(() => {
+	return Boolean(normalizedHwidInput.value) && !hwidPreviewLoading.value && !hwidPurgeLoading.value;
+});
+const hwidCanPurge = computed(() => {
+	return (
+		Boolean(normalizedHwidInput.value) &&
+		hwidPreviewIsCurrent.value &&
+		Boolean(hwidTool.value.confirm) &&
+		!hwidPreviewLoading.value &&
+		!hwidPurgeLoading.value
+	);
+});
+const hwidOwners = computed(() => (Array.isArray(hwidPreview.value?.owners) ? hwidPreview.value.owners : []));
+const hwidPurgeSummary = computed(() => {
+	return hwidPurgeResult.value && typeof hwidPurgeResult.value.summary === 'object'
+		? hwidPurgeResult.value.summary
+		: null;
+});
+
+const settingsAccessHint = computed(() => {
+	if (!settingsAccess.value.checked) return '';
+	if (!settingsAccess.value.canRead && !settingsAccess.value.canUpdate) {
+		return 'Коллекция `tvpn_admin_settings` недоступна для текущей роли. Панель использует локальные значения по умолчанию, сохранение отключено.';
+	}
+	if (!settingsAccess.value.canRead) {
+		return 'Чтение `tvpn_admin_settings` недоступно. Панель использует локальные значения по умолчанию.';
+	}
+	if (!settingsAccess.value.canUpdate) {
+		return 'Настройки `tvpn_admin_settings` доступны только для чтения. Сохранение отключено.';
+	}
+	return '';
+});
+
+function toDateTimeLocalValue(value) {
+	const d = value instanceof Date ? value : new Date(value);
+	if (Number.isNaN(d.getTime())) return '';
+	const local = new Date(d.getTime() - d.getTimezoneOffset() * 60000);
+	return local.toISOString().slice(0, 16);
+}
+
+function buildNotificationFormDefault(windowHours = NOTIFICATION_DEFAULT_WINDOW_HOURS) {
+	const now = new Date();
+	const end = new Date(now.getTime() + windowHours * 60 * 60 * 1000);
+	return {
+		title: '',
+		body: '',
+		start_at: toDateTimeLocalValue(now),
+		end_at: toDateTimeLocalValue(end),
+		is_active: true,
+		max_per_user: '',
+		max_per_session: '',
+		auto_hide_seconds: '',
+	};
+}
+
+const notificationForm = ref(buildNotificationFormDefault());
 
 const controlLinks = [
 	{
@@ -1287,12 +1559,6 @@ const controlLinks = [
 		desc: 'Запуск акций, ограничение выдачи и контроль актуальных промо-кампаний.',
 	},
 	{
-		path: '/content/prize_wheel_config',
-		icon: 'casino',
-		title: 'Колесо призов',
-		desc: 'Настройка призового конфига и вероятностей с серверной валидацией.',
-	},
-	{
 		path: '/content/users',
 		icon: 'people',
 		title: 'Пользователи',
@@ -1304,18 +1570,24 @@ const controlLinks = [
 		title: 'Платежи',
 		desc: 'Контроль статусов и суммы операций, быстрая проверка проблемных транзакций.',
 	},
-	{
-		path: '/content/error_reports',
-		icon: 'bug_report',
-		title: 'Ошибки',
-		desc: 'Триаж инцидентов и контроль технического состояния проекта.',
-	},
-	{
-		path: '/content/promo_usages',
-		icon: 'bolt',
-		title: 'Promo usage',
-		desc: 'Проверка фактического использования промокодов и связей с пользователями.',
-	},
+		{
+			path: '/content/error_reports',
+			icon: 'bug_report',
+			title: 'Ошибки',
+			desc: 'Триаж инцидентов и контроль технического состояния проекта.',
+		},
+		{
+			path: '/content/in_app_notifications',
+			icon: 'notifications_active',
+			title: 'In-App уведомления',
+			desc: 'Планирование и управление всплывающими уведомлениями Mini App.',
+		},
+		{
+			path: '/content/promo_usages',
+			icon: 'bolt',
+			title: 'Использования промо',
+			desc: 'Проверка фактического использования промокодов и связей с пользователями.',
+		},
 ];
 
 const trends = ref({
@@ -1398,15 +1670,14 @@ const navSections = computed(() => [
 			{ path: '/content/promo_batches', icon: 'inventory_2', label: 'Партии промокодов', badgeKey: null },
 		],
 	},
-	{
-		id: 'system',
-		title: 'Система',
-		items: [
-			{ path: '/content/error_reports', icon: 'bug_report', label: 'Логи ошибок', badgeKey: 'blockedRecent' },
-			{ path: '/content/prize_wheel_config', icon: 'casino', label: 'Настройки призов', badgeKey: null },
-			{ path: '/content/prize_wheel_history', icon: 'history_toggle_off', label: 'История призов', badgeKey: null },
-		],
-	},
+		{
+			id: 'system',
+			title: 'Система',
+			items: [
+				{ path: '/content/error_reports', icon: 'bug_report', label: 'Логи ошибок', badgeKey: 'blockedRecent' },
+				{ path: '/content/in_app_notifications', icon: 'notifications_active', label: 'In-App уведомления', badgeKey: null },
+			],
+		},
 ]);
 
 function navBadge(item) {
@@ -1663,6 +1934,122 @@ function compactMetric(value) {
 	return Math.round(n).toString();
 }
 
+function clearHwidToolFeedback({ preservePreview = false, preservePurgeResult = false } = {}) {
+	hwidPreviewError.value = '';
+	hwidPurgeError.value = '';
+	if (!preservePreview) hwidPreview.value = null;
+	if (!preservePurgeResult) hwidPurgeResult.value = null;
+}
+
+function handleHwidInputChange() {
+	hwidTool.value.confirm = false;
+	clearHwidToolFeedback();
+}
+
+function formatHwidOwnerTitle(owner) {
+	if (owner?.full_name) return owner.full_name;
+	if (owner?.username) return `@${owner.username}`;
+	if (owner?.telegram_user_id != null) return `Пользователь #${owner.telegram_user_id}`;
+	return 'Неизвестный владелец';
+}
+
+function formatHwidOwnerMeta(owner) {
+	const parts = [];
+	if (owner?.telegram_user_id != null) parts.push(`ID: ${owner.telegram_user_id}`);
+	if (owner?.user_uuid) parts.push(`UUID: ${owner.user_uuid}`);
+	return parts.join(' • ') || 'Без локального пользователя';
+}
+
+function formatListInline(values, fallback = '—') {
+	if (!Array.isArray(values) || values.length === 0) return fallback;
+	return values.filter(Boolean).join(', ') || fallback;
+}
+
+function formatHwidPurgeStatus(status) {
+	if (status === 'deleted') return 'Удалено';
+	if (status === 'already_absent') return 'Уже отсутствовал';
+	if (status === 'user_missing') return 'Пользователь уже отсутствует';
+	if (status === 'error') return 'Ошибка';
+	return status || 'Неизвестно';
+}
+
+async function previewHwidPurge() {
+	if (!hwidCanPreview.value) {
+		hwidPreviewError.value = 'Укажите HWID для проверки.';
+		return;
+	}
+	hwidPreviewLoading.value = true;
+	clearHwidToolFeedback();
+	try {
+		const res = await api.post('/server-ops/hwid/preview', {
+			hwid: normalizedHwidInput.value,
+		});
+		const preview = res?.data?.preview;
+		if (!preview || typeof preview !== 'object') {
+			throw new Error('Directus не вернул preview HWID.');
+		}
+		hwidPreview.value = preview;
+		hwidTool.value.confirm = false;
+	} catch (e) {
+		const status = e?.response?.status;
+		const detail = e?.response?.data?.error || e?.response?.data?.errors?.[0]?.message || e?.message || '';
+		if (status === 403) {
+			hwidPreviewError.value = 'Недостаточно прав: операция доступна только администраторам Directus.';
+		} else if (status === 400) {
+			hwidPreviewError.value = detail || 'Некорректный HWID.';
+		} else if (status === 503) {
+			hwidPreviewError.value = 'Не настроен ADMIN_INTEGRATION_URL / ADMIN_INTEGRATION_TOKEN в Directus.';
+		} else {
+			hwidPreviewError.value = detail ? `Не удалось получить preview: ${detail}` : 'Не удалось получить preview HWID.';
+		}
+	} finally {
+		hwidPreviewLoading.value = false;
+	}
+}
+
+async function purgeHwidEverywhere() {
+	if (!hwidCanPurge.value) {
+		if (!normalizedHwidInput.value) {
+			hwidPurgeError.value = 'Укажите HWID.';
+		} else if (!hwidPreviewIsCurrent.value) {
+			hwidPurgeError.value = 'Сначала выполните проверку для текущего HWID.';
+		} else if (!hwidTool.value.confirm) {
+			hwidPurgeError.value = 'Подтвердите удаление anti-twink истории для этого HWID.';
+		}
+		return;
+	}
+
+	hwidPurgeLoading.value = true;
+	hwidPurgeError.value = '';
+	hwidPurgeResult.value = null;
+	try {
+		const res = await api.post('/server-ops/hwid/purge', {
+			hwid: normalizedHwidInput.value,
+			reason: String(hwidTool.value.reason || '').trim() || null,
+		});
+		const result = res?.data?.result;
+		if (!result || typeof result !== 'object') {
+			throw new Error('Directus не вернул результат очистки HWID.');
+		}
+		hwidPurgeResult.value = result;
+		hwidTool.value.confirm = false;
+	} catch (e) {
+		const status = e?.response?.status;
+		const detail = e?.response?.data?.error || e?.response?.data?.errors?.[0]?.message || e?.message || '';
+		if (status === 403) {
+			hwidPurgeError.value = 'Недостаточно прав: очистка доступна только администраторам Directus.';
+		} else if (status === 400) {
+			hwidPurgeError.value = detail || 'Некорректный HWID.';
+		} else if (status === 503) {
+			hwidPurgeError.value = 'Не настроен ADMIN_INTEGRATION_URL / ADMIN_INTEGRATION_TOKEN в Directus.';
+		} else {
+			hwidPurgeError.value = detail ? `Не удалось очистить HWID: ${detail}` : 'Не удалось очистить HWID.';
+		}
+	} finally {
+		hwidPurgeLoading.value = false;
+	}
+}
+
 function sumInSeries(series, take = 7) {
 	if (!Array.isArray(series) || !series.length) return 0;
 	const tail = series.slice(Math.max(0, series.length - take));
@@ -1747,6 +2134,105 @@ function isoMonthStartFromNow(monthsBack = 11) {
 	d.setUTCMonth(d.getUTCMonth() - safe);
 	if (Number.isNaN(d.getTime())) return new Date().toISOString();
 	return d.toISOString();
+}
+
+function resetNotificationForm() {
+	notificationForm.value = buildNotificationFormDefault();
+	notificationError.value = '';
+	notificationSuccess.value = '';
+	notificationLastId.value = null;
+}
+
+function applyNotificationWindow(hours) {
+	const value = Number(hours);
+	const safe = Number.isFinite(value) && value >= 1 ? value : NOTIFICATION_DEFAULT_WINDOW_HOURS;
+	notificationForm.value = {
+		...notificationForm.value,
+		...buildNotificationFormDefault(safe),
+		title: notificationForm.value.title,
+		body: notificationForm.value.body,
+		is_active: notificationForm.value.is_active,
+		max_per_user: notificationForm.value.max_per_user,
+		max_per_session: notificationForm.value.max_per_session,
+		auto_hide_seconds: notificationForm.value.auto_hide_seconds,
+	};
+}
+
+function optionalPositiveInt(raw) {
+	if (raw === null || raw === undefined || String(raw).trim() === '') return null;
+	const n = Number(raw);
+	if (!Number.isFinite(n)) return null;
+	const rounded = Math.floor(n);
+	return rounded >= 1 ? rounded : null;
+}
+
+async function createInAppNotification() {
+	if (notificationSaving.value) return;
+	notificationSaving.value = true;
+	notificationError.value = '';
+	notificationSuccess.value = '';
+	notificationLastId.value = null;
+	try {
+		const title = String(notificationForm.value.title || '').trim();
+		const body = String(notificationForm.value.body || '').trim();
+		if (!title || !body) {
+			notificationError.value = 'Заполните заголовок и текст уведомления.';
+			notificationSaving.value = false;
+			return;
+		}
+
+		const startAt = new Date(notificationForm.value.start_at);
+		const endAt = new Date(notificationForm.value.end_at);
+		if (Number.isNaN(startAt.getTime()) || Number.isNaN(endAt.getTime())) {
+			notificationError.value = 'Укажите корректные дату/время начала и окончания.';
+			notificationSaving.value = false;
+			return;
+		}
+		if (endAt < startAt) {
+			notificationError.value = 'Дата окончания должна быть позже даты начала.';
+			notificationSaving.value = false;
+			return;
+		}
+
+		const payload = {
+			title: title.slice(0, 255),
+			body,
+			start_at: startAt.toISOString(),
+			end_at: endAt.toISOString(),
+			is_active: Boolean(notificationForm.value.is_active),
+			max_per_user: optionalPositiveInt(notificationForm.value.max_per_user),
+			max_per_session: optionalPositiveInt(notificationForm.value.max_per_session),
+			auto_hide_seconds: optionalPositiveInt(notificationForm.value.auto_hide_seconds),
+		};
+
+		const res = await api.post('/items/in_app_notifications', payload);
+		const row = Array.isArray(res?.data?.data) ? res.data.data[0] : res?.data?.data;
+		const createdId = row?.id ?? null;
+		notificationLastId.value = createdId;
+		notificationSuccess.value = createdId
+			? `Уведомление #${createdId} успешно создано.`
+			: 'Уведомление успешно создано.';
+		notificationForm.value = {
+			...buildNotificationFormDefault(),
+			is_active: notificationForm.value.is_active,
+		};
+	} catch (e) {
+		const status = e?.response?.status;
+		const detail = e?.response?.data?.errors?.[0]?.message || e?.response?.data?.error || e?.message || '';
+		if (status === 403) {
+			notificationError.value = 'Недостаточно прав на создание in_app_notifications (нужно create).';
+		} else if (status === 404) {
+			notificationError.value = 'Коллекция in_app_notifications не найдена. Запустите scripts/directus_super_setup.py.';
+		} else if (!e?.response) {
+			notificationError.value = 'Ошибка сети при создании уведомления.';
+		} else {
+			notificationError.value = detail
+				? `Не удалось создать уведомление: ${detail}`
+				: 'Не удалось создать уведомление.';
+		}
+	} finally {
+		notificationSaving.value = false;
+	}
 }
 
 function parseDdMmYyyy(value) {
@@ -1952,8 +2438,27 @@ async function fetchItems(collection, params = {}) {
 	return Array.isArray(res?.data?.data) ? res.data.data : [];
 }
 
+async function loadSettingsAccess() {
+	if (settingsAccess.value.checked) return;
+	try {
+		const res = await api.get('/permissions/me');
+		const payload = res?.data?.data;
+		const entry = payload && typeof payload === 'object' ? payload.tvpn_admin_settings : null;
+		const canRead = Boolean(entry?.read?.access);
+		const canUpdate = Boolean(entry?.update?.access);
+		settingsAccess.value = {
+			checked: true,
+			canRead,
+			canUpdate,
+		};
+	} catch {
+		// If the permission snapshot can't be loaded, keep the optimistic default.
+	}
+}
+
 async function loadSettings() {
 	settingsSaveError.value = '';
+	if (settingsAccess.value.checked && !settingsAccess.value.canRead) return;
 	try {
 		const res = await api.get('/items/tvpn_admin_settings');
 		const payload = res?.data?.data;
@@ -1977,6 +2482,10 @@ async function loadSettings() {
 
 async function saveSettings() {
 	if (settingsSaving.value) return;
+	if (settingsReadOnly.value) {
+		settingsSaveError.value = settingsAccessHint.value || 'Недостаточно прав на сохранение `tvpn_admin_settings`.';
+		return;
+	}
 	settingsSaving.value = true;
 	settingsSaveError.value = '';
 	const payload = { ...settings.value };
@@ -2052,6 +2561,7 @@ async function refresh() {
 	loading.value = true;
 	error.value = '';
 	try {
+		await loadSettingsAccess();
 		await loadSettings();
 
 		const expDays = Number(settings.value.expiring_days);
@@ -2213,21 +2723,106 @@ onMounted(() => {
 	width: 100% !important;
 }
 
+:deep(.private-view__navigation) {
+	min-width: 0;
+}
+
 .page {
-	padding: 16px 20px;
+	--tvpn-radius: 14px;
+	--tvpn-page-base: var(--tvpn-home-page-base, #0f172a);
+	--tvpn-page-glow-a: var(--tvpn-home-page-glow-a, rgba(59, 130, 246, 0.12));
+	--tvpn-page-glow-b: var(--tvpn-home-page-glow-b, rgba(16, 185, 129, 0.08));
+	--tvpn-text: var(--tvpn-home-text, #c9d1d9);
+	--tvpn-text-soft: var(--tvpn-home-text-soft, rgba(201, 209, 217, 0.72));
+	--tvpn-border: var(--tvpn-home-border, rgba(148, 163, 184, 0.18));
+	--tvpn-border-strong: var(--tvpn-home-border-strong, rgba(96, 165, 250, 0.34));
+	--tvpn-surface-soft: var(--tvpn-home-surface-soft, rgba(22, 27, 34, 0.88));
+	--tvpn-surface-strong: var(--tvpn-home-surface-strong, rgba(33, 38, 46, 0.94));
+	--tvpn-surface-muted: var(--tvpn-home-surface-muted, rgba(255, 255, 255, 0.03));
+	--tvpn-surface-muted-hover: var(--tvpn-home-surface-muted-hover, rgba(255, 255, 255, 0.055));
+	--tvpn-surface-elevated: var(--tvpn-home-surface-elevated, rgba(2, 6, 23, 0.32));
+	--tvpn-surface-elevated-strong: var(--tvpn-home-surface-elevated-strong, rgba(2, 6, 23, 0.45));
+	--tvpn-input-bg: var(--tvpn-home-input-bg, rgba(255, 255, 255, 0.03));
+	--tvpn-input-border: var(--tvpn-home-input-border, rgba(255, 255, 255, 0.10));
+	--tvpn-section-border: var(--tvpn-home-section-border, rgba(255, 255, 255, 0.08));
+	--tvpn-row-border: var(--tvpn-home-row-border, rgba(255, 255, 255, 0.06));
+	--tvpn-shadow-soft: var(--tvpn-home-shadow-soft, 0 8px 24px rgba(2, 6, 23, 0.08));
+	--tvpn-shadow-strong: var(--tvpn-home-shadow-strong, 0 14px 30px rgba(2, 6, 23, 0.12));
+	--tvpn-card-shadow: var(--tvpn-home-card-shadow, 0 10px 24px rgba(2, 6, 23, 0.12));
+	--tvpn-chart-bg: var(--tvpn-home-chart-bg, radial-gradient(circle at 0 0, rgba(120, 174, 255, 0.14), rgba(6, 14, 28, 0.72) 56%), linear-gradient(180deg, rgba(7, 16, 32, 0.98), rgba(7, 14, 30, 0.88)));
+	--tvpn-chart-border: var(--tvpn-home-chart-border, rgba(147, 188, 255, 0.22));
+	--tvpn-chart-shadow: var(--tvpn-home-chart-shadow, inset 0 0 0 1px rgba(15, 28, 52, 0.45), 0 24px 60px rgba(0, 0, 0, 0.35));
+	--tvpn-chart-axis: var(--tvpn-home-chart-axis, rgba(215, 231, 255, 0.70));
+	--tvpn-chart-axis-strong: var(--tvpn-home-chart-axis-strong, rgba(255, 255, 255, 0.14));
+	--tvpn-chart-grid: var(--tvpn-home-chart-grid, rgba(255, 255, 255, 0.07));
+	--tvpn-chart-tooltip-bg: var(--tvpn-home-chart-tooltip-bg, rgba(8, 16, 32, 0.94));
+	--tvpn-chart-tooltip-border: var(--tvpn-home-chart-tooltip-border, rgba(255, 255, 255, 0.18));
+	--tvpn-chart-tooltip-text: var(--tvpn-home-chart-tooltip-text, #eaf2ff);
+	--tvpn-chart-empty-text: var(--tvpn-home-chart-empty-text, rgba(215, 231, 255, 0.56));
+	--tvpn-accent-soft: var(--tvpn-home-accent-soft, rgba(59, 130, 246, 0.08));
+	--tvpn-accent-strong: var(--tvpn-home-accent-strong, rgba(59, 130, 246, 0.18));
+	--tvpn-accent-gradient: var(--tvpn-home-accent-gradient, linear-gradient(120deg, rgba(59, 130, 246, 0.18), rgba(16, 185, 129, 0.12)));
+	--tvpn-activity-eyebrow-text: var(--tvpn-home-activity-eyebrow-text, rgba(191, 219, 254, 0.96));
+	--tvpn-activity-eyebrow-bg: var(--tvpn-home-activity-eyebrow-bg, rgba(59, 130, 246, 0.16));
+	--tvpn-activity-eyebrow-border: var(--tvpn-home-activity-eyebrow-border, rgba(96, 165, 250, 0.24));
+	padding: 16px 20px 20px;
 	max-width: 100%;
 	display: grid;
 	grid-template-columns: minmax(0, 1fr) minmax(320px, 380px);
-	gap: 12px;
+	gap: 16px;
 	align-items: start;
 	justify-items: stretch;
 	width: 100%;
 	min-width: 0;
+	color: var(--tvpn-text);
+	background:
+		radial-gradient(circle at 0 0, var(--tvpn-page-glow-a), transparent 28%),
+		radial-gradient(circle at 100% 0, var(--tvpn-page-glow-b), transparent 24%),
+		var(--tvpn-page-base);
+}
+
+:global(body.light) {
+	--tvpn-home-page-base: #eef3f8;
+	--tvpn-home-page-glow-a: rgba(59, 130, 246, 0.10);
+	--tvpn-home-page-glow-b: rgba(16, 185, 129, 0.06);
+	--tvpn-home-text: #182334;
+	--tvpn-home-text-soft: rgba(51, 65, 85, 0.76);
+	--tvpn-home-border: rgba(148, 163, 184, 0.22);
+	--tvpn-home-border-strong: rgba(59, 130, 246, 0.30);
+	--tvpn-home-surface-soft: rgba(255, 255, 255, 0.88);
+	--tvpn-home-surface-strong: rgba(255, 255, 255, 0.96);
+	--tvpn-home-surface-muted: rgba(248, 250, 252, 0.92);
+	--tvpn-home-surface-muted-hover: rgba(241, 245, 249, 0.96);
+	--tvpn-home-surface-elevated: rgba(241, 245, 249, 0.94);
+	--tvpn-home-surface-elevated-strong: rgba(226, 232, 240, 0.96);
+	--tvpn-home-input-bg: rgba(255, 255, 255, 0.98);
+	--tvpn-home-input-border: rgba(148, 163, 184, 0.24);
+	--tvpn-home-section-border: rgba(148, 163, 184, 0.18);
+	--tvpn-home-row-border: rgba(148, 163, 184, 0.16);
+	--tvpn-home-shadow-soft: 0 12px 24px rgba(15, 23, 42, 0.08);
+	--tvpn-home-shadow-strong: 0 18px 30px rgba(15, 23, 42, 0.12);
+	--tvpn-home-card-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
+	--tvpn-home-chart-bg: radial-gradient(circle at 0 0, rgba(96, 165, 250, 0.18), rgba(255, 255, 255, 0.96) 56%), linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 250, 252, 0.98));
+	--tvpn-home-chart-border: rgba(148, 163, 184, 0.28);
+	--tvpn-home-chart-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.75), 0 20px 44px rgba(15, 23, 42, 0.08);
+	--tvpn-home-chart-axis: rgba(71, 85, 105, 0.84);
+	--tvpn-home-chart-axis-strong: rgba(148, 163, 184, 0.36);
+	--tvpn-home-chart-grid: rgba(148, 163, 184, 0.16);
+	--tvpn-home-chart-tooltip-bg: rgba(255, 255, 255, 0.98);
+	--tvpn-home-chart-tooltip-border: rgba(148, 163, 184, 0.28);
+	--tvpn-home-chart-tooltip-text: #182334;
+	--tvpn-home-chart-empty-text: rgba(71, 85, 105, 0.68);
+	--tvpn-home-accent-soft: rgba(59, 130, 246, 0.08);
+	--tvpn-home-accent-strong: rgba(59, 130, 246, 0.14);
+	--tvpn-home-accent-gradient: linear-gradient(120deg, rgba(59, 130, 246, 0.16), rgba(16, 185, 129, 0.10));
+	--tvpn-home-activity-eyebrow-text: #1d4ed8;
+	--tvpn-home-activity-eyebrow-bg: rgba(59, 130, 246, 0.10);
+	--tvpn-home-activity-eyebrow-border: rgba(96, 165, 250, 0.20);
 }
 
 .page__main {
 	display: grid;
-	gap: 12px;
+	gap: 16px;
 	min-width: 0;
 	align-items: stretch;
 	justify-items: stretch;
@@ -2241,9 +2836,9 @@ onMounted(() => {
 
 .page__side {
 	display: grid;
-	gap: 12px;
+	gap: 16px;
 	position: sticky;
-	top: 12px;
+	top: 16px;
 	align-self: start;
 	min-width: 0;
 	align-items: stretch;
@@ -2256,37 +2851,65 @@ onMounted(() => {
 	justify-self: stretch;
 }
 
-.hero {
+.home-hero {
 	display: flex;
 	align-items: flex-start;
 	justify-content: space-between;
 	gap: 16px;
-	padding: 16px;
-	border-radius: 12px;
-	background: linear-gradient(135deg, rgba(59, 130, 246, 0.12), rgba(16, 185, 129, 0.06));
-	border: 1px solid rgba(255, 255, 255, 0.06);
+	padding: 20px;
+	border-radius: var(--tvpn-radius);
+	background:
+		linear-gradient(145deg, rgba(59, 130, 246, 0.12), rgba(16, 185, 129, 0.05)),
+		var(--tvpn-surface-strong);
+	border: 1px solid var(--tvpn-border-strong);
 	margin-bottom: 0;
+	box-shadow: var(--tvpn-shadow-soft);
+	min-height: 0;
+	height: auto;
 }
 
-.hero__title {
-	font-size: 20px;
+.home-hero__left,
+.home-hero__right {
+	min-width: 0;
+}
+
+.home-hero__left {
+	flex: 1 1 560px;
+}
+
+.home-hero__right {
+	flex: 0 0 min(340px, 40%);
+}
+
+.home-hero__meta {
+	padding: 12px 14px;
+	border-radius: 12px;
+	background: var(--tvpn-surface-soft);
+	border: 1px solid var(--tvpn-border);
+	box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.home-hero__title {
+	font-size: clamp(21px, 2.2vw, 26px);
 	font-weight: 700;
 	line-height: 1.2;
+	letter-spacing: -0.015em;
 }
 
-.hero__subtitle {
-	margin-top: 6px;
+.home-hero__subtitle {
+	margin-top: 8px;
 	opacity: 0.8;
 	max-width: 720px;
 	font-size: 13px;
+	line-height: 1.5;
 }
 
-.hero__meta-label {
+.home-hero__meta-label {
 	font-size: 12px;
-	opacity: 0.7;
+	color: var(--tvpn-text-soft);
 }
 
-.hero__meta-value {
+.home-hero__meta-value {
 	margin-top: 2px;
 	font-weight: 600;
 }
@@ -2294,7 +2917,7 @@ onMounted(() => {
 .kpi-grid {
 	display: grid;
 	grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-	gap: 12px;
+	gap: 13px;
 	min-width: 0;
 	justify-items: stretch;
 }
@@ -2341,10 +2964,11 @@ onMounted(() => {
 .trend {
 	padding: 10px;
 	border-radius: 12px;
-	border: 1px solid rgba(255, 255, 255, 0.06);
-	background: rgba(255, 255, 255, 0.03);
+	border: 1px solid var(--tvpn-border);
+	background: var(--tvpn-surface-soft);
 	width: 100%;
 	min-width: 0;
+	box-shadow: var(--tvpn-shadow-soft);
 }
 
 .trend__head {
@@ -2740,82 +3364,6 @@ onMounted(() => {
 	stroke: rgba(139, 92, 246, 0.9);
 }
 
-.events {
-	display: grid;
-	grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-	gap: 12px;
-}
-
-.events__title {
-	display: flex;
-	align-items: center;
-	gap: 8px;
-	font-weight: 700;
-	margin-bottom: 10px;
-}
-
-.events__all {
-	margin-left: auto;
-	font-size: 12px;
-	opacity: 0.8;
-	text-decoration: none;
-}
-
-.events__list {
-	display: grid;
-	gap: 8px;
-}
-
-.events__empty {
-	opacity: 0.7;
-	font-size: 12px;
-}
-
-.event {
-	display: flex;
-	justify-content: space-between;
-	gap: 12px;
-	padding: 10px;
-	border-radius: 12px;
-	text-decoration: none;
-	border: 1px solid rgba(255, 255, 255, 0.06);
-	background: rgba(255, 255, 255, 0.03);
-}
-
-.event:hover {
-	background: rgba(255, 255, 255, 0.05);
-}
-
-.event__title {
-	font-weight: 650;
-	overflow-wrap: anywhere;
-}
-
-.event__meta {
-	display: flex;
-	flex-wrap: wrap;
-	gap: 6px;
-	margin-top: 4px;
-}
-
-.event__time {
-	font-size: 12px;
-	opacity: 0.75;
-	white-space: nowrap;
-}
-
-.pill {
-	font-size: 11px;
-	padding: 2px 6px;
-	border-radius: 999px;
-	border: 1px solid rgba(255, 255, 255, 0.08);
-	opacity: 0.9;
-}
-
-.pill--bad {
-	background: rgba(239, 68, 68, 0.16);
-}
-
 .kpi {
 	padding: 14px;
 	border-radius: 12px;
@@ -2823,6 +3371,9 @@ onMounted(() => {
 	width: 100%;
 	max-width: none !important;
 	justify-self: stretch !important;
+	border: 1px solid var(--tvpn-border);
+	background: var(--tvpn-surface-soft);
+	box-shadow: var(--tvpn-shadow-soft);
 }
 
 .kpi__row {
@@ -2875,16 +3426,15 @@ onMounted(() => {
 	display: grid;
 	grid-template-columns: 1fr;
 	padding: 14px;
-	border-radius: 12px;
+	border-radius: var(--tvpn-radius);
 	overflow: hidden;
 	width: 100%;
 	max-width: none !important;
 	box-sizing: border-box;
 	justify-self: stretch !important;
-}
-
-.panel--ops-accordion {
-	overflow: visible;
+	background: var(--tvpn-surface-strong);
+	border: 1px solid var(--tvpn-border);
+	box-shadow: var(--tvpn-shadow-soft);
 }
 
 .panel > * {
@@ -2895,14 +3445,94 @@ onMounted(() => {
 
 .panel__title {
 	font-weight: 700;
+	font-size: 15px;
+	line-height: 1.3;
+	letter-spacing: 0.01em;
 }
 
 .panel__subtitle {
 	opacity: 0.75;
 	font-size: 12px;
+	line-height: 1.45;
 	margin-top: 4px;
-	margin-bottom: 10px;
+	margin-bottom: 12px;
 }
+
+.panel__title,
+.panel__subtitle,
+.widgets__title,
+.widgets__hint,
+.action__title,
+.action__desc,
+.health__hint {
+	overflow-wrap: anywhere;
+}
+
+.panel,
+.kpi,
+.trend,
+.action,
+.widgets__row,
+.control-link,
+.nav__item {
+	transition:
+		background 0.18s ease,
+		border-color 0.18s ease,
+		box-shadow 0.18s ease,
+		transform 0.18s ease;
+}
+
+:where(.home-hero__cta, .widgets__row, .action, .control-link, .nav__item):focus-visible {
+	outline: 2px solid rgba(147, 197, 253, 0.8);
+	outline-offset: 2px;
+}
+
+.panel--activity {
+	padding: 16px;
+	border-color: var(--tvpn-border);
+	background:
+		linear-gradient(180deg, rgba(59, 130, 246, 0.05), rgba(59, 130, 246, 0.02)),
+		var(--tvpn-surface-strong);
+	box-shadow: var(--tvpn-shadow-soft);
+}
+
+.ops-grid {
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	grid-template-areas:
+		'summary summary'
+		'notify notify'
+		'maintenance thresholds'
+		'hwid hwid'
+		'console console'
+		'links links'
+		'map map';
+	gap: 14px;
+	min-width: 0;
+	align-items: start;
+}
+
+.ops-grid > * {
+	min-width: 0;
+	align-self: start;
+	height: auto;
+}
+
+.panel--ops-summary { grid-area: summary; }
+
+.panel--ops-notify { grid-area: notify; }
+
+.panel--ops-maintenance { grid-area: maintenance; }
+
+.panel--ops-thresholds { grid-area: thresholds; }
+
+.panel--ops-hwid { grid-area: hwid; }
+
+.panel--ops-console { grid-area: console; }
+
+.panel--ops-links { grid-area: links; }
+
+.panel--ops-map { grid-area: map; }
 
 .ops-toolbar {
 	display: flex;
@@ -2917,6 +3547,34 @@ onMounted(() => {
 	opacity: 0.74;
 }
 
+.inline-link {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 12px;
+	text-decoration: none;
+	color: inherit;
+	opacity: 0.82;
+	padding: 5px 9px;
+	border-radius: 9px;
+	border: 1px solid var(--tvpn-border);
+	background: var(--tvpn-surface-soft);
+}
+
+.inline-link:hover {
+	opacity: 1;
+	border-color: var(--tvpn-border-strong);
+	background: var(--tvpn-accent-soft);
+}
+
+.notification-result {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	gap: 10px;
+	flex-wrap: wrap;
+}
+
 .ops-stack {
 	display: grid;
 	gap: 12px;
@@ -2927,8 +3585,8 @@ onMounted(() => {
 	gap: 10px;
 	padding: 12px;
 	border-radius: 12px;
-	border: 1px solid rgba(255, 255, 255, 0.08);
-	background: rgba(255, 255, 255, 0.03);
+	border: 1px solid var(--tvpn-section-border);
+	background: var(--tvpn-surface-muted);
 	min-width: 0;
 	width: 100%;
 	box-sizing: border-box;
@@ -2954,8 +3612,8 @@ onMounted(() => {
 .ops-health__item {
 	padding: 10px;
 	border-radius: 10px;
-	border: 1px solid rgba(255, 255, 255, 0.08);
-	background: rgba(2, 6, 23, 0.32);
+	border: 1px solid var(--tvpn-section-border);
+	background: var(--tvpn-surface-elevated);
 	display: grid;
 	gap: 6px;
 }
@@ -2976,7 +3634,8 @@ onMounted(() => {
 	border-radius: 999px;
 	font-size: 11px;
 	font-weight: 700;
-	border: 1px solid rgba(255, 255, 255, 0.12);
+	border: 1px solid var(--tvpn-input-border);
+	background: var(--tvpn-surface-muted);
 }
 
 .ops-badge--ok {
@@ -3002,15 +3661,18 @@ onMounted(() => {
 	gap: 6px;
 	padding: 10px;
 	border-radius: 10px;
-	border: 1px solid rgba(59, 130, 246, 0.24);
-	background: linear-gradient(150deg, rgba(59, 130, 246, 0.12), rgba(255, 255, 255, 0.03));
+	border: 1px solid var(--tvpn-border-strong);
+	background: linear-gradient(150deg, rgba(59, 130, 246, 0.16), var(--tvpn-surface-muted));
 	text-decoration: none;
 	color: inherit;
 	min-width: 0;
+	box-shadow: var(--tvpn-shadow-soft);
 }
 
 .control-link:hover {
-	background: linear-gradient(150deg, rgba(59, 130, 246, 0.18), rgba(255, 255, 255, 0.05));
+	background: linear-gradient(150deg, rgba(59, 130, 246, 0.20), var(--tvpn-surface-muted-hover));
+	border-color: var(--tvpn-border-strong);
+	transform: translateY(-1px);
 }
 
 .control-link__head {
@@ -3039,6 +3701,80 @@ onMounted(() => {
 .settings__actions {
 	display: flex;
 	justify-content: flex-start;
+	gap: 8px;
+	flex-wrap: wrap;
+}
+
+.notification-presets {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin-bottom: 10px;
+}
+
+.notification-presets__btn {
+	border: 1px solid var(--tvpn-border);
+	background: var(--tvpn-surface-muted);
+	color: inherit;
+	padding: 6px 10px;
+	border-radius: 10px;
+	font-size: 12px;
+	cursor: pointer;
+}
+
+.notification-presets__btn:hover {
+	border-color: var(--tvpn-border-strong);
+	background: var(--tvpn-accent-soft);
+}
+
+.notification-form {
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: 10px;
+}
+
+.notification-form__field {
+	display: grid;
+	gap: 6px;
+	font-size: 12px;
+	opacity: 0.9;
+}
+
+.notification-form__field--wide {
+	grid-column: 1 / -1;
+}
+
+.notification-form__field--checkbox {
+	grid-template-columns: minmax(0, 1fr) auto;
+	align-items: center;
+}
+
+.notification-form__input,
+.notification-form__textarea {
+	width: 100%;
+	min-width: 0;
+	padding: 7px 9px;
+	border-radius: 10px;
+	border: 1px solid var(--tvpn-input-border);
+	background: var(--tvpn-input-bg);
+	color: inherit;
+	box-sizing: border-box;
+}
+
+.notification-form__textarea {
+	min-height: 78px;
+	resize: vertical;
+}
+
+.notification-form__toggle {
+	width: 16px;
+	height: 16px;
+}
+
+.notification-form__hint {
+	margin-top: 8px;
+	font-size: 12px;
+	opacity: 0.74;
 }
 
 .actions {
@@ -3055,8 +3791,9 @@ onMounted(() => {
 .widgets__block {
 	padding: 10px;
 	border-radius: 12px;
-	border: 1px solid rgba(255, 255, 255, 0.06);
-	background: rgba(255, 255, 255, 0.03);
+	border: 1px solid var(--tvpn-border);
+	background: var(--tvpn-surface-muted);
+	box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 
 .widgets__title {
@@ -3073,31 +3810,38 @@ onMounted(() => {
 }
 
 .widgets__row {
-	display: flex;
-	justify-content: space-between;
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) auto;
+	align-items: center;
 	gap: 10px;
 	padding: 8px 10px;
 	border-radius: 10px;
 	text-decoration: none;
-	border: 1px solid rgba(255, 255, 255, 0.06);
-	background: rgba(255, 255, 255, 0.02);
+	border: 1px solid var(--tvpn-section-border);
+	background: var(--tvpn-surface-muted);
 }
 
 .widgets__row:hover {
-	background: rgba(255, 255, 255, 0.04);
+	background: var(--tvpn-surface-muted-hover);
+	border-color: var(--tvpn-border-strong);
+	transform: translateY(-1px);
 }
 
 .widgets__name {
+	min-width: 0;
 	font-weight: 600;
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
+	line-height: 1.25;
 }
 
 .widgets__meta {
 	font-size: 12px;
 	opacity: 0.75;
 	white-space: nowrap;
+	justify-self: end;
+	text-align: right;
 }
 
 .widgets__empty {
@@ -3129,15 +3873,22 @@ onMounted(() => {
 	grid-template-columns: 1fr;
 }
 
+.settings__row > span {
+	min-width: 0;
+	line-height: 1.35;
+	overflow-wrap: anywhere;
+}
+
 .settings__input {
 	width: 100%;
+	min-width: 0;
 }
 
 .settings__input--num {
 	padding: 6px 8px;
 	border-radius: 10px;
-	border: 1px solid rgba(255, 255, 255, 0.10);
-	background: rgba(255, 255, 255, 0.03);
+	border: 1px solid var(--tvpn-input-border);
+	background: var(--tvpn-input-bg);
 	color: inherit;
 }
 
@@ -3145,8 +3896,8 @@ onMounted(() => {
 	min-height: 72px;
 	padding: 8px 10px;
 	border-radius: 10px;
-	border: 1px solid rgba(255, 255, 255, 0.10);
-	background: rgba(255, 255, 255, 0.03);
+	border: 1px solid var(--tvpn-input-border);
+	background: var(--tvpn-input-bg);
 	color: inherit;
 	resize: vertical;
 }
@@ -3170,8 +3921,8 @@ onMounted(() => {
 	width: 100%;
 	padding: 8px 10px;
 	border-radius: 10px;
-	border: 1px solid rgba(255, 255, 255, 0.10);
-	background: rgba(255, 255, 255, 0.03);
+	border: 1px solid var(--tvpn-input-border);
+	background: var(--tvpn-input-bg);
 	color: inherit;
 	min-width: 0;
 	box-sizing: border-box;
@@ -3186,8 +3937,8 @@ onMounted(() => {
 	margin: 0;
 	padding: 10px;
 	border-radius: 10px;
-	border: 1px solid rgba(255, 255, 255, 0.08);
-	background: rgba(2, 6, 23, 0.45);
+	border: 1px solid var(--tvpn-section-border);
+	background: var(--tvpn-surface-elevated-strong);
 	max-height: 240px;
 	overflow: auto;
 	font-size: 11px;
@@ -3196,12 +3947,183 @@ onMounted(() => {
 	word-break: break-word;
 }
 
+.hwid-tool__notice {
+	display: grid;
+	gap: 6px;
+}
+
+.hwid-tool__form {
+	margin-top: 10px;
+}
+
+.hwid-tool__confirm {
+	display: grid;
+	grid-template-columns: auto minmax(0, 1fr);
+	gap: 10px;
+	align-items: start;
+	margin-top: 10px;
+	padding: 10px 12px;
+	border-radius: 12px;
+	border: 1px solid var(--tvpn-section-border);
+	background: var(--tvpn-surface-muted);
+	font-size: 12px;
+	line-height: 1.4;
+}
+
+.hwid-tool__confirm-input {
+	margin-top: 3px;
+}
+
+.hwid-tool__actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin-top: 12px;
+}
+
+.hwid-tool__preview {
+	display: grid;
+	gap: 12px;
+	margin-top: 14px;
+	max-height: min(72vh, 860px);
+	overflow: auto;
+	overscroll-behavior: contain;
+	scrollbar-gutter: stable;
+	padding-right: 4px;
+}
+
+.hwid-tool__preview-head {
+	display: grid;
+	gap: 4px;
+}
+
+.hwid-tool__preview-title {
+	font-weight: 700;
+}
+
+.hwid-tool__preview-subtitle,
+.hwid-tool__empty {
+	font-size: 12px;
+	opacity: 0.76;
+}
+
+.hwid-tool__owners {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+	gap: 10px;
+}
+
+.hwid-tool__owner {
+	display: grid;
+	gap: 10px;
+	padding: 12px;
+	border-radius: 14px;
+	border: 1px solid var(--tvpn-section-border);
+	background: var(--tvpn-surface-elevated);
+}
+
+.hwid-tool__owner-head {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 10px;
+	flex-wrap: wrap;
+}
+
+.hwid-tool__owner-title {
+	font-weight: 700;
+}
+
+.hwid-tool__owner-meta {
+	margin-top: 4px;
+	font-size: 12px;
+	opacity: 0.74;
+	word-break: break-word;
+}
+
+.hwid-tool__owner-badges {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+}
+
+.hwid-tool__badge {
+	padding: 4px 8px;
+	border-radius: 999px;
+	border: 1px solid var(--tvpn-input-border);
+	background: var(--tvpn-surface-muted);
+	font-size: 11px;
+	font-weight: 700;
+}
+
+.hwid-tool__badge--accent {
+	background: rgba(59, 130, 246, 0.16);
+}
+
+.hwid-tool__badge--warn {
+	background: rgba(245, 158, 11, 0.22);
+}
+
+.hwid-tool__owner-grid {
+	display: grid;
+	gap: 8px;
+}
+
+.hwid-tool__owner-row {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr);
+	gap: 3px;
+	align-items: start;
+	font-size: 12px;
+}
+
+.hwid-tool__owner-row > span {
+	opacity: 0.76;
+}
+
+.hwid-tool__owner-row > strong {
+	text-align: left;
+	word-break: break-word;
+	line-height: 1.4;
+}
+
+.hwid-tool__results {
+	display: grid;
+	gap: 8px;
+}
+
+.hwid-tool__results-title {
+	font-size: 12px;
+	font-weight: 700;
+	opacity: 0.82;
+}
+
+.hwid-tool__results-list {
+	display: grid;
+	gap: 6px;
+}
+
+.hwid-tool__result-row {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) auto;
+	gap: 10px;
+	padding: 8px 10px;
+	border-radius: 10px;
+	border: 1px solid var(--tvpn-section-border);
+	background: var(--tvpn-surface-muted);
+	font-size: 12px;
+}
+
+.hwid-tool__result-row > span {
+	word-break: break-word;
+}
+
 .help__row {
 	display: grid;
 	grid-template-columns: 120px 1fr;
 	gap: 10px;
 	padding: 8px 0;
-	border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+	border-bottom: 1px solid var(--tvpn-row-border);
 }
 
 .help__row:last-child {
@@ -3224,12 +4146,15 @@ onMounted(() => {
 	padding: 10px;
 	border-radius: 10px;
 	text-decoration: none;
-	border: 1px solid rgba(255, 255, 255, 0.06);
-	background: rgba(255, 255, 255, 0.03);
+	border: 1px solid var(--tvpn-border);
+	background: var(--tvpn-surface-muted);
+	box-shadow: var(--tvpn-shadow-soft);
 }
 
 .action:hover {
-	background: rgba(255, 255, 255, 0.05);
+	background: var(--tvpn-surface-muted-hover);
+	border-color: var(--tvpn-border-strong);
+	transform: translateY(-1px);
 }
 
 .action__title {
@@ -3247,7 +4172,7 @@ onMounted(() => {
 	justify-content: space-between;
 	align-items: center;
 	padding: 8px 0;
-	border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+	border-bottom: 1px solid var(--tvpn-row-border);
 }
 
 .health__row:last-child {
@@ -3296,14 +4221,18 @@ onMounted(() => {
 	border-radius: 10px;
 	text-decoration: none;
 	color: inherit;
+	border: 1px solid transparent;
+	transition: border-color 0.18s ease, background 0.18s ease;
 }
 
 .nav__item:hover {
-	background: rgba(255, 255, 255, 0.05);
+	background: var(--tvpn-accent-soft);
+	border-color: var(--tvpn-border);
 }
 
 .nav__item--active {
-	background: rgba(59, 130, 246, 0.14);
+	background: var(--tvpn-accent-strong);
+	border-color: var(--tvpn-border-strong);
 }
 
 .nav--premium {
@@ -3318,8 +4247,10 @@ onMounted(() => {
 	align-items: center;
 	padding: 10px;
 	border-radius: 12px;
-	border: 1px solid rgba(255, 255, 255, 0.08);
-	background: linear-gradient(135deg, rgba(59, 130, 246, 0.16), rgba(16, 185, 129, 0.08));
+	border: 1px solid var(--tvpn-border);
+	background:
+		linear-gradient(135deg, rgba(59, 130, 246, 0.12), rgba(16, 185, 129, 0.06)),
+		var(--tvpn-surface-soft);
 }
 
 .nav__brand-logo {
@@ -3356,7 +4287,7 @@ onMounted(() => {
 	width: 28px;
 	height: 28px;
 	border-radius: 8px;
-	background: rgba(59, 130, 246, 0.15);
+	background: var(--tvpn-accent-strong);
 }
 
 .nav__item-label {
@@ -3370,8 +4301,8 @@ onMounted(() => {
 	line-height: 1;
 	padding: 4px 6px;
 	border-radius: 999px;
-	border: 1px solid rgba(255, 255, 255, 0.12);
-	background: rgba(255, 255, 255, 0.06);
+	border: 1px solid var(--tvpn-border);
+	background: var(--tvpn-surface-soft);
 	opacity: 0.9;
 }
 
@@ -3386,9 +4317,23 @@ onMounted(() => {
 	align-items: center;
 }
 
+.panel__head--compact {
+	align-items: flex-start;
+	margin-bottom: 8px;
+}
+
+.panel__head--compact .panel__subtitle {
+	margin-bottom: 0;
+}
+
 .panel--chart-hub {
-	border: 1px solid rgba(59, 130, 246, 0.22);
-	background: linear-gradient(165deg, rgba(59, 130, 246, 0.08), rgba(10, 20, 38, 0.85));
+	border: 1px solid var(--tvpn-border);
+	background:
+		linear-gradient(165deg, rgba(59, 130, 246, 0.08), rgba(16, 185, 129, 0.04)),
+		var(--tvpn-surface-strong);
+	box-shadow: var(--tvpn-shadow-soft);
+	gap: 12px;
+	overflow: visible;
 }
 
 .segmented {
@@ -3397,8 +4342,8 @@ onMounted(() => {
 	gap: 6px;
 	padding: 4px;
 	border-radius: 10px;
-	border: 1px solid rgba(255, 255, 255, 0.08);
-	background: rgba(255, 255, 255, 0.02);
+	border: 1px solid var(--tvpn-border);
+	background: var(--tvpn-surface-soft);
 }
 
 .segmented--compact {
@@ -3419,25 +4364,37 @@ onMounted(() => {
 
 .segmented__btn:hover {
 	opacity: 1;
-	background: rgba(255, 255, 255, 0.06);
+	background: var(--tvpn-accent-soft);
 }
 
 .segmented__btn--active {
 	opacity: 1;
-	background: linear-gradient(120deg, rgba(59, 130, 246, 0.35), rgba(16, 185, 129, 0.26));
+	background: var(--tvpn-accent-gradient);
 }
 
 .chart-hub__stats {
 	display: grid;
 	grid-template-columns: repeat(3, minmax(0, 1fr));
 	gap: 10px;
+	align-items: stretch;
 }
 
 .chart-hub__stat {
 	padding: 10px;
 	border-radius: 10px;
-	border: 1px solid rgba(255, 255, 255, 0.08);
-	background: rgba(255, 255, 255, 0.03);
+	border: 1px solid var(--tvpn-border);
+	background: var(--tvpn-surface-soft);
+	min-height: 72px;
+	display: grid;
+	align-content: start;
+}
+
+.panel--chart-hub :deep(.chart) {
+	margin-top: 2px;
+}
+
+.panel--chart-hub :deep(.chart__canvas) {
+	overflow: hidden;
 }
 
 .chart-hub__label {
@@ -3452,42 +4409,7 @@ onMounted(() => {
 	letter-spacing: -0.01em;
 }
 
-.panel--ops-accordion :deep(.v-expansion-panel) {
-	border-radius: 10px;
-	overflow: hidden;
-	background: rgba(255, 255, 255, 0.02);
-	border: 1px solid rgba(255, 255, 255, 0.06);
-	min-width: 0;
-	width: 100%;
-	box-sizing: border-box;
-}
-
-.panel--ops-accordion :deep(.v-expansion-panels) {
-	display: grid;
-	gap: 10px;
-	align-content: start;
-}
-
-.panel--ops-accordion :deep(.v-expansion-panel-title) {
-	min-height: 52px;
-	padding: 11px 14px;
-	font-weight: 700;
-}
-
-.panel--ops-accordion :deep(.v-expansion-panel-text) {
-	overflow: visible;
-}
-
-.panel--ops-accordion :deep(.v-expansion-panel-text__wrapper) {
-	padding: 0 14px 14px;
-	background: rgba(255, 255, 255, 0.01);
-	overflow: visible;
-	min-width: 0;
-	width: 100%;
-	box-sizing: border-box;
-}
-
-.hero__kicker {
+.home-hero__kicker {
 	display: inline-flex;
 	width: fit-content;
 	padding: 3px 10px;
@@ -3496,18 +4418,18 @@ onMounted(() => {
 	font-weight: 700;
 	letter-spacing: 0.07em;
 	text-transform: uppercase;
-	border: 1px solid rgba(255, 255, 255, 0.12);
-	background: rgba(59, 130, 246, 0.2);
+	border: 1px solid var(--tvpn-border);
+	background: var(--tvpn-accent-strong);
 }
 
-.hero__cta-row {
+.home-hero__cta-row {
 	display: flex;
 	flex-wrap: wrap;
 	gap: 8px;
-	margin-top: 8px;
+	margin-top: 12px;
 }
 
-.hero__cta {
+.home-hero__cta {
 	display: inline-flex;
 	gap: 8px;
 	align-items: center;
@@ -3517,29 +4439,53 @@ onMounted(() => {
 	color: inherit;
 	font-size: 12px;
 	font-weight: 650;
-	border: 1px solid rgba(255, 255, 255, 0.12);
+	border: 1px solid var(--tvpn-border);
+	transition:
+		background 0.18s ease,
+		border-color 0.18s ease,
+		box-shadow 0.18s ease,
+		transform 0.18s ease;
+	box-shadow: var(--tvpn-shadow-soft);
 }
 
-.hero__cta--primary {
-	background: linear-gradient(120deg, rgba(59, 130, 246, 0.38), rgba(16, 185, 129, 0.28));
+.home-hero__cta:hover {
+	transform: translateY(-1px);
+	border-color: var(--tvpn-border-strong);
+	box-shadow: var(--tvpn-card-shadow);
 }
 
-.hero__cta--ghost {
-	background: rgba(255, 255, 255, 0.04);
+.home-hero__cta--primary {
+	background: linear-gradient(120deg, rgba(59, 130, 246, 0.34), rgba(16, 185, 129, 0.22));
 }
 
-.hero__meta-stats {
+.home-hero__cta--ghost {
+	background: var(--tvpn-surface-soft);
+}
+
+.home-hero__meta-stats {
 	margin-top: 10px;
 	display: grid;
 	gap: 6px;
 }
 
-.hero__meta-stat {
+.home-hero__meta-stat {
 	display: flex;
 	justify-content: space-between;
 	gap: 10px;
 	font-size: 12px;
 	opacity: 0.9;
+	padding: 4px 0;
+	border-bottom: 1px solid var(--tvpn-border);
+}
+
+.home-hero__meta-stat:last-child {
+	border-bottom: none;
+	padding-bottom: 0;
+}
+
+.home-hero__meta-stat strong {
+	font-weight: 750;
+	letter-spacing: -0.01em;
 }
 
 @media (max-width: 1500px) {
@@ -3551,18 +4497,21 @@ onMounted(() => {
 @media (max-width: 1400px) {
 	.page {
 		grid-template-columns: 1fr;
+		gap: 12px;
 	}
 
 	.page__side {
 		position: static;
 		top: auto;
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+		align-items: stretch;
+	}
+
+	.page__side > * {
+		height: 100%;
 	}
 
 	.trends {
-		grid-template-columns: 1fr;
-	}
-
-	.events {
 		grid-template-columns: 1fr;
 	}
 
@@ -3576,17 +4525,90 @@ onMounted(() => {
 	}
 }
 
+@media (max-width: 1200px) {
+	.ops-grid {
+		grid-template-columns: 1fr;
+		grid-template-areas:
+			'summary'
+			'notify'
+			'maintenance'
+			'thresholds'
+			'hwid'
+			'console'
+			'links'
+			'map';
+		gap: 12px;
+	}
+
+	.page__side {
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+	}
+
+	.page__side > :last-child {
+		grid-column: 1 / -1;
+	}
+}
+
+@media (max-width: 980px) {
+	/* On phones/tablets, hide custom module navigation column to keep main content readable. */
+	:deep(.private-view__navigation) {
+		display: none !important;
+		width: 0 !important;
+		min-width: 0 !important;
+		max-width: 0 !important;
+		padding: 0 !important;
+		margin: 0 !important;
+		border: 0 !important;
+		overflow: hidden !important;
+	}
+
+	:deep(.private-view__main),
+	:deep(.private-view__content) {
+		max-width: none !important;
+		width: 100% !important;
+	}
+
+	.notification-form {
+		grid-template-columns: 1fr;
+	}
+
+	.chart-hub__stats {
+		grid-template-columns: 1fr;
+	}
+
+	.home-hero {
+		flex-direction: column;
+		padding: 14px;
+		gap: 12px;
+		min-height: auto !important;
+		height: auto !important;
+		max-height: none !important;
+	}
+
+	.home-hero__left,
+	.home-hero__right {
+		flex: 0 0 auto;
+		width: 100%;
+	}
+
+	.home-hero__subtitle {
+		max-width: none;
+	}
+
+	.home-hero__cta-row {
+		width: 100%;
+	}
+
+	.home-hero__cta {
+		flex: 1 1 160px;
+		justify-content: center;
+	}
+}
+
 @media (max-width: 720px) {
 	.page {
 		padding: 12px;
-	}
-
-	.hero {
-		flex-direction: column;
-	}
-
-	.hero__subtitle {
-		max-width: none;
+		gap: 10px;
 	}
 
 	.kpi-grid {
@@ -3598,20 +4620,14 @@ onMounted(() => {
 		align-items: flex-start;
 	}
 
-	.event {
-		flex-direction: column;
-	}
-
-	.event__time {
-		white-space: normal;
-	}
-
 	.help__row {
 		grid-template-columns: 1fr;
 	}
 
 	.settings__row {
 		grid-template-columns: 1fr;
+		align-items: start;
+		gap: 6px;
 	}
 
 	.big__metrics {
@@ -3632,6 +4648,11 @@ onMounted(() => {
 		align-items: flex-start;
 	}
 
+	.panel__head--compact {
+		flex-direction: column;
+		align-items: flex-start;
+	}
+
 	.ops-health {
 		grid-template-columns: 1fr;
 	}
@@ -3640,17 +4661,59 @@ onMounted(() => {
 		grid-template-columns: 1fr;
 	}
 
-	.nav--premium {
-		display: flex;
+	.page__side {
+		grid-template-columns: 1fr;
 		gap: 10px;
-		overflow-x: auto;
-		padding-bottom: 4px;
+	}
+
+	.page__side > :last-child {
+		grid-column: auto;
+	}
+
+	.panel {
+		padding: 12px;
+	}
+
+	.hwid-tool__preview {
+		max-height: min(68vh, 720px);
+	}
+
+	.notification-presets {
+		gap: 6px;
+	}
+
+	.notification-presets__btn {
+		flex: 1 1 auto;
+		min-width: 120px;
+	}
+
+	.widgets__row {
+		grid-template-columns: 1fr;
+		gap: 4px;
+	}
+
+	.widgets__name {
+		white-space: normal;
+		overflow: visible;
+		text-overflow: clip;
+	}
+
+	.widgets__meta {
+		justify-self: start;
+		text-align: left;
+		white-space: normal;
+	}
+
+	.nav--premium {
+		display: grid;
+		gap: 10px;
+		overflow: visible;
+		padding-bottom: 0;
 	}
 
 	.nav--premium .nav__brand,
 	.nav--premium .nav__section {
-		min-width: 240px;
+		min-width: 0;
 	}
 }
 </style>
-
