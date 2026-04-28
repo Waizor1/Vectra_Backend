@@ -7,8 +7,9 @@ import secrets
 import smtplib
 import types
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from email.message import EmailMessage
+from html import escape
 from typing import Any, Literal
 from urllib.parse import urlencode, urlsplit
 
@@ -47,6 +48,7 @@ from bloobcat.logger import get_logger
 from bloobcat.middleware.rate_limit import RateLimiter
 from bloobcat.settings import (
     auth_settings,
+    app_settings,
     oauth_settings,
     script_settings,
     smtp_settings,
@@ -733,6 +735,51 @@ async def get_or_create_user_for_oauth_profile(profile: ProviderProfile) -> tupl
     return user, True
 
 
+def _safe_html(value: Any) -> str:
+    if value is None:
+        return "—"
+    return escape(str(value), quote=False)
+
+
+async def notify_web_oauth_registration(
+    user: Users, profile: ProviderProfile, provider: OAuthProvider
+) -> None:
+    try:
+        from bloobcat.bot.notifications.admin import send_admin_message
+
+        label = {"google": "Google", "yandex": "Yandex", "telegram": "Telegram", "apple": "Apple"}.get(
+            provider,
+            provider,
+        )
+        email_line = (
+            f"\nEmail: <code>{_safe_html(profile.email)}</code>"
+            if profile.email
+            else "\nEmail: —"
+        )
+        text = (
+            "🆕 Новая web-регистрация!\n\n"
+            f"👤 Пользователь: {_safe_html(profile.display_name or user.full_name or profile.email)}\n"
+            f"🆔 ID пользователя: <code>{int(user.id)}</code>\n"
+            f"🔐 Провайдер: {_safe_html(label)}"
+            f"{email_line}\n\n"
+            "#новый_пользователь #web_auth"
+        )
+        delivered = await send_admin_message(text=text)
+        if not delivered:
+            logger.warning(
+                "Web OAuth registration log was not delivered: user=%s provider=%s",
+                user.id,
+                provider,
+            )
+    except Exception as exc:
+        logger.warning(
+            "Web OAuth registration log failed: user=%s provider=%s error=%s",
+            getattr(user, "id", None),
+            provider,
+            exc,
+        )
+
+
 def issue_access_token_for_user(user: Users) -> tuple[str, int]:
     return create_access_token(int(user.id), token_version=int(user.auth_token_version or 0))
 
@@ -789,6 +836,8 @@ async def handle_oauth_callback(provider: OAuthProvider, code: str, state: str, 
             user, created = await get_or_create_telegram_user_for_profile(profile)
         else:
             user, created = await get_or_create_user_for_oauth_profile(profile)
+            if created:
+                await notify_web_oauth_registration(user, profile, provider)
         await audit_auth_event(
             action="oauth_login",
             result="success",
@@ -990,7 +1039,39 @@ async def complete_telegram_link(source_user: Users, link_token: str, telegram_u
     return await merge_source_user_into_telegram_user(source_user, telegram_user)
 
 
+async def grant_trial_if_eligible(user: Users) -> bool:
+    """Grant the local trial entitlement without depending on RemnaWave availability."""
+    if user.expired_at is not None or user.used_trial:
+        return False
+
+    trial_until = date.today() + timedelta(days=app_settings.trial_days)
+    user.is_trial = True
+    user.used_trial = True
+    user.expired_at = trial_until
+    await user.save(update_fields=["is_trial", "used_trial", "expired_at"])
+    logger.info("Granted local trial for user=%s until %s", user.id, trial_until)
+
+    try:
+        from bloobcat.bot.notifications.trial.granted import notify_trial_granted
+
+        await notify_trial_granted(user)
+    except Exception as exc:
+        logger.warning(
+            "Trial grant notification failed for user=%s: %s",
+            getattr(user, "id", None),
+            exc,
+        )
+    return True
+
+
 async def complete_registration_for_user(user: Users) -> tuple[str, int]:
+    if is_web_user_id(user.id):
+        await grant_trial_if_eligible(user)
+        if not user.remnawave_uuid:
+            Users._schedule_remnawave_ensure(int(user.id))
+        token, ttl = issue_access_token_for_user(user)
+        return token, ttl
+
     if not user.remnawave_uuid:
         ensured = await user._ensure_remnawave_user()
         if not ensured and not user.remnawave_uuid:

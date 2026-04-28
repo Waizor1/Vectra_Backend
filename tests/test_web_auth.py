@@ -219,18 +219,55 @@ async def test_complete_telegram_link_blocks_auto_merge_when_source_has_material
 
 
 @pytest.mark.asyncio
-async def test_complete_registration_raises_when_remnawave_ensure_is_still_unavailable():
+async def test_complete_registration_raises_for_telegram_when_remnawave_ensure_is_still_unavailable():
     class _User(types.SimpleNamespace):
         async def _ensure_remnawave_user(self):
             return False
 
-    user = _User(id=web_auth.WEB_USER_ID_FLOOR + 12, remnawave_uuid=None)
+    user = _User(id=123456, remnawave_uuid=None)
 
     with pytest.raises(web_auth.WebAuthError) as exc_info:
         await web_auth.complete_registration_for_user(user)
 
     assert exc_info.value.code == "registration_sync_pending"
     assert exc_info.value.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_complete_registration_grants_web_trial_without_waiting_for_remnawave(monkeypatch):
+    calls: list[tuple[str, object]] = []
+
+    class _User(types.SimpleNamespace):
+        async def save(self, update_fields=None):
+            calls.append(("save", tuple(update_fields or ())))
+
+        async def _ensure_remnawave_user(self):
+            calls.append(("ensure", None))
+            return False
+
+    def _schedule(cls, user_id):
+        calls.append(("schedule", user_id))
+
+    monkeypatch.setattr(web_auth.Users, "_schedule_remnawave_ensure", classmethod(_schedule))
+    monkeypatch.setattr(web_auth, "issue_access_token_for_user", lambda user: ("token-web", 3600))
+
+    user = _User(
+        id=web_auth.WEB_USER_ID_FLOOR + 12,
+        remnawave_uuid=None,
+        expired_at=None,
+        is_trial=False,
+        used_trial=False,
+    )
+
+    token, ttl = await web_auth.complete_registration_for_user(user)
+
+    assert (token, ttl) == ("token-web", 3600)
+    assert user.is_trial is True
+    assert user.used_trial is True
+    assert user.expired_at is not None
+    assert ("save", ("is_trial", "used_trial", "expired_at")) in calls
+    assert ("schedule", user.id) in calls
+    assert ("ensure", None) not in calls
 
 
 @pytest.mark.asyncio
@@ -664,6 +701,59 @@ async def test_telegram_oauth_link_returns_canonical_telegram_ticket(monkeypatch
 
     assert ticket == "ticket-telegram"
     assert return_to == "/account/security"
+
+
+@pytest.mark.asyncio
+async def test_web_oauth_created_user_sends_admin_registration_log(monkeypatch):
+    user = types.SimpleNamespace(id=web_auth.WEB_USER_ID_FLOOR + 42)
+    state_row = types.SimpleNamespace(mode="login", linking_user_id=None, return_to="/connect")
+    profile = web_auth.ProviderProfile(
+        provider="google",
+        subject="google-subject",
+        email="user@example.com",
+        email_verified=True,
+        display_name="Web User",
+    )
+    calls: list[tuple[str, object]] = []
+
+    async def _consume(provider, state):
+        assert provider == "google"
+        assert state == "state"
+        return state_row
+
+    async def _profile(_config, _state_row, code):
+        assert code == "code"
+        return profile
+
+    async def _get_or_create(resolved_profile):
+        assert resolved_profile is profile
+        return user, True
+
+    async def _notify(created_user, resolved_profile, provider):
+        calls.append(("notify", (created_user.id, resolved_profile.provider, provider)))
+
+    async def _audit(**kwargs):
+        calls.append(("audit", kwargs["reason"]))
+
+    async def _ticket(created_user):
+        assert created_user is user
+        return "ticket-web"
+
+    monkeypatch.setattr(web_auth, "provider_is_enabled", lambda provider: provider == "google")
+    monkeypatch.setattr(web_auth, "get_provider_config", lambda provider: types.SimpleNamespace(provider=provider))
+    monkeypatch.setattr(web_auth, "_consume_oauth_state", _consume)
+    monkeypatch.setattr(web_auth, "resolve_provider_profile", _profile)
+    monkeypatch.setattr(web_auth, "get_or_create_user_for_oauth_profile", _get_or_create)
+    monkeypatch.setattr(web_auth, "notify_web_oauth_registration", _notify)
+    monkeypatch.setattr(web_auth, "audit_auth_event", _audit)
+    monkeypatch.setattr(web_auth, "create_login_ticket", _ticket)
+
+    ticket, return_to = await web_auth.handle_oauth_callback("google", "code", "state")
+
+    assert ticket == "ticket-web"
+    assert return_to == "/connect"
+    assert ("notify", (user.id, "google", "google")) in calls
+    assert ("audit", "created") in calls
 
 
 @pytest.mark.asyncio
