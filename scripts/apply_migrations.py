@@ -24,6 +24,14 @@ from scripts.verify_runtime_state import verify_runtime_state
 
 logger = get_logger("scripts.apply_migrations")
 _OLD_FORMAT_MIGRATION_FRAGMENT = "old format of migration file detected"
+_LEGACY_ALREADY_APPLIED_FRAGMENTS = (
+    "already exists",
+    "duplicatecolumnerror",
+    "duplicate column",
+    "duplicate table",
+    "duplicate constraint",
+    "duplicate object",
+)
 
 # Keep a module-level symbol for tests that monkeypatch `Command`.
 Command: type[Any] | None = None
@@ -62,6 +70,11 @@ def _is_old_format_migration_error(exc: Exception) -> bool:
     return _OLD_FORMAT_MIGRATION_FRAGMENT in str(exc).lower()
 
 
+def _is_legacy_schema_already_applied_error(exc: Exception) -> bool:
+    error_text = str(exc).lower()
+    return any(fragment in error_text for fragment in _LEGACY_ALREADY_APPLIED_FRAGMENTS)
+
+
 async def _prepare_legacy_aerich_upgrade(command: Any) -> None:
     """Prepare Aerich 0.9.x to apply legacy migration files.
 
@@ -84,9 +97,66 @@ async def _prepare_legacy_aerich_upgrade(command: Any) -> None:
     Migrate.migrate_location = Path(command.location, command.app)
 
 
+async def _legacy_tolerant_upgrade(command: Any) -> None:
+    """Apply missing migrations while tolerating pre-existing legacy schema.
+
+    Some production databases were migrated before Aerich records were kept
+    consistently. In that case Aerich may think an old migration is pending
+    while the target column/table/constraint already exists. For this legacy
+    recovery path only, mark that migration as applied and continue so new
+    migrations can still be applied normally and runtime verification remains
+    the final safety gate.
+    """
+    from aerich.migrate import Migrate  # type: ignore
+    from aerich.models import Aerich  # type: ignore
+    from aerich.utils import get_app_connection_name  # type: ignore
+    from tortoise.exceptions import OperationalError
+    from tortoise.transactions import in_transaction
+
+    app_conn_name = get_app_connection_name(command.tortoise_config, command.app)
+    migrated: list[str] = []
+    marked_already_applied: list[str] = []
+
+    for version_module in Migrate.get_all_version_modules():
+        version_file = version_module.name + ".py"
+        try:
+            exists = await Aerich.exists(version=version_file, app=command.app)
+        except OperationalError:
+            exists = False
+        if exists:
+            continue
+
+        try:
+            async with in_transaction(app_conn_name) as conn:
+                await command._upgrade(conn, version_file, False, version_module)
+            migrated.append(version_file)
+        except OperationalError as exc:
+            if not _is_legacy_schema_already_applied_error(exc):
+                raise
+
+            logger.warning(
+                "Migration {} appears already applied in legacy schema ({}); "
+                "recording Aerich marker and continuing.",
+                version_file,
+                exc,
+            )
+            async with in_transaction(app_conn_name) as conn:
+                await command._upgrade(conn, version_file, True, version_module)
+            marked_already_applied.append(version_file)
+
+    if migrated:
+        logger.info("Applied migrations: {}", ", ".join(migrated))
+    if marked_already_applied:
+        logger.warning(
+            "Marked legacy already-applied migrations: {}",
+            ", ".join(marked_already_applied),
+        )
+
+
 async def run(*, skip_runtime_verify: bool = False) -> None:
     command_class = _resolve_command_class()
     command = command_class(tortoise_config=TORTOISE_ORM, location="migrations")
+    use_legacy_tolerant_upgrade = False
     try:
         logger.info("Aerich init...")
         try:
@@ -99,8 +169,12 @@ async def run(*, skip_runtime_verify: bool = False) -> None:
                 "upgrade path for existing production history."
             )
             await _prepare_legacy_aerich_upgrade(command)
+            use_legacy_tolerant_upgrade = True
         logger.info("Aerich upgrade (transaction=true)...")
-        await command.upgrade(run_in_transaction=True)
+        if use_legacy_tolerant_upgrade:
+            await _legacy_tolerant_upgrade(command)
+        else:
+            await command.upgrade(run_in_transaction=True)
         logger.info("Migrations applied successfully.")
     except Exception as e:
         error_text = str(e).lower()

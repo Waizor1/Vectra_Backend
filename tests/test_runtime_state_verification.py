@@ -371,11 +371,15 @@ async def test_apply_migrations_runs_runtime_verify_by_default(monkeypatch):
 @pytest.mark.asyncio
 async def test_apply_migrations_handles_legacy_aerich_format(monkeypatch):
     apply_migrations = _load_module("scripts.apply_migrations")
-    called = {"prepare_legacy": 0, "verify": 0}
+    called = {"prepare_legacy": 0, "legacy_upgrade": 0, "verify": 0}
 
     async def _fake_prepare_legacy(command):
         assert isinstance(command, _FakeLegacyAerichCommand)
         called["prepare_legacy"] += 1
+
+    async def _fake_legacy_upgrade(command):
+        assert isinstance(command, _FakeLegacyAerichCommand)
+        called["legacy_upgrade"] += 1
 
     async def _fake_verify():
         called["verify"] += 1
@@ -386,11 +390,30 @@ async def test_apply_migrations_handles_legacy_aerich_format(monkeypatch):
         "_prepare_legacy_aerich_upgrade",
         _fake_prepare_legacy,
     )
+    monkeypatch.setattr(
+        apply_migrations,
+        "_legacy_tolerant_upgrade",
+        _fake_legacy_upgrade,
+    )
     monkeypatch.setattr(apply_migrations, "verify_runtime_state", _fake_verify)
 
     await apply_migrations.run()
 
-    assert called == {"prepare_legacy": 1, "verify": 1}
+    assert called == {"prepare_legacy": 1, "legacy_upgrade": 1, "verify": 1}
+
+
+def test_apply_migrations_recognizes_legacy_already_applied_errors():
+    apply_migrations = _load_module("scripts.apply_migrations")
+
+    assert apply_migrations._is_legacy_schema_already_applied_error(
+        RuntimeError('column "renew_id" of relation "users" already exists')
+    )
+    assert apply_migrations._is_legacy_schema_already_applied_error(
+        RuntimeError('relation "auth_identities" already exists')
+    )
+    assert not apply_migrations._is_legacy_schema_already_applied_error(
+        RuntimeError('column "auth_token_version" of relation "users" does not exist')
+    )
 
 
 @pytest.mark.asyncio
