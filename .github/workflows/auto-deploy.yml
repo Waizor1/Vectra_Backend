@@ -213,7 +213,7 @@ jobs:
             printf '%s' "$COMPOSE_PROJECT_NAME"
           else
             raw_name="$(basename "$PROJECT_PATH")"
-            sanitized_name="$(printf '%s' "$raw_name" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' '_' | tr -s '_' | sed 's/^_*//; s/_*$//')"
+            sanitized_name="$(printf '%s' "$raw_name" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9_-' '_' | tr -s '_' | sed 's/^_*//; s/_*$//')"
             printf '%s' "${sanitized_name:-tvpn_backend}"
           fi
         }
