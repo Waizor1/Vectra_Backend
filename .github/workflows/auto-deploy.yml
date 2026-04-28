@@ -68,6 +68,30 @@ jobs:
         ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts
         chmod 644 ~/.ssh/known_hosts
 
+    - name: Sync backend source to server
+      env:
+        SERVER_HOST: ${{ secrets.SERVER_HOST }}
+        SERVER_USER: ${{ secrets.SERVER_USER }}
+        PROJECT_PATH: ${{ secrets.PROJECT_PATH }}
+      run: |
+        set -euo pipefail
+        if [ -z "$PROJECT_PATH" ]; then
+          echo "PROJECT_PATH is empty"
+          exit 1
+        fi
+        ssh "$SERVER_USER@$SERVER_HOST" "mkdir -p '$PROJECT_PATH'"
+        rsync -az --delete \
+          --exclude '.git/' \
+          --exclude '.env' \
+          --exclude 'logs/' \
+          --exclude '__pycache__/' \
+          --exclude '.pytest_cache/' \
+          --exclude '.mypy_cache/' \
+          --exclude 'node_modules/' \
+          --exclude 'directus/extensions/*/node_modules/' \
+          --exclude 'directus/extensions/*/.npm/' \
+          ./ "$SERVER_USER@$SERVER_HOST:$PROJECT_PATH/"
+
     - name: Deploy to server
       env:
         SERVER_HOST: ${{ secrets.SERVER_HOST }}
@@ -106,11 +130,6 @@ jobs:
         cd "$PROJECT_PATH"
         echo "🚀 Выполняем деплой..."
 
-        if [ ! -d .git ]; then
-          echo "❌ .git directory not found in PROJECT_PATH: $PROJECT_PATH"
-          exit 1
-        fi
-
         TARGET_BRANCH="main" # Non-branch events intentionally default to main.
         if [ "${GITHUB_REF_TYPE:-}" = "branch" ] && [ -n "${GITHUB_REF_NAME:-}" ]; then
           TARGET_BRANCH="$GITHUB_REF_NAME"
@@ -145,31 +164,35 @@ jobs:
           echo "ℹ️  PRERELEASE FULL REINSTALL MODE: INACTIVE ($FULL_REINSTALL_INACTIVE_REASON)"
         fi
 
-        git fetch --prune origin "\$TARGET_BRANCH"
-        if ! git rev-parse --verify --quiet "origin/\$TARGET_BRANCH^{commit}" >/dev/null; then
-          echo "❌ Remote branch not found: origin/\$TARGET_BRANCH"
-          exit 1
-        fi
-        git checkout -f -B "\$TARGET_BRANCH" "origin/\$TARGET_BRANCH"
-        git reset --hard "origin/\$TARGET_BRANCH"
-        git clean -ffd
+        if [ -d .git ]; then
+          git fetch --prune origin "\$TARGET_BRANCH"
+          if ! git rev-parse --verify --quiet "origin/\$TARGET_BRANCH^{commit}" >/dev/null; then
+            echo "❌ Remote branch not found: origin/\$TARGET_BRANCH"
+            exit 1
+          fi
+          git checkout -f -B "\$TARGET_BRANCH" "origin/\$TARGET_BRANCH"
+          git reset --hard "origin/\$TARGET_BRANCH"
+          git clean -ffd
 
-        if [ -n "\$(git status --porcelain --untracked-files=no)" ]; then
-          echo "❌ Git working tree is dirty after sync (tracked files only)"
-          git status --short --untracked-files=no
-          exit 1
-        fi
-        echo "✅ Working tree is clean after sync"
+          if [ -n "\$(git status --porcelain --untracked-files=no)" ]; then
+            echo "❌ Git working tree is dirty after sync (tracked files only)"
+            git status --short --untracked-files=no
+            exit 1
+          fi
+          echo "✅ Working tree is clean after sync"
 
-        LOCAL_HEAD="\$(git rev-parse HEAD)"
-        REMOTE_HEAD="\$(git rev-parse "origin/\$TARGET_BRANCH")"
-        if [ "\$LOCAL_HEAD" != "\$REMOTE_HEAD" ]; then
-          echo "❌ Git sync verification failed: HEAD mismatch after reset"
-          echo "Local: \$LOCAL_HEAD"
-          echo "Remote: \$REMOTE_HEAD"
-          exit 1
+          LOCAL_HEAD="\$(git rev-parse HEAD)"
+          REMOTE_HEAD="\$(git rev-parse "origin/\$TARGET_BRANCH")"
+          if [ "\$LOCAL_HEAD" != "\$REMOTE_HEAD" ]; then
+            echo "❌ Git sync verification failed: HEAD mismatch after reset"
+            echo "Local: \$LOCAL_HEAD"
+            echo "Remote: \$REMOTE_HEAD"
+            exit 1
+          fi
+          echo "✅ Synced commit: \$LOCAL_HEAD"
+        else
+          echo "ℹ️  No .git in PROJECT_PATH; using source uploaded by workflow"
         fi
-        echo "✅ Synced commit: \$LOCAL_HEAD"
 
         if [ ! -f docker-compose.yml ]; then
           echo "docker-compose.yml not found in $PROJECT_PATH"
