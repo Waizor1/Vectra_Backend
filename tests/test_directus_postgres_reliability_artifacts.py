@@ -213,7 +213,7 @@ def test_workflow_prerelease_full_reinstall_path_wipes_project_scoped_volumes_on
     assert "docker compose $COMPOSE_ARGS down -v --remove-orphans" in content
     assert "resolve_compose_project_name()" in content
     assert 'raw_name="$(basename "$PROJECT_PATH")"' in content
-    assert "tr -c 'a-z0-9' '_'" in content
+    assert "tr -c 'a-z0-9_-' '_'" in content
     assert "sed 's/^_*//; s/_*$//'" in content
     assert 'COMPOSE_PROJECT_NAME_RESOLVED="$(resolve_compose_project_name)"' in content
     assert 'export COMPOSE_PROJECT_NAME="$COMPOSE_PROJECT_NAME_RESOLVED"' in content
