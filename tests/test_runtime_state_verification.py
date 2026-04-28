@@ -411,8 +411,13 @@ def test_apply_migrations_recognizes_legacy_already_applied_errors():
     assert apply_migrations._is_legacy_schema_already_applied_error(
         RuntimeError('relation "auth_identities" already exists')
     )
+    assert apply_migrations._is_legacy_schema_already_applied_error(
+        RuntimeError('column "price" does not exist'),
+        version_file="48_20250101_add_device_discount_to_tariffs.py",
+    )
     assert not apply_migrations._is_legacy_schema_already_applied_error(
-        RuntimeError('column "auth_token_version" of relation "users" does not exist')
+        RuntimeError('column "key_activated" of relation "users" does not exist'),
+        version_file="100_20260428120000_key_activation_hwid_gate.py",
     )
 
 

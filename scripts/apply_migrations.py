@@ -70,9 +70,36 @@ def _is_old_format_migration_error(exc: Exception) -> bool:
     return _OLD_FORMAT_MIGRATION_FRAGMENT in str(exc).lower()
 
 
-def _is_legacy_schema_already_applied_error(exc: Exception) -> bool:
+def _legacy_migration_number(version_file: str | None) -> int | None:
+    if not version_file:
+        return None
+    prefix = version_file.split("_", 1)[0]
+    try:
+        return int(prefix)
+    except ValueError:
+        return None
+
+
+def _is_legacy_schema_already_applied_error(
+    exc: Exception,
+    *,
+    version_file: str | None = None,
+) -> bool:
     error_text = str(exc).lower()
-    return any(fragment in error_text for fragment in _LEGACY_ALREADY_APPLIED_FRAGMENTS)
+    if any(fragment in error_text for fragment in _LEGACY_ALREADY_APPLIED_FRAGMENTS):
+        return True
+
+    # Some old migrations rename/drop columns that are already absent in the
+    # current production schema (for example tariffs.price -> base_price).
+    # Treat that as an already-applied marker only while reconciling the legacy
+    # pre-current migration range. New/current migrations should still fail
+    # closed on missing dependencies.
+    migration_number = _legacy_migration_number(version_file)
+    return bool(
+        migration_number is not None
+        and migration_number < 100
+        and "does not exist" in error_text
+    )
 
 
 async def _prepare_legacy_aerich_upgrade(command: Any) -> None:
@@ -131,7 +158,7 @@ async def _legacy_tolerant_upgrade(command: Any) -> None:
                 await command._upgrade(conn, version_file, False, version_module)
             migrated.append(version_file)
         except OperationalError as exc:
-            if not _is_legacy_schema_already_applied_error(exc):
+            if not _is_legacy_schema_already_applied_error(exc, version_file=version_file):
                 raise
 
             logger.warning(
