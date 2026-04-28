@@ -23,6 +23,7 @@ from bloobcat.logger import get_logger
 from scripts.verify_runtime_state import verify_runtime_state
 
 logger = get_logger("scripts.apply_migrations")
+_OLD_FORMAT_MIGRATION_FRAGMENT = "old format of migration file detected"
 
 # Keep a module-level symbol for tests that monkeypatch `Command`.
 Command: type[Any] | None = None
@@ -57,12 +58,47 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _is_old_format_migration_error(exc: Exception) -> bool:
+    return _OLD_FORMAT_MIGRATION_FRAGMENT in str(exc).lower()
+
+
+async def _prepare_legacy_aerich_upgrade(command: Any) -> None:
+    """Prepare Aerich 0.9.x to apply legacy migration files.
+
+    Production has a long-lived migration history that predates Aerich's
+    `MODELS_STATE` file format. Aerich 0.9.x refuses `Command.init()` when the
+    newest file is still in that old format, but `Command.upgrade()` can still
+    safely apply SQL migrations and records current model state for files that
+    do not provide `MODELS_STATE`.
+
+    This keeps deploy fail-closed for real upgrade/runtime verification errors
+    while allowing the legacy migration catalog to keep working.
+    """
+    from aerich.migrate import Migrate  # type: ignore
+    from tortoise import Tortoise
+
+    if not Tortoise._inited:
+        await Tortoise.init(config=TORTOISE_ORM)
+
+    Migrate.app = command.app
+    Migrate.migrate_location = Path(command.location, command.app)
+
+
 async def run(*, skip_runtime_verify: bool = False) -> None:
     command_class = _resolve_command_class()
     command = command_class(tortoise_config=TORTOISE_ORM, location="migrations")
     try:
         logger.info("Aerich init...")
-        await command.init()
+        try:
+            await command.init()
+        except Exception as init_error:
+            if not _is_old_format_migration_error(init_error):
+                raise
+            logger.warning(
+                "Aerich migration files use legacy format; preparing relaxed "
+                "upgrade path for existing production history."
+            )
+            await _prepare_legacy_aerich_upgrade(command)
         logger.info("Aerich upgrade (transaction=true)...")
         await command.upgrade(run_in_transaction=True)
         logger.info("Migrations applied successfully.")
@@ -91,4 +127,3 @@ async def run(*, skip_runtime_verify: bool = False) -> None:
 if __name__ == "__main__":
     args = parse_args()
     asyncio.run(run(skip_runtime_verify=args.skip_runtime_verify))
-
