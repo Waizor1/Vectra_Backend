@@ -115,6 +115,8 @@ class SubscriptionQuote:
     discount_rub: int
     discount_percent: int
     duration_discount_percent: int
+    duration_discount_rub: int
+    total_discount_rub: int
     lte_price_rub: int
     total_price_rub: int
     per_month_text: str
@@ -133,6 +135,8 @@ class SubscriptionQuote:
             "discountRub": self.discount_rub,
             "discountPercent": self.discount_percent,
             "durationDiscountPercent": self.duration_discount_percent,
+            "durationDiscountRub": self.duration_discount_rub,
+            "totalDiscountRub": self.total_discount_rub,
             "ltePriceRub": self.lte_price_rub,
             "totalPriceRub": self.total_price_rub,
             "perMonthText": self.per_month_text,
@@ -145,6 +149,8 @@ class SubscriptionQuote:
             "quote_discount_rub": int(self.discount_rub),
             "quote_discount_percent": int(self.discount_percent),
             "quote_duration_discount_percent": int(self.duration_discount_percent),
+            "quote_duration_discount_rub": int(self.duration_discount_rub),
+            "quote_total_discount_rub": int(self.total_discount_rub),
             "quote_lte_price": int(self.lte_price_rub),
             "quote_total_price": int(self.total_price_rub),
             "quote_per_month_text": self.per_month_text,
@@ -203,14 +209,18 @@ async def build_subscription_quote(
     per_month = int(round(total_price / months)) if months > 0 else total_price
 
     duration_discount_percent = 0
+    duration_discount_rub = 0
     if one_month_reference_tariff is not None and months > 1:
         try:
             await one_month_reference_tariff.sync_effective_pricing_fields()
             ref = int(one_month_reference_tariff.calculate_price(normalized_device_count)) * months
             if ref > subscription_price > 0:
-                duration_discount_percent = max(0, min(99, round((1 - subscription_price / ref) * 100)))
+                duration_discount_rub = max(0, int(ref) - int(subscription_price))
+                duration_discount_percent = max(0, min(99, round(duration_discount_rub / ref * 100)))
         except Exception:
             duration_discount_percent = 0
+            duration_discount_rub = 0
+    total_discount_rub = int(duration_discount_rub) + int(discount_rub)
 
     return SubscriptionQuote(
         tariff_id=int(tariff.id),
@@ -223,6 +233,8 @@ async def build_subscription_quote(
         discount_rub=int(discount_rub),
         discount_percent=int(discount_percent),
         duration_discount_percent=int(duration_discount_percent),
+        duration_discount_rub=int(duration_discount_rub),
+        total_discount_rub=int(total_discount_rub),
         lte_price_rub=int(lte_price),
         total_price_rub=int(total_price),
         per_month_text=f"≈ {per_month} ₽/мес",
