@@ -5,6 +5,7 @@ import types
 from urllib.parse import parse_qs, urlparse
 
 import pytest
+from pydantic import SecretStr
 
 from bloobcat.services import web_auth
 
@@ -416,6 +417,8 @@ async def test_password_register_requires_email_delivery_before_creating_user(mo
     monkeypatch.setattr(web_auth.web_auth_settings, "password_auth_enabled", True)
     monkeypatch.setattr(web_auth.smtp_settings, "host", "")
     monkeypatch.setattr(web_auth.smtp_settings, "from_email", "")
+    monkeypatch.setattr(web_auth.resend_settings, "api_key", None)
+    monkeypatch.setattr(web_auth.resend_settings, "from_email", "")
     monkeypatch.setattr(web_auth, "enforce_password_email_rate_limit", _rate_limit)
     monkeypatch.setattr(web_auth, "create_web_user", _create_web_user)
 
@@ -425,6 +428,66 @@ async def test_password_register_requires_email_delivery_before_creating_user(mo
     assert exc_info.value.code == "password_email_delivery_disabled"
     assert exc_info.value.status_code == 503
     assert create_called is False
+
+
+@pytest.mark.asyncio
+async def test_send_auth_email_uses_resend_when_configured(monkeypatch):
+    requests: list[dict[str, object]] = []
+
+    class _FakeResponse:
+        status_code = 202
+
+    class _FakeAsyncClient:
+        def __init__(self, *, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url, *, headers, json):
+            requests.append({"url": url, "headers": headers, "json": json, "timeout": self.timeout})
+            return _FakeResponse()
+
+    monkeypatch.setattr(web_auth.resend_settings, "api_key", SecretStr("re_test_key"))
+    monkeypatch.setattr(web_auth.resend_settings, "from_email", "onboarding@resend.dev")
+    monkeypatch.setattr(web_auth.resend_settings, "from_name", "Vectra Connect")
+    monkeypatch.setattr(web_auth.resend_settings, "base_url", "https://api.resend.com")
+    monkeypatch.setattr(web_auth.resend_settings, "timeout_seconds", 7.5)
+    monkeypatch.setattr(web_auth.smtp_settings, "host", "smtp.example.test")
+    monkeypatch.setattr(web_auth.smtp_settings, "from_email", "smtp@example.test")
+    monkeypatch.setattr(web_auth.httpx, "AsyncClient", _FakeAsyncClient)
+
+    sent = await web_auth.send_auth_email("user@example.com", "Hello", "Line 1\n\nLine 2")
+
+    assert sent is True
+    assert len(requests) == 1
+    request = requests[0]
+    assert request["url"] == "https://api.resend.com/emails"
+    assert request["headers"] == {
+        "Authorization": "Bearer re_test_key",
+        "Content-Type": "application/json",
+        "User-Agent": "vectra-connect-backend/1.0",
+    }
+    assert request["json"] == {
+        "from": "Vectra Connect <onboarding@resend.dev>",
+        "to": ["user@example.com"],
+        "subject": "Hello",
+        "text": "Line 1\n\nLine 2",
+        "html": "<p>Line 1</p>\n<p>Line 2</p>",
+    }
+    assert request["timeout"] == 7.5
+
+
+def test_password_email_delivery_enabled_with_resend(monkeypatch):
+    monkeypatch.setattr(web_auth.smtp_settings, "host", "")
+    monkeypatch.setattr(web_auth.smtp_settings, "from_email", "")
+    monkeypatch.setattr(web_auth.resend_settings, "api_key", SecretStr("re_test_key"))
+    monkeypatch.setattr(web_auth.resend_settings, "from_email", "onboarding@resend.dev")
+
+    assert web_auth.is_password_email_delivery_enabled() is True
 
 
 @pytest.mark.asyncio

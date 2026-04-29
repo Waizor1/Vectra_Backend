@@ -50,6 +50,7 @@ from bloobcat.settings import (
     auth_settings,
     app_settings,
     oauth_settings,
+    resend_settings,
     script_settings,
     smtp_settings,
     telegram_settings,
@@ -1097,12 +1098,75 @@ def verify_password(password: str, password_hash: str) -> bool:
 
 
 async def send_auth_email(email: str, subject: str, body: str) -> bool:
-    if not smtp_settings.host or not smtp_settings.from_email:
-        logger.warning("SMTP is not configured; auth email was not sent to hash=%s", hash_secret(email)[:12])
+    if resend_settings.api_key and resend_settings.from_email:
+        return await send_auth_email_via_resend(email, subject, body)
+    if smtp_settings.host and smtp_settings.from_email:
+        return await send_auth_email_via_smtp(email, subject, body)
+
+    logger.warning("Email delivery is not configured; auth email was not sent to hash=%s", hash_secret(email)[:12])
+    return False
+
+
+def _format_sender(from_email: str, from_name: str | None) -> str:
+    if "<" in from_email and ">" in from_email:
+        return from_email
+    safe_name = (from_name or "").strip()
+    return f"{safe_name} <{from_email}>" if safe_name else from_email
+
+
+def _email_body_to_html(body: str) -> str:
+    paragraphs = [part.strip() for part in body.split("\n\n") if part.strip()]
+    if not paragraphs:
+        return ""
+    return "\n".join(
+        f"<p>{escape(part).replace(chr(10), '<br>')}</p>"
+        for part in paragraphs
+    )
+
+
+async def send_auth_email_via_resend(email: str, subject: str, body: str) -> bool:
+    api_key = resend_settings.api_key.get_secret_value() if resend_settings.api_key else ""
+    from_email = (resend_settings.from_email or "").strip()
+    if not api_key or not from_email:
+        logger.warning("Resend is not configured; auth email was not sent to hash=%s", hash_secret(email)[:12])
         return False
+
+    url = f"{resend_settings.base_url.rstrip('/')}/emails"
+    payload = {
+        "from": _format_sender(from_email, resend_settings.from_name),
+        "to": [email],
+        "subject": subject,
+        "text": body,
+        "html": _email_body_to_html(body),
+    }
+    try:
+        async with httpx.AsyncClient(timeout=resend_settings.timeout_seconds) as client:
+            response = await client.post(
+                url,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                    "User-Agent": "vectra-connect-backend/1.0",
+                },
+                json=payload,
+            )
+        if 200 <= response.status_code < 300:
+            return True
+        logger.warning(
+            "Resend auth email send failed hash=%s status=%s",
+            hash_secret(email)[:12],
+            response.status_code,
+        )
+        return False
+    except Exception as exc:
+        logger.warning("Resend auth email send failed hash=%s: %s", hash_secret(email)[:12], exc)
+        return False
+
+
+async def send_auth_email_via_smtp(email: str, subject: str, body: str) -> bool:
     message = EmailMessage()
     message["Subject"] = subject
-    message["From"] = f"{smtp_settings.from_name} <{smtp_settings.from_email}>"
+    message["From"] = _format_sender(smtp_settings.from_email or "", smtp_settings.from_name)
     message["To"] = email
     message.set_content(body)
     try:
@@ -1125,7 +1189,10 @@ async def send_auth_email(email: str, subject: str, body: str) -> bool:
 
 
 def is_password_email_delivery_enabled() -> bool:
-    return bool(smtp_settings.host and smtp_settings.from_email)
+    return bool(
+        (resend_settings.api_key and resend_settings.from_email)
+        or (smtp_settings.host and smtp_settings.from_email)
+    )
 
 
 def _password_email_delivery_enabled_or_raise() -> None:

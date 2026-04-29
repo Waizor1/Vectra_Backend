@@ -378,9 +378,20 @@ class SMTPSettings(BaseSettings):
     use_tls: bool = True
 
 
+class ResendSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="RESEND_")
+
+    api_key: SecretStr | None = None
+    from_email: str | None = None
+    from_name: str = "Vectra Connect"
+    base_url: str = "https://api.resend.com"
+    timeout_seconds: float = 10.0
+
+
 web_auth_settings = WebAuthSettings()
 oauth_settings = OAuthSettings()
 smtp_settings = SMTPSettings()
+resend_settings = ResendSettings()
 
 
 class LocalDevAuthSettings(BaseSettings):
