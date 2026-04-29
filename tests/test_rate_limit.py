@@ -7,6 +7,7 @@ class FakeRedis:
     def __init__(self):
         self.zsets: dict[str, dict[str, float]] = {}
         self.expirations: dict[str, int] = {}
+        self.eval_calls: list[dict[str, object]] = []
 
     async def zremrangebyscore(self, key: str, minimum: float, maximum: float) -> int:
         members = self.zsets.setdefault(key, {})
@@ -34,6 +35,24 @@ class FakeRedis:
         self.expirations[key] = seconds
         return True
 
+    async def eval(self, script: str, numkeys: int, key: str, cutoff: float, now: float, window_seconds: int, limit: int, member: str):
+        self.eval_calls.append({"script": script, "numkeys": numkeys, "key": key})
+        await self.zremrangebyscore(key, float("-inf"), float(cutoff))
+        count = await self.zcard(key)
+        if count >= int(limit):
+            oldest = await self.zrange(key, 0, 0, withscores=True)
+            oldest_score = float(oldest[0][1]) if oldest else float(now)
+            wait_time = int(max(1, oldest_score + int(window_seconds) - float(now)))
+            return [0, wait_time]
+        await self.zadd(key, {member: float(now)})
+        await self.expire(key, int(window_seconds))
+        return [1, 0]
+
+
+class FailingRedis:
+    async def eval(self, *_args, **_kwargs):
+        raise RuntimeError("redis down")
+
 
 @pytest.mark.asyncio
 async def test_rate_limiter_can_use_redis_backend_without_plain_identifier_keys():
@@ -53,6 +72,7 @@ async def test_rate_limiter_can_use_redis_backend_without_plain_identifier_keys(
     assert allowed is False
     assert wait_time is not None and 1 <= wait_time <= 60
     assert redis.zsets
+    assert redis.eval_calls
     assert all("user@example.com" not in key for key in redis.zsets)
 
 
@@ -104,3 +124,18 @@ async def test_redis_rate_limiter_uses_sliding_window_across_bucket_boundaries(m
     assert await limiter.is_allowed("203.0.113.20") == (True, None)
     now = 60.01
     assert await limiter.is_allowed("203.0.113.20") == (False, 59)
+
+
+@pytest.mark.asyncio
+async def test_redis_rate_limiter_can_fail_closed_for_sensitive_routes():
+    from bloobcat.middleware.rate_limit import RateLimiter
+
+    limiter = RateLimiter(
+        requests_per_minute=2,
+        window_seconds=60,
+        redis_client=FailingRedis(),
+        namespace="auth-sensitive",
+        fail_closed=True,
+    )
+
+    assert await limiter.is_allowed("203.0.113.30") == (False, 1)

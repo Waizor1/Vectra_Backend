@@ -1,9 +1,10 @@
 from datetime import datetime, timedelta, timezone
+import json
 import re
 from typing import Any, Dict, Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from bloobcat.db.error_reports import ErrorReports
@@ -14,6 +15,14 @@ logger = get_logger("routes.error_reports")
 router = APIRouter(prefix="/errors", tags=["errors"])
 
 REDACTED_VALUE = "[redacted]"
+TRUNCATED_VALUE = "[truncated]"
+ERROR_REPORT_MAX_TEXT_LENGTH = 8_000
+ERROR_REPORT_MAX_URL_LENGTH = 2_048
+ERROR_REPORT_MAX_USER_AGENT_LENGTH = 512
+ERROR_REPORT_MAX_PAYLOAD_BYTES = 24_000
+ERROR_REPORT_MAX_EXTRA_DEPTH = 4
+ERROR_REPORT_MAX_EXTRA_ITEMS = 40
+ERROR_REPORT_MAX_EXTRA_STRING_LENGTH = 2_000
 SENSITIVE_KEY_RE = re.compile(
     r"(?:token|ticket|secret|password|payment[_-]?id|session|auth|credential|startapp|start_param|tgwebappdata)",
     re.IGNORECASE,
@@ -86,20 +95,91 @@ def _redact_url(value: str | None) -> tuple[str | None, list[str]]:
         return _redact_string(value), sensitive_values
 
 
-def _redact_unknown(value: Any, key_hint: str = "", sensitive_values: list[str] | None = None) -> Any:
+def _truncate_string(value: str, max_length: int) -> str:
+    if len(value) <= max_length:
+        return value
+    return value[:max_length] + TRUNCATED_VALUE
+
+
+def _redact_unknown(
+    value: Any,
+    key_hint: str = "",
+    sensitive_values: list[str] | None = None,
+    *,
+    depth: int = 0,
+) -> Any:
+    if depth >= ERROR_REPORT_MAX_EXTRA_DEPTH:
+        return TRUNCATED_VALUE
     if value is None or isinstance(value, (bool, int, float)):
         return value
     if isinstance(value, str):
-        return REDACTED_VALUE if SENSITIVE_KEY_RE.search(key_hint) else _redact_string(value, sensitive_values)
+        if SENSITIVE_KEY_RE.search(key_hint):
+            return REDACTED_VALUE
+        return _truncate_string(
+            _redact_string(value, sensitive_values),
+            ERROR_REPORT_MAX_EXTRA_STRING_LENGTH,
+        )
     if isinstance(value, list):
-        return [_redact_unknown(item, key_hint, sensitive_values) for item in value]
+        bounded = value[:ERROR_REPORT_MAX_EXTRA_ITEMS]
+        result = [
+            _redact_unknown(item, key_hint, sensitive_values, depth=depth + 1)
+            for item in bounded
+        ]
+        if len(value) > ERROR_REPORT_MAX_EXTRA_ITEMS:
+            result.append(TRUNCATED_VALUE)
+        return result
     if isinstance(value, dict):
-        return {str(key): _redact_unknown(item, str(key), sensitive_values) for key, item in value.items()}
-    return _redact_string(str(value), sensitive_values)
+        result: dict[str, Any] = {}
+        for idx, (key, item) in enumerate(value.items()):
+            if idx >= ERROR_REPORT_MAX_EXTRA_ITEMS:
+                result[TRUNCATED_VALUE] = TRUNCATED_VALUE
+                break
+            result[str(key)[:128]] = _redact_unknown(
+                item,
+                str(key),
+                sensitive_values,
+                depth=depth + 1,
+            )
+        return result
+    return _truncate_string(
+        _redact_string(str(value), sensitive_values),
+        ERROR_REPORT_MAX_EXTRA_STRING_LENGTH,
+    )
+
+
+def _reject_if_too_large(payload: ErrorReportPayload) -> None:
+    field_limits = {
+        "eventId": 128,
+        "code": 128,
+        "type": 64,
+        "message": ERROR_REPORT_MAX_TEXT_LENGTH,
+        "name": 256,
+        "stack": ERROR_REPORT_MAX_TEXT_LENGTH,
+        "route": ERROR_REPORT_MAX_URL_LENGTH,
+        "href": ERROR_REPORT_MAX_URL_LENGTH,
+        "userAgent": ERROR_REPORT_MAX_USER_AGENT_LENGTH,
+    }
+    for field_name, limit in field_limits.items():
+        raw = getattr(payload, field_name, None)
+        if raw is not None and len(str(raw)) > limit:
+            raise HTTPException(status_code=413, detail="Error report payload is too large")
+
+    try:
+        serialized = json.dumps(
+            payload.model_dump(mode="json"),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    except Exception:
+        return
+    if len(serialized.encode("utf-8")) > ERROR_REPORT_MAX_PAYLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="Error report payload is too large")
 
 
 @router.post("/report")
 async def report_error(payload: ErrorReportPayload, request: Request) -> Dict[str, Any]:
+    _reject_if_too_large(payload)
+
     user_id = None
     auth_header = request.headers.get("Authorization")
     if auth_header:

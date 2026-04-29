@@ -32,13 +32,17 @@ services:
       - "127.0.0.1:33083:33083"
     container_name: bloobcat
     restart: always
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     build:
       context: .
       dockerfile: Dockerfile
       args:
         BUILD_TIME: ${BUILD_TIME:-}
     volumes:
-      - ./logs:/app/logs
+      - bloobcat-logs:/app/logs
     networks:
       - bloobcat_network
     depends_on:
@@ -103,4 +107,5 @@ networks:
 
 volumes:
   bloobcat-db-volume:
+  bloobcat-logs:
   directus-uploads:

@@ -72,6 +72,36 @@ def test_get_client_ip_uses_xff_only_for_trusted_proxy(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_rate_limit_middleware_limits_public_error_reports(monkeypatch):
+    from bloobcat.middleware import rate_limit
+
+    class _DenyLimiter:
+        async def is_allowed(self, key: str):
+            assert key == "203.0.113.44"
+            return False, 17
+
+    async def _should_not_call(_request):
+        raise AssertionError("rate-limited error report must not reach the route handler")
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/errors/report",
+        "headers": [],
+        "client": ("203.0.113.44", 12345),
+        "server": ("testserver", 80),
+        "scheme": "http",
+    }
+
+    monkeypatch.setattr(rate_limit, "error_report_ip_limiter", _DenyLimiter())
+
+    response = await rate_limit.rate_limit_middleware(Request(scope), _should_not_call)
+
+    assert response.status_code == 429
+    assert response.headers["retry-after"] == "17"
+
+
+@pytest.mark.asyncio
 async def test_get_user_id_from_request_supports_bearer(monkeypatch):
     scope = {
         "type": "http",
@@ -90,6 +120,41 @@ async def test_get_user_id_from_request_supports_bearer(monkeypatch):
     monkeypatch.setattr("bloobcat.funcs.auth_tokens.decode_access_token", _decode)
     user_id = await get_user_id_from_request(req)
     assert user_id == 777
+
+
+@pytest.mark.asyncio
+async def test_validate_bearer_ignores_unsigned_start_param_headers(monkeypatch):
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/user",
+        "headers": [
+            (b"authorization", b"Bearer token123"),
+            (b"x-start-param", b"partner-999"),
+            (b"referer", b"https://app.vectra-pro.net/?start=ref_999"),
+        ],
+        "client": ("127.0.0.1", 12345),
+        "server": ("testserver", 80),
+        "scheme": "http",
+    }
+    req = Request(scope)
+    user = types.SimpleNamespace(id=777, auth_token_version=0)
+
+    def _decode(_token):
+        return {"sub": "777", "ver": 0}
+
+    async def _get_or_none(**kwargs):
+        assert kwargs == {"id": 777}
+        return user
+
+    async def _should_not_resolve(*_args, **_kwargs):
+        raise AssertionError("Bearer auth must not trust unsigned X-Start-Param/Referer attribution")
+
+    monkeypatch.setattr(validate_module, "decode_access_token", _decode)
+    monkeypatch.setattr(validate_module.Users, "get_or_none", _get_or_none)
+    monkeypatch.setattr(validate_module, "resolve_referral_from_start_param", _should_not_resolve)
+
+    assert await validate_module.validate("Bearer token123", req) is user
 
 
 @pytest.mark.asyncio

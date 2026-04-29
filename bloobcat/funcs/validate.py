@@ -147,15 +147,9 @@ async def validate(init_data: str = Depends(oauth2_scheme), request: Request = N
                 except ValueError:
                     raise HTTPException(status_code=403, detail="Invalid token version")
 
-            # Reliability guard: even in bearer mode, allow client to forward start param.
-            # This prevents missed attribution when /auth/telegram bootstrap is skipped/raced.
-            if header_start_param:
-                referred_by, utm = await resolve_referral_from_start_param(
-                    header_start_param, user_id=db_user.id
-                )
-                db_user = await _apply_referral_attribution_existing_user(
-                    db_user, referred_by=referred_by, utm=utm
-                )
+            # Bearer requests are browser-authenticated, but X-Start-Param and Referer
+            # are unsigned client-controlled headers. Do not let them change referral
+            # or partner attribution for an already-authenticated web session.
 
             return db_user
             

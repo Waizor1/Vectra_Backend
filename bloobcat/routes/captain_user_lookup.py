@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hmac
+
 from fastapi import APIRouter, Header, Request, status
 from fastapi.responses import JSONResponse
 
@@ -35,9 +37,10 @@ def _is_authorized(authorization_header: str | None) -> bool:
     if not authorization_header.lower().startswith("bearer "):
         return False
     provided = authorization_header.split(" ", 1)[1].strip()
-    return bool(
-        provided and provided == captain_lookup_settings.api_key.get_secret_value()
-    )
+    if not provided:
+        return False
+    expected = captain_lookup_settings.api_key.get_secret_value()
+    return hmac.compare_digest(str(provided), str(expected))
 
 
 def _is_domain_allowed(request: Request) -> bool:

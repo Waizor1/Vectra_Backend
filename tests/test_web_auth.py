@@ -481,6 +481,108 @@ async def test_send_auth_email_uses_resend_when_configured(monkeypatch):
     assert request["timeout"] == 7.5
 
 
+@pytest.mark.asyncio
+async def test_password_register_hashes_password_off_event_loop(monkeypatch):
+    calls: list[tuple[str, object]] = []
+
+    class _FakePasswordCredential:
+        @classmethod
+        async def get_or_none(cls, **kwargs):
+            assert kwargs == {"email_normalized": "new@example.com"}
+            return None
+
+        @classmethod
+        async def create(cls, **kwargs):
+            calls.append(("credential_create", kwargs["password_hash"]))
+            return types.SimpleNamespace(user_id=kwargs["user"].id)
+
+    async def _to_thread(func, *args, **kwargs):
+        calls.append(("to_thread", func.__name__))
+        assert args == ("password-123",)
+        return "hashed-password"
+
+    async def _rate_limit(*_args, **_kwargs):
+        return None
+
+    async def _create_web_user(**_kwargs):
+        return types.SimpleNamespace(id=web_auth.WEB_USER_ID_FLOOR + 31, full_name="New")
+
+    async def _ensure_identity(*_args, **_kwargs):
+        return None
+
+    async def _send_verification(*_args, **_kwargs):
+        return True
+
+    async def _audit(**_kwargs):
+        return None
+
+    monkeypatch.setattr(web_auth.web_auth_settings, "web_auth_enabled", True)
+    monkeypatch.setattr(web_auth.web_auth_settings, "password_auth_enabled", True)
+    monkeypatch.setattr(web_auth.smtp_settings, "host", "smtp.example.test")
+    monkeypatch.setattr(web_auth.smtp_settings, "from_email", "noreply@example.test")
+    monkeypatch.setattr(web_auth, "AuthPasswordCredential", _FakePasswordCredential)
+    monkeypatch.setattr(web_auth, "enforce_password_email_rate_limit", _rate_limit)
+    monkeypatch.setattr(web_auth, "create_web_user", _create_web_user)
+    monkeypatch.setattr(web_auth, "ensure_identity_for_user", _ensure_identity)
+    monkeypatch.setattr(web_auth, "_send_verification_email", _send_verification)
+    monkeypatch.setattr(web_auth, "audit_auth_event", _audit)
+    monkeypatch.setattr(web_auth.asyncio, "to_thread", _to_thread)
+
+    response = await web_auth.register_password_user("New@Example.COM", "password-123")
+
+    assert response == {"ok": True, "emailVerificationRequired": True, "emailSent": True}
+    assert ("to_thread", "hash_password") in calls
+    assert ("credential_create", "hashed-password") in calls
+
+
+@pytest.mark.asyncio
+async def test_smtp_auth_email_runs_blocking_smtp_in_thread(monkeypatch):
+    calls: list[tuple[str, object]] = []
+
+    async def _to_thread(func, *args, **kwargs):
+        calls.append(("to_thread", func.__name__))
+        assert args == ("user@example.com", "Hello", "Body")
+        return True
+
+    monkeypatch.setattr(web_auth.asyncio, "to_thread", _to_thread)
+
+    assert await web_auth.send_auth_email_via_smtp("user@example.com", "Hello", "Body") is True
+    assert calls == [("to_thread", "_send_auth_email_via_smtp_sync")]
+
+
+@pytest.mark.asyncio
+async def test_oauth_id_token_decode_runs_jwks_lookup_in_thread(monkeypatch):
+    config = web_auth.ProviderConfig(
+        provider="google",
+        client_id="google-client-id",
+        client_secret="google-secret",
+        auth_url="https://accounts.example/auth",
+        token_url="https://accounts.example/token",
+        jwks_url="https://accounts.example/jwks",
+        issuer="https://accounts.example",
+        userinfo_url=None,
+        scope="openid email profile",
+    )
+    state_row = types.SimpleNamespace(nonce="nonce", pkce_verifier="verifier")
+    calls: list[tuple[str, object]] = []
+
+    async def _exchange(*_args, **_kwargs):
+        return {"id_token": "id-token"}
+
+    async def _to_thread(func, *args, **kwargs):
+        calls.append(("to_thread", func.__name__))
+        assert args == (config, "id-token", "nonce")
+        return {"sub": "google-sub", "nonce": "nonce", "email": "user@example.com"}
+
+    monkeypatch.setattr(web_auth, "_exchange_oauth_code", _exchange)
+    monkeypatch.setattr(web_auth.asyncio, "to_thread", _to_thread)
+
+    profile = await web_auth.resolve_provider_profile(config, state_row, "code")
+
+    assert profile.subject == "google-sub"
+    assert calls == [("to_thread", "_decode_id_token")]
+
+
 def test_password_email_delivery_enabled_with_resend(monkeypatch):
     monkeypatch.setattr(web_auth.smtp_settings, "host", "")
     monkeypatch.setattr(web_auth.smtp_settings, "from_email", "")

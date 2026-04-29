@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+import hmac
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
@@ -31,7 +32,10 @@ async def require_admin_integration_token(
     if not admin_integration_settings.token:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Admin integration not configured")
     expected = admin_integration_settings.token.get_secret_value()
-    if not x_admin_integration_token or x_admin_integration_token != expected:
+    if not x_admin_integration_token or not hmac.compare_digest(
+        str(x_admin_integration_token),
+        str(expected),
+    ):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
 
 

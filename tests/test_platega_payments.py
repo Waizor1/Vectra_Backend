@@ -294,6 +294,27 @@ async def test_platega_status_confirmed_applies_fallback_without_renew_id(monkey
 
 
 @pytest.mark.asyncio
+async def test_platega_status_requires_local_payment_before_provider_lookup(monkeypatch):
+    from fastapi import HTTPException
+
+    from bloobcat.routes import payment as payment_route
+
+    user, _tariff = await _seed_user_and_tariff()
+
+    class FakePlategaClient:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("unknown Platega payment IDs must be rejected before provider lookup")
+
+    monkeypatch.setattr(payment_route.payment_settings, "provider", "platega")
+    monkeypatch.setattr(payment_route, "PlategaClient", FakePlategaClient)
+
+    with pytest.raises(HTTPException) as exc:
+        await payment_route.get_payment_status("platega-foreign-or-random", user=user)
+
+    assert exc.value.status_code == 404
+
+
+@pytest.mark.asyncio
 async def test_platega_webhook_rejects_invalid_headers(monkeypatch):
     from fastapi import HTTPException
 

@@ -11,6 +11,20 @@ from bloobcat.logger import get_logger
 
 logger = get_logger("rate_limit")
 
+REDIS_SLIDING_WINDOW_SCRIPT = """
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', ARGV[1])
+local count = redis.call('ZCARD', KEYS[1])
+if count >= tonumber(ARGV[4]) then
+  local oldest = redis.call('ZRANGE', KEYS[1], 0, 0, 'WITHSCORES')
+  local oldest_score = tonumber(oldest[2]) or tonumber(ARGV[2])
+  local wait = math.max(1, math.floor(oldest_score + tonumber(ARGV[3]) - tonumber(ARGV[2])))
+  return {0, wait}
+end
+redis.call('ZADD', KEYS[1], ARGV[2], ARGV[5])
+redis.call('EXPIRE', KEYS[1], tonumber(ARGV[3]))
+return {1, 0}
+"""
+
 class RateLimiter:
     """Простой rate limiter для FastAPI эндпоинтов"""
     
@@ -22,6 +36,7 @@ class RateLimiter:
         redis_url: str | None = None,
         redis_client: Any | None = None,
         namespace: str = "rate_limit",
+        fail_closed: bool = False,
     ):
         self.requests_per_minute = requests_per_minute
         self.window_seconds = window_seconds
@@ -30,6 +45,7 @@ class RateLimiter:
         self._redis_url = redis_url if redis_url is not None else os.getenv("RATE_LIMIT_REDIS_URL", "").strip()
         self._redis_client = redis_client
         self._namespace = namespace
+        self._fail_closed = fail_closed
 
     async def _get_redis_client(self):
         if self._redis_client is not None:
@@ -46,18 +62,43 @@ class RateLimiter:
             self._redis_url = ""
             return None
 
-    def _redis_key(self, user_id: str, now: float) -> str:
+    def _redis_key(self, user_id: str) -> str:
         digest = hashlib.sha256(user_id.encode("utf-8", errors="ignore")).hexdigest()
         return f"{self._namespace}:{self.window_seconds}:{digest}"
 
     async def _is_allowed_redis(self, user_id: str) -> Tuple[bool, Optional[int]] | None:
+        redis_was_configured = bool(self._redis_client is not None or self._redis_url)
         client = await self._get_redis_client()
         if client is None:
+            if redis_was_configured and self._fail_closed:
+                logger.warning(
+                    "Redis rate limiter unavailable for fail-closed namespace=%s",
+                    self._namespace,
+                )
+                return False, 1
             return None
         now = time.time()
-        key = self._redis_key(user_id, now)
+        key = self._redis_key(user_id)
         cutoff = now - self.window_seconds
         try:
+            member = f"{now:.6f}:{uuid.uuid4().hex}"
+            if hasattr(client, "eval"):
+                result = await client.eval(
+                    REDIS_SLIDING_WINDOW_SCRIPT,
+                    1,
+                    key,
+                    cutoff,
+                    now,
+                    self.window_seconds,
+                    self.requests_per_minute,
+                    member,
+                )
+                allowed = bool(int(result[0]))
+                wait_time = int(result[1] or 0)
+                return allowed, (wait_time or None if allowed else max(1, wait_time))
+
+            # Best-effort fallback for Redis-like test doubles that do not expose
+            # EVAL. Real Redis uses the atomic Lua path above.
             await client.zremrangebyscore(key, float("-inf"), cutoff)
             count = int(await client.zcard(key))
             if count >= self.requests_per_minute:
@@ -65,11 +106,17 @@ class RateLimiter:
                 oldest_score = float(oldest[0][1]) if oldest else now
                 wait_time = int(max(1, oldest_score + self.window_seconds - now))
                 return False, wait_time
-            member = f"{now:.6f}:{uuid.uuid4().hex}"
             await client.zadd(key, {member: now})
             await client.expire(key, self.window_seconds)
             return True, None
         except Exception as exc:
+            if self._fail_closed:
+                logger.warning(
+                    "Redis rate limiter check failed, denying fail-closed namespace=%s: %s",
+                    self._namespace,
+                    exc,
+                )
+                return False, 1
             logger.warning("Redis rate limiter check failed, using in-memory fallback: {}", exc)
             return None
     
@@ -116,15 +163,16 @@ reset_devices_limiter = RateLimiter(requests_per_minute=2, window_seconds=60, na
 family_revoke_limiter = RateLimiter(requests_per_minute=1, window_seconds=300, namespace="family_revoke")  # 1 запрос в 5 минут
 promo_validate_limiter = RateLimiter(requests_per_minute=5, window_seconds=60, namespace="promo_validate")  # 5 запросов в минуту
 promo_redeem_limiter = RateLimiter(requests_per_minute=2, window_seconds=60, namespace="promo_redeem")  # 2 запроса в минуту
-auth_ip_limiter = RateLimiter(requests_per_minute=120, window_seconds=60, namespace="auth_telegram")  # Anti-storm для /auth/telegram
-auth_oauth_ip_limiter = RateLimiter(requests_per_minute=60, window_seconds=60, namespace="auth_oauth")  # OAuth start/callback/ticket
-auth_password_ip_limiter = RateLimiter(requests_per_minute=12, window_seconds=60, namespace="auth_password")  # login/register/reset brute-force guard
-auth_link_ip_limiter = RateLimiter(requests_per_minute=30, window_seconds=60, namespace="auth_link")  # account linking guard
+auth_ip_limiter = RateLimiter(requests_per_minute=120, window_seconds=60, namespace="auth_telegram", fail_closed=True)  # Anti-storm для /auth/telegram
+auth_oauth_ip_limiter = RateLimiter(requests_per_minute=60, window_seconds=60, namespace="auth_oauth", fail_closed=True)  # OAuth start/callback/ticket
+auth_password_ip_limiter = RateLimiter(requests_per_minute=12, window_seconds=60, namespace="auth_password", fail_closed=True)  # login/register/reset brute-force guard
+auth_link_ip_limiter = RateLimiter(requests_per_minute=30, window_seconds=60, namespace="auth_link", fail_closed=True)  # account linking guard
 user_ip_limiter = RateLimiter(requests_per_minute=240, window_seconds=60, namespace="user_hot")  # Hot endpoint /user
 devices_ip_limiter = RateLimiter(requests_per_minute=240, window_seconds=60, namespace="devices_hot")  # Hot endpoint /devices
 app_info_ip_limiter = RateLimiter(requests_per_minute=300, window_seconds=60, namespace="app_info")  # Public endpoint /app/info
 welcome_vpn_ip_limiter = RateLimiter(requests_per_minute=180, window_seconds=60, namespace="welcome_vpn")  # Public endpoint /welcome-vpn
 partner_summary_ip_limiter = RateLimiter(requests_per_minute=180, window_seconds=60, namespace="partner_summary")  # Hot partner endpoint
+error_report_ip_limiter = RateLimiter(requests_per_minute=20, window_seconds=60, namespace="error_report")  # Public client diagnostics endpoint
 unauth_sensitive_ip_limiter = RateLimiter(requests_per_minute=60, window_seconds=60, namespace="unauth_sensitive")  # Неавторизованные запросы на чувствительные endpoints
 
 
@@ -242,6 +290,14 @@ async def rate_limit_middleware(request: Request, call_next):
         allowed, wait_time = await partner_summary_ip_limiter.is_allowed(client_ip)
         if not allowed:
             logger.warning(f"Rate limit exceeded for /partner/summary by ip={client_ip}, wait={wait_time}s")
+            return _rate_limited_response(
+                wait_time=wait_time or 1,
+                detail=f"Слишком много запросов. Попробуйте снова через {wait_time} секунд.",
+            )
+    elif request.url.path == "/errors/report" and request.method == "POST":
+        allowed, wait_time = await error_report_ip_limiter.is_allowed(client_ip)
+        if not allowed:
+            logger.warning(f"Rate limit exceeded for /errors/report by ip={client_ip}, wait={wait_time}s")
             return _rate_limited_response(
                 wait_time=wait_time or 1,
                 detail=f"Слишком много запросов. Попробуйте снова через {wait_time} секунд.",

@@ -2473,6 +2473,13 @@ async def get_payment_status(
         else _active_payment_provider()
     )
     if provider == PAYMENT_PROVIDER_PLATEGA:
+        if processed is None:
+            # Platega status lookups must first prove local ownership. The pay()
+            # path creates a pending ProcessedPayments row before returning a
+            # Platega transaction id, so a missing row is either unknown or not
+            # owned by this user. Avoid using the provider as an oracle for
+            # arbitrary transaction IDs.
+            raise HTTPException(status_code=404, detail="Payment not found")
         return await _get_platega_payment_status_response(
             payment_id=payment_id,
             user=user,
