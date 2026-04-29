@@ -1,6 +1,7 @@
 import os
 from typing import Annotated
 from ipaddress import ip_address
+from urllib.parse import urlparse
 from uuid import UUID
 
 from dotenv import load_dotenv
@@ -8,6 +9,9 @@ from pydantic import SecretStr, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 load_dotenv()
+
+
+_STRATA_REMNAWAVE_DOMAIN = "stratavpn.com"
 
 
 class TelegramSettings(BaseSettings):
@@ -136,6 +140,30 @@ class RemnaWaveSettings(BaseSettings):
     lte_internal_squad_uuid: str | None = None
     # Маркер LTE-нод в названии (например, CHTF)
     lte_node_marker: str = "CHTF"
+
+    @field_validator("url")
+    @classmethod
+    def validate_vectra_owned_url(cls, value):
+        text = str(value or "").strip().rstrip("/")
+        if not text:
+            raise ValueError(
+                "REMNAWAVE_URL must point to Vectra's own RemnaWave panel"
+            )
+
+        parsed = urlparse(text)
+        hostname = (parsed.hostname or "").lower()
+        if not hostname:
+            raise ValueError("REMNAWAVE_URL must include a hostname")
+
+        if hostname == _STRATA_REMNAWAVE_DOMAIN or hostname.endswith(
+            f".{_STRATA_REMNAWAVE_DOMAIN}"
+        ):
+            raise ValueError(
+                "REMNAWAVE_URL points to Strata RemnaWave; configure "
+                "Vectra's own RemnaWave panel instead"
+            )
+
+        return text
 
     @field_validator(
         "default_internal_squad_uuid",

@@ -30,3 +30,13 @@ def test_remnawave_settings_rejects_invalid_optional_uuid_value():
                 "default_external_squad_uuid": "not-a-uuid",
             }
         )
+
+
+def test_remnawave_settings_rejects_strata_panel_url():
+    with pytest.raises(ValueError, match="Strata RemnaWave"):
+        RemnaWaveSettings.model_validate(
+            {
+                "url": "https://pan.stratavpn.com",
+                "token": "token",
+            }
+        )

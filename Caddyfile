@@ -6,5 +6,12 @@
 api-app.vectra-pro.net {
   encode gzip
 
-  reverse_proxy bloobcat:33083
+  reverse_proxy bloobcat:33083 {
+    lb_try_duration 10s
+    lb_try_interval 250ms
+    transport http {
+      dial_timeout 2s
+      response_header_timeout 8s
+    }
+  }
 }

@@ -91,7 +91,7 @@ async def _schema_already_initialized(conn) -> bool:
 
 async def _apply_legacy_sql_migrations(conn) -> None:
     migrations_dir = Path(__file__).resolve().parents[1] / "migrations" / "models"
-    migration_files = sorted(migrations_dir.glob("*.py"))
+    migration_files = sorted(migrations_dir.glob("*.py"), key=_migration_sort_key)
     logger.warning(
         "Applying legacy SQL migrations from {} files in {}",
         len(migration_files),
@@ -111,6 +111,14 @@ async def _apply_legacy_sql_migrations(conn) -> None:
         if str(sql or "").strip():
             logger.info("Applying legacy migration {}", migration_file.name)
             await conn.execute_script(sql)
+
+
+def _migration_sort_key(migration_file: Path) -> tuple[int, str]:
+    """Sort Aerich legacy migrations by numeric prefix, not lexicographically."""
+    prefix = migration_file.name.split("_", 1)[0]
+    if prefix.isdigit():
+        return (int(prefix), migration_file.name)
+    return (10**9, migration_file.name)
 
 
 async def _initialize_schema_without_aerich() -> None:
