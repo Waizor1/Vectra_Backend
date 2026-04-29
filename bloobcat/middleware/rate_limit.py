@@ -3,6 +3,7 @@ import asyncio
 import os
 import ipaddress
 import hashlib
+import uuid
 from typing import Any, Dict, Tuple, Optional
 from fastapi import Request
 from fastapi.responses import JSONResponse
@@ -46,9 +47,8 @@ class RateLimiter:
             return None
 
     def _redis_key(self, user_id: str, now: float) -> str:
-        bucket = int(now // max(1, self.window_seconds))
         digest = hashlib.sha256(user_id.encode("utf-8", errors="ignore")).hexdigest()
-        return f"{self._namespace}:{self.window_seconds}:{digest}:{bucket}"
+        return f"{self._namespace}:{self.window_seconds}:{digest}"
 
     async def _is_allowed_redis(self, user_id: str) -> Tuple[bool, Optional[int]] | None:
         client = await self._get_redis_client()
@@ -56,14 +56,19 @@ class RateLimiter:
             return None
         now = time.time()
         key = self._redis_key(user_id, now)
+        cutoff = now - self.window_seconds
         try:
-            count = int(await client.incr(key))
-            if count == 1:
-                await client.expire(key, self.window_seconds)
-            if count <= self.requests_per_minute:
-                return True, None
-            ttl = int(await client.ttl(key))
-            return False, max(1, ttl if ttl > 0 else self.window_seconds)
+            await client.zremrangebyscore(key, float("-inf"), cutoff)
+            count = int(await client.zcard(key))
+            if count >= self.requests_per_minute:
+                oldest = await client.zrange(key, 0, 0, withscores=True)
+                oldest_score = float(oldest[0][1]) if oldest else now
+                wait_time = int(max(1, oldest_score + self.window_seconds - now))
+                return False, wait_time
+            member = f"{now:.6f}:{uuid.uuid4().hex}"
+            await client.zadd(key, {member: now})
+            await client.expire(key, self.window_seconds)
+            return True, None
         except Exception as exc:
             logger.warning("Redis rate limiter check failed, using in-memory fallback: {}", exc)
             return None
@@ -107,20 +112,20 @@ class RateLimiter:
             return True, None
 
 # Создаем экземпляры rate limiter для разных эндпоинтов
-reset_devices_limiter = RateLimiter(requests_per_minute=2, window_seconds=60)  # 2 запроса в минуту
-family_revoke_limiter = RateLimiter(requests_per_minute=1, window_seconds=300)  # 1 запрос в 5 минут
-promo_validate_limiter = RateLimiter(requests_per_minute=5, window_seconds=60)  # 5 запросов в минуту
-promo_redeem_limiter = RateLimiter(requests_per_minute=2, window_seconds=60)  # 2 запроса в минуту
-auth_ip_limiter = RateLimiter(requests_per_minute=120, window_seconds=60)  # Anti-storm для /auth/telegram
-auth_oauth_ip_limiter = RateLimiter(requests_per_minute=60, window_seconds=60)  # OAuth start/callback/ticket
-auth_password_ip_limiter = RateLimiter(requests_per_minute=12, window_seconds=60)  # login/register/reset brute-force guard
-auth_link_ip_limiter = RateLimiter(requests_per_minute=30, window_seconds=60)  # account linking guard
-user_ip_limiter = RateLimiter(requests_per_minute=240, window_seconds=60)  # Hot endpoint /user
-devices_ip_limiter = RateLimiter(requests_per_minute=240, window_seconds=60)  # Hot endpoint /devices
-app_info_ip_limiter = RateLimiter(requests_per_minute=300, window_seconds=60)  # Public endpoint /app/info
-welcome_vpn_ip_limiter = RateLimiter(requests_per_minute=180, window_seconds=60)  # Public endpoint /welcome-vpn
-partner_summary_ip_limiter = RateLimiter(requests_per_minute=180, window_seconds=60)  # Hot partner endpoint
-unauth_sensitive_ip_limiter = RateLimiter(requests_per_minute=60, window_seconds=60)  # Неавторизованные запросы на чувствительные endpoints
+reset_devices_limiter = RateLimiter(requests_per_minute=2, window_seconds=60, namespace="reset_devices")  # 2 запроса в минуту
+family_revoke_limiter = RateLimiter(requests_per_minute=1, window_seconds=300, namespace="family_revoke")  # 1 запрос в 5 минут
+promo_validate_limiter = RateLimiter(requests_per_minute=5, window_seconds=60, namespace="promo_validate")  # 5 запросов в минуту
+promo_redeem_limiter = RateLimiter(requests_per_minute=2, window_seconds=60, namespace="promo_redeem")  # 2 запроса в минуту
+auth_ip_limiter = RateLimiter(requests_per_minute=120, window_seconds=60, namespace="auth_telegram")  # Anti-storm для /auth/telegram
+auth_oauth_ip_limiter = RateLimiter(requests_per_minute=60, window_seconds=60, namespace="auth_oauth")  # OAuth start/callback/ticket
+auth_password_ip_limiter = RateLimiter(requests_per_minute=12, window_seconds=60, namespace="auth_password")  # login/register/reset brute-force guard
+auth_link_ip_limiter = RateLimiter(requests_per_minute=30, window_seconds=60, namespace="auth_link")  # account linking guard
+user_ip_limiter = RateLimiter(requests_per_minute=240, window_seconds=60, namespace="user_hot")  # Hot endpoint /user
+devices_ip_limiter = RateLimiter(requests_per_minute=240, window_seconds=60, namespace="devices_hot")  # Hot endpoint /devices
+app_info_ip_limiter = RateLimiter(requests_per_minute=300, window_seconds=60, namespace="app_info")  # Public endpoint /app/info
+welcome_vpn_ip_limiter = RateLimiter(requests_per_minute=180, window_seconds=60, namespace="welcome_vpn")  # Public endpoint /welcome-vpn
+partner_summary_ip_limiter = RateLimiter(requests_per_minute=180, window_seconds=60, namespace="partner_summary")  # Hot partner endpoint
+unauth_sensitive_ip_limiter = RateLimiter(requests_per_minute=60, window_seconds=60, namespace="unauth_sensitive")  # Неавторизованные запросы на чувствительные endpoints
 
 
 def _is_trusted_proxy_ip(ip: str) -> bool:

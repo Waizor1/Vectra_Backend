@@ -20,4 +20,6 @@ if str(PROJECT_ROOT) not in sys.path:
 # Force safe example defaults before application modules import settings.py;
 # settings.py's own load_dotenv() keeps these values because override=False.
 load_dotenv(PROJECT_ROOT / ".env.example", override=True)
+os.environ["AUTH_JWT_SECRET"] = "test-suite-auth-jwt-secret-with-safe-length-0001"
+os.environ["API_KEY"] = "test-suite-captain-api-key-with-safe-length-0001"
 os.environ["REMNAWAVE_LTE_NODE_MARKER"] = ""

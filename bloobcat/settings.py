@@ -23,6 +23,7 @@ _UNSAFE_SECRET_PLACEHOLDERS = {
     "your-secret",
     "your_secret",
 }
+_UNSAFE_SECRET_MARKERS = ("dev-only", "please-rotate", "example", "dummy")
 
 
 def _test_mode_from_env() -> bool:
@@ -39,7 +40,12 @@ def validate_runtime_secret(
     normalized = raw.strip()
     if _test_mode_from_env():
         return normalized
-    if normalized.lower() in _UNSAFE_SECRET_PLACEHOLDERS or len(normalized) < min_length:
+    lowered = normalized.lower()
+    if (
+        lowered in _UNSAFE_SECRET_PLACEHOLDERS
+        or any(marker in lowered for marker in _UNSAFE_SECRET_MARKERS)
+        or len(normalized) < min_length
+    ):
         raise ValueError(f"{name} must be a non-placeholder secret with at least {min_length} characters")
     return normalized
 

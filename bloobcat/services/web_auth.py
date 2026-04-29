@@ -75,6 +75,7 @@ PASSWORD_EMAIL_RATE_LIMIT_WINDOW_SECONDS = 15 * 60
 password_email_limiter = RateLimiter(
     requests_per_minute=8,
     window_seconds=PASSWORD_EMAIL_RATE_LIMIT_WINDOW_SECONDS,
+    namespace="password_email",
 )
 
 GENERIC_PASSWORD_RESPONSE = {
