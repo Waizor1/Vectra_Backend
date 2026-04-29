@@ -2646,6 +2646,18 @@ async def platega_webhook(request: Request):
     currency = str(body.get("currency") or PAYMENT_CURRENCY_RUB).strip().upper()
 
     processed = await ProcessedPayments.get_or_none(payment_id=payment_id)
+    if provider_status == PLATEGA_STATUS_CONFIRMED and processed is None:
+        logger.error(
+            "Confirmed Platega webhook references an unknown local payment",
+            extra={"payment_id": payment_id, "provider_status": provider_status},
+        )
+        return {"status": "error", "message": "Unknown payment"}
+    if processed is not None and getattr(processed, "provider", None) not in (None, PAYMENT_PROVIDER_PLATEGA):
+        logger.error(
+            "Platega webhook payment id collides with another provider",
+            extra={"payment_id": payment_id, "provider": getattr(processed, "provider", None)},
+        )
+        return {"status": "error", "message": "Provider mismatch"}
     metadata = _parse_platega_metadata_from_payload(body.get("payload"))
     if not metadata:
         metadata = _metadata_from_processed_payment(processed)

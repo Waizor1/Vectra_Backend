@@ -13,6 +13,25 @@ from zoneinfo import ZoneInfo
 
 logger = get_logger("remnawave_client")
 
+SENSITIVE_LOG_KEYS = {"token", "authorization", "password", "subscription_url", "shortuuid", "uuid"}
+
+
+def _redact_for_log(value):
+    if isinstance(value, dict):
+        result = {}
+        for key, item in value.items():
+            key_text = str(key).lower()
+            if any(marker in key_text for marker in SENSITIVE_LOG_KEYS):
+                result[key] = "[redacted]"
+            else:
+                result[key] = _redact_for_log(item)
+        return result
+    if isinstance(value, list):
+        return [_redact_for_log(item) for item in value]
+    if isinstance(value, str) and ("crypto" in value.lower() or "token=" in value.lower() or "://" in value):
+        return "[redacted]"
+    return value
+
 class RemnaWaveClient:
     def __init__(self, base_url: str, token: str):
         self.base_url = base_url.rstrip('/')
@@ -53,7 +72,7 @@ class RemnaWaveClient:
         if 'json' in kwargs:
             kwargs['json'] = self._prepare_json_data(kwargs['json'])
         
-        request_data_log = kwargs.get('json', kwargs.get('data', {}))
+        request_data_log = _redact_for_log(kwargs.get('json', kwargs.get('data', {})))
         logger.debug(f"Sending {method} request to {url} with data: {json.dumps(request_data_log, indent=2, default=str)}")
         
         try:
@@ -66,13 +85,13 @@ class RemnaWaveClient:
                 except json.JSONDecodeError as e:
                     response_text = await response.text()
                     logger.error(f"Failed to decode JSON response from {url}: {str(e)}")
-                    logger.error(f"Raw response text: {response_text}")
-                    raise Exception(f"Failed to decode API response: {response_text}")
+                    logger.error("Raw response text: [redacted]")
+                    raise Exception("Failed to decode API response")
                 
                 if response.status >= 400:
                     error_msg = response_json.get('message', 'Unknown error')
                     error_code = response_json.get('errorCode')
-                    logger.error(f"API Error Response ({response.status}) from {url}: {response_json}")
+                    logger.error(f"API Error Response ({response.status}) from {url}: {_redact_for_log(response_json)}")
                     # Новая панель возвращает детали валидации в errors[]. Важно пометить это как validation,
                     # чтобы верхний retry-слой не тратил 60 сек на бессмысленные повторы.
                     if response.status in (400, 422) and isinstance(response_json.get("errors"), list):

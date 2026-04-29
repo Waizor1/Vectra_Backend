@@ -6,6 +6,14 @@
 api-app.vectra-pro.net {
   encode gzip
 
+  header {
+    Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+    X-Content-Type-Options "nosniff"
+    Referrer-Policy "strict-origin-when-cross-origin"
+    Permissions-Policy "camera=(), microphone=(), geolocation=()"
+    Content-Security-Policy "default-src 'none'; frame-ancestors 'none'; base-uri 'none'"
+  }
+
   reverse_proxy bloobcat:33083 {
     lb_try_duration 10s
     lb_try_interval 250ms

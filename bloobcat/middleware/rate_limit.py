@@ -2,7 +2,8 @@ import time
 import asyncio
 import os
 import ipaddress
-from typing import Dict, Tuple, Optional
+import hashlib
+from typing import Any, Dict, Tuple, Optional
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from bloobcat.logger import get_logger
@@ -12,11 +13,60 @@ logger = get_logger("rate_limit")
 class RateLimiter:
     """Простой rate limiter для FastAPI эндпоинтов"""
     
-    def __init__(self, requests_per_minute: int = 5, window_seconds: int = 60):
+    def __init__(
+        self,
+        requests_per_minute: int = 5,
+        window_seconds: int = 60,
+        *,
+        redis_url: str | None = None,
+        redis_client: Any | None = None,
+        namespace: str = "rate_limit",
+    ):
         self.requests_per_minute = requests_per_minute
         self.window_seconds = window_seconds
         self.requests: Dict[str, list] = {}  # user_id -> list of timestamps
         self._lock = asyncio.Lock()
+        self._redis_url = redis_url if redis_url is not None else os.getenv("RATE_LIMIT_REDIS_URL", "").strip()
+        self._redis_client = redis_client
+        self._namespace = namespace
+
+    async def _get_redis_client(self):
+        if self._redis_client is not None:
+            return self._redis_client
+        if not self._redis_url:
+            return None
+        try:
+            import redis.asyncio as redis  # type: ignore
+
+            self._redis_client = redis.from_url(self._redis_url, decode_responses=True)
+            return self._redis_client
+        except Exception as exc:
+            logger.warning("Redis rate limiter unavailable, using in-memory fallback: {}", exc)
+            self._redis_url = ""
+            return None
+
+    def _redis_key(self, user_id: str, now: float) -> str:
+        bucket = int(now // max(1, self.window_seconds))
+        digest = hashlib.sha256(user_id.encode("utf-8", errors="ignore")).hexdigest()
+        return f"{self._namespace}:{self.window_seconds}:{digest}:{bucket}"
+
+    async def _is_allowed_redis(self, user_id: str) -> Tuple[bool, Optional[int]] | None:
+        client = await self._get_redis_client()
+        if client is None:
+            return None
+        now = time.time()
+        key = self._redis_key(user_id, now)
+        try:
+            count = int(await client.incr(key))
+            if count == 1:
+                await client.expire(key, self.window_seconds)
+            if count <= self.requests_per_minute:
+                return True, None
+            ttl = int(await client.ttl(key))
+            return False, max(1, ttl if ttl > 0 else self.window_seconds)
+        except Exception as exc:
+            logger.warning("Redis rate limiter check failed, using in-memory fallback: {}", exc)
+            return None
     
     async def is_allowed(self, user_id: str) -> Tuple[bool, Optional[int]]:
         """
@@ -25,6 +75,10 @@ class RateLimiter:
         Returns:
             Tuple[bool, Optional[int]]: (разрешено, время до следующего разрешения в секундах)
         """
+        redis_result = await self._is_allowed_redis(user_id)
+        if redis_result is not None:
+            return redis_result
+
         async with self._lock:
             now = time.time()
             

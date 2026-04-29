@@ -351,6 +351,17 @@ async def test_platega_webhook_confirmed_is_idempotent(monkeypatch):
         "payload": json.dumps({"metadata": metadata}),
     }
 
+    await ProcessedPayments.create(
+        payment_id="platega-tx-webhook",
+        provider="platega",
+        user_id=user.id,
+        amount=1000,
+        amount_external=1000,
+        amount_from_balance=0,
+        status="pending",
+        provider_payload=json.dumps({"metadata": metadata}),
+    )
+
     request = await _make_platega_request(
         {"X-MerchantId": "merchant-1", "X-Secret": "secret-1"},
         body,
@@ -371,6 +382,48 @@ async def test_platega_webhook_confirmed_is_idempotent(monkeypatch):
     assert row.provider == "platega"
     assert row.status == "succeeded"
     assert row.effect_applied is True
+
+
+@pytest.mark.asyncio
+async def test_platega_webhook_confirmed_requires_existing_pending_payment(monkeypatch):
+    from bloobcat.db.payments import ProcessedPayments
+    from bloobcat.routes import payment as payment_route
+
+    user, tariff = await _seed_user_and_tariff()
+    metadata = {
+        "user_id": user.id,
+        "month": 1,
+        "amount_from_balance": 0,
+        "tariff_id": tariff.id,
+        "device_count": 1,
+        "tariff_kind": "base",
+        "expected_amount": 1000.0,
+        "expected_currency": "RUB",
+        "payment_provider": "platega",
+    }
+
+    monkeypatch.setattr(payment_route.platega_settings, "merchant_id", "merchant-1")
+    monkeypatch.setattr(
+        payment_route.platega_settings,
+        "secret_key",
+        type("Secret", (), {"get_secret_value": lambda self: "secret-1"})(),
+    )
+    request = await _make_platega_request(
+        {"X-MerchantId": "merchant-1", "X-Secret": "secret-1"},
+        {
+            "id": "platega-forged-confirmed",
+            "status": "CONFIRMED",
+            "amount": 1000,
+            "currency": "RUB",
+            "payload": json.dumps({"metadata": metadata}),
+        },
+    )
+
+    assert await payment_route.platega_webhook(request) == {
+        "status": "error",
+        "message": "Unknown payment",
+    }
+    assert await ProcessedPayments.get_or_none(payment_id="platega-forged-confirmed") is None
 
 
 @pytest.mark.asyncio
