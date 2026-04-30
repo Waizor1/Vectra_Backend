@@ -235,6 +235,43 @@ async def test_complete_registration_raises_for_telegram_when_remnawave_ensure_i
 
 
 @pytest.mark.asyncio
+async def test_complete_registration_can_defer_remnawave_for_explicit_telegram_registration(monkeypatch):
+    calls: list[tuple[str, object]] = []
+
+    class _User(types.SimpleNamespace):
+        async def save(self, update_fields=None):
+            calls.append(("save", tuple(update_fields or ())))
+
+        async def _ensure_remnawave_user(self):
+            calls.append(("ensure", None))
+            return False
+
+    def _schedule(cls, user_id):
+        calls.append(("schedule", user_id))
+
+    monkeypatch.setattr(web_auth.Users, "_schedule_remnawave_ensure", classmethod(_schedule))
+    monkeypatch.setattr(web_auth, "issue_access_token_for_user", lambda user: ("token-tg", 3600))
+
+    user = _User(
+        id=123456,
+        remnawave_uuid=None,
+        expired_at=None,
+        is_trial=False,
+        used_trial=False,
+    )
+
+    token, ttl = await web_auth.complete_registration_for_user(user, defer_remnawave=True)
+
+    assert (token, ttl) == ("token-tg", 3600)
+    assert user.is_trial is True
+    assert user.used_trial is True
+    assert user.expired_at is not None
+    assert ("save", ("is_trial", "used_trial", "expired_at")) in calls
+    assert ("schedule", user.id) in calls
+    assert ("ensure", None) not in calls
+
+
+@pytest.mark.asyncio
 async def test_complete_registration_grants_web_trial_without_waiting_for_remnawave(monkeypatch):
     calls: list[tuple[str, object]] = []
 
