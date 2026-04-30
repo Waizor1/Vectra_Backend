@@ -433,10 +433,13 @@ async def test_subscription_quote_returns_backend_pricing_for_devices_and_lte():
     assert payload["lteGb"] == 10
     assert payload["ltePriceRub"] == 100
     assert payload["subscriptionPriceRub"] == tariff.calculate_price(10)
+    expected_device_discount = max(0, tariff.calculate_price(1) * 10 - tariff.calculate_price(10))
+    assert payload["deviceDiscountRub"] == expected_device_discount
+    assert payload["deviceDiscountPercent"] == round(expected_device_discount / (tariff.calculate_price(1) * 10) * 100)
     one_month_tariff = await Tariffs.get(id=101)
     expected_duration_discount = max(0, one_month_tariff.calculate_price(10) * 3 - tariff.calculate_price(10))
     assert payload["durationDiscountRub"] == expected_duration_discount
-    assert payload["totalDiscountRub"] == expected_duration_discount
+    assert payload["totalDiscountRub"] == expected_device_discount + expected_duration_discount
     assert payload["totalPriceRub"] == payload["subscriptionPriceRub"] + 100
     assert payload["copy"] == "Стоимость обновлена и будет проверена перед оплатой"
     assert "backend" not in payload["copy"].lower()
