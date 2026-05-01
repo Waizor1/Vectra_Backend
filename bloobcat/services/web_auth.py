@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -75,6 +76,7 @@ PASSWORD_EMAIL_RATE_LIMIT_WINDOW_SECONDS = 15 * 60
 password_email_limiter = RateLimiter(
     requests_per_minute=8,
     window_seconds=PASSWORD_EMAIL_RATE_LIMIT_WINDOW_SECONDS,
+    namespace="password_email",
 )
 
 GENERIC_PASSWORD_RESPONSE = {
@@ -574,6 +576,11 @@ def _decode_id_token(config: ProviderConfig, id_token: str, nonce: str) -> dict[
     return payload
 
 
+async def _decode_id_token_async(config: ProviderConfig, id_token: str, nonce: str) -> dict[str, Any]:
+    # PyJWKClient performs synchronous network/cache work; keep it off the event loop.
+    return await asyncio.to_thread(_decode_id_token, config, id_token, nonce)
+
+
 def _extract_numeric_telegram_id(claims: dict[str, Any]) -> int:
     for key in ("id", "telegram_id"):
         raw = claims.get(key)
@@ -606,7 +613,7 @@ async def resolve_provider_profile(config: ProviderConfig, state_row: AuthOAuthS
 
     id_claims: dict[str, Any] = {}
     if id_token:
-        id_claims = _decode_id_token(config, str(id_token), state_row.nonce)
+        id_claims = await _decode_id_token_async(config, str(id_token), state_row.nonce)
 
     userinfo: dict[str, Any] = {}
     if access_token and config.userinfo_url:
@@ -1095,11 +1102,19 @@ def hash_password(password: str) -> str:
     return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
 
+async def hash_password_async(password: str) -> str:
+    return await asyncio.to_thread(hash_password, password)
+
+
 def verify_password(password: str, password_hash: str) -> bool:
     try:
         return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8"))
     except Exception:
         return False
+
+
+async def verify_password_async(password: str, password_hash: str) -> bool:
+    return await asyncio.to_thread(verify_password, password, password_hash)
 
 
 async def send_auth_email(email: str, subject: str, body: str) -> bool:
@@ -1168,7 +1183,7 @@ async def send_auth_email_via_resend(email: str, subject: str, body: str) -> boo
         return False
 
 
-async def send_auth_email_via_smtp(email: str, subject: str, body: str) -> bool:
+def _send_auth_email_via_smtp_sync(email: str, subject: str, body: str) -> bool:
     message = EmailMessage()
     message["Subject"] = subject
     message["From"] = _format_sender(smtp_settings.from_email or "", smtp_settings.from_name)
@@ -1190,6 +1205,10 @@ async def send_auth_email_via_smtp(email: str, subject: str, body: str) -> bool:
     except Exception as exc:
         logger.warning("Auth email send failed hash=%s: %s", hash_secret(email)[:12], exc)
         return False
+
+
+async def send_auth_email_via_smtp(email: str, subject: str, body: str) -> bool:
+    return await asyncio.to_thread(_send_auth_email_via_smtp_sync, email, subject, body)
 
 
 
@@ -1283,7 +1302,7 @@ async def register_password_user(email: str, password: str, request: Request | N
     await AuthPasswordCredential.create(
         user=user,
         email_normalized=normalized,
-        password_hash=hash_password(password),
+        password_hash=await hash_password_async(password),
         email_verified=False,
         verification_token_hash=token_hash,
         verification_expires_at=now_utc() + timedelta(seconds=EMAIL_TOKEN_TTL_SECONDS),
@@ -1330,7 +1349,10 @@ async def login_with_password(email: str, password: str, request: Request | None
         request=request,
     )
     credential = await AuthPasswordCredential.get_or_none(email_normalized=normalized)
-    if not credential or not credential.email_verified or not verify_password(password, credential.password_hash):
+    password_ok = False
+    if credential and credential.email_verified:
+        password_ok = await verify_password_async(password, credential.password_hash)
+    if not credential or not credential.email_verified or not password_ok:
         await audit_auth_event(action="password_login", result="failed", provider="password", reason="invalid_credentials", request=request)
         raise WebAuthError("invalid_credentials", status_code=403)
     user = await Users.get(id=credential.user_id)
@@ -1372,7 +1394,7 @@ async def confirm_password_reset(token: str, password: str, request: Request | N
     credential = await AuthPasswordCredential.get_or_none(reset_token_hash=hash_secret(token))
     if not credential or not credential.reset_expires_at or credential.reset_expires_at < now_utc():
         raise WebAuthError("invalid_reset_token", status_code=403)
-    credential.password_hash = hash_password(password)
+    credential.password_hash = await hash_password_async(password)
     credential.email_verified = True
     credential.reset_token_hash = None
     credential.reset_expires_at = None

@@ -7,6 +7,8 @@ jobs:
   diagnose:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
     steps:
       - name: Setup SSH
         uses: webfactory/ssh-agent@v0.9.0
@@ -46,13 +48,13 @@ jobs:
           docker compose $COMPOSE_ARGS ps || true
 
           echo "=== bloobcat logs ==="
-          docker compose $COMPOSE_ARGS logs --tail=300 bloobcat || true
+          docker compose $COMPOSE_ARGS logs --tail=120 bloobcat || true
 
           echo "=== caddy logs ==="
-          docker compose $COMPOSE_ARGS logs --tail=200 caddy || true
+          docker compose $COMPOSE_ARGS logs --tail=80 caddy || true
 
           echo "=== directus logs ==="
-          docker compose $COMPOSE_ARGS logs --tail=200 directus || true
+          docker compose $COMPOSE_ARGS logs --tail=80 directus || true
 
           echo "=== in-server HTTP checks ==="
           curl -sS -m 8 -i http://localhost:33083/health || true

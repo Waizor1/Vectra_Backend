@@ -1,3 +1,5 @@
+import time
+
 from fastapi import APIRouter
 from bloobcat.bot.bot import get_bot_username # Предполагаемый путь
 from bloobcat.build_info import get_build_info
@@ -10,12 +12,27 @@ from bloobcat.logger import get_logger
 router = APIRouter(prefix="/app", tags=["app_info"])
 logger = get_logger("app_info")
 
+MAINTENANCE_SETTINGS_CACHE_TTL_SECONDS = 15.0
+_maintenance_settings_cache: tuple[float, tuple[bool, str]] | None = None
+
+
+def clear_maintenance_settings_cache() -> None:
+    global _maintenance_settings_cache
+    _maintenance_settings_cache = None
+
 
 async def read_maintenance_settings() -> tuple[bool, str]:
     """
     Best-effort read maintenance settings from Directus singleton collection.
     Falls back to disabled mode when Directus table/row is unavailable.
     """
+    global _maintenance_settings_cache
+    now = time.monotonic()
+    if _maintenance_settings_cache is not None:
+        cached_at, cached_value = _maintenance_settings_cache
+        if now - cached_at < MAINTENANCE_SETTINGS_CACHE_TTL_SECONDS:
+            return cached_value
+
     try:
         conn = Tortoise.get_connection("default")
         rows = await conn.execute_query_dict(
@@ -31,10 +48,14 @@ async def read_maintenance_settings() -> tuple[bool, str]:
         mode = bool(row.get("maintenance_mode", False))
         message_raw = row.get("maintenance_message")
         message = message_raw.strip() if isinstance(message_raw, str) else ""
-        return mode, message
+        result = (mode, message)
+        _maintenance_settings_cache = (now, result)
+        return result
     except Exception as exc:
         logger.debug("Maintenance settings unavailable: {}", exc)
-        return False, ""
+        result = (False, "")
+        _maintenance_settings_cache = (now, result)
+        return result
 
 @router.get("/bot_username")
 async def get_bot_username_endpoint():

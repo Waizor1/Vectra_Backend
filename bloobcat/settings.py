@@ -12,6 +12,42 @@ load_dotenv()
 
 
 _STRATA_REMNAWAVE_DOMAIN = "stratavpn.com"
+_UNSAFE_SECRET_PLACEHOLDERS = {
+    "",
+    "change-me",
+    "changeme",
+    "replace-me",
+    "replace_me",
+    "secret",
+    "password",
+    "your-secret",
+    "your_secret",
+}
+_UNSAFE_SECRET_MARKERS = ("dev-only", "please-rotate", "example", "dummy")
+
+
+def _test_mode_from_env() -> bool:
+    return os.getenv("TESTMODE", "false").strip().lower() in {"true", "1", "yes", "on"}
+
+
+def validate_runtime_secret(
+    name: str,
+    value: SecretStr | str | None,
+    *,
+    min_length: int = 32,
+) -> str:
+    raw = value.get_secret_value() if isinstance(value, SecretStr) else str(value or "")
+    normalized = raw.strip()
+    if _test_mode_from_env():
+        return normalized
+    lowered = normalized.lower()
+    if (
+        lowered in _UNSAFE_SECRET_PLACEHOLDERS
+        or any(marker in lowered for marker in _UNSAFE_SECRET_MARKERS)
+        or len(normalized) < min_length
+    ):
+        raise ValueError(f"{name} must be a non-placeholder secret with at least {min_length} characters")
+    return normalized
 
 
 class TelegramSettings(BaseSettings):
@@ -20,6 +56,7 @@ class TelegramSettings(BaseSettings):
     token: SecretStr
     webhook_secret: str
     webhook_enabled: bool = True
+    delete_webhook_on_shutdown: bool = False
     username: str | None = None
     webapp_url: str
     miniapp_url: str
@@ -226,6 +263,10 @@ class AuthSettings(BaseSettings):
     access_token_ttl_seconds: int = 86400
     jwt_leeway_seconds: int = 30
 
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        validate_runtime_secret("AUTH_JWT_SECRET", self.jwt_secret)
+
 
 class CORSSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="CORS_")
@@ -430,6 +471,10 @@ class CaptainUserLookupSettings(BaseSettings):
 
     api_key: SecretStr = SecretStr("change-me")
     allowlist_domains: list[str] | str | None = None
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        validate_runtime_secret("API_KEY", self.api_key)
 
     @field_validator("allowlist_domains", mode="before")
     @classmethod

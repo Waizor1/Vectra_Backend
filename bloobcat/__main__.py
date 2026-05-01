@@ -379,7 +379,7 @@ async def lifespan(fastapi_app: FastAPI):
 
     # Закрытие всех клиентов RemnaWave при завершении работы
     try:
-        if telegram_settings.webhook_enabled:
+        if telegram_settings.webhook_enabled and telegram_settings.delete_webhook_on_shutdown:
             # Удаляем webhook при остановке приложения с повторными попытками
             webhook_deleted = False
             for attempt in range(3):  # 3 попытки удаления
@@ -403,6 +403,8 @@ async def lifespan(fastapi_app: FastAPI):
                 logger.warning(
                     "🔄 Webhook не был удален, но приложение продолжает завершение"
                 )
+        elif telegram_settings.webhook_enabled:
+            logger.info("Telegram webhook deletion skipped by TELEGRAM_DELETE_WEBHOOK_ON_SHUTDOWN=false")
         else:
             logger.info("Telegram webhook deletion skipped by TELEGRAM_WEBHOOK_ENABLED=false")
 

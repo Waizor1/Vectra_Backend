@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import os
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -15,6 +16,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 
-# Mirror the backend workdir behavior so settings-dependent imports see the
-# project .env during collection when tests run from the repository root.
-load_dotenv(PROJECT_ROOT / ".env")
+# Unit tests must not depend on or leak the operator's local/prod-like .env.
+# Force safe example defaults before application modules import settings.py;
+# settings.py's own load_dotenv() keeps these values because override=False.
+load_dotenv(PROJECT_ROOT / ".env.example", override=True)
+os.environ["AUTH_JWT_SECRET"] = "test-suite-auth-jwt-secret-with-safe-length-0001"
+os.environ["API_KEY"] = "test-suite-captain-api-key-with-safe-length-0001"
+os.environ["REMNAWAVE_LTE_NODE_MARKER"] = ""

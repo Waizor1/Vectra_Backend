@@ -22,6 +22,9 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     timeout-minutes: 35
+    permissions:
+      contents: read
+    environment: production
     concurrency:
       group: tvpn-backend-deploy-prod
       cancel-in-progress: ${{ vars.PRERELEASE_FULL_REINSTALL != 'true' }}
@@ -44,12 +47,6 @@ jobs:
         pip install -r requirements.txt
         pip install pytest pytest-asyncio
         pip install -e . --no-deps
-
-    - name: Debug Python import context
-      run: |
-        pwd
-        ls -la
-        python -c "import os,sys; print(os.getcwd()); print(sys.executable); print(sys.path); import bloobcat, pytest_asyncio; print(bloobcat.__file__); print(pytest_asyncio.__file__)"
 
     - name: Run backend tests
       run: python -m pytest tests -q
