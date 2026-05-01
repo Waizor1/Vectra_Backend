@@ -43,6 +43,7 @@
 ## Перед полноценным запуском RemnaWave/VPN-доступа
 
 - Временно для web OAuth регистраций (`Google`/`Yandex`) trial выдаётся локально до создания профиля в RemnaWave, а `Users._ensure_remnawave_user()` уходит в background, чтобы не держать экран "Быстрый вход" 60 секунд при отсутствующей Vectra RemnaWave панели.
+- Welcome-agent больше не используется: `/welcome-vpn` возвращает `featureEnabled=false` и не обращается к RemnaWave. При подключении стабильной подписки/панели для Vectra Connect **не создавать и не активировать** пользователя `welcome-agent`; первичный вход идёт через браузер.
 - Когда Vectra RemnaWave будет настроен (`REMNAWAVE_URL`, token, internal/external squad UUIDs, DNS/health), вернуть production-safe поведение: регистрация/выдача demo должна подтверждать создание/привязку RemnaWave профиля, а дата trial должна синхронизироваться в RemnaWave до того, как пользователь увидит готовый ключ.
 - Обязательный smoke перед запуском: новый Google/Yandex web-user -> `/auth/complete-registration` быстро завершается -> у пользователя есть `expired_at/is_trial/used_trial` -> `remnawave_uuid` создан -> `/user` возвращает `subscription_url_status=ready` и не показывает `account_initializing`.
 

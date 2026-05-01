@@ -1,25 +1,15 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
-from typing import Any
-from zoneinfo import ZoneInfo
-
 from fastapi import APIRouter, Response
 from pydantic import BaseModel, Field
 
-from bloobcat.logger import get_logger
-from bloobcat.routes.remnawave.happ_crypto import normalize_happ_crypto_link
-from bloobcat.routes.user import remnawave_client
-
-logger = get_logger("routes.welcome_vpn")
-
-MOSCOW_TZ = ZoneInfo("Europe/Moscow")
-WELCOME_ALIAS = "welcome-agent"
-WELCOME_SUBSCRIPTION_TITLE = "Vectra Connect | Временная"
-WELCOME_SERVER_REMARK = "🇷🇺 RU 1дн | Регистрация в Vectra Connect"
+WELCOME_ALIAS = "browser-entry"
+WELCOME_SUBSCRIPTION_TITLE = "Vectra Connect | Вход через браузер"
+WELCOME_SERVER_REMARK = "Временный доступ отключён"
 WELCOME_BOT_URL = "https://t.me/VectraConnect_bot"
 WELCOME_SUPPORT_URL = "https://t.me/VectraConnect_support_bot"
-WELCOME_ROTATION_MODE = "recreate"
+WELCOME_ROTATION_MODE = "disabled"
+WELCOME_UNAVAILABLE_REASON = "browser_entry_available"
 
 router = APIRouter(tags=["welcome-vpn"])
 
@@ -39,73 +29,23 @@ class WelcomeVpnResponse(BaseModel):
     unavailableReason: str | None = Field(default=None, exclude=True)
 
 
-def next_moscow_midnight_label(now: datetime | None = None) -> str:
-    """Returns the next daily welcome-agent rotation date as dd.MM in Moscow time."""
-    current = now.astimezone(MOSCOW_TZ) if now else datetime.now(MOSCOW_TZ)
-    next_day = current.date() + timedelta(days=1)
-    return next_day.strftime("%d.%m")
-
-
-def build_welcome_announce(active_until_label: str) -> str:
+def build_welcome_announce() -> str:
     return (
-        "Временный доступ помогает продолжить настройку Vectra Connect.\n"
-        "Установите Happ, добавьте подписку и откройте нашего бота.\n"
-        f"Доступ обновляется каждый день и активен до {active_until_label} по Москве."
+        "Временный доступ отключён для Vectra Connect. "
+        "Используйте вход через браузер: он заменяет временную Happ-подписку для первичного подключения."
     )
 
 
-def _extract_remnawave_user(raw_response: dict[str, Any]) -> dict[str, Any]:
-    response = raw_response.get("response")
-    if isinstance(response, dict):
-        user = response.get("user")
-        if isinstance(user, dict):
-            return user
-        return response
-    return raw_response
-
-
-async def _extract_happ_subscription_url(user_data: dict[str, Any]) -> str:
-    happ_payload = user_data.get("happ")
-    if isinstance(happ_payload, dict):
-        crypto_link = normalize_happ_crypto_link(happ_payload.get("cryptoLink") or "")
-        if crypto_link:
-            return crypto_link
-
-    raw_subscription_url = str(user_data.get("subscriptionUrl") or "").strip()
-    if raw_subscription_url:
-        return normalize_happ_crypto_link(
-            await remnawave_client.tools.encrypt_happ_crypto_link(raw_subscription_url)
-        )
-
-    raise ValueError("welcome-agent subscription URL not found")
-
-
-async def build_welcome_vpn_response(now: datetime | None = None) -> WelcomeVpnResponse:
-    active_until_label = next_moscow_midnight_label(now)
-    base_payload = {
-        "activeUntilLabel": active_until_label,
-        "announce": build_welcome_announce(active_until_label),
-    }
-
-    try:
-        raw_user = await remnawave_client.users.get_user_by_username(WELCOME_ALIAS)
-        user_data = _extract_remnawave_user(raw_user)
-        subscription_url = await _extract_happ_subscription_url(user_data)
-
-        return WelcomeVpnResponse(
-            featureEnabled=True,
-            subscriptionUrl=subscription_url,
-            rotatedAt=str(user_data.get("rotatedAt") or "").strip() or None,
-            **base_payload,
-        )
-    except Exception as exc:
-        logger.error("Failed to resolve welcome VPN subscription: {}", exc, exc_info=True)
-        return WelcomeVpnResponse(
-            featureEnabled=False,
-            subscriptionUrl=None,
-            unavailableReason="subscription_unavailable",
-            **base_payload,
-        )
+async def build_welcome_vpn_response() -> WelcomeVpnResponse:
+    """Return a stable disabled contract for stale clients without touching RemnaWave."""
+    return WelcomeVpnResponse(
+        featureEnabled=False,
+        subscriptionUrl=None,
+        announce=build_welcome_announce(),
+        activeUntilLabel="",
+        rotatedAt=None,
+        unavailableReason=WELCOME_UNAVAILABLE_REASON,
+    )
 
 
 @router.get("/welcome-vpn", response_model=WelcomeVpnResponse)
