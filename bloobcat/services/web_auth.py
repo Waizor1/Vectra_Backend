@@ -1072,7 +1072,7 @@ async def grant_trial_if_eligible(user: Users) -> bool:
     return True
 
 
-async def complete_registration_for_user(user: Users) -> tuple[str, int]:
+async def complete_registration_for_user(user: Users, *, defer_remnawave: bool = False) -> tuple[str, int]:
     if is_web_user_id(user.id):
         await grant_trial_if_eligible(user)
         if not user.remnawave_uuid:
@@ -1081,6 +1081,11 @@ async def complete_registration_for_user(user: Users) -> tuple[str, int]:
         return token, ttl
 
     if not user.remnawave_uuid:
+        if defer_remnawave:
+            await grant_trial_if_eligible(user)
+            Users._schedule_remnawave_ensure(int(user.id))
+            token, ttl = issue_access_token_for_user(user)
+            return token, ttl
         ensured = await user._ensure_remnawave_user()
         if not ensured and not user.remnawave_uuid:
             raise WebAuthError("registration_sync_pending", status_code=503)

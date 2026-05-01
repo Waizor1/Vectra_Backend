@@ -266,7 +266,7 @@ async def test_auth_telegram_with_partner_start_param_marks_partner_source(
 
 
 @pytest.mark.asyncio
-async def test_auth_telegram_with_register_intent_completes_remnawave_before_token(
+async def test_auth_telegram_with_register_intent_defers_remnawave_before_token(
     monkeypatch,
 ):
     parsed = types.SimpleNamespace(
@@ -279,8 +279,9 @@ async def test_auth_telegram_with_register_intent_completes_remnawave_before_tok
         assert kwargs["ensure_remnawave"] is False
         return created_user, True
 
-    async def _complete_registration(user):
+    async def _complete_registration(user, *, defer_remnawave=False):
         assert user is created_user
+        assert defer_remnawave is True
         return f"token-{user.id}", 900
 
     monkeypatch.setattr(auth_module, "safe_parse_webapp_init_data", lambda *_: parsed)
@@ -318,8 +319,9 @@ async def test_auth_telegram_with_register_intent_does_not_mutate_activation_reg
         assert kwargs["ensure_remnawave"] is False
         return created_user, True
 
-    async def _complete_registration(user):
+    async def _complete_registration(user, *, defer_remnawave=False):
         assert user is created_user
+        assert defer_remnawave is True
         return f"token-{user.id}", 900
 
     monkeypatch.setattr(auth_module, "safe_parse_webapp_init_data", lambda *_: parsed)
@@ -348,7 +350,8 @@ async def test_auth_telegram_register_intent_returns_public_pending_when_sync_fa
         assert kwargs["ensure_remnawave"] is False
         return created_user, True
 
-    async def _complete_registration(_user):
+    async def _complete_registration(_user, *, defer_remnawave=False):
+        assert defer_remnawave is True
         raise auth_module.WebAuthError(
             "registration_sync_pending",
             message="Failed to initialize user account.",

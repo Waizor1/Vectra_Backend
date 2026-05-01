@@ -267,7 +267,9 @@ async def auth_telegram(
 
             await ensure_telegram_identity(db_user, user_data.user)
             if is_explicit_registration:
-                token, ttl_seconds = await complete_registration_for_user(db_user)
+                token, ttl_seconds = await complete_registration_for_user(
+                    db_user, defer_remnawave=True
+                )
                 return TelegramAuthResponse(
                     accessToken=token,
                     expiresIn=ttl_seconds,

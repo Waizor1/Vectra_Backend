@@ -112,6 +112,8 @@ class SubscriptionQuote:
     lte_gb: int
     subscription_price_rub: int
     discounted_subscription_price_rub: int
+    device_discount_rub: int
+    device_discount_percent: int
     discount_rub: int
     discount_percent: int
     duration_discount_percent: int
@@ -132,6 +134,8 @@ class SubscriptionQuote:
             "lteGb": self.lte_gb,
             "subscriptionPriceRub": self.subscription_price_rub,
             "discountedSubscriptionPriceRub": self.discounted_subscription_price_rub,
+            "deviceDiscountRub": self.device_discount_rub,
+            "deviceDiscountPercent": self.device_discount_percent,
             "discountRub": self.discount_rub,
             "discountPercent": self.discount_percent,
             "durationDiscountPercent": self.duration_discount_percent,
@@ -146,6 +150,8 @@ class SubscriptionQuote:
         return {
             "quote_subscription_price": int(self.subscription_price_rub),
             "quote_discounted_subscription_price": int(self.discounted_subscription_price_rub),
+            "quote_device_discount_rub": int(self.device_discount_rub),
+            "quote_device_discount_percent": int(self.device_discount_percent),
             "quote_discount_rub": int(self.discount_rub),
             "quote_discount_percent": int(self.discount_percent),
             "quote_duration_discount_percent": int(self.duration_discount_percent),
@@ -192,6 +198,14 @@ async def build_subscription_quote(
 
     months = max(1, int(getattr(tariff, "months", 1) or 1))
     subscription_price = int(tariff.calculate_price(normalized_device_count))
+    single_device_price = int(tariff.calculate_price(1))
+    full_device_price = max(0, int(single_device_price) * int(normalized_device_count))
+    device_discount_rub = max(0, int(full_device_price) - int(subscription_price))
+    device_discount_percent = (
+        max(0, min(99, round(device_discount_rub / full_device_price * 100)))
+        if full_device_price > 0 and device_discount_rub > 0
+        else 0
+    )
     discounted_price_raw, discount_id, discount_percent_raw = await apply_personal_discount(
         int(user_id), subscription_price, months
     )
@@ -220,7 +234,7 @@ async def build_subscription_quote(
         except Exception:
             duration_discount_percent = 0
             duration_discount_rub = 0
-    total_discount_rub = int(duration_discount_rub) + int(discount_rub)
+    total_discount_rub = int(device_discount_rub) + int(duration_discount_rub) + int(discount_rub)
 
     return SubscriptionQuote(
         tariff_id=int(tariff.id),
@@ -230,6 +244,8 @@ async def build_subscription_quote(
         lte_gb=normalized_lte_gb,
         subscription_price_rub=int(subscription_price),
         discounted_subscription_price_rub=int(discounted_price),
+        device_discount_rub=int(device_discount_rub),
+        device_discount_percent=int(device_discount_percent),
         discount_rub=int(discount_rub),
         discount_percent=int(discount_percent),
         duration_discount_percent=int(duration_discount_percent),
