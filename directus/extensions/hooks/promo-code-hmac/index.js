@@ -13,8 +13,12 @@ export default function registerHook({ filter }) {
     const next = { ...payload };
     const rawCode = typeof next.raw_code === "string" ? next.raw_code.trim() : "";
     const codeHmac = typeof next.code_hmac === "string" ? next.code_hmac.trim() : "";
+    const needsSecret = Boolean(rawCode || (codeHmac && !isHex64(codeHmac)));
 
     if (!secret) {
+      if (needsSecret) {
+        throw new Error("PROMO_HMAC_SECRET is not configured");
+      }
       return next;
     }
 

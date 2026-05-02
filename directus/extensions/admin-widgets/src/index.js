@@ -1,5 +1,10 @@
 import crypto from "crypto";
 
+function isAdminRequest(req) {
+  const accountability = req?.accountability;
+  return Boolean(accountability && accountability.admin === true);
+}
+
 const toUtcDate = (value) => {
   if (!value) return null;
   const d = new Date(value);
@@ -140,6 +145,13 @@ const buildPromoCode = (prefix) => {
 };
 
 export default function registerEndpoint(router, { database }) {
+  router.use((req, res, next) => {
+    if (!isAdminRequest(req)) {
+      return res.status(403).json({ error: "Admin access required" });
+    }
+    return next();
+  });
+
   const tableExistsCache = new Map();
   const columnExistsCache = new Map();
 

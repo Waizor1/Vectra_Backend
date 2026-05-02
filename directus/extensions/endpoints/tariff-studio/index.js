@@ -1,5 +1,6 @@
-function isAuthenticatedRequest(req) {
-  return Boolean(req?.accountability && (req.accountability.admin === true || req.accountability.user));
+function isAdminRequest(req) {
+  const accountability = req?.accountability;
+  return Boolean(accountability && accountability.admin === true);
 }
 
 function normalizePlainObject(value, maxJsonLength = 12000) {
@@ -49,8 +50,8 @@ async function callBackend(path, body) {
 
 export default function registerEndpoint(router) {
   router.post("/quote-preview", async (req, res) => {
-    if (!isAuthenticatedRequest(req)) {
-      return res.status(401).json({ ok: false, message: "Unauthorized" });
+    if (!isAdminRequest(req)) {
+      return res.status(403).json({ ok: false, message: "Admin access required" });
     }
     const body = normalizePlainObject(req.body);
     const tariffIdRaw = body.tariff_id ?? body.tariffId ?? null;

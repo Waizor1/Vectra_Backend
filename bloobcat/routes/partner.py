@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Literal, Optional, Tuple
+from urllib.parse import quote
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -14,9 +15,11 @@ from bloobcat.db.partner_qr import PartnerQr
 from bloobcat.db.partner_withdrawals import PartnerWithdrawals
 from bloobcat.db.partner_earnings import PartnerEarnings
 from bloobcat.db.payments import ProcessedPayments
+from bloobcat.bot.bot import get_bot_username
 from bloobcat.funcs.referral_attribution import build_partner_link
 from bloobcat.funcs.validate import validate
 from bloobcat.logger import get_logger
+from bloobcat.settings import telegram_settings
 
 logger = get_logger("routes.partner")
 
@@ -112,14 +115,15 @@ def _slugify_title(title: str) -> str:
 
 
 async def _build_qr_link(title: str) -> str:
-    # NOTE: QR link must be stable: renaming a QR code should not break already printed materials.
-    # For new records we build the link from the QR UUID (set after create).
     slug = _slugify_title(title)
+    return await _build_qr_link_from_payload(f"qr_{slug}")
+
+
+async def _build_qr_link_from_payload(payload: str) -> str:
     try:
         bot_name = await get_bot_username()
     except Exception:
         bot_name = "VectraConnect_bot"
-    payload = f"qr_{slug}"
     webapp_url = (getattr(telegram_settings, "webapp_url", None) or "").strip()
     if webapp_url and webapp_url.lower().startswith("https://"):
         sep = "&" if "?" in webapp_url else "?"
@@ -256,29 +260,19 @@ async def create_qr_code(payload: PartnerQrCreateRequest, user: Users = Depends(
     if not title:
         raise HTTPException(status_code=400, detail="Title is required")
     slug = _slugify_title(title)
+    qr_id = uuid.uuid4()
+    # Stable token based on UUID hex (fits into Telegram start param restrictions).
+    link = await _build_qr_link_from_payload(f"qr_{qr_id.hex}")
     qr = await PartnerQr.create(
+        id=qr_id,
         owner=user,
         title=title,
         slug=slug,
-        link=None,
+        link=link,
         is_active=True,
         views_count=0,
         activations_count=0,
     )
-    # Stable token based on UUID hex (fits into Telegram start param restrictions).
-    try:
-        bot_name = await get_bot_username()
-    except Exception:
-        bot_name = "VectraConnect_bot"
-    token = str(qr.id).replace("-", "")
-    start_payload = f"qr_{token}"
-    webapp_url = (getattr(telegram_settings, "webapp_url", None) or "").strip()
-    if webapp_url and webapp_url.lower().startswith("https://"):
-        sep = "&" if "?" in webapp_url else "?"
-        qr.link = f"{webapp_url.rstrip('/')}{sep}startapp={quote(start_payload, safe='')}"
-    else:
-        qr.link = f"https://t.me/{bot_name}?start={start_payload}"
-    await qr.save(update_fields=["link"])
     return _format_qr(qr)
 
 
