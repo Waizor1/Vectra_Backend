@@ -112,48 +112,48 @@ async def _seed_standard_tariffs() -> None:
         id=101,
         name="base_1m",
         months=1,
-        base_price=199,
-        progressive_multiplier=0.65,
+        base_price=290,
+        progressive_multiplier=0.9,
         order=1,
         devices_limit_default=1,
         devices_limit_family=30,
         family_plan_enabled=False,
-        final_price_default=199,
+        final_price_default=290,
     )
     await Tariffs.create(
         id=103,
         name="base_3m",
         months=3,
-        base_price=449,
-        progressive_multiplier=0.65,
+        base_price=290,
+        progressive_multiplier=0.9,
         order=2,
-        devices_limit_default=1,
-        devices_limit_family=30,
-        family_plan_enabled=False,
-        final_price_default=449,
-    )
-    await Tariffs.create(
-        id=106,
-        name="base_6m",
-        months=6,
-        base_price=749,
-        progressive_multiplier=0.65,
-        order=3,
         devices_limit_default=1,
         devices_limit_family=30,
         family_plan_enabled=False,
         final_price_default=749,
     )
     await Tariffs.create(
+        id=106,
+        name="base_6m",
+        months=6,
+        base_price=1290,
+        progressive_multiplier=0.9,
+        order=3,
+        devices_limit_default=1,
+        devices_limit_family=30,
+        family_plan_enabled=False,
+        final_price_default=1290,
+    )
+    await Tariffs.create(
         id=112,
         name="base_12m",
         months=12,
-        base_price=1299,
-        progressive_multiplier=0.65,
+        base_price=2190,
+        progressive_multiplier=0.9,
         order=4,
         devices_limit_default=1,
         devices_limit_family=30,
-        final_price_default=1299,
+        final_price_default=2190,
         final_price_family=None,
         family_plan_enabled=False,
     )
@@ -216,20 +216,20 @@ async def test_subscription_plans_endpoint_returns_discounted_personal_prices():
     assert response.status_code == 200
     plans = _plans_by_id(response.json())
 
-    assert plans["1month"]["priceRub"] == 179
-    assert plans["1month"]["originalPriceRub"] == 199
+    assert plans["1month"]["priceRub"] == 261
+    assert plans["1month"]["originalPriceRub"] == 290
     assert plans["1month"]["personalDiscountPercent"] == 10
     assert plans["1month"]["discountText"] is None
 
-    assert plans["3months"]["priceRub"] == 404
-    assert plans["3months"]["originalPriceRub"] == 449
+    assert plans["3months"]["priceRub"] == 674
+    assert plans["3months"]["originalPriceRub"] == 749
     assert plans["3months"]["personalDiscountPercent"] == 10
-    assert plans["3months"]["discountText"] == "−25%"
+    assert plans["3months"]["discountText"] == "−14%"
 
-    assert plans["12months"]["priceRub"] == 1169
-    assert plans["12months"]["originalPriceRub"] == 1299
+    assert plans["12months"]["priceRub"] == 1971
+    assert plans["12months"]["originalPriceRub"] == 2190
     assert plans["12months"]["personalDiscountPercent"] == 10
-    assert plans["12months"]["discountText"] == "−46%"
+    assert plans["12months"]["discountText"] == "−37%"
 
     assert "12months_family" not in plans
     assert plans["12months"]["devicesMin"] == 1
@@ -272,19 +272,19 @@ async def test_subscription_plans_apply_discount_only_to_matching_months():
     assert response.status_code == 200
     plans = _plans_by_id(response.json())
 
-    assert plans["1month"]["priceRub"] == 199
+    assert plans["1month"]["priceRub"] == 290
     assert plans["1month"]["originalPriceRub"] is None
     assert plans["1month"]["personalDiscountPercent"] is None
 
-    assert plans["3months"]["priceRub"] == 449
+    assert plans["3months"]["priceRub"] == 749
     assert plans["3months"]["originalPriceRub"] is None
     assert plans["3months"]["personalDiscountPercent"] is None
-    assert plans["3months"]["discountText"] == "−25%"
+    assert plans["3months"]["discountText"] == "−14%"
 
-    assert plans["12months"]["priceRub"] == 1039
-    assert plans["12months"]["originalPriceRub"] == 1299
+    assert plans["12months"]["priceRub"] == 1752
+    assert plans["12months"]["originalPriceRub"] == 2190
     assert plans["12months"]["personalDiscountPercent"] == 20
-    assert plans["12months"]["discountText"] == "−46%"
+    assert plans["12months"]["discountText"] == "−37%"
 
     assert "12months_family" not in plans
 
@@ -322,8 +322,8 @@ async def test_subscription_plans_reads_discount_without_consuming_remaining_use
     first_plans = _plans_by_id(first_response.json())
     second_plans = _plans_by_id(second_response.json())
 
-    assert first_plans["3months"]["priceRub"] == second_plans["3months"]["priceRub"] == 382
-    assert first_plans["3months"]["originalPriceRub"] == second_plans["3months"]["originalPriceRub"] == 449
+    assert first_plans["3months"]["priceRub"] == second_plans["3months"]["priceRub"] == 637
+    assert first_plans["3months"]["originalPriceRub"] == second_plans["3months"]["originalPriceRub"] == 749
 
     discount_after = await PersonalDiscount.get(id=discount.id)
     assert int(discount_after.remaining_uses or 0) == 1
@@ -375,7 +375,7 @@ async def test_subscription_plans_reflect_promo_redeem_result_without_consuming_
     assert after_response.status_code == 200
 
     before_plans = _plans_by_id(before_response.json())
-    assert before_plans["3months"]["priceRub"] == 449
+    assert before_plans["3months"]["priceRub"] == 749
     assert before_plans["3months"]["originalPriceRub"] is None
 
     redeem_payload = redeem_response.json()
@@ -383,14 +383,14 @@ async def test_subscription_plans_reflect_promo_redeem_result_without_consuming_
     assert redeem_payload["effects"]["discount_percent"] == 15
 
     after_plans = _plans_by_id(after_response.json())
-    assert after_plans["1month"]["priceRub"] == 199
+    assert after_plans["1month"]["priceRub"] == 290
     assert after_plans["1month"]["originalPriceRub"] is None
 
-    assert after_plans["3months"]["priceRub"] == 382
-    assert after_plans["3months"]["originalPriceRub"] == 449
+    assert after_plans["3months"]["priceRub"] == 637
+    assert after_plans["3months"]["originalPriceRub"] == 749
     assert after_plans["3months"]["personalDiscountPercent"] == 15
-    assert after_plans["12months"]["priceRub"] == 1104
-    assert after_plans["12months"]["originalPriceRub"] == 1299
+    assert after_plans["12months"]["priceRub"] == 1862
+    assert after_plans["12months"]["originalPriceRub"] == 2190
 
     discount = await PersonalDiscount.get(user_id=user.id, source="promo")
     assert int(discount.remaining_uses or 0) == 1

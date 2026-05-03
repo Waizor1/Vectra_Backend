@@ -113,25 +113,6 @@ async def _apply_legacy_sql_migrations(conn) -> None:
             await conn.execute_script(sql)
 
 
-async def _apply_generate_schema_compat_patches(conn) -> None:
-    """
-    Apply idempotent runtime patches needed before the app can reach deploy
-    migration verification when SCHEMA_INIT_GENERATE_ONLY is enabled.
-
-    In that mode, existing databases intentionally skip Aerich startup
-    migrations and the deploy workflow runs explicit migrations only after the
-    service becomes healthy. New model fields that are queried during startup
-    therefore need a tiny safe bootstrap here.
-    """
-    await conn.execute_script(
-        """
-        ALTER TABLE IF EXISTS "users"
-            ADD COLUMN IF NOT EXISTS "email_notifications_enabled"
-            BOOLEAN NOT NULL DEFAULT TRUE;
-        """
-    )
-
-
 def _migration_sort_key(migration_file: Path) -> tuple[int, str]:
     """Sort Aerich legacy migrations by numeric prefix, not lexicographically."""
     prefix = migration_file.name.split("_", 1)[0]
@@ -148,22 +129,17 @@ async def _initialize_schema_without_aerich() -> None:
     try:
         conn = Tortoise.get_connection("default")
         if await _schema_already_initialized(conn):
-            await _apply_generate_schema_compat_patches(conn)
-            logger.info(
-                "Schema already initialized; applied generate-schema compatibility patches"
-            )
+            logger.info("Schema already initialized; skipping staging schema bootstrap")
             return
         try:
             await Tortoise.generate_schemas(safe=True)
             logger.info("Schema generated from current Tortoise models")
-            await _apply_generate_schema_compat_patches(conn)
         except Exception as schema_error:
             logger.warning(
                 "Tortoise schema generation failed ({}), falling back to legacy SQL migrations",
                 schema_error,
             )
             await _apply_legacy_sql_migrations(conn)
-            await _apply_generate_schema_compat_patches(conn)
     finally:
         await Tortoise.close_connections()
 
