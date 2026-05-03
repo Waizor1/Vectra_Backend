@@ -100,6 +100,7 @@ class Users(models.Model):
     renew_id = fields.CharField(max_length=100, null=True)
     connected_at = fields.DatetimeField(null=True)
     email = fields.CharField(max_length=255, null=True)
+    email_notifications_enabled = fields.BooleanField(default=True)
     language_code = fields.CharField(
         max_length=5,
         default="ru",
