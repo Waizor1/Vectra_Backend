@@ -85,10 +85,10 @@ async def seed_test_fixtures() -> None:
     logger.info("TESTMODE=TRUE: подготавливаем тестовые данные")
 
     tariffs = [
-        {"name": "Месяц", "months": 1, "base_price": 1000, "progressive_multiplier": 0.9, "order": 1},
-        {"name": "Квартал", "months": 3, "base_price": 2700, "progressive_multiplier": 0.9, "order": 2},
-        {"name": "Полгода", "months": 6, "base_price": 4800, "progressive_multiplier": 0.9, "order": 3},
-        {"name": "Год", "months": 12, "base_price": 8400, "progressive_multiplier": 0.9, "order": 4},
+        {"name": "Месяц", "months": 1, "base_price": 199, "progressive_multiplier": 0.65, "order": 1},
+        {"name": "Квартал", "months": 3, "base_price": 449, "progressive_multiplier": 0.65, "order": 2},
+        {"name": "Полгода", "months": 6, "base_price": 749, "progressive_multiplier": 0.65, "order": 3},
+        {"name": "Год", "months": 12, "base_price": 1299, "progressive_multiplier": 0.65, "order": 4},
     ]
     for t in tariffs:
         await _upsert_tariff(t)
