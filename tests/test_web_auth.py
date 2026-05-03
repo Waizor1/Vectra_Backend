@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import types
+from datetime import date, timedelta
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -249,7 +250,12 @@ async def test_complete_registration_can_defer_remnawave_for_explicit_telegram_r
     def _schedule(cls, user_id):
         calls.append(("schedule", user_id))
 
+    async def _grant_trial(cls, user_id, trial_until):
+        calls.append(("atomic_grant", (user_id, trial_until)))
+        return True
+
     monkeypatch.setattr(web_auth.Users, "_schedule_remnawave_ensure", classmethod(_schedule))
+    monkeypatch.setattr(web_auth.Users, "_grant_trial_if_unclaimed", classmethod(_grant_trial))
     monkeypatch.setattr(web_auth, "issue_access_token_for_user", lambda user: ("token-tg", 3600))
 
     user = _User(
@@ -266,9 +272,70 @@ async def test_complete_registration_can_defer_remnawave_for_explicit_telegram_r
     assert user.is_trial is True
     assert user.used_trial is True
     assert user.expired_at is not None
-    assert ("save", ("is_trial", "used_trial", "expired_at")) in calls
+    assert ("atomic_grant", (user.id, user.expired_at)) in calls
     assert ("schedule", user.id) in calls
     assert ("ensure", None) not in calls
+
+
+@pytest.mark.asyncio
+async def test_grant_trial_if_eligible_skips_notification_when_parallel_grant_wins(
+    monkeypatch,
+):
+    trial_until = date.today() + timedelta(days=web_auth.app_settings.trial_days)
+    calls: list[tuple[str, object]] = []
+    notifications: list[int] = []
+
+    class _TrialUpdateQuery:
+        async def update(self, **kwargs):
+            calls.append(("atomic_update", kwargs))
+            return 0
+
+    class _User(types.SimpleNamespace):
+        async def save(self, update_fields=None):
+            calls.append(("stale_save", tuple(update_fields or ())))
+
+    user = _User(
+        id=123456,
+        expired_at=None,
+        is_trial=False,
+        used_trial=False,
+    )
+    refreshed_user = types.SimpleNamespace(
+        id=user.id,
+        expired_at=trial_until,
+        is_trial=True,
+        used_trial=True,
+    )
+
+    def _filter(*args, **kwargs):
+        calls.append(("filter", kwargs))
+        return _TrialUpdateQuery()
+
+    async def _get_or_none(*args, **kwargs):
+        assert kwargs == {"id": user.id}
+        return refreshed_user
+
+    async def _notify_trial_granted(notified_user):
+        notifications.append(int(notified_user.id))
+
+    from bloobcat.bot.notifications.trial import granted as trial_granted_mod
+
+    monkeypatch.setattr(web_auth.Users, "filter", _filter)
+    monkeypatch.setattr(web_auth.Users, "get_or_none", _get_or_none)
+    monkeypatch.setattr(
+        trial_granted_mod,
+        "notify_trial_granted",
+        _notify_trial_granted,
+    )
+
+    granted = await web_auth.grant_trial_if_eligible(user)
+
+    assert granted is False
+    assert user.is_trial is True
+    assert user.used_trial is True
+    assert user.expired_at == trial_until
+    assert notifications == []
+    assert ("stale_save", ("is_trial", "used_trial", "expired_at")) not in calls
 
 
 @pytest.mark.asyncio
@@ -286,7 +353,12 @@ async def test_complete_registration_grants_web_trial_without_waiting_for_remnaw
     def _schedule(cls, user_id):
         calls.append(("schedule", user_id))
 
+    async def _grant_trial(cls, user_id, trial_until):
+        calls.append(("atomic_grant", (user_id, trial_until)))
+        return True
+
     monkeypatch.setattr(web_auth.Users, "_schedule_remnawave_ensure", classmethod(_schedule))
+    monkeypatch.setattr(web_auth.Users, "_grant_trial_if_unclaimed", classmethod(_grant_trial))
     monkeypatch.setattr(web_auth, "issue_access_token_for_user", lambda user: ("token-web", 3600))
 
     user = _User(
@@ -303,7 +375,7 @@ async def test_complete_registration_grants_web_trial_without_waiting_for_remnaw
     assert user.is_trial is True
     assert user.used_trial is True
     assert user.expired_at is not None
-    assert ("save", ("is_trial", "used_trial", "expired_at")) in calls
+    assert ("atomic_grant", (user.id, user.expired_at)) in calls
     assert ("schedule", user.id) in calls
     assert ("ensure", None) not in calls
 

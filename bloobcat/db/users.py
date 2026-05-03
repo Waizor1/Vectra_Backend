@@ -100,6 +100,7 @@ class Users(models.Model):
     renew_id = fields.CharField(max_length=100, null=True)
     connected_at = fields.DatetimeField(null=True)
     email = fields.CharField(max_length=255, null=True)
+    email_notifications_enabled = fields.BooleanField(default=True)
     language_code = fields.CharField(
         max_length=5,
         default="ru",
@@ -393,6 +394,19 @@ class Users(models.Model):
 
         return best_user
 
+    @classmethod
+    async def _grant_trial_if_unclaimed(cls, user_id: int, trial_until: date) -> bool:
+        rows_updated = await cls.filter(
+            id=user_id,
+            expired_at__isnull=True,
+            used_trial=False,
+        ).update(
+            is_trial=True,
+            used_trial=True,
+            expired_at=trial_until,
+        )
+        return bool(rows_updated)
+
     async def _ensure_remnawave_user(self) -> bool:
         """
         Создает пользователя в RemnaWave, если он еще не создан.
@@ -428,22 +442,37 @@ class Users(models.Model):
                     today = date.today()
                     if expire_at_date is None:
                         if not current_user.used_trial:
-                            expire_at_date = today + timedelta(
+                            trial_until = today + timedelta(
                                 days=app_settings.trial_days
                             )
-                            current_user.is_trial = True
-                            current_user.used_trial = True
-                            current_user.expired_at = expire_at_date
-                            logger.info(
-                                f"Назначен триал для {self.id} до {expire_at_date}"
+                            trial_granted = await Users._grant_trial_if_unclaimed(
+                                int(current_user.id),
+                                trial_until,
                             )
-                            try:
-                                await notify_trial_granted(current_user)
-                            except Exception as e_notify:
-                                logger.error(
-                                    "Ошибка при отправке уведомления о предоставлении триала "
-                                    f"пользователю {self.id} в _ensure_remnawave_user: {e_notify}"
+                            if trial_granted:
+                                expire_at_date = trial_until
+                                current_user.is_trial = True
+                                current_user.used_trial = True
+                                current_user.expired_at = expire_at_date
+                                logger.info(
+                                    f"Назначен триал для {self.id} до {expire_at_date}"
                                 )
+                                try:
+                                    await notify_trial_granted(current_user)
+                                except Exception as e_notify:
+                                    logger.error(
+                                        "Ошибка при отправке уведомления о предоставлении триала "
+                                        f"пользователю {self.id} в _ensure_remnawave_user: {e_notify}"
+                                    )
+                            else:
+                                refreshed_user = await Users.get_or_none(
+                                    id=current_user.id
+                                )
+                                if refreshed_user:
+                                    current_user.is_trial = refreshed_user.is_trial
+                                    current_user.used_trial = refreshed_user.used_trial
+                                    current_user.expired_at = refreshed_user.expired_at
+                                    expire_at_date = refreshed_user.expired_at
                     else:
                         expire_at_date = max(expire_at_date, today)
                         if current_user.expired_at < today:

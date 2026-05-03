@@ -4,6 +4,7 @@ from .payment import router as payment_router, webhook_router as payment_webhook
 from .user import router as user_router
 from .devices import router as devices_router
 from .auth import router as auth_router
+from .email import router as email_router
 from .family import router as family_router
 from .family_invites import router as family_invites_router
 from .promo import router as promo_router
@@ -23,6 +24,7 @@ main_router = APIRouter()
 main_router.include_router(payment_router)
 main_router.include_router(payment_webhook_router)
 main_router.include_router(auth_router)
+main_router.include_router(email_router)
 main_router.include_router(user_router)
 main_router.include_router(devices_router)
 main_router.include_router(family_router)

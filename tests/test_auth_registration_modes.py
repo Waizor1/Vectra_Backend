@@ -913,3 +913,97 @@ async def test_ensure_remnawave_user_create_uses_partial_save_and_keeps_concurre
         "expired_at",
         "hwid_limit",
     ]
+
+
+@pytest.mark.asyncio
+async def test_ensure_remnawave_user_skips_trial_notification_when_parallel_grant_wins(
+    monkeypatch,
+):
+    user = Users(id=559, username="u", full_name="H")
+    trial_until = date.today() + timedelta(days=users_module.app_settings.trial_days)
+    notifications: list[int] = []
+    calls: list[tuple[str, object]] = []
+
+    class _CurrentUser:
+        id = 559
+        email = None
+        active_tariff_id = None
+        lte_gb_total = None
+
+        def __init__(self, *, granted: bool):
+            self.remnawave_uuid = None
+            self.is_trial = granted
+            self.used_trial = granted
+            self.expired_at = trial_until if granted else None
+            self.hwid_limit = 0
+
+        def name(self):
+            return "H"
+
+        async def save(self, *args, **kwargs):
+            calls.append(("save", kwargs))
+
+    get_calls = 0
+
+    async def _get_or_none(*args, **kwargs):
+        nonlocal get_calls
+        assert kwargs["id"] == 559
+        get_calls += 1
+        return _CurrentUser(granted=get_calls > 1)
+
+    class _TrialUpdateQuery:
+        async def update(self, **kwargs):
+            calls.append(("atomic_update", kwargs))
+            return 0
+
+    def _filter(*args, **kwargs):
+        calls.append(("filter", kwargs))
+        return _TrialUpdateQuery()
+
+    async def _notify_trial_granted(notified_user):
+        notifications.append(int(notified_user.id))
+
+    class _FakeRemnaWaveUsers:
+        async def create_user(self, **kwargs):
+            return {"response": {"uuid": "new-uuid-559"}}
+
+    class _FakeRemnaWaveClient:
+        def __init__(self, *_args, **_kwargs):
+            self.users = _FakeRemnaWaveUsers()
+
+        async def close(self):
+            return None
+
+    class _FakeToken:
+        def get_secret_value(self):
+            return "token"
+
+    fake_remnawave_settings = types.SimpleNamespace(
+        url="https://remnawave.local",
+        token=_FakeToken(),
+        default_internal_squad_uuid=None,
+        lte_internal_squad_uuid=None,
+        default_external_squad_uuid=None,
+    )
+
+    remnawave_client_module = importlib.import_module(
+        "bloobcat.routes.remnawave.client"
+    )
+
+    monkeypatch.setattr(Users, "get_or_none", _get_or_none)
+    monkeypatch.setattr(Users, "filter", _filter)
+    monkeypatch.setattr(users_module, "notify_trial_granted", _notify_trial_granted)
+    monkeypatch.setattr(
+        remnawave_client_module, "RemnaWaveClient", _FakeRemnaWaveClient
+    )
+    monkeypatch.setattr(users_module, "remnawave_settings", fake_remnawave_settings)
+
+    created = await user._ensure_remnawave_user()
+
+    assert created is True
+    assert user.remnawave_uuid == "new-uuid-559"
+    assert notifications == []
+    assert (
+        "filter",
+        {"id": 559, "expired_at__isnull": True, "used_trial": False},
+    ) in calls

@@ -1053,10 +1053,18 @@ async def grant_trial_if_eligible(user: Users) -> bool:
         return False
 
     trial_until = date.today() + timedelta(days=app_settings.trial_days)
+    trial_granted = await Users._grant_trial_if_unclaimed(int(user.id), trial_until)
+    if not trial_granted:
+        refreshed_user = await Users.get_or_none(id=user.id)
+        if refreshed_user:
+            user.is_trial = refreshed_user.is_trial
+            user.used_trial = refreshed_user.used_trial
+            user.expired_at = refreshed_user.expired_at
+        return False
+
     user.is_trial = True
     user.used_trial = True
     user.expired_at = trial_until
-    await user.save(update_fields=["is_trial", "used_trial", "expired_at"])
     logger.info("Granted local trial for user=%s until %s", user.id, trial_until)
 
     try:

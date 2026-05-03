@@ -29,7 +29,6 @@ from bloobcat.db.notifications import NotificationMarks
 from bloobcat.db.payments import ProcessedPayments
 from bloobcat.bot.bot import get_bot_username
 from bloobcat.bot.notifications.admin import (
-    cancel_subscription,
     notify_active_tariff_change,
     notify_lte_topup,
 )
@@ -453,11 +452,10 @@ async def unsubscribe(user: Users = Depends(validate)):
     """
     Отписывает пользователя от рассылки (но не влияет на подписку VPN).
     """
-    if not user.is_subscribed:
+    if not getattr(user, "email_notifications_enabled", True):
         return {"status": "ok", "message": "already unsubscribed"}
-    user.is_subscribed = False
-    await user.save()
-    await cancel_subscription(user)
+    user.email_notifications_enabled = False
+    await user.save(update_fields=["email_notifications_enabled"])
     return {"status": "ok"}
 
 
