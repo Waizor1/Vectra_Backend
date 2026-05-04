@@ -299,7 +299,7 @@ class CORSSettings(BaseSettings):
 # New settings class for application-specific configurations
 class AppSettings(BaseSettings):
     trial_days: int = (
-        3  # Default to 3 days, will be overridden by TRIAL_DAYS from .env
+        10  # Default to 10 days, will be overridden by TRIAL_DAYS from .env
     )
 
     # Настройки для блокированных пользователей

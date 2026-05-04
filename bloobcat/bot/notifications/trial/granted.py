@@ -15,6 +15,21 @@ if TYPE_CHECKING:
 logger = get_logger("notifications.trial.granted")
 WEB_USER_ID_FLOOR = 8_000_000_000_000_000
 
+
+def _ru_day_label(days: int) -> str:
+    normalized = abs(int(days))
+    last_digit = normalized % 10
+    last_two_digits = normalized % 100
+
+    if 11 <= last_two_digits <= 14:
+        return "дней"
+    if last_digit == 1:
+        return "день"
+    if 2 <= last_digit <= 4:
+        return "дня"
+    return "дней"
+
+
 async def notify_trial_granted(user: 'Users'): # Changed Users to 'Users'
     """
     Уведомляет пользователя о том, что ему был предоставлен триальный период.
@@ -35,7 +50,7 @@ async def notify_trial_granted(user: 'Users'): # Changed Users to 'Users'
     if lang == 'ru':
         text = (
             f"{user.full_name}, пробный доступ активирован.\n\n"
-            f"Срок действия: {trial_duration_days} дня."
+            f"Срок действия: {trial_duration_days} {_ru_day_label(trial_duration_days)}."
         )
         button_text = "Личный кабинет"
     else:

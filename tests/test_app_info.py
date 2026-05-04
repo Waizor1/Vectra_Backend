@@ -5,6 +5,14 @@ import types
 import pytest
 
 
+def test_app_settings_default_trial_days_is_ten(monkeypatch):
+    monkeypatch.delenv("TRIAL_DAYS", raising=False)
+
+    from bloobcat.settings import AppSettings
+
+    assert AppSettings().trial_days == 10
+
+
 @pytest.mark.asyncio
 async def test_read_maintenance_settings_caches_short_lived_db_result(monkeypatch):
     from bloobcat.routes import app_info
