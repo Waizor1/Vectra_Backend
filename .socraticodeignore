@@ -1,0 +1,17 @@
+# Extra SocratiCode exclusions. .gitignore is respected too; this keeps the
+# semantic index token-efficient and out of local artifacts/secrets.
+.env
+.env.*
+.venv/
+env/
+venv/
+logs/
+dist/
+sdist/
+build/
+coverage.xml
+.coverage
+.coverage.*
+node_modules/
+directus/extensions/**/node_modules/
+*.log
