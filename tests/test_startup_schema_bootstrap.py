@@ -41,5 +41,8 @@ async def test_schema_bootstrap_adds_email_preference_column_when_schema_exists(
 
     scripts = [value for kind, value in calls if kind == "script"]
     assert any("email_notifications_enabled" in str(sql) for sql in scripts)
+    assert any("CREATE TABLE IF NOT EXISTS \"user_devices\"" in str(sql) for sql in scripts)
+    assert any("temp_setup_token" in str(sql) for sql in scripts)
+    assert any("device_per_user_enabled" in str(sql) for sql in scripts)
     assert ("generate_schemas", True) not in calls
     assert ("close", None) in calls

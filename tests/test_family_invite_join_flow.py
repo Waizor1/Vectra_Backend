@@ -573,7 +573,10 @@ async def test_disabled_member_does_not_override_zero_limit_with_device_per_user
 
     owner = await _create_owner(user_id=9801, hwid_limit=10)
     owner.device_per_user_enabled = True
-    await owner.save(update_fields=["device_per_user_enabled"])
+    await owner.save(
+        update_fields=["device_per_user_enabled"],
+        skip_remnawave_sync=True,
+    )
     member_user = await _create_member(user_id=9802, hwid_limit=0)
     membership = await FamilyMembers.create(
         owner=owner,
