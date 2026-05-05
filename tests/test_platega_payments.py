@@ -204,6 +204,87 @@ async def test_platega_create_payment_returns_redirect_and_reuses_client_request
 
 
 @pytest.mark.asyncio
+async def test_platega_lte_topup_uses_active_provider_and_pending_row(monkeypatch):
+    from bloobcat.db.active_tariff import ActiveTariffs
+    from bloobcat.db.payments import ProcessedPayments
+    from bloobcat.db.users import Users
+    from bloobcat.routes import payment as payment_route
+    from bloobcat.routes import user as user_route
+    from bloobcat.services.platega import PlategaCreateResult
+
+    user = await Users.create(
+        id=223456,
+        username="platega_lte_user",
+        full_name="Platega LTE User",
+        balance=0,
+        is_registered=True,
+        expired_at=date.today() + timedelta(days=30),
+        hwid_limit=3,
+    )
+    active_tariff = await ActiveTariffs.create(
+        user=user,
+        name="Month",
+        months=1,
+        price=1000,
+        hwid_limit=3,
+        lte_gb_total=10,
+        lte_gb_used=3.0,
+        lte_price_per_gb=10.0,
+        progressive_multiplier=0.9,
+        residual_day_fraction=0.0,
+    )
+    user.active_tariff_id = active_tariff.id
+    await user.save(update_fields=["active_tariff_id"])
+
+    created: list[dict] = []
+
+    class FakePlategaClient:
+        async def create_transaction(self, **kwargs):
+            created.append(kwargs)
+            return PlategaCreateResult(
+                transaction_id="platega-lte-tx-1",
+                status="PENDING",
+                redirect_url="https://pay.platega.test/lte-1",
+                raw={"transactionId": "platega-lte-tx-1"},
+            )
+
+    monkeypatch.setattr(payment_route.payment_settings, "provider", "platega")
+    monkeypatch.setattr(payment_route, "PlategaClient", lambda *a, **kw: FakePlategaClient())
+
+    response = await user_route.change_active_tariff_devices(
+        user_route.ChangeDevicesRequest(device_count=3, lte_gb=15),
+        user=user,
+    )
+
+    assert response == {
+        "status": "payment_required",
+        "redirect_to": "https://pay.platega.test/lte-1",
+        "payment_id": "platega-lte-tx-1",
+        "provider": "platega",
+    }
+    assert created[0]["amount"] == 50.0
+    payload = json.loads(created[0]["payload"])
+    metadata = payload["metadata"]
+    assert metadata["payment_provider"] == "platega"
+    assert metadata["lte_topup"] is True
+    assert metadata["lte_gb_delta"] == 5
+    assert metadata["expected_amount"] == 50.0
+    assert metadata["expected_currency"] == "RUB"
+
+    row = await ProcessedPayments.get(payment_id="platega-lte-tx-1")
+    assert row.provider == "platega"
+    assert row.status == "pending"
+    assert row.payment_url == "https://pay.platega.test/lte-1"
+    stored_payload = json.loads(row.provider_payload)
+    assert stored_payload["metadata"]["lte_topup"] is True
+
+    active_after = await ActiveTariffs.get(id=active_tariff.id)
+    user_after = await Users.get(id=user.id)
+    assert int(active_after.lte_gb_total or 0) == 10
+    assert int(user_after.balance or 0) == 0
+
+
+@pytest.mark.asyncio
 async def test_yookassa_provider_without_credentials_fails_closed(monkeypatch):
     from fastapi import HTTPException
 

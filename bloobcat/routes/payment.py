@@ -3302,6 +3302,7 @@ async def yookassa_webhook(request: Request, secret: str):
                 amount_external=amount_external,
                 amount_from_balance=amount_from_balance,
                 status="succeeded",
+                provider=provider,
             )
 
             if user.remnawave_uuid and not preserve_active_tariff_state:
@@ -3333,7 +3334,7 @@ async def yookassa_webhook(request: Request, secret: str):
                 await notify_lte_topup(
                     user_id=user.id,
                     payment_id=payment.id,
-                    method="yookassa_lte_topup",
+                    method=f"{provider}_lte_topup",
                     lte_gb_delta=lte_gb_delta,
                     lte_gb_before=lte_before,
                     lte_gb_after=lte_after,

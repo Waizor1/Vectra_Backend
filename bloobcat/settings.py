@@ -301,6 +301,9 @@ class AppSettings(BaseSettings):
     trial_days: int = (
         10  # Default to 10 days, will be overridden by TRIAL_DAYS from .env
     )
+    trial_lte_limit_gb: float = (
+        1.0  # Default trial LTE quota in GB, overridden by TRIAL_LTE_LIMIT_GB or Directus.
+    )
 
     # Настройки для блокированных пользователей
     blocked_user_cleanup_days: int = (
@@ -315,6 +318,14 @@ class AppSettings(BaseSettings):
     cleanup_blocked_users_interval_hours: int = 24  # Интервал очистки в часах
     # model_config = SettingsConfigDict(env_prefix="APP_") # If we want APP_TRIAL_DAYS
     # No env_prefix means it will look for TRIAL_DAYS directly.
+
+    @field_validator("trial_lte_limit_gb", mode="before")
+    @classmethod
+    def normalize_trial_lte_limit_gb(cls, value):
+        if value is None or value == "":
+            return 1.0
+        parsed = float(value)
+        return max(0.0, parsed)
 
     # Колесо призов
     prize_wheel_spin_bonus_price: int = (

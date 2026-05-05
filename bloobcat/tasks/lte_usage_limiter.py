@@ -9,12 +9,12 @@ from bloobcat.bot.notifications.lte import notify_lte_full_limit, notify_lte_hal
 from bloobcat.logger import get_logger
 from bloobcat.routes.remnawave.client import RemnaWaveClient
 from bloobcat.routes.remnawave.lte_utils import set_lte_squad_status
+from bloobcat.services.trial_lte import read_trial_lte_limit_gb
 from bloobcat.settings import remnawave_settings
 
 logger = get_logger("tasks.lte_usage_limiter")
 
 BYTES_IN_GB = 1024**3
-TRIAL_LTE_LIMIT_GB = 1.0
 MSK_TZ = timezone(timedelta(hours=3))
 
 
@@ -255,6 +255,7 @@ async def lte_usage_limiter_once() -> int:
 
         trial_users = await Users.filter(is_trial=True, remnawave_uuid__not_isnull=True)
         if trial_users:
+            trial_lte_limit_gb = await read_trial_lte_limit_gb()
             end_str = _format_range_end(datetime.now(timezone.utc))
             marker_upper = (remnawave_settings.lte_node_marker or "").upper()
             for trial_user in trial_users:
@@ -284,11 +285,11 @@ async def lte_usage_limiter_once() -> int:
                 await _notify_lte_thresholds(
                     user=trial_user,
                     used_gb=total_gb,
-                    total_gb=TRIAL_LTE_LIMIT_GB,
+                    total_gb=trial_lte_limit_gb,
                     is_trial=True,
                 )
 
-                if total_gb >= TRIAL_LTE_LIMIT_GB:
+                if trial_lte_limit_gb <= 0 or total_gb >= trial_lte_limit_gb:
                     try:
                         await set_lte_squad_status(
                             user_uuid, enable=False, client=client

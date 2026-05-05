@@ -31,6 +31,8 @@ def install_stubs() -> Callable[[], None]:
         "bloobcat.bot.notifications.general.referral",
         "bloobcat.bot.notifications.prize_wheel",
         "bloobcat.bot.bot",
+        "bloobcat.bot.keyboard",
+        "bloobcat.bot.error_handler",
         "bloobcat.bot.notifications.trial.granted",
         "bloobcat.routes.remnawave.client",
         "bloobcat.routes.remnawave.hwid_utils",
@@ -363,6 +365,30 @@ def install_stubs() -> Callable[[], None]:
     bot_mod.get_bot_username = get_bot_username
     bot_mod.bot = DummyBot()
     sys.modules["bloobcat.bot.bot"] = bot_mod
+
+    keyboard_mod = types.ModuleType("bloobcat.bot.keyboard")
+
+    async def webapp_inline_button(text: str, url: str | None = None):
+        return {"button": text, "url": url}
+
+    keyboard_mod.webapp_inline_button = webapp_inline_button
+    sys.modules["bloobcat.bot.keyboard"] = keyboard_mod
+
+    error_handler_mod = types.ModuleType("bloobcat.bot.error_handler")
+
+    async def handle_telegram_forbidden_error(*args, **kwargs):
+        return True
+
+    async def handle_telegram_bad_request(*args, **kwargs):
+        return True
+
+    async def reset_user_failed_count(*args, **kwargs):
+        return True
+
+    error_handler_mod.handle_telegram_forbidden_error = handle_telegram_forbidden_error
+    error_handler_mod.handle_telegram_bad_request = handle_telegram_bad_request
+    error_handler_mod.reset_user_failed_count = reset_user_failed_count
+    sys.modules["bloobcat.bot.error_handler"] = error_handler_mod
     # Trial granted notification stub
     trial_granted_mod = types.ModuleType("bloobcat.bot.notifications.trial.granted")
 

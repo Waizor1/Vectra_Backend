@@ -5,6 +5,7 @@ from bloobcat.bot.bot import get_bot_username # Предполагаемый п�
 from bloobcat.build_info import get_build_info
 from bloobcat.settings import app_settings  # Импортируем настройки
 from bloobcat.config import referral_percent  # Импортируем конфигурацию реферальных отчислений
+from bloobcat.services.trial_lte import read_trial_lte_limit_gb
 from tortoise import Tortoise
 
 from bloobcat.logger import get_logger
@@ -74,9 +75,11 @@ async def get_app_info():
     # Получаем процент реферальных отчислений из конфигурации
     referral_percent_value = referral_percent[0][1] if referral_percent else 40
     maintenance_mode, maintenance_message = await read_maintenance_settings()
+    trial_lte_limit_gb = await read_trial_lte_limit_gb()
     return {
         "bot_username": username,
         "trial_days": app_settings.trial_days,
+        "trial_lte_limit_gb": trial_lte_limit_gb,
         "referral_percent": referral_percent_value,
         "maintenance_mode": maintenance_mode,
         "maintenance_message": maintenance_message,

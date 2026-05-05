@@ -1221,6 +1221,15 @@ def ensure_admin_settings(client: DirectusClient) -> None:
             "note": "Кастомный текст техработ (что происходит, сроки и т.д.)",
         },
     )
+    ensure_field(
+        "trial_lte_limit_gb",
+        "float",
+        {"default_value": 1.0},
+        {
+            "interface": "input",
+            "note": "Лимит LTE-трафика на пробном периоде в ГБ. 0 отключает LTE на триале.",
+        },
+    )
 
     # Ensure singleton row exists.
     defaults = {
@@ -1235,18 +1244,34 @@ def ensure_admin_settings(client: DirectusClient) -> None:
         "suspicious_block_days": 3,
         "maintenance_mode": False,
         "maintenance_message": "",
+        "trial_lte_limit_gb": 1.0,
     }
-    items = (
-        client.get(f"/items/{collection}", params={"limit": 1, "fields": "id"})
-        .json()
-        .get("data")
-        or []
+    items_resp = client.get(
+        f"/items/{collection}",
+        params={"limit": 1, "fields": "id,trial_lte_limit_gb"},
     )
+    if items_resp.status_code == 400:
+        # Older/permission-limited installs may not expose the newly requested
+        # field yet; fall back to id-only so setup stays idempotent.
+        items_resp = client.get(f"/items/{collection}", params={"limit": 1, "fields": "id"})
+    if items_resp.status_code in (401, 403):
+        return
+    items_resp.raise_for_status()
+    items = items_resp.json().get("data") or []
     if not items:
         created = client.post(f"/items/{collection}", json=defaults)
         if created.status_code in (401, 403):
             return
         created.raise_for_status()
+    elif "trial_lte_limit_gb" in items[0] and items[0].get("trial_lte_limit_gb") is None:
+        item_id = items[0].get("id")
+        if item_id is not None:
+            updated = client.patch(
+                f"/items/{collection}/{item_id}",
+                json={"trial_lte_limit_gb": defaults["trial_lte_limit_gb"]},
+            )
+            if updated.status_code not in (401, 403):
+                updated.raise_for_status()
 
     # Ensure permissions for Manager/Viewer policies (post-create, so order doesn't matter).
     manager_policy_id = get_policy_id_by_name(client, "Manager")

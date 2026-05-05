@@ -10,7 +10,11 @@ from aiogram.utils.web_app import safe_parse_webapp_init_data
 from bloobcat.db.users import Users
 from bloobcat.funcs.validate import validate
 from bloobcat.funcs.local_dev_auth import resolve_local_dev_telegram_user
-from bloobcat.funcs.referral_attribution import resolve_referral_from_start_param
+from bloobcat.funcs.referral_attribution import (
+    is_partner_source_utm,
+    pick_attribution_utm,
+    resolve_referral_from_start_param,
+)
 from bloobcat.funcs.start_params import is_registration_exception_start_param
 from bloobcat.settings import local_dev_auth_settings, telegram_settings
 from bloobcat.logger import get_logger
@@ -27,6 +31,7 @@ from bloobcat.services.web_auth import (
     handle_oauth_callback,
     issue_access_token_for_user,
     is_password_email_delivery_enabled,
+    user_has_material_data,
     list_user_identities,
     login_with_password,
     oauth_provider_or_404,
@@ -64,6 +69,10 @@ class AuthTokenResponse(BaseModel):
     accessToken: str
     expiresIn: int
     was_just_created: bool = False
+
+
+class CompleteRegistrationRequest(BaseModel):
+    startParam: str | None = None
 
 
 class ProvidersResponse(BaseModel):
@@ -183,6 +192,63 @@ async def _parse_telegram_init_data(init_data: str, request: Request | None):
     if not user_data or not user_data.user:
         raise HTTPException(status_code=403, detail="Invalid user data")
     return user_data
+
+
+async def _apply_web_referral_attribution(user: Users, start_param_raw: str | None) -> None:
+    start_param = (start_param_raw or "").strip()
+    if not start_param:
+        return
+
+    current_referred_by = int(getattr(user, "referred_by", 0) or 0)
+    if current_referred_by:
+        return
+
+    user_id = int(user.id)
+    if await user_has_material_data(user_id):
+        logger.debug(
+            "web_referral_attribution_skip_material_user user=%s start_param_present=%s",
+            user_id,
+            bool(start_param),
+        )
+        return
+
+    referred_by, utm = await resolve_referral_from_start_param(
+        start_param,
+        user_id=user_id,
+        track_partner_qr_view=False,
+    )
+    if not referred_by or int(referred_by) == user_id:
+        return
+
+    referrer = await Users.get_or_none(id=int(referred_by))
+    if not referrer:
+        logger.info(
+            "web_referral_attribution_skip_no_referrer user=%s referred_by=%s",
+            user_id,
+            referred_by,
+        )
+        return
+
+    update_fields = ["referred_by"]
+    user.referred_by = int(referred_by)
+
+    current_utm = (getattr(user, "utm", None) or "").strip()
+    next_utm = pick_attribution_utm(
+        current_utm,
+        utm,
+        force_partner_source=is_partner_source_utm(utm),
+    )
+    if next_utm != (current_utm or None):
+        user.utm = next_utm
+        update_fields.append("utm")
+
+    await user.save(update_fields=update_fields)
+    logger.info(
+        "web_referral_attribution_applied user=%s referred_by=%s utm=%s",
+        user_id,
+        int(referred_by),
+        next_utm,
+    )
 
 
 @router.post("/telegram", response_model=TelegramAuthResponse)
@@ -500,8 +566,12 @@ async def telegram_link_complete(
 
 
 @router.post("/complete-registration", response_model=AuthTokenResponse)
-async def complete_registration(user: Users = Depends(validate)) -> AuthTokenResponse:
+async def complete_registration(
+    payload: CompleteRegistrationRequest | None = None,
+    user: Users = Depends(validate),
+) -> AuthTokenResponse:
     try:
+        await _apply_web_referral_attribution(user, payload.startParam if payload else None)
         token, ttl = await complete_registration_for_user(user)
         return AuthTokenResponse(accessToken=token, expiresIn=ttl)
     except WebAuthError as exc:

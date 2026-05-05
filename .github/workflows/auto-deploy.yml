@@ -212,8 +212,26 @@ jobs:
           fi
         }
 
+        ensure_env_default() {
+          key="$1"
+          value="$2"
+
+          if [ ! -f .env ]; then
+            touch .env
+            chmod 600 .env
+          fi
+
+          if grep -q "^${key}=" .env; then
+            return
+          fi
+
+          printf '\n%s=%s\n' "$key" "$value" >> .env
+        }
+
         ensure_env_value TRIAL_DAYS 10
         echo "✅ TRIAL_DAYS set to 10 days for this deploy"
+        ensure_env_default TRIAL_LTE_LIMIT_GB 1.0
+        echo "✅ TRIAL_LTE_LIMIT_GB default is present (existing value preserved)"
 
         # Prefer prod override when present (Caddy/TLS, etc.)
         if [ -f docker-compose.prod.yml ]; then

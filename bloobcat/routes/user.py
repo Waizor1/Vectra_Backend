@@ -27,7 +27,6 @@ from bloobcat.db.family_members import FamilyMembers
 from bloobcat.db.tariff import Tariffs
 from bloobcat.db.notifications import NotificationMarks
 from bloobcat.db.payments import ProcessedPayments
-from bloobcat.bot.bot import get_bot_username
 from bloobcat.bot.notifications.admin import (
     notify_active_tariff_change,
     notify_lte_topup,
@@ -513,6 +512,135 @@ class ChangeDevicesRequest(BaseModel):
     lte_gb: int | None = None
 
 
+async def _create_external_lte_topup_payment(
+    *,
+    user: Users,
+    active_tariff: ActiveTariffs,
+    amount_to_pay: float,
+    amount_from_balance: float,
+    metadata: dict[str, Any],
+) -> dict[str, Any]:
+    from bloobcat.routes.payment import (
+        PAYMENT_CURRENCY_RUB,
+        PAYMENT_PROVIDER_PLATEGA,
+        PAYMENT_PROVIDER_YOOKASSA,
+        PlategaAPIError,
+        PlategaClient,
+        PlategaConfigError,
+        _active_payment_provider,
+        _provider_payload_json,
+        _resolve_payment_return_url,
+        _upsert_processed_payment,
+    )
+
+    provider = _active_payment_provider()
+    return_url = await _resolve_payment_return_url()
+    metadata["expected_amount"] = float(amount_to_pay)
+    metadata["expected_currency"] = PAYMENT_CURRENCY_RUB
+    metadata["payment_provider"] = provider
+
+    if provider == PAYMENT_PROVIDER_PLATEGA:
+        provider_payload = _provider_payload_json({"metadata": metadata})
+        try:
+            payment = await PlategaClient().create_transaction(
+                amount=float(amount_to_pay),
+                currency=PAYMENT_CURRENCY_RUB,
+                description=f"LTE трафик пользователю {user.id}",
+                return_url=return_url,
+                failed_url=return_url,
+                payload=provider_payload,
+            )
+        except PlategaConfigError:
+            logger.error("Platega selected for LTE top-up but credentials are not configured")
+            raise HTTPException(
+                status_code=503,
+                detail="Сервис оплаты временно недоступен. Пожалуйста, попробуйте позже.",
+            )
+        except PlategaAPIError as exc:
+            logger.error(
+                "Ошибка при создании LTE платежа Platega",
+                extra={
+                    "user_id": user.id,
+                    "active_tariff_id": active_tariff.id,
+                    "amount": amount_to_pay,
+                    "status_code": exc.status_code,
+                },
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Сервис оплаты временно недоступен. Пожалуйста, попробуйте позже.",
+            )
+
+        await _upsert_processed_payment(
+            payment_id=payment.transaction_id,
+            user_id=user.id,
+            amount=float(amount_to_pay) + float(amount_from_balance),
+            amount_external=float(amount_to_pay),
+            amount_from_balance=float(amount_from_balance),
+            status="pending",
+            provider=PAYMENT_PROVIDER_PLATEGA,
+            payment_url=payment.redirect_url,
+            provider_payload=_provider_payload_json(
+                {
+                    "metadata": metadata,
+                    "provider_status": payment.status,
+                    "provider_response": {
+                        "transactionId": payment.transaction_id,
+                        "status": payment.status,
+                        "redirect": payment.redirect_url,
+                    },
+                }
+            ),
+        )
+        return {
+            "status": "payment_required",
+            "redirect_to": payment.redirect_url,
+            "payment_id": payment.transaction_id,
+            "provider": PAYMENT_PROVIDER_PLATEGA,
+        }
+
+    if provider != PAYMENT_PROVIDER_YOOKASSA:
+        logger.error("Unsupported LTE payment provider: %s", provider)
+        raise HTTPException(status_code=503, detail="Сервис оплаты временно недоступен")
+
+    try:
+        payment_data = {
+            "amount": {"value": str(amount_to_pay), "currency": PAYMENT_CURRENCY_RUB},
+            "confirmation": {
+                "type": "redirect",
+                "return_url": return_url,
+            },
+            "metadata": metadata,
+            "capture": True,
+            "description": f"LTE трафик пользователю {user.id}",
+        }
+        idempotence_key = str(randint(100000, 999999999999))
+        payment = await asyncio.wait_for(
+            asyncio.to_thread(partial(Payment.create, payment_data, idempotence_key)),
+            timeout=30.0,
+        )
+        await _upsert_processed_payment(
+            payment_id=payment.id,
+            user_id=user.id,
+            amount=float(amount_to_pay) + float(amount_from_balance),
+            amount_external=float(amount_to_pay),
+            amount_from_balance=float(amount_from_balance),
+            status="pending",
+            provider=PAYMENT_PROVIDER_YOOKASSA,
+            payment_url=payment.confirmation.confirmation_url,
+            provider_payload=_provider_payload_json({"metadata": metadata}),
+        )
+        return {
+            "status": "payment_required",
+            "redirect_to": payment.confirmation.confirmation_url,
+            "payment_id": payment.id,
+            "provider": PAYMENT_PROVIDER_YOOKASSA,
+        }
+    except Exception as e:
+        logger.error(f"Ошибка при создании LTE платежа для {user.id}: {e}")
+        raise HTTPException(status_code=500, detail="Ошибка при создании платежа")
+
+
 @router.patch("/active_tariff")
 async def change_active_tariff_devices(
     payload: ChangeDevicesRequest, user: Users = Depends(validate)
@@ -799,33 +927,13 @@ async def change_active_tariff_devices(
                         metadata["pending_devices_decrease_count"] = (
                             pending_device_update["devices_decrease_count"]
                         )
-                try:
-                    payment_data = {
-                        "amount": {"value": str(amount_to_pay), "currency": "RUB"},
-                        "confirmation": {
-                            "type": "redirect",
-                            "return_url": f"https://t.me/{await get_bot_username()}/",
-                        },
-                        "metadata": metadata,
-                        "capture": True,
-                        "description": f"LTE трафик пользователю {user.id}",
-                    }
-                    idempotence_key = str(randint(100000, 999999999999))
-                    payment = await asyncio.wait_for(
-                        asyncio.to_thread(
-                            partial(Payment.create, payment_data, idempotence_key)
-                        ),
-                        timeout=30.0,
-                    )
-                    return {
-                        "status": "payment_required",
-                        "redirect_to": payment.confirmation.confirmation_url,
-                    }
-                except Exception as e:
-                    logger.error(f"Ошибка при создании LTE платежа для {user.id}: {e}")
-                    raise HTTPException(
-                        status_code=500, detail="Ошибка при создании платежа"
-                    )
+                return await _create_external_lte_topup_payment(
+                    user=user,
+                    active_tariff=active_tariff,
+                    amount_to_pay=float(amount_to_pay),
+                    amount_from_balance=float(amount_from_balance),
+                    metadata=metadata,
+                )
 
     if pending_device_update:
         # Обновляем пользователя и активный тариф

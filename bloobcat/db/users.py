@@ -18,6 +18,7 @@ import logging
 
 from bloobcat.settings import remnawave_settings, test_mode, app_settings
 from bloobcat.logger import get_logger
+from bloobcat.services.trial_lte import read_trial_lte_limit_gb
 
 from bloobcat.db.active_tariff import ActiveTariffs
 from bloobcat.db.fk_guards import (
@@ -580,7 +581,7 @@ class Users(models.Model):
                     if lte_uuid:
                         lte_allowed = False
                         if current_user.is_trial:
-                            lte_allowed = True
+                            lte_allowed = (await read_trial_lte_limit_gb()) > 0
                         elif current_user.active_tariff_id:
                             active_tariff = await ActiveTariffs.get_or_none(
                                 id=current_user.active_tariff_id
@@ -829,7 +830,7 @@ class Users(models.Model):
                     if lte_uuid:
                         lte_allowed = False
                         if current_user.is_trial:
-                            lte_allowed = True
+                            lte_allowed = (await read_trial_lte_limit_gb()) > 0
                         elif current_user.active_tariff_id:
                             active_tariff = await ActiveTariffs.get_or_none(
                                 id=current_user.active_tariff_id

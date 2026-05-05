@@ -1027,3 +1027,171 @@ async def test_ensure_remnawave_user_skips_trial_notification_when_parallel_gran
         "filter",
         {"id": 559, "expired_at__isnull": True, "used_trial": False},
     ) in calls
+
+
+@pytest.mark.asyncio
+async def test_ensure_remnawave_user_skips_trial_lte_squad_when_limit_is_zero(
+    monkeypatch,
+):
+    user = Users(id=560, username="u", full_name="Trial No LTE")
+    captured_create: dict[str, Any] = {}
+    save_calls: list[dict[str, Any]] = []
+
+    class _CurrentUser:
+        id = 560
+        email = None
+        active_tariff_id = None
+        lte_gb_total = None
+
+        def __init__(self):
+            self.remnawave_uuid = None
+            self.is_trial = True
+            self.used_trial = True
+            self.expired_at = date.today() + timedelta(days=5)
+            self.hwid_limit = 1
+
+        def name(self):
+            return "Trial No LTE"
+
+        async def save(self, *args, **kwargs):
+            save_calls.append(kwargs)
+
+    current_user = _CurrentUser()
+
+    async def _get_or_none(**kwargs):
+        assert kwargs["id"] == 560
+        return current_user
+
+    async def _read_trial_lte_limit_gb():
+        return 0.0
+
+    class _FakeRemnaWaveUsers:
+        async def create_user(self, **kwargs):
+            captured_create.update(kwargs)
+            return {"response": {"uuid": "new-uuid-560"}}
+
+    class _FakeRemnaWaveClient:
+        def __init__(self, *_args, **_kwargs):
+            self.users = _FakeRemnaWaveUsers()
+
+        async def close(self):
+            return None
+
+    class _FakeToken:
+        def get_secret_value(self):
+            return "token"
+
+    fake_remnawave_settings = types.SimpleNamespace(
+        url="https://remnawave.local",
+        token=_FakeToken(),
+        default_internal_squad_uuid="base-squad",
+        lte_internal_squad_uuid="lte-squad",
+        default_external_squad_uuid=None,
+    )
+
+    remnawave_client_module = importlib.import_module(
+        "bloobcat.routes.remnawave.client"
+    )
+    settings_module = importlib.import_module("bloobcat.settings")
+
+    monkeypatch.setattr(Users, "get_or_none", _get_or_none)
+    monkeypatch.setattr(
+        users_module, "read_trial_lte_limit_gb", _read_trial_lte_limit_gb
+    )
+    monkeypatch.setattr(
+        remnawave_client_module, "RemnaWaveClient", _FakeRemnaWaveClient
+    )
+    monkeypatch.setattr(users_module, "remnawave_settings", fake_remnawave_settings)
+    monkeypatch.setattr(settings_module, "remnawave_settings", fake_remnawave_settings)
+
+    created = await user._ensure_remnawave_user()
+
+    assert created is True
+    assert user.remnawave_uuid == "new-uuid-560"
+    assert captured_create["active_internal_squads"] == ["base-squad"]
+    assert len(save_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_complete_registration_applies_web_referral_start_param(monkeypatch):
+    user = types.SimpleNamespace(
+        id=users_module.WEB_USER_ID_FLOOR + 501,
+        referred_by=None,
+        utm=None,
+    )
+    save_calls: list[dict[str, Any]] = []
+
+    async def _save(**kwargs):
+        save_calls.append(kwargs)
+
+    async def _has_material_data(user_id: int):
+        assert user_id == user.id
+        return False
+
+    async def _resolve(start_param: str, **kwargs):
+        assert start_param == "ref_321"
+        assert kwargs["user_id"] == user.id
+        assert kwargs["track_partner_qr_view"] is False
+        return 321, None
+
+    async def _get_or_none(**kwargs):
+        assert kwargs["id"] == 321
+        return types.SimpleNamespace(id=321)
+
+    async def _complete_registration(registered_user):
+        assert registered_user is user
+        assert user.referred_by == 321
+        return "token-web", 900
+
+    user.save = _save
+    monkeypatch.setattr(auth_module, "user_has_material_data", _has_material_data)
+    monkeypatch.setattr(auth_module, "resolve_referral_from_start_param", _resolve)
+    monkeypatch.setattr(auth_module.Users, "get_or_none", _get_or_none)
+    monkeypatch.setattr(auth_module, "complete_registration_for_user", _complete_registration)
+
+    result = await auth_module.complete_registration(
+        auth_module.CompleteRegistrationRequest(startParam="ref_321"),
+        user,
+    )
+
+    assert result.accessToken == "token-web"
+    assert result.expiresIn == 900
+    assert save_calls == [{"update_fields": ["referred_by"]}]
+
+
+@pytest.mark.asyncio
+async def test_complete_registration_does_not_rebind_material_web_user(monkeypatch):
+    user = types.SimpleNamespace(
+        id=users_module.WEB_USER_ID_FLOOR + 502,
+        referred_by=None,
+        utm=None,
+    )
+
+    async def _save(**_kwargs):
+        raise AssertionError("material web user must not be rebound")
+
+    async def _has_material_data(user_id: int):
+        assert user_id == user.id
+        return True
+
+    async def _resolve(*_args, **_kwargs):
+        raise AssertionError("material guard should run before resolving attribution")
+
+    async def _complete_registration(registered_user):
+        assert registered_user is user
+        assert user.referred_by is None
+        return "token-existing", 900
+
+    user.save = _save
+    monkeypatch.setattr(auth_module, "user_has_material_data", _has_material_data)
+    monkeypatch.setattr(auth_module, "resolve_referral_from_start_param", _resolve)
+    monkeypatch.setattr(auth_module, "complete_registration_for_user", _complete_registration)
+
+    result = await auth_module.complete_registration(
+        auth_module.CompleteRegistrationRequest(startParam="ref_321"),
+        user,
+    )
+
+    assert result.accessToken == "token-existing"
+    assert result.expiresIn == 900
+    assert user.referred_by is None
