@@ -408,8 +408,9 @@ async def test_ensure_remnawave_user_rebind_normalizes_hwid_limit_and_syncs(monk
     async def _get_or_none(**kwargs):
         return user
 
-    async def _find_existing(_self, _client, base_username):
-        assert base_username == str(user.id)
+    async def _find_existing(_self, _client, base_username, legacy_usernames=None):
+        assert base_username == f"VECTRA_{user.id}"
+        assert legacy_usernames == [str(user.id)]
         return {"uuid": "remote-rebind-uuid"}
 
     saved_fields = []
@@ -465,8 +466,9 @@ async def test_ensure_remnawave_user_rebind_imports_existing_connection_state(mo
     async def _get_or_none(**kwargs):
         return user
 
-    async def _find_existing(_self, _client, base_username):
-        assert base_username == str(user.id)
+    async def _find_existing(_self, _client, base_username, legacy_usernames=None):
+        assert base_username == f"VECTRA_{user.id}"
+        assert legacy_usernames == [str(user.id)]
         return {
             "uuid": "remote-rebind-uuid",
             "userTraffic": {

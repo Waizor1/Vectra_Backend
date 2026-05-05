@@ -235,19 +235,30 @@ async def get_user_add_device_state(user: Any) -> dict[str, Any]:
 
 
 def _make_device_username(owner: Any, device_id: int, family_member: Any | None) -> str:
+    from bloobcat.db.users import (
+        REMNAWAVE_USERNAME_MAX_LENGTH,
+        REMNAWAVE_USERNAME_PREFIX,
+        build_vectra_remnawave_username,
+    )
     from bloobcat.settings import test_mode
 
     owner_id = str(getattr(owner, "id", "0"))
     suffix = "T" if test_mode else ""
+    raw_budget = REMNAWAVE_USERNAME_MAX_LENGTH - len(REMNAWAVE_USERNAME_PREFIX)
     if family_member is not None:
         token = str(getattr(family_member, "id", ""))[:8]
         candidate = f"u{owner_id}_f{token}_{device_id}{suffix}"
     else:
         candidate = f"u{owner_id}_{device_id}{suffix}"
-    if len(candidate) <= 36:
-        return candidate
+    if len(candidate) <= raw_budget:
+        return build_vectra_remnawave_username(candidate)
     short_owner = owner_id[-10:]
-    return f"u{short_owner}_{device_id}{suffix}"[:36]
+    if family_member is not None:
+        token = str(getattr(family_member, "id", ""))[:8]
+        candidate = f"u{short_owner}_f{token}_{device_id}{suffix}"
+    else:
+        candidate = f"u{short_owner}_{device_id}{suffix}"
+    return build_vectra_remnawave_username(candidate[:raw_budget])
 
 
 async def _collect_internal_squads(owner: Any, family_member: Any | None = None) -> list[str]:

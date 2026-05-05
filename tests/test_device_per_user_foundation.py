@@ -297,6 +297,7 @@ async def test_create_device_user_creates_dedicated_remnawave_user(monkeypatch):
     assert device.device_name == "MacBook"
     assert str(device.remnawave_uuid) == "00000000-0000-0000-0000-00000000d001"
     assert await UserDevice.filter(user_id=user.id).count() == 1
+    assert fake_client.created[0]["username"].startswith("VECTRA_")
     assert fake_client.created[0]["hwid_device_limit"] == 1
     assert fake_client.updated[-1][1]["hwidDeviceLimit"] == 1
     assert fake_client.closed is True

@@ -1,6 +1,7 @@
+import asyncio
+import re
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional, Any, Union
-import asyncio
 
 from aiogram.types import User
 from aiogram.utils.web_app import WebAppUser
@@ -35,6 +36,9 @@ logger = get_logger("users_db")
 _REMNAWAVE_USER_LOCKS: dict[int, asyncio.Lock] = {}
 _REMNAWAVE_USER_LOCKS_GUARD = asyncio.Lock()
 WEB_USER_ID_FLOOR = 8_000_000_000_000_000
+REMNAWAVE_USERNAME_PREFIX = "VECTRA_"
+REMNAWAVE_USERNAME_MAX_LENGTH = 36
+_REMNAWAVE_USERNAME_SAFE_CHARS = re.compile(r"[^A-Za-z0-9_]+")
 
 
 async def _get_remnawave_user_lock(user_id: int) -> asyncio.Lock:
@@ -63,6 +67,38 @@ def normalize_date(val: Optional[Union[date, datetime]]) -> Optional[date]:
         return val
     # Fallback для неожиданных типов (не должно происходить при корректной типизации)
     return val
+
+
+def build_vectra_remnawave_username(raw_username: str) -> str:
+    """Return a RemnaWave-safe Vectra username without leaking plain service IDs."""
+
+    normalized = _REMNAWAVE_USERNAME_SAFE_CHARS.sub(
+        "_", str(raw_username or "").strip()
+    ).strip("_")
+    if not normalized:
+        normalized = "user"
+    if normalized.startswith(REMNAWAVE_USERNAME_PREFIX):
+        candidate = normalized
+    else:
+        candidate = f"{REMNAWAVE_USERNAME_PREFIX}{normalized}"
+    return candidate[:REMNAWAVE_USERNAME_MAX_LENGTH]
+
+
+def legacy_remnawave_username_for_user_id(user_id: int, *, test: bool = False) -> str:
+    is_web_user = int(user_id) >= WEB_USER_ID_FLOOR
+    if test and is_web_user:
+        return f"web_{user_id}_TEST"
+    if test:
+        return f"{user_id}_TEST"
+    if is_web_user:
+        return f"web_{user_id}"
+    return str(user_id)
+
+
+def remnawave_username_for_user_id(user_id: int, *, test: bool = False) -> str:
+    return build_vectra_remnawave_username(
+        legacy_remnawave_username_for_user_id(user_id, test=test)
+    )
 
 
 def crc32(a: str):
@@ -293,9 +329,15 @@ class Users(models.Model):
         return update_fields
 
     async def _find_existing_remnawave_user(
-        self, remnawave: Any, base_username: str
+        self,
+        remnawave: Any,
+        base_username: str,
+        legacy_usernames: Optional[list[str]] = None,
     ) -> Optional[dict]:
         candidates: list[dict] = []
+        username_candidates = list(
+            dict.fromkeys([base_username, *(legacy_usernames or [])])
+        )
 
         async def _collect(payload_coro, source: str):
             try:
@@ -321,7 +363,11 @@ class Users(models.Model):
         await _collect(remnawave.users.get_user_by_telegram_id(self.id), "telegram_id")
         if self.email:
             await _collect(remnawave.users.get_user_by_email(self.email), "email")
-        await _collect(remnawave.users.get_user_by_username(base_username), "username")
+        for username_candidate in username_candidates:
+            await _collect(
+                remnawave.users.get_user_by_username(username_candidate),
+                "username",
+            )
 
         # Fallback по списку пользователей (на случай старой панели без точечных endpoint'ов)
         try:
@@ -331,7 +377,11 @@ class Users(models.Model):
             max_pages = 20
             pages_fetched = 0
             normalized_email = (self.email or "").strip().lower()
-            username_prefix = f"{base_username}_"
+            username_prefixes = [
+                f"{username_candidate}_"
+                for username_candidate in username_candidates
+                if username_candidate
+            ]
 
             while pages_fetched < max_pages and (
                 total_users is None or start_index < total_users
@@ -358,8 +408,11 @@ class Users(models.Model):
                     email = str(remote_user.get("email") or "").strip().lower()
                     if (
                         str(telegram_id) == str(self.id)
-                        or username == base_username
-                        or username.startswith(username_prefix)
+                        or username in username_candidates
+                        or any(
+                            username.startswith(prefix)
+                            for prefix in username_prefixes
+                        )
                         or (normalized_email and email and email == normalized_email)
                     ):
                         candidates.append(remote_user)
@@ -396,6 +449,13 @@ class Users(models.Model):
                 score += 50
             elif candidate_username.startswith(f"{base_username}_"):
                 score += 20
+            elif candidate_username in (legacy_usernames or []):
+                score += 15
+            elif any(
+                candidate_username.startswith(f"{legacy_username}_")
+                for legacy_username in (legacy_usernames or [])
+            ):
+                score += 10
             if (
                 self.email
                 and candidate_email
@@ -544,10 +604,11 @@ class Users(models.Model):
                     active_internal_squads = internal_squads or None
 
                     is_web_user = int(self.id) >= WEB_USER_ID_FLOOR
-                    base_username = (
-                        f"web_{self.id}_TEST"
-                        if test_mode and is_web_user
-                        else (f"{self.id}_TEST" if test_mode else (f"web_{self.id}" if is_web_user else str(self.id)))
+                    base_username = remnawave_username_for_user_id(
+                        int(self.id), test=test_mode
+                    )
+                    legacy_base_username = legacy_remnawave_username_for_user_id(
+                        int(self.id), test=test_mode
                     )
                     remnawave_telegram_id = None if is_web_user else self.id
                     remnawave_description = (
@@ -572,6 +633,7 @@ class Users(models.Model):
                                 await self._find_existing_remnawave_user(
                                     remnawave,
                                     base_username=base_username,
+                                    legacy_usernames=[legacy_base_username],
                                 )
                             )
                             if existing_remote_user and existing_remote_user.get(
@@ -705,14 +767,16 @@ class Users(models.Model):
                                 raise
 
                     is_web_user = int(self.id) >= WEB_USER_ID_FLOOR
-                    base_username = (
-                        f"web_{self.id}_TEST"
-                        if test_mode and is_web_user
-                        else (f"{self.id}_TEST" if test_mode else (f"web_{self.id}" if is_web_user else str(self.id)))
+                    base_username = remnawave_username_for_user_id(
+                        int(self.id), test=test_mode
+                    )
+                    legacy_base_username = legacy_remnawave_username_for_user_id(
+                        int(self.id), test=test_mode
                     )
                     existing_remote_user = await self._find_existing_remnawave_user(
                         remnawave,
                         base_username=base_username,
+                        legacy_usernames=[legacy_base_username],
                     )
                     if existing_remote_user and existing_remote_user.get("uuid"):
                         current_user.remnawave_uuid = existing_remote_user["uuid"]
@@ -809,6 +873,7 @@ class Users(models.Model):
                                 await self._find_existing_remnawave_user(
                                     remnawave,
                                     base_username=base_username,
+                                    legacy_usernames=[legacy_base_username],
                                 )
                             )
                             if existing_remote_user and existing_remote_user.get(

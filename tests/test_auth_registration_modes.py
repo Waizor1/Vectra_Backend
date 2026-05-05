@@ -13,6 +13,23 @@ from bloobcat.db import users as users_module
 from bloobcat.db.users import Users
 
 
+def test_remnawave_username_prefix_marks_vectra_users():
+    web_id = users_module.WEB_USER_ID_FLOOR + 12345
+
+    assert (
+        users_module.remnawave_username_for_user_id(1394034854)
+        == "VECTRA_1394034854"
+    )
+    assert (
+        users_module.remnawave_username_for_user_id(web_id)
+        == f"VECTRA_web_{web_id}"
+    )
+    assert (
+        users_module.remnawave_username_for_user_id(web_id, test=True)
+        == f"VECTRA_web_{web_id}_TEST"
+    )
+
+
 def test_auth_telegram_route_uses_plain_request_annotation_for_fastapi_startup():
     request_parameter = inspect.signature(auth_module.auth_telegram).parameters[
         "request"
@@ -859,6 +876,7 @@ async def test_ensure_remnawave_user_create_uses_partial_save_and_keeps_concurre
                 db_row["hwid_limit"] = self.hwid_limit
 
     stale_current_user = _StaleCurrentUser()
+    captured_create: dict[str, Any] = {}
 
     async def _get_or_none(**kwargs):
         assert kwargs["id"] == 557
@@ -866,6 +884,7 @@ async def test_ensure_remnawave_user_create_uses_partial_save_and_keeps_concurre
 
     class _FakeRemnaWaveUsers:
         async def create_user(self, **kwargs):
+            captured_create.update(kwargs)
             # Concurrent auth request binds referral after stale snapshot was loaded.
             db_row["referred_by"] = 998
             return {"response": {"uuid": "new-uuid-557"}}
@@ -903,6 +922,7 @@ async def test_ensure_remnawave_user_create_uses_partial_save_and_keeps_concurre
 
     assert created is True
     assert user.remnawave_uuid == "new-uuid-557"
+    assert captured_create["username"] == "VECTRA_557"
     assert db_row["referred_by"] == 998
     assert db_row["hwid_limit"] == 1
     assert len(save_calls) == 1
