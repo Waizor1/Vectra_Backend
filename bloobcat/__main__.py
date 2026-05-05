@@ -128,6 +128,12 @@ async def _apply_generate_schema_compat_patches(conn) -> None:
         ALTER TABLE IF EXISTS "users"
             ADD COLUMN IF NOT EXISTS "email_notifications_enabled"
             BOOLEAN NOT NULL DEFAULT TRUE;
+        ALTER TABLE IF EXISTS "users"
+            ADD COLUMN IF NOT EXISTS "trial_started_at" TIMESTAMPTZ;
+        UPDATE "users"
+        SET "trial_started_at" = COALESCE("registration_date", "created_at", NOW())
+        WHERE "trial_started_at" IS NULL
+          AND "used_trial" = TRUE;
 
         CREATE TABLE IF NOT EXISTS "user_devices" (
             "id" SERIAL PRIMARY KEY,
