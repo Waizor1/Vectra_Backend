@@ -114,6 +114,10 @@ def main() -> None:
         "personal_discounts": ["id", "created_at"],
         "hwid_devices_local": ["id", "first_seen_at", "last_seen_at"],
         "processed_payments": ["id", "processed_at"],
+        "analytics_payment_events": ["id", "payment_id", "created_at", "updated_at"],
+        "analytics_service_daily": ["id", "last_calculated_at"],
+        "analytics_trial_daily": ["id", "last_calculated_at"],
+        "analytics_trial_risk_flags": ["id", "created_at", "updated_at"],
     }
 
     for collection, fields in readonly_map.items():

@@ -340,6 +340,14 @@ class AppSettings(BaseSettings):
     lte_default_price_per_gb: float = 1.5
     lte_default_max_gb: int = 500
     lte_default_step_gb: int = 1
+    analytics_paid_interval_seconds: int = 3600
+    analytics_trial_interval_seconds: int = 1800
+    analytics_nightly_reconcile_hour_msk: int = 3
+    analytics_remnawave_timeout_seconds: int = 30
+    trial_abuse_warning_gb: float = 3.0
+    trial_abuse_critical_gb: float = 10.0
+    trial_abuse_spike_share_pct: float = 50.0
+    trial_abuse_spike_min_gb: float = 2.0
     # Family alerts and anomaly protection
     family_alerts_enabled: bool = True
     family_alerts_webhook_url: str | None = None

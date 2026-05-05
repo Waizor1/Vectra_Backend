@@ -45,6 +45,7 @@ from bloobcat.tasks.payment_reconcile import run_payment_reconcile_scheduler
 from bloobcat.tasks.remnawave_delete_retry import run_remnawave_delete_retry_scheduler
 from bloobcat.tasks.subscription_resume import run_subscription_resume_scheduler
 from bloobcat.tasks.temp_setup_cleanup import run_temp_setup_cleanup_scheduler
+from bloobcat.tasks.service_growth_analytics import run_service_growth_analytics_scheduler
 from bloobcat.tasks.auto_payment_reminders import (
     build_auto_payment_reminder_eta,
     run_auto_payment_reminders_scheduler,
@@ -787,6 +788,8 @@ async def schedule_all_tasks():
     asyncio.create_task(run_payment_reconcile_scheduler())
     # Retry RemnaWave user deletes that failed with transient errors.
     asyncio.create_task(run_remnawave_delete_retry_scheduler())
+    # Precompute paid/trial traffic and revenue analytics for Directus.
+    asyncio.create_task(run_service_growth_analytics_scheduler())
     # Safety net: resume frozen base subscriptions after family ends.
     asyncio.create_task(run_subscription_resume_scheduler())
     # Cleanup expired device setup links and unbound temporary device-users.

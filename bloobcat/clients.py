@@ -31,6 +31,7 @@ TORTOISE_ORM = {
                 "bloobcat.db.remnawave_retry_jobs",
                 "bloobcat.db.subscription_freezes",
                 "bloobcat.db.auth",
+                "bloobcat.db.analytics",
             ],
             "default_connection": "default",
         },

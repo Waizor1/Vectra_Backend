@@ -146,6 +146,10 @@ class Users(models.Model):
     created_at = fields.DatetimeField(auto_now_add=True)
     is_trial = fields.BooleanField(default=False)
     used_trial = fields.BooleanField(default=False)
+    trial_started_at = fields.DatetimeField(
+        null=True,
+        description="Когда пользователю был выдан пробный период",
+    )
     remnawave_uuid = fields.UUIDField(null=True)  # UUID пользователя в RemnaWave
     last_hwid_reset = fields.DatetimeField(
         null=True,
@@ -480,6 +484,7 @@ class Users(models.Model):
             is_trial=True,
             used_trial=True,
             expired_at=trial_until,
+            trial_started_at=datetime.now(timezone.utc),
         )
         return bool(rows_updated)
 
@@ -527,6 +532,7 @@ class Users(models.Model):
                             )
                             if trial_granted:
                                 expire_at_date = trial_until
+                                current_user.trial_started_at = datetime.now(timezone.utc)
                                 current_user.is_trial = True
                                 current_user.used_trial = True
                                 current_user.expired_at = expire_at_date
@@ -547,6 +553,17 @@ class Users(models.Model):
                                 if refreshed_user:
                                     current_user.is_trial = refreshed_user.is_trial
                                     current_user.used_trial = refreshed_user.used_trial
+                                    current_user.trial_started_at = (
+                                        getattr(
+                                            refreshed_user,
+                                            "trial_started_at",
+                                            getattr(
+                                                current_user,
+                                                "trial_started_at",
+                                                None,
+                                            ),
+                                        )
+                                    )
                                     current_user.expired_at = refreshed_user.expired_at
                                     expire_at_date = refreshed_user.expired_at
                     else:
@@ -656,6 +673,8 @@ class Users(models.Model):
                                     "expired_at",
                                     "hwid_limit",
                                 ]
+                                if hasattr(current_user, "trial_started_at"):
+                                    update_fields.append("trial_started_at")
                                 update_fields.extend(
                                     self._apply_existing_remnawave_connection_state(
                                         current_user,
@@ -705,6 +724,11 @@ class Users(models.Model):
                             "expired_at",
                             "hwid_limit",
                         ]
+                        + (
+                            ["trial_started_at"]
+                            if hasattr(current_user, "trial_started_at")
+                            else []
+                        )
                     )
                     self.remnawave_uuid = current_user.remnawave_uuid
                     self.hwid_limit = current_user.hwid_limit

@@ -592,6 +592,16 @@ def apply_collection_ux(client: DirectusClient) -> None:
             "hidden": False,
             "translations": [{"language": "ru-RU", "translation": "Платежи"}],
         },
+        "analytics_payment_events": {
+            "group": "grp_payments",
+            "icon": "receipt_long",
+            "note": "Нормализованный ledger платежей для аналитики роста сервиса",
+            "sort": 2,
+            "hidden": True,
+            "translations": [
+                {"language": "ru-RU", "translation": "Аналитика платежей"}
+            ],
+        },
         "connections": {
             "group": "grp_analytics",
             "icon": "timeline",
@@ -599,6 +609,30 @@ def apply_collection_ux(client: DirectusClient) -> None:
             "sort": 1,
             "hidden": False,
             "translations": [{"language": "ru-RU", "translation": "Подключения"}],
+        },
+        "analytics_service_daily": {
+            "group": "grp_analytics",
+            "icon": "monitoring",
+            "note": "Предрасчитанные paid traffic/revenue totals для Directus",
+            "sort": 2,
+            "hidden": False,
+            "translations": [{"language": "ru-RU", "translation": "Рост сервиса"}],
+        },
+        "analytics_trial_daily": {
+            "group": "grp_analytics",
+            "icon": "speed",
+            "note": "Trial traffic totals, новые триалы и top consumer",
+            "sort": 3,
+            "hidden": False,
+            "translations": [{"language": "ru-RU", "translation": "Trial и abuse"}],
+        },
+        "analytics_trial_risk_flags": {
+            "group": "grp_analytics",
+            "icon": "warning",
+            "note": "Автоматические флаги подозрительного trial-трафика",
+            "sort": 4,
+            "hidden": False,
+            "translations": [{"language": "ru-RU", "translation": "Trial risk flags"}],
         },
         "error_reports": {
             "group": "grp_service",
@@ -750,6 +784,7 @@ def apply_field_notes_ru(client: DirectusClient) -> None:
             "is_subscribed": "Есть активная подписка на текущий момент.",
             "is_trial": "Пользователь находится на пробном периоде.",
             "used_trial": "Пробный период уже был использован ранее.",
+            "trial_started_at": "Когда пользователю был выдан пробный период. Используется для trial-графиков.",
             "is_partner": "Участник партнерской программы.",
             "custom_referral_percent": "Индивидуальный процент партнерского вознаграждения.",
             "referred_by": "Родитель-реферер. Поле кликабельно для быстрого перехода.",
@@ -809,6 +844,30 @@ def apply_field_notes_ru(client: DirectusClient) -> None:
             "amount": "Сумма платежа. Используется в витрине и для поиска аномалий.",
             "status": "Статус обработки/зачисления платежа.",
             "processed_at": "Когда платеж был обработан и попал в систему.",
+        },
+        "analytics_service_daily": {
+            "day": "День агрегата.",
+            "product": "main_paid / lte_paid / all_paid. Trial-трафик сюда не входит.",
+            "traffic_gb": "Платный трафик за день в ГБ.",
+            "rub_per_gb": "Выручка / traffic_gb для выбранного продукта.",
+            "last_calculated_at": "Когда collector пересчитал строку.",
+        },
+        "analytics_trial_daily": {
+            "day": "День агрегата.",
+            "new_trials": "Сколько новых trial было выдано за день.",
+            "active_trials": "Сколько trial были активны на этот день.",
+            "traffic_gb": "Суммарный trial-трафик за день.",
+            "top_user_id": "Trial-пользователь с самым большим трафиком за день.",
+            "flagged_users_count": "Сколько trial risk flags сейчас в статусе new.",
+        },
+        "analytics_trial_risk_flags": {
+            "user_id": "Подозрительный trial-пользователь.",
+            "day": "День, за который сработало правило.",
+            "traffic_gb": "Trial-трафик пользователя за день.",
+            "share_pct": "Доля пользователя от всего trial-трафика за день.",
+            "reason": "Правило срабатывания.",
+            "severity": "warning / critical.",
+            "status": "new / acknowledged / ignored / resolved.",
         },
         "partner_withdrawals": {
             "amount_rub": "Запрошенная сумма вывода (руб).",
@@ -1230,6 +1289,42 @@ def ensure_admin_settings(client: DirectusClient) -> None:
             "note": "Лимит LTE-трафика на пробном периоде в ГБ. 0 отключает LTE на триале.",
         },
     )
+    ensure_field(
+        "trial_abuse_warning_gb",
+        "float",
+        {"default_value": 3.0},
+        {
+            "interface": "input",
+            "note": "Trial risk warning: трафик пользователя за день >= N ГБ.",
+        },
+    )
+    ensure_field(
+        "trial_abuse_critical_gb",
+        "float",
+        {"default_value": 10.0},
+        {
+            "interface": "input",
+            "note": "Trial risk critical: трафик пользователя за день >= N ГБ.",
+        },
+    )
+    ensure_field(
+        "trial_abuse_spike_share_pct",
+        "float",
+        {"default_value": 50.0},
+        {
+            "interface": "input",
+            "note": "Trial risk spike: доля пользователя от всего trial traffic за день, %.",
+        },
+    )
+    ensure_field(
+        "trial_abuse_spike_min_gb",
+        "float",
+        {"default_value": 2.0},
+        {
+            "interface": "input",
+            "note": "Trial risk spike: минимальный трафик пользователя, ГБ.",
+        },
+    )
 
     # Ensure singleton row exists.
     defaults = {
@@ -1245,10 +1340,21 @@ def ensure_admin_settings(client: DirectusClient) -> None:
         "maintenance_mode": False,
         "maintenance_message": "",
         "trial_lte_limit_gb": 1.0,
+        "trial_abuse_warning_gb": 3.0,
+        "trial_abuse_critical_gb": 10.0,
+        "trial_abuse_spike_share_pct": 50.0,
+        "trial_abuse_spike_min_gb": 2.0,
     }
     items_resp = client.get(
         f"/items/{collection}",
-        params={"limit": 1, "fields": "id,trial_lte_limit_gb"},
+        params={
+            "limit": 1,
+            "fields": (
+                "id,trial_lte_limit_gb,trial_abuse_warning_gb,"
+                "trial_abuse_critical_gb,trial_abuse_spike_share_pct,"
+                "trial_abuse_spike_min_gb"
+            ),
+        },
     )
     if items_resp.status_code == 400:
         # Older/permission-limited installs may not expose the newly requested
@@ -1270,12 +1376,23 @@ def ensure_admin_settings(client: DirectusClient) -> None:
         if created.status_code in (401, 403):
             return
         created.raise_for_status()
-    elif "trial_lte_limit_gb" in items[0] and items[0].get("trial_lte_limit_gb") is None:
+    else:
+        missing_defaults = {
+            field: defaults[field]
+            for field in (
+                "trial_lte_limit_gb",
+                "trial_abuse_warning_gb",
+                "trial_abuse_critical_gb",
+                "trial_abuse_spike_share_pct",
+                "trial_abuse_spike_min_gb",
+            )
+            if field in items[0] and items[0].get(field) is None
+        }
         item_id = items[0].get("id")
-        if item_id is not None:
+        if item_id is not None and missing_defaults:
             updated = client.patch(
                 f"/items/{collection}/{item_id}",
-                json={"trial_lte_limit_gb": defaults["trial_lte_limit_gb"]},
+                json=missing_defaults,
             )
             if updated.status_code not in (401, 403):
                 updated.raise_for_status()
@@ -2891,17 +3008,25 @@ def ensure_permissions_baseline(client: DirectusClient) -> None:
         "promo_codes",
         "promo_usages",
         "processed_payments",
+        "analytics_payment_events",
+        "analytics_service_daily",
+        "analytics_trial_daily",
+        "analytics_trial_risk_flags",
         "in_app_notifications",
         # Partners (optional)
         "partner_withdrawals",
     }
     manager_update_only = {
         "error_reports",
+        "analytics_trial_risk_flags",
     }
     manager_ro = {
         "connections",
         "error_reports",
         "notification_views",
+        "analytics_payment_events",
+        "analytics_service_daily",
+        "analytics_trial_daily",
     }
     viewer_ro = {
         "users",
@@ -2913,6 +3038,10 @@ def ensure_permissions_baseline(client: DirectusClient) -> None:
         "family_audit_logs",
         "connections",
         "processed_payments",
+        "analytics_payment_events",
+        "analytics_service_daily",
+        "analytics_trial_daily",
+        "analytics_trial_risk_flags",
         "error_reports",
         "in_app_notifications",
         "notification_views",
@@ -2930,6 +3059,10 @@ def ensure_permissions_baseline(client: DirectusClient) -> None:
         "promo_usages",
         "connections",
         "processed_payments",
+        "analytics_payment_events",
+        "analytics_service_daily",
+        "analytics_trial_daily",
+        "analytics_trial_risk_flags",
         "in_app_notifications",
         "notification_views",
         # Partners (optional)

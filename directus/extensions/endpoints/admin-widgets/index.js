@@ -33,6 +33,30 @@ const toFiniteNumber = (value) => {
   return Number.isFinite(parsed) ? parsed : 0;
 };
 
+const ensureAnalyticsProduct = (value) => {
+  const allowed = new Set(["main_paid", "lte_paid", "all_paid"]);
+  return allowed.has(value) ? value : "all_paid";
+};
+
+const ensureAnalyticsPeriod = (value) => {
+  const period = ensurePeriod(value);
+  return period === "year" ? "month" : period;
+};
+
+const emptyAnalyticsSummary = () => ({
+  traffic_gb: 0,
+  traffic_bytes: 0,
+  subscription_revenue_rub: 0,
+  lte_revenue_rub: 0,
+  revenue_total_rub: 0,
+  amount_external_rub: 0,
+  amount_from_balance_rub: 0,
+  lte_gb_purchased: 0,
+  payments_count: 0,
+  paying_users: 0,
+  rub_per_gb: 0,
+});
+
 const getMinDate = async (database, table, column) => {
   const row = await database(table).min({ min_date: column }).first();
   return row?.min_date ? new Date(row.min_date) : null;
@@ -393,6 +417,271 @@ export default function registerEndpoint(router, { database }) {
       max_x_field: maxDate.toISOString(),
       period_x_field: period,
     });
+  });
+
+  router.get("/service-growth/paid", async (req, res) => {
+    try {
+      const hasAnalytics = await hasTable("analytics_service_daily");
+      const days = toInt(req.query.days, 30, 1, 366);
+      const period = ensureAnalyticsPeriod(req.query.period_x_field || req.query.period || "day");
+      const product = ensureAnalyticsProduct(req.query.product || "all_paid");
+      if (!hasAnalytics) {
+        return res.json({
+          days,
+          period,
+          product,
+          summary: emptyAnalyticsSummary(),
+          timeline: [],
+          stale: true,
+        });
+      }
+
+      const raw = await database.raw(
+        `
+        WITH scoped AS (
+          SELECT
+            date_trunc('${period}', "day"::timestamp)::date AS bucket,
+            traffic_bytes,
+            traffic_gb,
+            subscription_revenue_rub,
+            lte_revenue_rub,
+            amount_external_rub,
+            amount_from_balance_rub,
+            lte_gb_purchased,
+            payments_count,
+            paying_users
+          FROM analytics_service_daily
+          WHERE product = ?
+            AND "day" >= CURRENT_DATE - (? * INTERVAL '1 day')
+            AND "day" <= CURRENT_DATE
+        ),
+        grouped AS (
+          SELECT
+            bucket,
+            COALESCE(SUM(traffic_bytes), 0)::bigint AS traffic_bytes,
+            COALESCE(SUM(traffic_gb), 0)::float AS traffic_gb,
+            COALESCE(SUM(subscription_revenue_rub), 0)::numeric AS subscription_revenue_rub,
+            COALESCE(SUM(lte_revenue_rub), 0)::numeric AS lte_revenue_rub,
+            COALESCE(SUM(amount_external_rub), 0)::numeric AS amount_external_rub,
+            COALESCE(SUM(amount_from_balance_rub), 0)::numeric AS amount_from_balance_rub,
+            COALESCE(SUM(lte_gb_purchased), 0)::float AS lte_gb_purchased,
+            COALESCE(SUM(payments_count), 0)::int AS payments_count,
+            COALESCE(MAX(paying_users), 0)::int AS paying_users_daily_fallback
+          FROM scoped
+          GROUP BY bucket
+        ),
+        payers AS (
+          SELECT
+            date_trunc('${period}', paid_at AT TIME ZONE 'Europe/Moscow')::date AS bucket,
+            COUNT(DISTINCT user_id)::int AS paying_users
+          FROM analytics_payment_events
+          WHERE paid_at >= (CURRENT_DATE - (? * INTERVAL '1 day'))::timestamptz
+            AND paid_at < (CURRENT_DATE + INTERVAL '1 day')::timestamptz
+            AND (
+              ? = 'all_paid'
+              OR (? = 'main_paid' AND subscription_revenue_rub > 0)
+              OR (? = 'lte_paid' AND (lte_revenue_rub > 0 OR lte_gb_purchased > 0))
+            )
+          GROUP BY bucket
+        )
+        SELECT
+          to_char(g.bucket, 'YYYY-MM-DD') AS day,
+          g.traffic_bytes,
+          g.traffic_gb,
+          g.subscription_revenue_rub,
+          g.lte_revenue_rub,
+          g.amount_external_rub,
+          g.amount_from_balance_rub,
+          g.lte_gb_purchased,
+          g.payments_count,
+          COALESCE(p.paying_users, g.paying_users_daily_fallback, 0)::int AS paying_users
+        FROM grouped g
+        LEFT JOIN payers p ON p.bucket = g.bucket
+        ORDER BY g.bucket ASC;
+        `,
+        [product, days - 1, days - 1, product, product, product]
+      );
+      const timeline = raw?.rows ?? raw ?? [];
+      const payersSummaryRaw = await database.raw(
+        `
+        SELECT COUNT(DISTINCT user_id)::int AS paying_users
+        FROM analytics_payment_events
+        WHERE paid_at >= (CURRENT_DATE - (? * INTERVAL '1 day'))::timestamptz
+          AND paid_at < (CURRENT_DATE + INTERVAL '1 day')::timestamptz
+          AND (
+            ? = 'all_paid'
+            OR (? = 'main_paid' AND subscription_revenue_rub > 0)
+            OR (? = 'lte_paid' AND (lte_revenue_rub > 0 OR lte_gb_purchased > 0))
+          );
+        `,
+        [days - 1, product, product, product]
+      );
+      const summary = timeline.reduce((acc, row) => {
+        acc.traffic_bytes += toFiniteNumber(row.traffic_bytes);
+        acc.traffic_gb += toFiniteNumber(row.traffic_gb);
+        acc.subscription_revenue_rub += toFiniteNumber(row.subscription_revenue_rub);
+        acc.lte_revenue_rub += toFiniteNumber(row.lte_revenue_rub);
+        acc.amount_external_rub += toFiniteNumber(row.amount_external_rub);
+        acc.amount_from_balance_rub += toFiniteNumber(row.amount_from_balance_rub);
+        acc.lte_gb_purchased += toFiniteNumber(row.lte_gb_purchased);
+        acc.payments_count += toFiniteNumber(row.payments_count);
+        acc.paying_users = Math.max(acc.paying_users, toFiniteNumber(row.paying_users));
+        return acc;
+      }, emptyAnalyticsSummary());
+      const payersSummaryRows = payersSummaryRaw?.rows ?? payersSummaryRaw ?? [];
+      summary.paying_users = toFiniteNumber(payersSummaryRows?.[0]?.paying_users ?? summary.paying_users);
+      summary.revenue_total_rub = summary.subscription_revenue_rub + summary.lte_revenue_rub;
+      summary.rub_per_gb = summary.traffic_gb > 0 ? summary.revenue_total_rub / summary.traffic_gb : 0;
+
+      res.json({
+        days,
+        period,
+        product,
+        summary,
+        timeline,
+        stale: false,
+      });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to build service-growth paid analytics", details: String(err?.message || err) });
+    }
+  });
+
+  router.get("/service-growth/trials", async (req, res) => {
+    try {
+      const hasTrialDaily = await hasTable("analytics_trial_daily");
+      const hasRiskFlags = await hasTable("analytics_trial_risk_flags");
+      const days = toInt(req.query.days, 30, 1, 366);
+      const period = ensureAnalyticsPeriod(req.query.period_x_field || req.query.period || "day");
+      const limit = toInt(req.query.limit, 25, 1, 100);
+      if (!hasTrialDaily) {
+        return res.json({
+          days,
+          period,
+          summary: {
+            new_trials: 0,
+            active_trials: 0,
+            traffic_gb: 0,
+            top_user_id: null,
+            top_user_traffic_gb: 0,
+            flagged_users_count: 0,
+          },
+          timeline: [],
+          flags: [],
+          stale: true,
+        });
+      }
+
+      const timelineRaw = await database.raw(
+        `
+        WITH base AS (
+          SELECT
+            date_trunc('${period}', "day"::timestamp)::date AS bucket,
+            new_trials,
+            active_trials,
+            traffic_bytes,
+            traffic_gb,
+            top_user_id,
+            top_user_traffic_gb,
+            flagged_users_count
+          FROM analytics_trial_daily
+          WHERE "day" >= CURRENT_DATE - (? * INTERVAL '1 day')
+            AND "day" <= CURRENT_DATE
+        ),
+        grouped AS (
+          SELECT
+            bucket,
+            COALESCE(SUM(new_trials), 0)::int AS new_trials,
+            COALESCE(MAX(active_trials), 0)::int AS active_trials,
+            COALESCE(SUM(traffic_bytes), 0)::bigint AS traffic_bytes,
+            COALESCE(SUM(traffic_gb), 0)::float AS traffic_gb,
+            COALESCE(SUM(flagged_users_count), 0)::int AS flagged_users_count
+          FROM base
+          GROUP BY bucket
+        ),
+        top_by_bucket AS (
+          SELECT DISTINCT ON (bucket)
+            bucket,
+            top_user_id,
+            top_user_traffic_gb
+          FROM base
+          WHERE top_user_id IS NOT NULL
+          ORDER BY bucket, top_user_traffic_gb DESC
+        )
+        SELECT
+          to_char(g.bucket, 'YYYY-MM-DD') AS day,
+          g.new_trials,
+          g.active_trials,
+          g.traffic_bytes,
+          g.traffic_gb,
+          t.top_user_id,
+          COALESCE(t.top_user_traffic_gb, 0)::float AS top_user_traffic_gb,
+          g.flagged_users_count
+        FROM grouped g
+        LEFT JOIN top_by_bucket t ON t.bucket = g.bucket
+        ORDER BY g.bucket ASC;
+        `,
+        [days - 1]
+      );
+      const timeline = timelineRaw?.rows ?? timelineRaw ?? [];
+      const summary = timeline.reduce(
+        (acc, row) => {
+          acc.new_trials += toFiniteNumber(row.new_trials);
+          acc.active_trials = Math.max(acc.active_trials, toFiniteNumber(row.active_trials));
+          acc.traffic_gb += toFiniteNumber(row.traffic_gb);
+          acc.flagged_users_count += toFiniteNumber(row.flagged_users_count);
+          const topTraffic = toFiniteNumber(row.top_user_traffic_gb);
+          if (topTraffic > acc.top_user_traffic_gb) {
+            acc.top_user_traffic_gb = topTraffic;
+            acc.top_user_id = row.top_user_id ?? null;
+          }
+          return acc;
+        },
+        {
+          new_trials: 0,
+          active_trials: 0,
+          traffic_gb: 0,
+          top_user_id: null,
+          top_user_traffic_gb: 0,
+          flagged_users_count: 0,
+        }
+      );
+
+      const flagsRaw = hasRiskFlags
+        ? await database.raw(
+            `
+            SELECT
+              user_id,
+              to_char("day", 'YYYY-MM-DD') AS day,
+              traffic_gb,
+              share_pct,
+              reason,
+              severity,
+              status,
+              created_at,
+              updated_at
+            FROM analytics_trial_risk_flags
+            WHERE "day" >= CURRENT_DATE - (? * INTERVAL '1 day')
+            ORDER BY
+              "day" DESC,
+              CASE severity WHEN 'critical' THEN 0 ELSE 1 END ASC,
+              traffic_gb DESC
+            LIMIT ?;
+            `,
+            [days - 1, limit]
+          )
+        : { rows: [] };
+
+      res.json({
+        days,
+        period,
+        summary,
+        timeline,
+        flags: flagsRaw?.rows ?? flagsRaw ?? [],
+        stale: false,
+      });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to build service-growth trial analytics", details: String(err?.message || err) });
+    }
   });
 
   router.get("/content-ops/summary", async (req, res) => {

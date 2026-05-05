@@ -66,7 +66,15 @@ def main() -> None:
         print("Policies Manager/Viewer not found. Nothing to do.")
         return
 
-    collections = ["users", "connections", "active_tariffs", "promo_usages"]
+    collections = [
+        "users",
+        "connections",
+        "active_tariffs",
+        "promo_usages",
+        "analytics_service_daily",
+        "analytics_trial_daily",
+        "analytics_trial_risk_flags",
+    ]
     created = 0
     for policy_name in target_policies:
         policy_id = policy_map[policy_name]["id"]
