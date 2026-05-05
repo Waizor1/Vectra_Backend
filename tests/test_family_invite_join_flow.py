@@ -190,6 +190,7 @@ async def db(_install_stubs_once):
                         "bloobcat.db.family_members",
                         "bloobcat.db.family_invites",
                         "bloobcat.db.family_audit_logs",
+                        "bloobcat.db.user_devices",
                     ],
                     "default_connection": "default",
                 }
@@ -562,3 +563,35 @@ async def test_owner_with_30_devices_can_create_and_accept_invite_above_legacy_1
     assert result["ok"] is True
     assert membership.allocated_devices == 12
     assert member.hwid_limit == 12
+
+
+@pytest.mark.asyncio
+async def test_disabled_member_does_not_override_zero_limit_with_device_per_user_sync(monkeypatch):
+    from bloobcat.db.family_members import FamilyMembers
+    from bloobcat.routes import family_invites as family_module
+    from bloobcat.services import device_service
+
+    owner = await _create_owner(user_id=9801, hwid_limit=10)
+    owner.device_per_user_enabled = True
+    await owner.save(update_fields=["device_per_user_enabled"])
+    member_user = await _create_member(user_id=9802, hwid_limit=0)
+    membership = await FamilyMembers.create(
+        owner=owner,
+        member=member_user,
+        allocated_devices=0,
+        status="disabled",
+    )
+    calls = []
+
+    async def fake_sync_legacy_hwid_limit_for(*args, **kwargs):
+        calls.append((args, kwargs))
+
+    monkeypatch.setattr(
+        device_service,
+        "sync_legacy_hwid_limit_for",
+        fake_sync_legacy_hwid_limit_for,
+    )
+
+    await family_module._sync_family_member_device_entitlements(owner, membership)
+
+    assert calls == []

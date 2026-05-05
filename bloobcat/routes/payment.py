@@ -161,6 +161,29 @@ PAYMENT_PROVIDER_PLATEGA = PLATEGA_PROVIDER
 PAYMENT_CURRENCY_RUB = "RUB"
 
 
+async def _sync_device_per_user_after_payment(user: Users, *, source: str) -> bool:
+    if not user.is_device_per_user_enabled():
+        return False
+    try:
+        from bloobcat.services.device_service import sync_device_entitlements
+
+        await sync_device_entitlements(user)
+        logger.info(
+            "Device-per-user entitlements synced after payment source=%s user=%s",
+            source,
+            user.id,
+        )
+    except Exception as exc:
+        logger.error(
+            "Device-per-user entitlement sync failed source=%s user=%s err=%s",
+            source,
+            user.id,
+            exc,
+            exc_info=True,
+        )
+    return True
+
+
 def _active_payment_provider() -> str:
     provider = str(getattr(payment_settings, "provider", "") or "").strip().lower()
     if provider == PAYMENT_PROVIDER_PLATEGA:
@@ -2059,7 +2082,19 @@ async def _apply_succeeded_payment_fallback(
         )
 
     # Best-effort RemnaWave sync for HWID limit.
-    if user.remnawave_uuid and user.hwid_limit and not preserve_active_tariff_state:
+    if (
+        user.remnawave_uuid
+        and user.hwid_limit
+        and not preserve_active_tariff_state
+        and user.is_device_per_user_enabled()
+    ):
+        await _sync_device_per_user_after_payment(user, source="fallback")
+    if (
+        user.remnawave_uuid
+        and user.hwid_limit
+        and not preserve_active_tariff_state
+        and not user.is_device_per_user_enabled()
+    ):
         await _refresh_payment_processing_lease(
             payment_id=pid,
             user_id=int(user.id),
@@ -3218,7 +3253,11 @@ async def yookassa_webhook(request: Request, secret: str):
                     )
                 await active_tariff.save()
 
-                if user.remnawave_uuid:
+                if user.remnawave_uuid and user.is_device_per_user_enabled():
+                    await _sync_device_per_user_after_payment(
+                        user, source="webhook_lte"
+                    )
+                if user.remnawave_uuid and not user.is_device_per_user_enabled():
                     remnawave_client = None
                     try:
                         await _refresh_payment_processing_lease(
@@ -3860,7 +3899,17 @@ async def yookassa_webhook(request: Request, secret: str):
             )
 
             # Синхронизируем данные с RemnaWave
-            if user.remnawave_uuid and not preserve_active_tariff_state:
+            if (
+                user.remnawave_uuid
+                and not preserve_active_tariff_state
+                and user.is_device_per_user_enabled()
+            ):
+                await _sync_device_per_user_after_payment(user, source="webhook")
+            if (
+                user.remnawave_uuid
+                and not preserve_active_tariff_state
+                and not user.is_device_per_user_enabled()
+            ):
                 # Настройки бесконечных повторных попыток с ограничением по времени
                 max_total_time = (
                     60  # Максимальное время в секундах для всех попыток (1 минута)
@@ -4730,7 +4779,17 @@ async def pay(
                 )
 
             # Синхронизируем лимит устройств и дату окончания с RemnaWave
-            if user.remnawave_uuid and not preserve_active_tariff_state:
+            if (
+                user.remnawave_uuid
+                and not preserve_active_tariff_state
+                and user.is_device_per_user_enabled()
+            ):
+                await _sync_device_per_user_after_payment(user, source="balance")
+            if (
+                user.remnawave_uuid
+                and not preserve_active_tariff_state
+                and not user.is_device_per_user_enabled()
+            ):
                 remnawave_client = None
                 try:
                     remnawave_client = RemnaWaveClient(

@@ -19,6 +19,7 @@ TORTOISE_ORM = {
                 "bloobcat.db.hwid_local",
                 "bloobcat.db.family_devices",
                 "bloobcat.db.family_members",
+                "bloobcat.db.user_devices",
                 "bloobcat.db.family_invites",
                 "bloobcat.db.family_audit_logs",
                 "bloobcat.db.partner_qr",

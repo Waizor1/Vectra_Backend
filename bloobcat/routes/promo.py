@@ -159,19 +159,24 @@ async def redeem_promo(req: PromoValidateRequest, user=Depends(validate)):
             # Синхронизируем hwidDeviceLimit в RemnaWave (если есть UUID)
             if user.remnawave_uuid:
                 try:
-                    from bloobcat.routes.remnawave.client import RemnaWaveClient
-                    from bloobcat.settings import remnawave_settings
-                    remnawave_client = RemnaWaveClient(
-                        remnawave_settings.url,
-                        remnawave_settings.token.get_secret_value()
-                    )
-                    try:
-                        await remnawave_client.users.update_user(
-                            user.remnawave_uuid,
-                            hwidDeviceLimit=user.hwid_limit
+                    if user.is_device_per_user_enabled():
+                        from bloobcat.services.device_service import sync_device_entitlements
+
+                        await sync_device_entitlements(user)
+                    else:
+                        from bloobcat.routes.remnawave.client import RemnaWaveClient
+                        from bloobcat.settings import remnawave_settings
+                        remnawave_client = RemnaWaveClient(
+                            remnawave_settings.url,
+                            remnawave_settings.token.get_secret_value()
                         )
-                    finally:
-                        await remnawave_client.close()
+                        try:
+                            await remnawave_client.users.update_user(
+                                user.remnawave_uuid,
+                                hwidDeviceLimit=user.hwid_limit
+                            )
+                        finally:
+                            await remnawave_client.close()
                 except Exception:
                     # Проглатываем ошибки синхронизации: бэкенд периодически делает батч-синк
                     pass

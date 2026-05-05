@@ -118,6 +118,18 @@ async def _sync_owner_effective_remnawave_limit(owner: Users) -> None:
     # reservations.
     if not owner.remnawave_uuid:
         return
+    if owner.is_device_per_user_enabled():
+        try:
+            from bloobcat.services.device_service import sync_legacy_hwid_limit_for
+
+            await sync_legacy_hwid_limit_for(owner)
+            return
+        except Exception as exc:
+            logger.warning(
+                "family_owner_device_per_user_limit_sync_failed owner=%s err=%s",
+                owner.id,
+                exc,
+            )
     effective_limit = await _owner_effective_devices_limit(owner)
     client = RemnaWaveClient(
         remnawave_settings.url,
@@ -129,6 +141,57 @@ async def _sync_owner_effective_remnawave_limit(owner: Users) -> None:
         )
     finally:
         await client.close()
+
+
+async def _count_member_used_devices(member: FamilyMembers) -> int:
+    target_user = member.member
+    legacy_count = await _get_user_connected_devices_count(target_user)
+    try:
+        from bloobcat.services.device_service import count_device_users_for_family_member
+
+        return legacy_count + await count_device_users_for_family_member(member)
+    except Exception as exc:
+        logger.warning(
+            "family_member_device_user_count_failed member=%s err=%s",
+            member.id,
+            exc,
+        )
+        return legacy_count
+
+
+async def _delete_family_member_device_users(member: FamilyMembers) -> int:
+    try:
+        from bloobcat.services.device_service import cascade_delete_family_member_devices
+
+        return await cascade_delete_family_member_devices(member)
+    except Exception as exc:
+        logger.warning(
+            "family_member_device_user_delete_failed member=%s err=%s",
+            member.id,
+            exc,
+        )
+        return 0
+
+
+async def _sync_family_member_device_entitlements(owner: Users, member: FamilyMembers) -> None:
+    if not owner.is_device_per_user_enabled():
+        return
+    if (
+        str(getattr(member, "status", "") or "") != "active"
+        or int(getattr(member, "allocated_devices", 0) or 0) <= 0
+    ):
+        return
+    try:
+        from bloobcat.services.device_service import sync_legacy_hwid_limit_for
+
+        await sync_legacy_hwid_limit_for(owner, member)
+    except Exception as exc:
+        logger.warning(
+            "family_member_device_per_user_limit_sync_failed owner=%s member=%s err=%s",
+            owner.id,
+            member.id,
+            exc,
+        )
 
 
 @dataclass(slots=True)
@@ -927,6 +990,7 @@ async def accept_invite(token: str, user: Users = Depends(validate)) -> Dict[str
             user = await Users.get(id=user.id)
 
         if transition_membership and transition_old_owner:
+            await _delete_family_member_device_users(transition_membership)
             await transition_membership.delete()
             transition_deleted = True
             try:
@@ -966,6 +1030,7 @@ async def accept_invite(token: str, user: Users = Depends(validate)) -> Dict[str
                 status="active",
             )
             reactivated = False
+        await _sync_family_member_device_entitlements(owner, member)
         try:
             await _sync_owner_effective_remnawave_limit(owner)
         except Exception as exc:
@@ -1145,14 +1210,31 @@ async def update_member(
     if next_reserved_devices > family_limit:
         raise HTTPException(status_code=409, detail="Family allocation limit exceeded")
     previous_allocated_devices = int(member.allocated_devices or 0)
+    target_user = member.member
+    if (
+        int(payload.allocated_devices or 0) > 0
+        and int(payload.allocated_devices or 0) < previous_allocated_devices
+    ):
+        used_devices = await _count_member_used_devices(member)
+        if used_devices > int(payload.allocated_devices or 0):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "allocated_devices_below_used",
+                    "used_devices": used_devices,
+                    "requested_allocated_devices": int(payload.allocated_devices or 0),
+                },
+            )
+    if int(payload.allocated_devices or 0) == 0:
+        await _delete_family_member_device_users(member)
     member.allocated_devices = payload.allocated_devices
     member.status = "disabled" if payload.allocated_devices == 0 else "active"
     await member.save()
-    target_user = member.member
     if not target_user.remnawave_uuid:
         await target_user._ensure_remnawave_user()
         target_user = await Users.get(id=target_user.id)
     await _sync_user_hwid_limit(target_user, payload.allocated_devices)
+    await _sync_family_member_device_entitlements(user, member)
     try:
         await _sync_owner_effective_remnawave_limit(user)
     except Exception as exc:
@@ -1220,6 +1302,7 @@ async def delete_member(
         return {"ok": True, "note": "already_deleted"}
     target_user = member.member
     personal_limit = await _resolve_personal_device_limit(target_user)
+    await _delete_family_member_device_users(member)
     await _sync_user_hwid_limit(target_user, personal_limit)
     await member.delete()
     try:
@@ -1299,6 +1382,7 @@ async def leave_family(user: Users = Depends(validate)) -> Dict[str, Any]:
     owner = member.owner
     member_id = str(member.id)
     personal_limit = await _resolve_personal_device_limit(user)
+    await _delete_family_member_device_users(member)
     await _sync_user_hwid_limit(user, personal_limit)
     await member.delete()
     try:

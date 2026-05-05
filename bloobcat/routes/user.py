@@ -76,12 +76,25 @@ def _has_completed_onboarding(user: Users) -> bool:
     return bool(getattr(user, "id", None))
 
 
+_SENSITIVE_USER_RESPONSE_FIELDS = {
+    "temp_setup_token",
+    "temp_setup_expires_at",
+    "temp_setup_device_id",
+}
+
+
+def _strip_sensitive_user_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
+    for field_name in _SENSITIVE_USER_RESPONSE_FIELDS:
+        payload.pop(field_name, None)
+    return payload
+
+
 def _dump_user_pydantic_compat(user_data: Any) -> Dict[str, Any]:
     """Serialize Tortoise/Pydantic user models across pydantic v1/v2 test stubs."""
     if hasattr(user_data, "model_dump"):
-        return user_data.model_dump(mode="json")
+        return _strip_sensitive_user_fields(user_data.model_dump(mode="json"))
     if hasattr(user_data, "dict"):
-        return user_data.dict()
+        return _strip_sensitive_user_fields(user_data.dict())
     if hasattr(user_data, "_meta"):
         payload: Dict[str, Any] = {}
         for field_name in getattr(user_data._meta, "db_fields", []):
@@ -92,8 +105,8 @@ def _dump_user_pydantic_compat(user_data: Any) -> Dict[str, Any]:
                 payload[field_name] = str(value)
             else:
                 payload[field_name] = value
-        return payload
-    return dict(user_data)
+        return _strip_sensitive_user_fields(payload)
+    return _strip_sensitive_user_fields(dict(user_data))
 
 
 SUBSCRIPTION_URL_PENDING_MESSAGE = (
@@ -410,6 +423,29 @@ async def check(user: Users = Depends(validate)) -> Dict[str, Any]:
             }
         else:
             user_dict["family_owner"] = None
+
+        try:
+            from bloobcat.services.device_service import get_user_add_device_state
+
+            device_state = await get_user_add_device_state(user)
+            user_dict["device_per_user_enabled"] = bool(
+                device_state.get("device_per_user_enabled")
+            )
+            user_dict["can_add_device"] = bool(device_state["can_add_device"])
+            user_dict["device_add_block_reason"] = device_state[
+                "device_add_block_reason"
+            ]
+        except Exception as exc:
+            logger.warning(
+                "Failed to compute device-per-user flags for user=%s: %s",
+                user.id,
+                exc,
+            )
+            user_dict["device_per_user_enabled"] = bool(
+                user.is_device_per_user_enabled()
+            )
+            user_dict["can_add_device"] = False
+            user_dict["device_add_block_reason"] = "device_state_unavailable"
 
         logger.info(f"Успешно обработан запрос /user для пользователя {user.id}")
         response = JSONResponse(content=user_dict)
@@ -821,14 +857,23 @@ async def change_active_tariff_devices(
         # Синхронизируем с RemnaWave
         if user.remnawave_uuid:
             try:
-                await remnawave_client.users.update_user(
-                    uuid=user.remnawave_uuid,
-                    expireAt=user.expired_at,
-                    hwidDeviceLimit=pending_device_update["hwid_limit"],
-                )
-                logger.debug(
-                    f"[change_active_tariff_devices] RemnaWave updated: uuid={user.remnawave_uuid}, expireAt={user.expired_at}, hwidDeviceLimit={pending_device_update['hwid_limit']}"
-                )
+                if user.is_device_per_user_enabled():
+                    from bloobcat.services.device_service import sync_device_entitlements
+
+                    await sync_device_entitlements(user)
+                    logger.debug(
+                        "[change_active_tariff_devices] device-per-user entitlements synced: user=%s",
+                        user.id,
+                    )
+                else:
+                    await remnawave_client.users.update_user(
+                        uuid=user.remnawave_uuid,
+                        expireAt=user.expired_at,
+                        hwidDeviceLimit=pending_device_update["hwid_limit"],
+                    )
+                    logger.debug(
+                        f"[change_active_tariff_devices] RemnaWave updated: uuid={user.remnawave_uuid}, expireAt={user.expired_at}, hwidDeviceLimit={pending_device_update['hwid_limit']}"
+                    )
             except Exception as e:
                 logger.error(f"Ошибка обновления RemnaWave при смене устройств: {e}")
                 # Не прерываем из-за ошибки внешнего сервиса

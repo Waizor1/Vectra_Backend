@@ -183,4 +183,17 @@ async def cleanup_user_hwid_devices(user_id: int, user_uuid: Union[str, object])
             try:
                 await client.close()
             except Exception as close_exc:
-                logger.warning(f"Ошибка закрытия клиента RemnaWave: {close_exc}") 
+                logger.warning(f"Ошибка закрытия клиента RemnaWave: {close_exc}")
+
+
+async def list_user_hwid_devices(user_uuid: str) -> List[Dict[str, Any]]:
+    """Return parsed HWID devices for a single RemnaWave user UUID."""
+    client = RemnaWaveClient(
+        remnawave_settings.url,
+        remnawave_settings.token.get_secret_value(),
+    )
+    try:
+        raw_resp = await client.users.get_user_hwid_devices(str(user_uuid))
+        return parse_remnawave_devices(raw_resp)
+    finally:
+        await client.close()

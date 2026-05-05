@@ -44,6 +44,7 @@ from bloobcat.tasks.lte_usage_limiter import (
 from bloobcat.tasks.payment_reconcile import run_payment_reconcile_scheduler
 from bloobcat.tasks.remnawave_delete_retry import run_remnawave_delete_retry_scheduler
 from bloobcat.tasks.subscription_resume import run_subscription_resume_scheduler
+from bloobcat.tasks.temp_setup_cleanup import run_temp_setup_cleanup_scheduler
 from bloobcat.tasks.auto_payment_reminders import (
     build_auto_payment_reminder_eta,
     run_auto_payment_reminders_scheduler,
@@ -788,6 +789,8 @@ async def schedule_all_tasks():
     asyncio.create_task(run_remnawave_delete_retry_scheduler())
     # Safety net: resume frozen base subscriptions after family ends.
     asyncio.create_task(run_subscription_resume_scheduler())
+    # Cleanup expired device setup links and unbound temporary device-users.
+    asyncio.create_task(run_temp_setup_cleanup_scheduler())
     # Start automatic statistics scheduler
     from bloobcat.statistics.scheduler import statistics_scheduler
     asyncio.create_task(statistics_scheduler()) 

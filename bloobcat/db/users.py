@@ -145,10 +145,25 @@ class Users(models.Model):
         default=0,
         description="Версия auth-токенов пользователя для серверной ревокации сессий",
     )
+    device_per_user_enabled = fields.BooleanField(
+        null=True,
+        description="Per-user device-per-user override; null means use global rollout flag",
+    )
+    temp_setup_token = fields.CharField(max_length=255, null=True, unique=True)
+    temp_setup_expires_at = fields.DatetimeField(null=True)
+    temp_setup_device_id = fields.IntField(
+        null=True,
+        description="Temporary setup UserDevice id for the device-per-user onboarding link",
+    )
     # Колесо призов: количество доступных попыток для пользователя
     prize_wheel_attempts = fields.IntField(
         default=0, description="Доступные попытки на колесе призов"
     )
+
+    def is_device_per_user_enabled(self) -> bool:
+        if self.device_per_user_enabled is not None:
+            return bool(self.device_per_user_enabled)
+        return bool(getattr(app_settings, "device_per_user_enabled", False))
 
     @staticmethod
     def _extract_remnawave_user(payload: Any) -> Optional[dict]:
@@ -967,6 +982,13 @@ class Users(models.Model):
             updated_fields: set[str] = set()
 
             current_utm = (getattr(user, "utm", None) or "").strip()
+            if (
+                is_new
+                and getattr(app_settings, "device_per_user_enabled_for_new_users", False)
+                and user.device_per_user_enabled is None
+            ):
+                user.device_per_user_enabled = True
+                updated_fields.add("device_per_user_enabled")
 
             # Обработка реферала:
             # Важно: пользователь мог уже существовать (например, ранее нажал /start без реф-ссылки),
@@ -1199,6 +1221,16 @@ class Users(models.Model):
         await ensure_notification_marks_fk_cascade()
         await ensure_promo_usages_fk_cascade()
         await ensure_users_referred_by_fk_set_null()
+        try:
+            from bloobcat.services.device_service import cascade_delete
+
+            await cascade_delete(self)
+        except Exception as exc:
+            logger.warning(
+                "Device-per-user cascade delete failed for user=%s: %s",
+                self.id,
+                exc,
+            )
         # Удаляем пользователя в RemnaWave
         if self.remnawave_uuid:
             from bloobcat.routes.remnawave.client import RemnaWaveClient
@@ -1256,15 +1288,21 @@ class Users(models.Model):
         old_is_subscribed = None
         old_is_trial = None
         old_is_blocked = None
+        old_hwid_limit = None
+        old_device_per_user_enabled = None
+        had_existing_row = False
         should_reschedule = False
 
         if self.id is not None:
             orig = await Users.get_or_none(id=self.id)
             if orig:
+                had_existing_row = True
                 old_expired_at = normalize_date(orig.expired_at)
                 old_is_subscribed = orig.is_subscribed
                 old_is_trial = orig.is_trial
                 old_is_blocked = orig.is_blocked
+                old_hwid_limit = orig.hwid_limit
+                old_device_per_user_enabled = orig.is_device_per_user_enabled()
 
                 # Check if any fields that affect scheduling have changed
                 current_expired_at = normalize_date(self.expired_at)
@@ -1283,6 +1321,12 @@ class Users(models.Model):
 
         # Save the user as usual
         await super().save(*args, **kwargs)
+
+        device_per_user_enabled_changed = (
+            had_existing_row
+            and old_device_per_user_enabled is not None
+            and self.is_device_per_user_enabled() != old_device_per_user_enabled
+        )
 
         if (
             not skip_remnawave_sync
@@ -1346,6 +1390,55 @@ class Users(models.Model):
                         logger.warning(
                             f"User {self.id} failed to update RemnaWave immediately, will be synced by batch updater: {e}"
                         )
+        if (
+            not skip_remnawave_sync
+            and had_existing_row
+            and self.is_device_per_user_enabled()
+            and (
+                normalize_date(self.expired_at) != old_expired_at
+                or self.hwid_limit != old_hwid_limit
+                or device_per_user_enabled_changed
+            )
+        ):
+            try:
+                from bloobcat.services.device_service import sync_device_entitlements
+
+                await sync_device_entitlements(self)
+            except Exception as exc:
+                logger.warning(
+                    "Device-per-user entitlement sync failed for user=%s: %s",
+                    self.id,
+                    exc,
+                )
+        if (
+            not skip_remnawave_sync
+            and had_existing_row
+            and device_per_user_enabled_changed
+            and not self.is_device_per_user_enabled()
+            and self.remnawave_uuid
+            and self.hwid_limit is not None
+        ):
+            try:
+                from bloobcat.routes.remnawave.client import RemnaWaveClient
+                from bloobcat.settings import remnawave_settings
+
+                remnawave_client = RemnaWaveClient(
+                    remnawave_settings.url,
+                    remnawave_settings.token.get_secret_value(),
+                )
+                try:
+                    await remnawave_client.users.update_user(
+                        uuid=self.remnawave_uuid,
+                        hwidDeviceLimit=max(0, int(self.hwid_limit or 0)),
+                    )
+                finally:
+                    await remnawave_client.close()
+            except Exception as exc:
+                logger.warning(
+                    "Device-per-user disable legacy limit restore failed for user=%s: %s",
+                    self.id,
+                    exc,
+                )
 
         # Перепланируем задачи только при изменении важных полей
         if should_reschedule:
@@ -1365,7 +1458,12 @@ class Users(models.Model):
 
     class PydanticMeta:
         computed = ["expires", "name", "referral_percent"]
-        exclude = ["country_code"]
+        exclude = [
+            "country_code",
+            "temp_setup_token",
+            "temp_setup_expires_at",
+            "temp_setup_device_id",
+        ]
 
     @staticmethod
     async def get_blocked_users_stats() -> dict:
@@ -1458,6 +1556,7 @@ class UsersModelAdmin(TortoiseModelAdmin):
         "utm",
         "active_tariff_id",
         "hwid_limit",
+        "device_per_user_enabled",
         "is_admin",
         "is_partner",
         "is_blocked",
@@ -1499,6 +1598,7 @@ class UsersModelAdmin(TortoiseModelAdmin):
         "active_tariff",
         "lte_gb_total",
         "hwid_limit",
+        "device_per_user_enabled",
         "is_blocked",
         "blocked_at",
         "last_failed_message_at",
@@ -1526,12 +1626,16 @@ class UsersModelAdmin(TortoiseModelAdmin):
         original_obj = None
         original_expired_at = None
         original_hwid_limit = None
+        original_device_per_user_enabled = None
 
         if pk:
             original_obj = await Users.get_or_none(id=pk)
             if original_obj:
                 original_expired_at = original_obj.expired_at
                 original_hwid_limit = original_obj.hwid_limit
+                original_device_per_user_enabled = (
+                    original_obj.is_device_per_user_enabled()
+                )
 
         pending_is_trial = form_data.get(
             "is_trial", original_obj.is_trial if original_obj else False
@@ -1674,6 +1778,17 @@ class UsersModelAdmin(TortoiseModelAdmin):
 
         if obj.remnawave_uuid:
             updates_needed = {}
+            device_per_user_sync_needed = False
+            device_per_user_enabled_changed = (
+                original_device_per_user_enabled is not None
+                and obj.is_device_per_user_enabled()
+                != original_device_per_user_enabled
+            )
+            if device_per_user_enabled_changed:
+                if obj.is_device_per_user_enabled():
+                    device_per_user_sync_needed = True
+                elif obj.hwid_limit is not None:
+                    updates_needed["hwidDeviceLimit"] = obj.hwid_limit
 
             # Проверяем изменение даты истечения
             obj_expired_at = normalize_date(obj.expired_at)
@@ -1689,13 +1804,19 @@ class UsersModelAdmin(TortoiseModelAdmin):
                     )
                 else:
                     updates_needed["expireAt"] = obj.expired_at
+                    device_per_user_sync_needed = bool(
+                        obj.is_device_per_user_enabled()
+                    )
                     logger.debug(
                         f"Дата истечения изменилась: {original_expired_at} -> {obj.expired_at}"
                     )
 
             # Проверяем изменение hwid_limit
             if obj.hwid_limit is not None and obj.hwid_limit != original_hwid_limit:
-                updates_needed["hwidDeviceLimit"] = obj.hwid_limit
+                if obj.is_device_per_user_enabled():
+                    device_per_user_sync_needed = True
+                else:
+                    updates_needed["hwidDeviceLimit"] = obj.hwid_limit
                 logger.debug(
                     f"Лимит устройств изменился: {original_hwid_limit} -> {obj.hwid_limit}"
                 )
@@ -1721,6 +1842,16 @@ class UsersModelAdmin(TortoiseModelAdmin):
                 except Exception as e:
                     logger.error(
                         f"Ошибка при обновлении данных в RemnaWave для пользователя {obj.id}: {e}",
+                        exc_info=True,
+                    )
+            if device_per_user_sync_needed:
+                try:
+                    from bloobcat.services.device_service import sync_device_entitlements
+
+                    await sync_device_entitlements(obj)
+                except Exception as e:
+                    logger.error(
+                        f"Ошибка синхронизации device-per-user для пользователя {obj.id}: {e}",
                         exc_info=True,
                     )
         else:

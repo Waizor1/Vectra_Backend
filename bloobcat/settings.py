@@ -336,6 +336,10 @@ class AppSettings(BaseSettings):
     family_anomaly_block_threshold: int = 3
     family_anomaly_block_window_hours: int = 6
     family_anomaly_block_duration_minutes: int = 60
+    # Optional device-per-user rollout. Both flags are intentionally off by default.
+    device_per_user_enabled: bool = False
+    device_per_user_enabled_for_new_users: bool = False
+    temp_setup_site_public_base_url: str | None = None
 
 
 app_settings = AppSettings()
