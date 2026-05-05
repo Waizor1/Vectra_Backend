@@ -1257,7 +1257,14 @@ def ensure_admin_settings(client: DirectusClient) -> None:
     if items_resp.status_code in (401, 403):
         return
     items_resp.raise_for_status()
-    items = items_resp.json().get("data") or []
+    raw_items = items_resp.json().get("data")
+    if isinstance(raw_items, list):
+        items = raw_items
+    elif isinstance(raw_items, dict):
+        # Directus singleton collections return an object instead of a list.
+        items = [raw_items]
+    else:
+        items = []
     if not items:
         created = client.post(f"/items/{collection}", json=defaults)
         if created.status_code in (401, 403):
