@@ -655,6 +655,55 @@ async def test_subscription_url_state_uses_public_pending_message_for_missing_re
 
 
 @pytest.mark.asyncio
+async def test_trial_user_response_includes_lte_usage_balance(monkeypatch):
+    from bloobcat.db.users import Users
+    from bloobcat.routes import user as user_module
+    from bloobcat.routes.user import check
+
+    async def fake_trial_lte_limit() -> float:
+        return 1.0
+
+    async def fake_usage_by_range(user_uuid: str, start: str, end: str):
+        assert user_uuid == "00000000-0000-0000-0000-000000000031"
+        assert start.endswith(".000Z")
+        assert end.endswith(".000Z")
+        return {
+            "response": [
+                {"nodeName": "VLESS TCP REALITY RU-LTE CHTF", "total": 0.25 * user_module.BYTES_IN_GB},
+                {"nodeName": "regular vpn", "total": 10 * user_module.BYTES_IN_GB},
+            ]
+        }
+
+    monkeypatch.setattr(user_module, "read_trial_lte_limit_gb", fake_trial_lte_limit)
+    monkeypatch.setattr(user_module.remnawave_settings, "lte_node_marker", "CHTF", raising=False)
+    monkeypatch.setattr(
+        user_module.remnawave_client.users,
+        "get_user_usage_by_range",
+        fake_usage_by_range,
+        raising=False,
+    )
+
+    trial = await Users.create(
+        id=2301,
+        username="trial_lte",
+        full_name="Trial LTE",
+        is_registered=True,
+        is_trial=True,
+        is_subscribed=True,
+        expired_at=date.today() + timedelta(days=10),
+        remnawave_uuid="00000000-0000-0000-0000-000000000031",
+    )
+
+    response = await check(user=trial)
+    payload = json.loads(response.body.decode("utf-8"))
+
+    assert payload["active_tariff"] is None
+    assert payload["trial_lte_gb_total"] == pytest.approx(1.0)
+    assert payload["trial_lte_gb_used"] == pytest.approx(0.25)
+    assert payload["trial_lte_gb_remaining"] == pytest.approx(0.75)
+
+
+@pytest.mark.asyncio
 async def test_subscription_url_state_hides_backend_exception_text(monkeypatch):
     from bloobcat.routes import user as user_module
 

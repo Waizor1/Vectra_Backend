@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, EmailStr
 from typing import Dict, Any
-from datetime import datetime, timedelta, timezone, date
+from datetime import datetime, timedelta, timezone, date, time
 from decimal import Decimal, ROUND_HALF_UP, getcontext
 from functools import partial
 from random import randint
@@ -38,8 +38,12 @@ from bloobcat.services.subscription_overlay import (
     get_overlay_payload,
     resume_frozen_base_if_due,
 )
+from bloobcat.services.trial_lte import read_trial_lte_limit_gb
 
 logger = get_logger("routes.user")
+
+BYTES_IN_GB = 1024**3
+MSK_TZ = timezone(timedelta(hours=3))
 
 router = APIRouter(
     prefix="/user",
@@ -69,6 +73,51 @@ def _family_devices_limit() -> int:
 
 def _is_active_subscription(expired_at: date | None) -> bool:
     return bool(expired_at and expired_at >= date.today())
+
+
+def _format_lte_range_start(start_date: date) -> str:
+    start_dt = datetime.combine(start_date, time.min, tzinfo=MSK_TZ)
+    return start_dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def _format_lte_range_end(end_dt: datetime) -> str:
+    return end_dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def _trial_lte_start_date(user: Users) -> date:
+    created_at = getattr(user, "created_at", None)
+    if not created_at:
+        return datetime.now(MSK_TZ).date()
+    if getattr(created_at, "tzinfo", None):
+        return created_at.astimezone(MSK_TZ).date()
+    return created_at.replace(tzinfo=timezone.utc).astimezone(MSK_TZ).date()
+
+
+async def _fetch_trial_lte_used_gb(user: Users) -> float:
+    if not user.remnawave_uuid:
+        return 0.0
+    marker_upper = (remnawave_settings.lte_node_marker or "").upper()
+    try:
+        resp = await remnawave_client.users.get_user_usage_by_range(
+            str(user.remnawave_uuid),
+            _format_lte_range_start(_trial_lte_start_date(user)),
+            _format_lte_range_end(datetime.now(timezone.utc)),
+        )
+        items = resp.get("response") or []
+        total_gb = 0.0
+        for item in items:
+            node_name = str(item.get("nodeName") or "").upper()
+            if marker_upper and marker_upper not in node_name:
+                continue
+            total_gb += float(item.get("total") or 0) / BYTES_IN_GB
+        return max(0.0, total_gb)
+    except Exception as exc:
+        logger.warning(
+            "Failed to fetch trial LTE usage for user={}: {}",
+            user.id,
+            exc,
+        )
+        return 0.0
 
 
 def _has_completed_onboarding(user: Users) -> bool:
@@ -345,6 +394,23 @@ async def check(user: Users = Depends(validate)) -> Dict[str, Any]:
                     "devices_decrease_limit": devices_decrease_limit or None,
                     "devices_decrease_remaining": remaining_decreases,
                 }
+
+        if active_tariff_data is None and bool(user.is_trial):
+            trial_lte_total = (
+                float(user.lte_gb_total)
+                if user.lte_gb_total is not None
+                else float(await read_trial_lte_limit_gb())
+            )
+            trial_lte_used = (
+                await _fetch_trial_lte_used_gb(user)
+                if trial_lte_total > 0
+                else 0.0
+            )
+            user_dict["trial_lte_gb_total"] = max(0.0, trial_lte_total)
+            user_dict["trial_lte_gb_used"] = max(0.0, trial_lte_used)
+            user_dict["trial_lte_gb_remaining"] = max(
+                0.0, trial_lte_total - trial_lte_used
+            )
 
         # 3. Личное значение из БД имеет наивысший приоритет
         if user.hwid_limit is not None:
