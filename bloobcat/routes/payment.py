@@ -1319,7 +1319,21 @@ async def _award_partner_cashback(
         if reward <= 0:
             return
 
-        await PartnerEarnings.create(
+        # Fraud screening: if referrer and the paying referral share a HWID we
+        # freeze the cashback at pending_review and notify admins in the bot
+        # instead of crediting balance silently.
+        from bloobcat.services.cashback_review import (
+            _safe_detect,
+            build_admin_review_text,
+            should_freeze_cashback,
+        )
+
+        signals = await _safe_detect(referrer, referral_user)
+        frozen = should_freeze_cashback(signals)
+
+        review_status = "pending_review" if frozen else "active"
+
+        earning = await PartnerEarnings.create(
             payment_id=str(payment_id),
             partner=referrer,
             referral_id=int(referral_user.id),
@@ -1328,9 +1342,66 @@ async def _award_partner_cashback(
             amount_total_rub=int(amount_rub_total),
             reward_rub=int(reward),
             percent=int(percent),
+            review_status=review_status,
+            review_signals=signals if (frozen or signals.get("hwid_overlap")) else None,
         )
 
-        # Update partner available balance (atomic).
+        if frozen:
+            # Do NOT credit balance yet. Surface the case to admins for manual review.
+            try:
+                from bloobcat.bot.notifications.admin import send_admin_message
+                from aiogram.types import (
+                    InlineKeyboardButton,
+                    InlineKeyboardMarkup,
+                )
+
+                review_text = build_admin_review_text(
+                    earning_id=str(earning.id),
+                    referrer=referrer,
+                    referred=referral_user,
+                    amount_total_rub=int(amount_rub_total),
+                    reward_rub=int(reward),
+                    percent=int(percent),
+                    signals=signals,
+                )
+                review_keyboard = InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [
+                            InlineKeyboardButton(
+                                text="✅ Одобрить",
+                                callback_data=f"cashback_review:approve:{earning.id}",
+                            ),
+                            InlineKeyboardButton(
+                                text="❌ Отменить",
+                                callback_data=f"cashback_review:reject:{earning.id}",
+                            ),
+                        ],
+                        [
+                            InlineKeyboardButton(
+                                text="💬 Связаться с партнёром",
+                                url=f"tg://user?id={int(referrer.id)}",
+                            ),
+                        ],
+                    ]
+                )
+                await send_admin_message(text=review_text, reply_markup=review_keyboard)
+            except Exception as e_admin:
+                logger.warning(
+                    "Frozen cashback admin notification failed for payment %s: %s",
+                    payment_id,
+                    e_admin,
+                )
+            logger.info(
+                "Partner cashback frozen for review payment=%s referrer=%s referred=%s "
+                "signals=%s",
+                payment_id,
+                referrer.id,
+                referral_user.id,
+                signals,
+            )
+            return
+
+        # Clean case: update partner available balance (atomic).
         await Users.filter(id=referrer.id).update(balance=F("balance") + int(reward))
 
         # Notify partner in bot (best-effort; do not fail payment processing).
@@ -2781,9 +2852,13 @@ async def platega_webhook(request: Request):
         return {"status": "ok"}
 
     if provider_status in {PLATEGA_STATUS_CHARGEBACK, PLATEGA_STATUS_CHARGEBACKED}:
-        user.is_subscribed = False
-        user.renew_id = None
-        await user.save()
+        from bloobcat.services.payment_revocation import revoke_access_for_refund
+
+        revocation_report = await revoke_access_for_refund(
+            user,
+            payment_id=str(payment_id),
+            reason="platega_chargeback",
+        )
         await _upsert_processed_payment(
             payment_id=payment_id,
             user_id=user_id,
@@ -2796,7 +2871,11 @@ async def platega_webhook(request: Request):
         )
         logger.info(
             "Platega chargeback processed",
-            extra={"payment_id": payment_id, "user_id": user_id},
+            extra={
+                "payment_id": payment_id,
+                "user_id": user_id,
+                "revocation": revocation_report,
+            },
         )
         return {"status": "ok"}
 
@@ -2914,11 +2993,15 @@ async def yookassa_webhook(request: Request, secret: str):
 
         # Обработка разных типов событий
         if event == WebhookNotificationEventType.REFUND_SUCCEEDED:
-            # При возврате средств отключаем автопродление
-            user.is_subscribed = False
-            user.renew_id = None
-            await user.save()
-            # Резервации отключены
+            # При возврате средств снимаем все привилегии: подписка, RemnaWave HWID,
+            # семейные слоты. Без этого юзер сохраняет VPN-доступ после chargeback'а.
+            from bloobcat.services.payment_revocation import revoke_access_for_refund
+
+            revocation_report = await revoke_access_for_refund(
+                user,
+                payment_id=str(payment.id),
+                reason="yookassa_refund",
+            )
 
             # Сохраняем информацию о возврате (идемпотентно)
             await _upsert_processed_payment(
@@ -2931,12 +3014,13 @@ async def yookassa_webhook(request: Request, secret: str):
             )
 
             logger.info(
-                f"Автопродление отключено для пользователя {user.id} из-за возврата средств",
+                f"Доступ отозван для пользователя {user.id} из-за возврата средств",
                 extra={
                     "payment_id": payment.id,
                     "user_id": user.id,
                     "amount": payment.amount.value,
                     "status": "refunded",
+                    "revocation": revocation_report,
                 },
             )
             return {"status": "ok"}

@@ -38,6 +38,15 @@ class PartnerEarnings(models.Model):
     reward_rub = fields.IntField()
     percent = fields.IntField()
 
+    # Review state for partner-cashback fraud screening (HWID overlap, etc.).
+    # "active": balance was credited immediately (default for clean cases).
+    # "pending_review": cashback frozen, admin must approve/reject in bot.
+    # "approved": admin approved, balance credited retroactively.
+    # "rejected": admin rejected, balance never credited.
+    review_status = fields.CharField(max_length=24, default="active")
+    # Snapshot of fraud signals captured at award time (e.g. shared HWIDs).
+    review_signals = fields.JSONField(null=True)
+
     created_at = fields.DatetimeField(auto_now_add=True)
 
     class Meta:
