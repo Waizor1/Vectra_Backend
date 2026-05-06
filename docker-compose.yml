@@ -50,12 +50,17 @@ services:
         condition: service_healthy
 
   pgadmin:
+    # Dev-only DB UI. Gated behind the `dev` compose profile so production
+    # deployments (which run plain `docker compose up`) never start it with the
+    # admin@admin.com/admin defaults below. To use locally: `docker compose --profile dev up`.
+    profiles:
+      - dev
     image: dpage/pgadmin4
     container_name: bloobcat_pgadmin
     restart: always
     environment:
-      PGADMIN_DEFAULT_EMAIL: admin@admin.com
-      PGADMIN_DEFAULT_PASSWORD: admin
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:-admin@admin.com}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD:-admin}
       TZ: Europe/Moscow
     networks:
       - bloobcat_network
