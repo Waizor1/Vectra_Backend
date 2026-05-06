@@ -39,3 +39,28 @@ def test_runtime_secret_validation_allows_fake_values_in_test_mode(monkeypatch):
     monkeypatch.setenv("TESTMODE", "true")
 
     assert validate_runtime_secret("AUTH_JWT_SECRET", SecretStr("change-me")) == "change-me"
+
+
+def test_runtime_secret_validation_rejects_placeholders_when_testmode_set_outside_pytest(monkeypatch):
+    """Regression: TESTMODE=true must not bypass validation when pytest is not the runner.
+
+    Prevents the catastrophic case where a stray TESTMODE=true in a production environment
+    file would let AUTH_JWT_SECRET="change-me" pass and enable arbitrary token forgery.
+    """
+    from bloobcat.settings import validate_runtime_secret
+
+    monkeypatch.setenv("TESTMODE", "true")
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+
+    with pytest.raises(ValueError, match="AUTH_JWT_SECRET"):
+        validate_runtime_secret("AUTH_JWT_SECRET", SecretStr("change-me"))
+
+
+def test_runtime_secret_validation_rejects_short_values_when_testmode_set_outside_pytest(monkeypatch):
+    from bloobcat.settings import validate_runtime_secret
+
+    monkeypatch.setenv("TESTMODE", "true")
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+
+    with pytest.raises(ValueError, match="API_KEY"):
+        validate_runtime_secret("API_KEY", SecretStr("too-short"), min_length=32)

@@ -30,6 +30,13 @@ def _test_mode_from_env() -> bool:
     return os.getenv("TESTMODE", "false").strip().lower() in {"true", "1", "yes", "on"}
 
 
+def _running_under_pytest() -> bool:
+    # pytest sets PYTEST_CURRENT_TEST automatically while collecting/executing tests.
+    # Without this guard, accidental TESTMODE=true in production would let placeholder
+    # secrets (e.g. AUTH_JWT_SECRET="change-me") pass validation and enable token forgery.
+    return "PYTEST_CURRENT_TEST" in os.environ
+
+
 def validate_runtime_secret(
     name: str,
     value: SecretStr | str | None,
@@ -38,7 +45,7 @@ def validate_runtime_secret(
 ) -> str:
     raw = value.get_secret_value() if isinstance(value, SecretStr) else str(value or "")
     normalized = raw.strip()
-    if _test_mode_from_env():
+    if _test_mode_from_env() and _running_under_pytest():
         return normalized
     lowered = normalized.lower()
     if (
