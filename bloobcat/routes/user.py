@@ -85,12 +85,13 @@ def _format_lte_range_end(end_dt: datetime) -> str:
 
 
 def _trial_lte_start_date(user: Users) -> date:
-    created_at = getattr(user, "created_at", None)
-    if not created_at:
+    trial_started_at = getattr(user, "trial_started_at", None)
+    reference_at = trial_started_at or getattr(user, "created_at", None)
+    if not reference_at:
         return datetime.now(MSK_TZ).date()
-    if getattr(created_at, "tzinfo", None):
-        return created_at.astimezone(MSK_TZ).date()
-    return created_at.replace(tzinfo=timezone.utc).astimezone(MSK_TZ).date()
+    if getattr(reference_at, "tzinfo", None):
+        return reference_at.astimezone(MSK_TZ).date()
+    return reference_at.replace(tzinfo=timezone.utc).astimezone(MSK_TZ).date()
 
 
 async def _fetch_trial_lte_used_gb(user: Users) -> float:

@@ -20,6 +20,14 @@ register_sqlite_datetime_compat()
 _ORIGINAL_SUBSCRIPTION_OVERLAY_MODULE = sys.modules.get(
     "bloobcat.services.subscription_overlay"
 )
+_ORIGINAL_ROUTES_MODULE = sys.modules.get("bloobcat.routes")
+_ORIGINAL_REMNAWAVE_ROUTES_MODULE = sys.modules.get("bloobcat.routes.remnawave")
+_ORIGINAL_REMNAWAVE_CLIENT_MODULE = sys.modules.get("bloobcat.routes.remnawave.client")
+_ORIGINAL_REMNAWAVE_HWID_UTILS_MODULE = sys.modules.get(
+    "bloobcat.routes.remnawave.hwid_utils"
+)
+_ORIGINAL_FAMILY_QUOTA_MODULE = sys.modules.get("bloobcat.routes.family_quota")
+_ORIGINAL_BLOOBCAT_ROUTES_ATTR = getattr(sys.modules.get("bloobcat"), "routes", None)
 
 
 def install_stubs() -> None:
@@ -43,6 +51,10 @@ def install_stubs() -> None:
     ]
     sys.modules["bloobcat.routes"] = routes_pkg
     sys.modules["bloobcat.routes.remnawave"] = remnawave_pkg
+    bloobcat_pkg = sys.modules.get("bloobcat")
+    if bloobcat_pkg is not None:
+        setattr(bloobcat_pkg, "routes", routes_pkg)
+    setattr(routes_pkg, "remnawave", remnawave_pkg)
 
     bot_pkg = types.ModuleType("bloobcat.bot")
     bot_pkg.__path__ = []
@@ -193,6 +205,7 @@ def install_stubs() -> None:
 
     remna_client_mod.RemnaWaveClient = RemnaWaveClient
     sys.modules["bloobcat.routes.remnawave.client"] = remna_client_mod
+    setattr(remnawave_pkg, "client", remna_client_mod)
 
     hwid_utils_mod = types.ModuleType("bloobcat.routes.remnawave.hwid_utils")
 
@@ -205,6 +218,76 @@ def install_stubs() -> None:
     hwid_utils_mod.cleanup_user_hwid_devices = cleanup_user_hwid_devices
     hwid_utils_mod.count_active_devices = count_active_devices
     sys.modules["bloobcat.routes.remnawave.hwid_utils"] = hwid_utils_mod
+    setattr(remnawave_pkg, "hwid_utils", hwid_utils_mod)
+
+    family_quota_mod = types.ModuleType("bloobcat.routes.family_quota")
+
+    async def build_family_quota_snapshot(
+        owner,
+        *,
+        owner_connected_devices=None,
+        owner_base_devices_limit=None,
+        now=None,
+    ):
+        from tortoise.expressions import F, Q
+
+        from bloobcat.db.family_invites import FamilyInvites
+        from bloobcat.db.family_members import FamilyMembers
+        from bloobcat.settings import app_settings
+
+        effective_now = now or datetime.now(timezone.utc)
+        active_members = await FamilyMembers.filter(
+            owner_id=owner.id,
+            status="active",
+            allocated_devices__gt=0,
+        )
+        active_invites = (
+            await FamilyInvites.filter(owner_id=owner.id, revoked_at=None)
+            .filter(Q(expires_at__isnull=True) | Q(expires_at__gte=effective_now))
+            .filter(used_count__lt=F("max_uses"))
+        )
+        member_allocated_devices = sum(
+            int(member.allocated_devices or 0) for member in active_members
+        )
+        invite_reserved_devices = sum(
+            int(invite.allocated_devices or 0) for invite in active_invites
+        )
+        family_limit = max(
+            int(app_settings.family_devices_limit),
+            int(owner_base_devices_limit or getattr(owner, "hwid_limit", None) or 1),
+        )
+        owner_quota_limit = max(
+            0,
+            family_limit - member_allocated_devices - invite_reserved_devices,
+        )
+        return types.SimpleNamespace(
+            family_limit=family_limit,
+            owner_base_devices_limit=int(
+                owner_base_devices_limit or getattr(owner, "hwid_limit", None) or 1
+            ),
+            owner_connected_devices=int(owner_connected_devices or 0),
+            member_allocated_devices=member_allocated_devices,
+            invite_reserved_devices=invite_reserved_devices,
+            reserved_devices=(
+                int(owner_connected_devices or 0)
+                + member_allocated_devices
+                + invite_reserved_devices
+            ),
+            available_devices=max(
+                0,
+                family_limit
+                - int(owner_connected_devices or 0)
+                - member_allocated_devices
+                - invite_reserved_devices,
+            ),
+            owner_quota_limit=owner_quota_limit,
+            active_members_count=len(active_members),
+            active_invites_count=len(active_invites),
+        )
+
+    family_quota_mod.build_family_quota_snapshot = build_family_quota_snapshot
+    sys.modules["bloobcat.routes.family_quota"] = family_quota_mod
+    setattr(routes_pkg, "family_quota", family_quota_mod)
 
     scheduler_mod = types.ModuleType("bloobcat.scheduler")
 
@@ -253,6 +336,8 @@ def install_stubs() -> None:
     # previously imported real RemnaWave client from other test modules.
     if "bloobcat.routes.user" in sys.modules:
         del sys.modules["bloobcat.routes.user"]
+    if hasattr(routes_pkg, "user"):
+        delattr(routes_pkg, "user")
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -266,6 +351,36 @@ def _install_stubs_once():
     else:
         sys.modules.pop("bloobcat.services.subscription_overlay", None)
     sys.modules.pop("bloobcat.routes.user", None)
+    if _ORIGINAL_ROUTES_MODULE is not None:
+        sys.modules["bloobcat.routes"] = _ORIGINAL_ROUTES_MODULE
+    else:
+        sys.modules.pop("bloobcat.routes", None)
+    if _ORIGINAL_REMNAWAVE_ROUTES_MODULE is not None:
+        sys.modules["bloobcat.routes.remnawave"] = _ORIGINAL_REMNAWAVE_ROUTES_MODULE
+    else:
+        sys.modules.pop("bloobcat.routes.remnawave", None)
+    if _ORIGINAL_REMNAWAVE_CLIENT_MODULE is not None:
+        sys.modules["bloobcat.routes.remnawave.client"] = (
+            _ORIGINAL_REMNAWAVE_CLIENT_MODULE
+        )
+    else:
+        sys.modules.pop("bloobcat.routes.remnawave.client", None)
+    if _ORIGINAL_REMNAWAVE_HWID_UTILS_MODULE is not None:
+        sys.modules["bloobcat.routes.remnawave.hwid_utils"] = (
+            _ORIGINAL_REMNAWAVE_HWID_UTILS_MODULE
+        )
+    else:
+        sys.modules.pop("bloobcat.routes.remnawave.hwid_utils", None)
+    if _ORIGINAL_FAMILY_QUOTA_MODULE is not None:
+        sys.modules["bloobcat.routes.family_quota"] = _ORIGINAL_FAMILY_QUOTA_MODULE
+    else:
+        sys.modules.pop("bloobcat.routes.family_quota", None)
+    bloobcat_pkg = sys.modules.get("bloobcat")
+    if bloobcat_pkg is not None:
+        if _ORIGINAL_BLOOBCAT_ROUTES_ATTR is not None:
+            setattr(bloobcat_pkg, "routes", _ORIGINAL_BLOOBCAT_ROUTES_ATTR)
+        elif hasattr(bloobcat_pkg, "routes"):
+            delattr(bloobcat_pkg, "routes")
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -665,7 +780,7 @@ async def test_trial_user_response_includes_lte_usage_balance(monkeypatch):
 
     async def fake_usage_by_range(user_uuid: str, start: str, end: str):
         assert user_uuid == "00000000-0000-0000-0000-000000000031"
-        assert start.endswith(".000Z")
+        assert start == "2026-05-05T21:00:00.000Z"
         assert end.endswith(".000Z")
         return {
             "response": [
@@ -690,6 +805,8 @@ async def test_trial_user_response_includes_lte_usage_balance(monkeypatch):
         is_registered=True,
         is_trial=True,
         is_subscribed=True,
+        created_at=datetime(2026, 4, 1, 12, 0, tzinfo=timezone.utc),
+        trial_started_at=datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc),
         expired_at=date.today() + timedelta(days=10),
         remnawave_uuid="00000000-0000-0000-0000-000000000031",
     )
