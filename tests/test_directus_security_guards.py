@@ -74,7 +74,12 @@ def test_admin_widgets_rejects_non_admin_before_routes():
 
 
 def test_tariff_preview_proxy_is_admin_only():
-    endpoint_url = (ROOT / "directus/extensions/endpoints/tariff-studio/index.js").as_uri()
+    endpoint_url = (ROOT / "directus/extensions/tariff-studio/src/index.js").as_uri()
+    legacy_source = _read("directus/extensions/endpoints/tariff-studio/index.js")
+    dist_source = _read("directus/extensions/tariff-studio/dist/index.js")
+
+    assert "Admin access required" in legacy_source
+    assert "Admin access required" in dist_source
 
     _node(
         f"""
