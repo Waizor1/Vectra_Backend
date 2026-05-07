@@ -103,6 +103,7 @@
               <label class="field"><span>Порядок</span><input v-model.number="form.order" type="number" /></label>
               <label class="field"><span>Срок, мес.</span><input v-model.number="form.months" type="number" min="1" /></label>
               <label class="field"><span>Цена за 1 устройство</span><input v-model.number="form.base_price" type="number" min="1" /></label>
+              <label class="field"><span>Множитель прогрессивной скидки</span><input v-model.number="form.progressive_multiplier" type="number" min="0.1" max="0.9999" step="0.01" /></label>
               <label class="field"><span>Максимум устройств</span><input v-model.number="form.devices_limit_family" type="number" min="1" max="30" /></label>
               <label class="field"><span>Бейдж/подсказка</span><input v-model="form.storefront_badge" type="text" placeholder="выгодно" /></label>
               <label class="field field--check"><input v-model="form.lte_enabled" type="checkbox" /> LTE включён</label>
@@ -193,6 +194,10 @@ const localBlockingErrors = computed(() => {
 
   if (!Number.isFinite(basePrice) || basePrice <= 0) {
     errors.push({ field: 'base_price', message: 'Цена за 1 устройство должна быть больше 0.' });
+  }
+  const multiplier = Number(form.progressive_multiplier || 0);
+  if (!Number.isFinite(multiplier) || multiplier < 0.1 || multiplier >= 1) {
+    errors.push({ field: 'progressive_multiplier', message: 'Множитель должен быть в диапазоне 0.1–0.9999. Меньше — агрессивнее скидка, ближе к 1 — почти полная цена.' });
   }
   if (!Number.isInteger(devicesMax) || devicesMax < 1) {
     errors.push({ field: 'devices_limit_family', message: 'Максимум устройств должен быть целым числом от 1 до 30.' });
