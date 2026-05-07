@@ -161,6 +161,85 @@
 							</div>
 						</div>
 					</v-card>
+
+					<v-card class="kpi" :title="serviceTooltip">
+						<div class="kpi__row">
+							<div class="kpi__icon kpi__icon--green">
+								<v-icon name="cloud_done" />
+							</div>
+							<div class="kpi__content">
+								<div class="kpi__label">Трафик основной подписки (вчера)</div>
+								<div class="kpi__value">{{ fmtGb(serviceLatest.main_paid?.traffic_gb) }}</div>
+								<div class="kpi__hint">7д: {{ fmtGb(serviceWeekTotals.main_paid_traffic) }}</div>
+							</div>
+						</div>
+					</v-card>
+
+					<v-card class="kpi" :title="serviceTooltip">
+						<div class="kpi__row">
+							<div class="kpi__icon kpi__icon--amber">
+								<v-icon name="signal_cellular_alt" />
+							</div>
+							<div class="kpi__content">
+								<div class="kpi__label">Трафик LTE-подписки (вчера)</div>
+								<div class="kpi__value">{{ fmtGb(serviceLatest.lte_paid?.traffic_gb) }}</div>
+								<div class="kpi__hint">7д: {{ fmtGb(serviceWeekTotals.lte_paid_traffic) }}</div>
+							</div>
+						</div>
+					</v-card>
+
+					<v-card class="kpi" :title="serviceTooltip">
+						<div class="kpi__row">
+							<div class="kpi__icon kpi__icon--purple">
+								<v-icon name="payments" />
+							</div>
+							<div class="kpi__content">
+								<div class="kpi__label">Выручка осн. подписки (вчера)</div>
+								<div class="kpi__value">{{ fmtMoney(serviceLatest.main_paid?.subscription_revenue_rub) }}</div>
+								<div class="kpi__hint">7д: {{ fmtMoney(serviceWeekTotals.main_paid_revenue) }}</div>
+							</div>
+						</div>
+					</v-card>
+
+					<v-card class="kpi" :title="serviceTooltip">
+						<div class="kpi__row">
+							<div class="kpi__icon kpi__icon--purple">
+								<v-icon name="add_card" />
+							</div>
+							<div class="kpi__content">
+								<div class="kpi__label">Выручка LTE-топап (вчера)</div>
+								<div class="kpi__value">{{ fmtMoney(serviceLatest.lte_paid?.lte_revenue_rub) }}</div>
+								<div class="kpi__hint">7д: {{ fmtMoney(serviceWeekTotals.lte_paid_revenue) }}</div>
+							</div>
+						</div>
+					</v-card>
+
+					<v-card class="kpi" :title="trialTooltip">
+						<div class="kpi__row">
+							<div class="kpi__icon kpi__icon--blue">
+								<v-icon name="rocket_launch" />
+							</div>
+							<div class="kpi__content">
+								<div class="kpi__label">Триал: новые / трафик (вчера)</div>
+								<div class="kpi__value">{{ fmt(trialLatest.new_trials) }} <span class="kpi__value-meta">· {{ fmtGb(trialLatest.traffic_gb) }}</span></div>
+								<div class="kpi__hint">Сейчас на триале: {{ fmt(trialLatest.active_trials) }}</div>
+							</div>
+						</div>
+					</v-card>
+
+					<v-card class="kpi kpi--alert" :class="{ 'kpi--alert-active': hasActiveAbuseFlags }" :title="trialTooltip">
+						<div class="kpi__row">
+							<div class="kpi__icon kpi__icon--amber">
+								<v-icon name="warning_amber" />
+							</div>
+							<div class="kpi__content">
+								<div class="kpi__label">Подозрительных триалов</div>
+								<div class="kpi__value">{{ fmt(abuseFlagsOpen.length) }}</div>
+								<div class="kpi__hint" v-if="abuseFlagsOpen.length">Топ за день: {{ fmtGb(trialLatest.top_user_traffic_gb) }} · user&nbsp;{{ trialLatest.top_user_id || '—' }}</div>
+								<div class="kpi__hint" v-else>За последние сутки чисто</div>
+							</div>
+						</div>
+					</v-card>
 				</div>
 
 				<v-card v-if="false" class="panel panel--legacy">
@@ -672,6 +751,137 @@
 					:value-formatter="yearValueFormatter"
 					mode="12m"
 				/>
+			</v-card>
+
+			<v-card class="panel panel--chart-hub">
+				<div class="panel__head panel__head--chart">
+					<div>
+						<div class="panel__title">Услуга: трафик и выручка (30 дней)</div>
+						<div class="panel__subtitle">Раздельно по основной подписке и LTE-топапам — рост usage против дохода.</div>
+					</div>
+					<div class="segmented segmented--compact">
+						<button
+							v-for="opt in serviceMetricOptions"
+							:key="opt.key"
+							type="button"
+							class="segmented__btn"
+							:class="{ 'segmented__btn--active': serviceMetric === opt.key }"
+							@click="serviceMetric = opt.key"
+						>
+							{{ opt.label }}
+						</button>
+					</div>
+				</div>
+				<div class="chart-hub__stats">
+					<div class="chart-hub__stat">
+						<div class="chart-hub__label">Сегодня</div>
+						<div class="chart-hub__value">{{ serviceChart.today }}</div>
+					</div>
+					<div class="chart-hub__stat">
+						<div class="chart-hub__label">7 дней</div>
+						<div class="chart-hub__value">{{ serviceChart.week }}</div>
+					</div>
+					<div class="chart-hub__stat">
+						<div class="chart-hub__label">Пик</div>
+						<div class="chart-hub__value">{{ serviceChart.peak }}</div>
+					</div>
+				</div>
+				<PremiumLineChart
+					:height="300"
+					:categories="serviceChart.categories"
+					:series="serviceChart.seriesForChart"
+					:value-formatter="serviceValueFormatter"
+					mode="30d"
+				/>
+				<v-notice v-if="!hasServiceData" type="info" class="panel__notice">
+					Сборщик аналитики ещё не наполнил `analytics_service_daily`. Первый прогон ~раз в час, ночная сверка в 03:00 МСК.
+				</v-notice>
+			</v-card>
+
+			<v-card class="panel panel--chart-hub">
+				<div class="panel__head panel__head--chart">
+					<div>
+						<div class="panel__title">Триал-активность (30 дней)</div>
+						<div class="panel__subtitle">Новые триалы и расход трафика — резкий пик трафика без роста новых = вероятный абузер.</div>
+					</div>
+					<div class="segmented segmented--compact">
+						<button
+							v-for="opt in trialMetricOptions"
+							:key="opt.key"
+							type="button"
+							class="segmented__btn"
+							:class="{ 'segmented__btn--active': trialMetric === opt.key }"
+							@click="trialMetric = opt.key"
+						>
+							{{ opt.label }}
+						</button>
+					</div>
+				</div>
+				<div class="chart-hub__stats">
+					<div class="chart-hub__stat">
+						<div class="chart-hub__label">Сегодня</div>
+						<div class="chart-hub__value">{{ trialChart.today }}</div>
+					</div>
+					<div class="chart-hub__stat">
+						<div class="chart-hub__label">7 дней</div>
+						<div class="chart-hub__value">{{ trialChart.week }}</div>
+					</div>
+					<div class="chart-hub__stat">
+						<div class="chart-hub__label">Пик</div>
+						<div class="chart-hub__value">{{ trialChart.peak }}</div>
+					</div>
+				</div>
+				<PremiumLineChart
+					:height="280"
+					:categories="trialChart.categories"
+					:series="trialChart.seriesForChart"
+					:value-formatter="trialValueFormatter"
+					mode="30d"
+				/>
+				<v-notice v-if="!hasTrialData" type="info" class="panel__notice">
+					Сборщик аналитики ещё не наполнил `analytics_trial_daily`.
+				</v-notice>
+			</v-card>
+
+			<v-card class="panel panel--alerts">
+				<div class="panel__head">
+					<div>
+						<div class="panel__title">Подозрительные триалы</div>
+						<div class="panel__subtitle">Авто-флаги из `analytics_trial_risk_flags`. Алерт уходит в админ-чат при создании.</div>
+					</div>
+					<router-link class="panel__head-link" :to="{ path: '/content/analytics_trial_risk_flags' }">
+						<v-icon name="open_in_new" left />
+						<span>Все флаги</span>
+					</router-link>
+				</div>
+				<div v-if="abuseFlagsOpen.length === 0" class="alerts__empty">
+					<v-icon name="check_circle" />
+					<span>Открытых флагов нет.</span>
+				</div>
+				<div v-else class="abuse-list">
+					<router-link
+						v-for="flag in abuseFlagsOpen"
+						:key="flag.id"
+						class="abuse-row"
+						:class="`abuse-row--${flag.severity}`"
+						:to="{ path: `/content/users/${flag.user_id}` }"
+					>
+						<div class="abuse-row__severity">
+							<v-icon :name="flag.severity === 'critical' ? 'error' : 'warning_amber'" />
+						</div>
+						<div class="abuse-row__main">
+							<div class="abuse-row__top">
+								<span class="abuse-row__user">user&nbsp;{{ flag.user_id }}</span>
+								<span class="abuse-row__day">{{ shortDate(flag.day) }}</span>
+							</div>
+							<div class="abuse-row__reason">{{ abuseReasonLabel(flag.reason) }}</div>
+						</div>
+						<div class="abuse-row__metrics">
+							<div class="abuse-row__gb">{{ fmtGb(flag.traffic_gb) }}</div>
+							<div class="abuse-row__share">{{ fmtPercent(flag.share_pct, 100) }} от триал-трафика</div>
+						</div>
+					</router-link>
+				</div>
 			</v-card>
 
 			<v-card class="panel panel--activity">
@@ -1474,7 +1684,7 @@ const opsCommands = [
 	{ id: 'fix_fk_active_tariffs', label: 'Исправить fk_active_tariffs_user (CASCADE)' },
 	{ id: 'family_quick_health', label: 'Проверить Family-раздел (счётчики)' },
 ];
-const refreshRequestEstimate = 19;
+const refreshRequestEstimate = 24;
 const NOTIFICATION_DEFAULT_WINDOW_HOURS = 24;
 
 const settingsReadOnly = computed(() => settingsAccess.value.checked && !settingsAccess.value.canUpdate);
@@ -1640,8 +1850,148 @@ const stats = ref({
 	registrations7d: null,
 });
 
+// Service-growth analytics rows are fetched directly from Directus tables
+// populated by bloobcat/tasks/service_growth_analytics.py (hourly + nightly reconcile).
+const serviceDaily = ref({
+	main_paid: [],
+	lte_paid: [],
+	all_paid: [],
+});
+const trialDaily = ref([]);
+const abuseFlagsOpen = ref([]);
+
+const serviceMetricOptions = [
+	{ key: 'main_paid_traffic', label: 'Трафик осн.', color: '#22c55e', kind: 'gb' },
+	{ key: 'lte_paid_traffic', label: 'Трафик LTE', color: '#f59e0b', kind: 'gb' },
+	{ key: 'main_paid_revenue', label: 'Выручка осн.', color: '#a855f7', kind: 'money' },
+	{ key: 'lte_paid_revenue', label: 'Выручка LTE', color: '#8b5cf6', kind: 'money' },
+];
+const serviceMetric = ref('main_paid_traffic');
+
+const trialMetricOptions = [
+	{ key: 'new_trials', label: 'Новые триалы', color: '#3b82f6', kind: 'count' },
+	{ key: 'traffic_gb', label: 'Триал-трафик', color: '#06b6d4', kind: 'gb' },
+	{ key: 'flagged_users_count', label: 'Флаги абузеров', color: '#f43f5e', kind: 'count' },
+];
+const trialMetric = ref('traffic_gb');
+
+const serviceTooltip = 'Источник: analytics_service_daily (по МСК-дням, обновляется ~раз в час).';
+const trialTooltip = 'Источник: analytics_trial_daily / analytics_trial_risk_flags. Пороги настраиваются в tvpn_admin_settings.';
+
+const ABUSE_REASON_LABELS = {
+	daily_traffic_warning: 'Превышен дневной порог (warning)',
+	daily_traffic_critical: 'Превышен дневной порог (critical)',
+	trial_traffic_share_spike: 'Доминирующая доля триал-трафика',
+};
+function abuseReasonLabel(reason) {
+	return ABUSE_REASON_LABELS[reason] || reason || '—';
+}
+
 const statsOk = computed(() => Object.values(stats.value).some((v) => typeof v === 'number'));
 const widgetsOk = ref(false);
+
+// --- Service-growth analytics computed ---
+function lastDailyRow(rows) {
+	if (!Array.isArray(rows) || rows.length === 0) return null;
+	return rows[rows.length - 1] || null;
+}
+
+const serviceLatest = computed(() => ({
+	main_paid: lastDailyRow(serviceDaily.value.main_paid),
+	lte_paid: lastDailyRow(serviceDaily.value.lte_paid),
+	all_paid: lastDailyRow(serviceDaily.value.all_paid),
+}));
+
+function sumLastN(rows, field, n = 7) {
+	if (!Array.isArray(rows)) return 0;
+	const tail = rows.slice(Math.max(0, rows.length - n));
+	let total = 0;
+	for (const row of tail) {
+		const v = Number(row?.[field]);
+		if (Number.isFinite(v)) total += v;
+	}
+	return total;
+}
+
+const serviceWeekTotals = computed(() => ({
+	main_paid_traffic: sumLastN(serviceDaily.value.main_paid, 'traffic_gb'),
+	lte_paid_traffic: sumLastN(serviceDaily.value.lte_paid, 'traffic_gb'),
+	main_paid_revenue: sumLastN(serviceDaily.value.main_paid, 'subscription_revenue_rub'),
+	lte_paid_revenue: sumLastN(serviceDaily.value.lte_paid, 'lte_revenue_rub'),
+}));
+
+const trialLatest = computed(() => {
+	const last = lastDailyRow(trialDaily.value);
+	return {
+		new_trials: last?.new_trials ?? 0,
+		active_trials: last?.active_trials ?? 0,
+		traffic_gb: last?.traffic_gb ?? 0,
+		top_user_id: last?.top_user_id ?? null,
+		top_user_traffic_gb: last?.top_user_traffic_gb ?? 0,
+		flagged_users_count: last?.flagged_users_count ?? 0,
+	};
+});
+
+const hasServiceData = computed(() => {
+	return ['main_paid', 'lte_paid', 'all_paid'].some((p) => Array.isArray(serviceDaily.value[p]) && serviceDaily.value[p].length > 0);
+});
+const hasTrialData = computed(() => Array.isArray(trialDaily.value) && trialDaily.value.length > 0);
+const hasActiveAbuseFlags = computed(() => abuseFlagsOpen.value.length > 0);
+
+function serviceCategoriesLabels() {
+	const rows = serviceDaily.value.all_paid;
+	if (!Array.isArray(rows) || rows.length === 0) return [];
+	return rows.map((r) => formatLabel(String(r.day || ''), 'day'));
+}
+function trialCategoriesLabels() {
+	if (!hasTrialData.value) return [];
+	return trialDaily.value.map((r) => formatLabel(String(r.day || ''), 'day'));
+}
+
+function pickServiceSeries(metricKey) {
+	const opt = serviceMetricOptions.find((m) => m.key === metricKey) || serviceMetricOptions[0];
+	const productMap = {
+		main_paid_traffic: { product: 'main_paid', field: 'traffic_gb' },
+		lte_paid_traffic: { product: 'lte_paid', field: 'traffic_gb' },
+		main_paid_revenue: { product: 'main_paid', field: 'subscription_revenue_rub' },
+		lte_paid_revenue: { product: 'lte_paid', field: 'lte_revenue_rub' },
+	};
+	const map = productMap[metricKey] || productMap.main_paid_traffic;
+	const rows = serviceDaily.value[map.product] || [];
+	return rows.map((r) => Number(r?.[map.field]) || 0);
+}
+
+const serviceChart = computed(() => {
+	const opt = serviceMetricOptions.find((m) => m.key === serviceMetric.value) || serviceMetricOptions[0];
+	const series = pickServiceSeries(serviceMetric.value);
+	const fmtFn = opt.kind === 'money' ? fmtMoney : (opt.kind === 'gb' ? fmtGb : fmt);
+	return {
+		categories: serviceCategoriesLabels(),
+		seriesForChart: [{ name: opt.label, data: series, color: opt.color }],
+		today: fmtFn(series.length ? series[series.length - 1] : 0),
+		week: fmtFn(sumInSeries(series, 7)),
+		peak: fmtFn(maxInSeries(series)),
+		formatter: fmtFn,
+	};
+});
+
+const trialChart = computed(() => {
+	const opt = trialMetricOptions.find((m) => m.key === trialMetric.value) || trialMetricOptions[0];
+	const rows = trialDaily.value;
+	const series = (rows || []).map((r) => Number(r?.[opt.key]) || 0);
+	const fmtFn = opt.kind === 'money' ? fmtMoney : (opt.kind === 'gb' ? fmtGb : fmt);
+	return {
+		categories: trialCategoriesLabels(),
+		seriesForChart: [{ name: opt.label, data: series, color: opt.color }],
+		today: fmtFn(series.length ? series[series.length - 1] : 0),
+		week: fmtFn(sumInSeries(series, 7)),
+		peak: fmtFn(maxInSeries(series)),
+		formatter: fmtFn,
+	};
+});
+
+function serviceValueFormatter(value) { return serviceChart.value.formatter(value); }
+function trialValueFormatter(value) { return trialChart.value.formatter(value); }
 
 const navSections = computed(() => [
 	{
@@ -1932,6 +2282,24 @@ function compactMetric(value) {
 	if (Math.abs(n) >= 1000000) return `${(n / 1000000).toFixed(1)}M`;
 	if (Math.abs(n) >= 1000) return `${(n / 1000).toFixed(1)}K`;
 	return Math.round(n).toString();
+}
+
+function fmtGb(value) {
+	const n = Number(value);
+	if (!Number.isFinite(n)) return '—';
+	if (n >= 1000) return `${(n / 1000).toFixed(2)} TB`;
+	if (n >= 100) return `${Math.round(n)} GB`;
+	if (n >= 10) return `${n.toFixed(1)} GB`;
+	return `${n.toFixed(2)} GB`;
+}
+
+function fmtPercent(used, total) {
+	const u = Number(used);
+	const t = Number(total);
+	if (!Number.isFinite(u) || !Number.isFinite(t) || t <= 0) return '—';
+	const pct = (u / t) * 100;
+	if (!Number.isFinite(pct)) return '—';
+	return `${pct.toFixed(pct >= 10 ? 0 : 1)}%`;
 }
 
 function clearHwidToolFeedback({ preservePreview = false, preservePurgeResult = false } = {}) {
@@ -2397,6 +2765,16 @@ async function fetchCount(collection, params = {}) {
 	return Number.isFinite(n) ? n : null;
 }
 
+async function fetchSum(collection, field, params = {}) {
+	const res = await api.get(`/items/${collection}`, {
+		params: { [`aggregate[sum]`]: field, ...params },
+	});
+	const row = Array.isArray(res?.data?.data) ? res.data.data[0] : null;
+	const raw = row?.sum?.[field] ?? row?.sum;
+	const n = Number(raw);
+	return Number.isFinite(n) ? n : null;
+}
+
 async function fetchWidgetSeries(endpoint, n = 30, opts = {}) {
 	const period = opts.period_x_field || 'day';
 	const params = { period_x_field: period };
@@ -2618,6 +2996,36 @@ async function refresh() {
 				'filter[is_blocked][_eq]': 'true',
 				'filter[blocked_at][_gte]': isoFromNow(-blockDaysSafe, -3),
 			}),
+			// Service-growth analytics: pre-computed daily totals split by product.
+			fetchItems('analytics_service_daily', {
+				fields: 'day,traffic_gb,subscription_revenue_rub,lte_revenue_rub,lte_gb_purchased,payments_count,paying_users,rub_per_gb',
+				'filter[product][_eq]': 'main_paid',
+				sort: 'day',
+				limit: 30,
+			}),
+			fetchItems('analytics_service_daily', {
+				fields: 'day,traffic_gb,subscription_revenue_rub,lte_revenue_rub,lte_gb_purchased,payments_count,paying_users,rub_per_gb',
+				'filter[product][_eq]': 'lte_paid',
+				sort: 'day',
+				limit: 30,
+			}),
+			fetchItems('analytics_service_daily', {
+				fields: 'day,traffic_gb,subscription_revenue_rub,lte_revenue_rub,lte_gb_purchased,payments_count,paying_users,rub_per_gb',
+				'filter[product][_eq]': 'all_paid',
+				sort: 'day',
+				limit: 30,
+			}),
+			fetchItems('analytics_trial_daily', {
+				fields: 'day,new_trials,active_trials,traffic_gb,top_user_id,top_user_traffic_gb,flagged_users_count',
+				sort: 'day',
+				limit: 30,
+			}),
+			fetchItems('analytics_trial_risk_flags', {
+				fields: 'id,user_id,day,traffic_gb,share_pct,reason,severity,status,created_at',
+				'filter[status][_eq]': 'new',
+				sort: '-created_at',
+				limit: 10,
+			}),
 		]);
 
 		const values = settled.map((r) => (r.status === 'fulfilled' ? r.value : null));
@@ -2641,12 +3049,32 @@ async function refresh() {
 			expiring,
 			topBalance,
 			blockedRecent,
+			serviceMain,
+			serviceLte,
+			serviceAll,
+			trialDailyRows,
+			abuseFlagsRows,
 		] = values;
 
 		const connections7d = Array.isArray(connections30?.series) && connections30.series.length ? sumInSeries(connections30.series, 7) : null;
 		const registrations7d = Array.isArray(registrations30?.series) && registrations30.series.length ? sumInSeries(registrations30.series, 7) : null;
 
-		stats.value = { totalUsers, activeTariffs, blockedUsers, processedPayments, connections7d, registrations7d };
+		stats.value = {
+			totalUsers,
+			activeTariffs,
+			blockedUsers,
+			processedPayments,
+			connections7d,
+			registrations7d,
+		};
+
+		serviceDaily.value = {
+			main_paid: Array.isArray(serviceMain) ? serviceMain : [],
+			lte_paid: Array.isArray(serviceLte) ? serviceLte : [],
+			all_paid: Array.isArray(serviceAll) ? serviceAll : [],
+		};
+		trialDaily.value = Array.isArray(trialDailyRows) ? trialDailyRows : [];
+		abuseFlagsOpen.value = Array.isArray(abuseFlagsRows) ? abuseFlagsRows : [];
 		trends.value = {
 			connections30d: connections30?.series || [],
 			connections30d_labels: connections30?.labels || [],
@@ -3419,6 +3847,133 @@ onMounted(() => {
 .kpi__value {
 	font-size: 20px;
 	font-weight: 800;
+	margin-top: 2px;
+}
+
+.kpi__value-meta {
+	font-size: 14px;
+	font-weight: 500;
+	opacity: 0.65;
+	margin-left: 4px;
+}
+
+.kpi__hint {
+	font-size: 11px;
+	margin-top: 4px;
+	opacity: 0.7;
+}
+
+.kpi--alert {
+	border-color: var(--tvpn-border);
+}
+.kpi--alert.kpi--alert-active {
+	border-color: rgba(244, 63, 94, 0.55);
+	box-shadow: 0 0 0 1px rgba(244, 63, 94, 0.18) inset, 0 6px 18px rgba(244, 63, 94, 0.18);
+}
+
+.panel__notice {
+	margin-top: 10px;
+}
+
+.panel__head-link {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	color: var(--tvpn-text-soft);
+	text-decoration: none;
+	font-size: 12px;
+	padding: 6px 10px;
+	border-radius: 8px;
+	border: 1px solid var(--tvpn-border);
+	background: var(--tvpn-surface-muted);
+}
+.panel__head-link:hover {
+	background: var(--tvpn-surface-muted-hover);
+	color: var(--tvpn-text);
+}
+
+.panel--alerts {
+	display: grid;
+	gap: 12px;
+}
+
+.alerts__empty {
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	padding: 10px 12px;
+	border-radius: 10px;
+	background: var(--tvpn-surface-muted);
+	border: 1px dashed var(--tvpn-border);
+	font-size: 13px;
+	color: var(--tvpn-text-soft);
+}
+
+.abuse-list {
+	display: grid;
+	gap: 6px;
+}
+
+.abuse-row {
+	display: grid;
+	grid-template-columns: 28px 1fr auto;
+	align-items: center;
+	gap: 12px;
+	padding: 10px 12px;
+	border-radius: 10px;
+	background: var(--tvpn-surface-muted);
+	border: 1px solid var(--tvpn-row-border);
+	color: inherit;
+	text-decoration: none;
+	transition: background 120ms ease, border-color 120ms ease;
+}
+.abuse-row:hover {
+	background: var(--tvpn-surface-muted-hover);
+	border-color: var(--tvpn-border-strong);
+}
+.abuse-row--critical {
+	border-color: rgba(244, 63, 94, 0.45);
+	background: rgba(244, 63, 94, 0.08);
+}
+.abuse-row--warning {
+	border-color: rgba(245, 158, 11, 0.40);
+	background: rgba(245, 158, 11, 0.06);
+}
+.abuse-row__severity :deep(i) {
+	font-size: 22px;
+	color: rgba(244, 63, 94, 0.92);
+}
+.abuse-row--warning .abuse-row__severity :deep(i) {
+	color: rgba(245, 158, 11, 0.95);
+}
+.abuse-row__top {
+	display: flex;
+	align-items: baseline;
+	gap: 10px;
+}
+.abuse-row__user {
+	font-weight: 700;
+	font-size: 13px;
+}
+.abuse-row__day {
+	font-size: 11px;
+	opacity: 0.65;
+}
+.abuse-row__reason {
+	font-size: 12px;
+	opacity: 0.85;
+	margin-top: 2px;
+}
+.abuse-row__metrics {
+	text-align: right;
+}
+.abuse-row__gb {
+	font-weight: 700;
+	font-size: 13px;
+}
+.abuse-row__share {
+	font-size: 11px;
+	opacity: 0.7;
 	margin-top: 2px;
 }
 
