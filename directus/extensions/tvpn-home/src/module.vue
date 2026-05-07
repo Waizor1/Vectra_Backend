@@ -114,19 +114,7 @@
 						</div>
 					</v-card>
 
-					<v-card class="kpi">
-						<div class="kpi__row">
-							<div class="kpi__icon kpi__icon--amber">
-								<v-icon name="block" />
-							</div>
-							<div class="kpi__content">
-								<div class="kpi__label">Заблокировано</div>
-								<div class="kpi__value">{{ fmt(stats.blockedUsers) }}</div>
-							</div>
-						</div>
-					</v-card>
-
-					<v-card class="kpi">
+					<v-card v-if="false" class="kpi">
 						<div class="kpi__row">
 							<div class="kpi__icon kpi__icon--purple">
 								<v-icon name="payments" />
@@ -134,30 +122,6 @@
 							<div class="kpi__content">
 								<div class="kpi__label">Платежей (всего)</div>
 								<div class="kpi__value">{{ fmt(stats.processedPayments) }}</div>
-							</div>
-						</div>
-					</v-card>
-
-					<v-card class="kpi">
-						<div class="kpi__row">
-							<div class="kpi__icon kpi__icon--green">
-								<v-icon name="wifi" />
-							</div>
-							<div class="kpi__content">
-								<div class="kpi__label">Подключения за 7 дней</div>
-								<div class="kpi__value">{{ fmt(stats.connections7d) }}</div>
-							</div>
-						</div>
-					</v-card>
-
-					<v-card class="kpi">
-						<div class="kpi__row">
-							<div class="kpi__icon kpi__icon--blue">
-								<v-icon name="person_add" />
-							</div>
-							<div class="kpi__content">
-								<div class="kpi__label">Регистрации за 7 дней</div>
-								<div class="kpi__value">{{ fmt(stats.registrations7d) }}</div>
 							</div>
 						</div>
 					</v-card>
@@ -669,7 +633,7 @@
 				</div>
 			</v-card>
 
-			<v-card class="panel panel--chart-hub">
+			<v-card v-if="advancedMode" class="panel panel--chart-hub">
 				<div class="panel__head panel__head--chart">
 					<div>
 						<div class="panel__title">Операционный пульс (30 дней)</div>
@@ -711,7 +675,7 @@
 				/>
 			</v-card>
 
-			<v-card class="panel panel--chart-hub">
+			<v-card v-if="advancedMode" class="panel panel--chart-hub">
 				<div class="panel__head panel__head--chart">
 					<div>
 						<div class="panel__title">Годовой обзор (12 месяцев)</div>
@@ -895,7 +859,22 @@
 				/>
 			</v-card>
 
-			<div class="ops-grid">
+			<div class="advanced-toggle">
+				<button
+					type="button"
+					class="advanced-toggle__btn"
+					:class="{ 'advanced-toggle__btn--active': advancedMode }"
+					@click="advancedMode = !advancedMode"
+				>
+					<v-icon :name="advancedMode ? 'expand_less' : 'expand_more'" />
+					<span>{{ advancedMode ? 'Скрыть расширенный режим' : 'Расширенный режим: старые графики и админ-инструменты' }}</span>
+				</button>
+				<div class="advanced-toggle__hint">
+					Скрытое: «Операционный пульс 30 дней», «Годовой обзор 12 месяцев», все панели администратора (HWID, ops, ссылки, карта).
+				</div>
+			</div>
+
+			<div v-if="advancedMode" class="ops-grid">
 				<v-card class="panel panel--ops-summary">
 					<div class="panel__title">Админ-инструменты</div>
 					<div class="panel__subtitle">Оперативный контроль состояния и ключевых параметров проекта.</div>
@@ -1677,6 +1656,7 @@ const notificationSaving = ref(false);
 const notificationError = ref('');
 const notificationSuccess = ref('');
 const notificationLastId = ref(null);
+const advancedMode = ref(false);
 const opsCommandId = ref('fk_active_tariffs');
 const opsCommands = [
 	{ id: 'fk_users_overview', label: 'Проверить все FK -> users' },
@@ -3860,6 +3840,41 @@ onMounted(() => {
 .kpi__hint {
 	font-size: 11px;
 	margin-top: 4px;
+	opacity: 0.7;
+}
+
+.advanced-toggle {
+	margin-top: 6px;
+	display: grid;
+	gap: 6px;
+	justify-items: start;
+}
+.advanced-toggle__btn {
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	padding: 10px 14px;
+	border-radius: 10px;
+	border: 1px dashed var(--tvpn-border);
+	background: var(--tvpn-surface-muted);
+	color: var(--tvpn-text-soft);
+	font-size: 12px;
+	cursor: pointer;
+	transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+.advanced-toggle__btn:hover {
+	background: var(--tvpn-surface-muted-hover);
+	color: var(--tvpn-text);
+	border-color: var(--tvpn-border-strong);
+}
+.advanced-toggle__btn--active {
+	background: var(--tvpn-accent-soft);
+	border-style: solid;
+	color: var(--tvpn-text);
+}
+.advanced-toggle__hint {
+	font-size: 11px;
+	color: var(--tvpn-text-soft);
 	opacity: 0.7;
 }
 
