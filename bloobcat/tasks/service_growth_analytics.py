@@ -286,6 +286,21 @@ async def _active_trial_uuid_map() -> dict[str, int]:
     return result
 
 
+async def _vectra_uuid_set() -> set[str]:
+    """Lowercased RemnaWave UUIDs of all Vectra users.
+
+    The RemnaWave panel may host other tenants whose users we must not count
+    in service-growth aggregates. Filtering raw node usage rows by this set
+    keeps `analytics_service_daily` scoped to Vectra-owned subscribers only.
+    """
+    uuids: set[str] = set()
+    rows = await Users.filter(remnawave_uuid__not_isnull=True).only("remnawave_uuid")
+    for row in rows:
+        if row.remnawave_uuid:
+            uuids.add(str(row.remnawave_uuid).lower())
+    return uuids
+
+
 async def _fetch_remnawave_usage(
     *,
     client: RemnaWaveClient,
@@ -301,6 +316,7 @@ async def _fetch_remnawave_usage(
     nodes_resp = await asyncio.wait_for(client.nodes.get_nodes(), timeout=timeout_seconds)
     nodes = nodes_resp.get("response") or []
     trial_by_uuid = await _active_trial_uuid_map()
+    vectra_uuids = await _vectra_uuid_set()
     start_str = _format_range_start(start_day)
     end_str = _format_range_end(end_dt)
 
@@ -325,6 +341,12 @@ async def _fetch_remnawave_usage(
             day = _safe_parse_date(item.get("date"))
             if day is None or day < start_day:
                 continue
+            user_uuid = str(item.get("userUuid") or "").lower()
+            # Skip users that don't belong to Vectra (other tenants on the
+            # shared panel). Fail-closed: if the local UUID set is empty we
+            # under-report rather than aggregate foreign traffic.
+            if user_uuid not in vectra_uuids:
+                continue
             item_node_name = str(item.get("nodeName") or node_name)
             product = (
                 PRODUCT_LTE_PAID
@@ -334,7 +356,6 @@ async def _fetch_remnawave_usage(
             total_bytes = max(0, int(_safe_float(item.get("total"), 0.0)))
             total_by_product[(day, product)] += total_bytes
 
-            user_uuid = str(item.get("userUuid") or "").lower()
             trial_user_id = trial_by_uuid.get(user_uuid)
             if trial_user_id is not None:
                 trial_by_product[(day, product)] += total_bytes

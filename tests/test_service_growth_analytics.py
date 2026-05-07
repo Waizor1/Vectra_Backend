@@ -318,3 +318,92 @@ async def test_collector_is_idempotent_for_payment_events_and_trial_flags(monkey
 
     assert await AnalyticsPaymentEvents.filter(payment_id="pay_growth_idempotent").count() == 1
     assert await AnalyticsTrialRiskFlags.filter(user_id=7301, day=today).count() == 1
+
+
+@pytest.mark.asyncio
+async def test_collector_excludes_foreign_tenant_traffic_from_shared_panel(monkeypatch):
+    from bloobcat.db.analytics import AnalyticsServiceDaily, AnalyticsTrialDaily
+    from bloobcat.tasks import service_growth_analytics as analytics
+
+    monkeypatch.setattr(analytics.remnawave_settings, "lte_node_marker", "CHTF")
+
+    today = datetime.now(analytics.MSK_TZ).date()
+    vectra_paid_uuid = uuid.uuid4()
+    vectra_trial_uuid = uuid.uuid4()
+    foreign_uuid = uuid.uuid4()  # belongs to another tenant on the same panel
+
+    await _create_user(
+        7401,
+        is_trial=True,
+        used_trial=True,
+        remnawave_uuid=vectra_trial_uuid,
+        trial_started_at=datetime.now(timezone.utc),
+        expired_at=today + timedelta(days=7),
+    )
+    await _create_user(
+        7402,
+        remnawave_uuid=vectra_paid_uuid,
+        expired_at=today + timedelta(days=30),
+    )
+    # Foreign user is intentionally NOT created in Users.
+
+    fake_client = _FakeRemnaClient(
+        {
+            "node-main": [
+                {
+                    "date": today.isoformat(),
+                    "userUuid": str(vectra_paid_uuid),
+                    "nodeName": "MAIN-DE",
+                    "total": 5 * BYTES_IN_GB,
+                },
+                {
+                    "date": today.isoformat(),
+                    "userUuid": str(vectra_trial_uuid),
+                    "nodeName": "MAIN-DE",
+                    "total": 2 * BYTES_IN_GB,
+                },
+                {
+                    "date": today.isoformat(),
+                    "userUuid": str(foreign_uuid),
+                    "nodeName": "MAIN-DE",
+                    "total": 100 * BYTES_IN_GB,  # huge foreign-tenant traffic
+                },
+            ],
+            "node-lte": [
+                {
+                    "date": today.isoformat(),
+                    "userUuid": str(vectra_paid_uuid),
+                    "nodeName": "CHTF-LTE",
+                    "total": 3 * BYTES_IN_GB,
+                },
+                {
+                    "date": today.isoformat(),
+                    "userUuid": str(foreign_uuid),
+                    "nodeName": "CHTF-LTE",
+                    "total": 50 * BYTES_IN_GB,
+                },
+            ],
+        }
+    )
+
+    result = await analytics.collect_service_growth_analytics_once(
+        client=fake_client,
+        send_alerts=False,
+    )
+    assert result["status"] == "ok"
+
+    main = await AnalyticsServiceDaily.get(day=today, product=analytics.PRODUCT_MAIN_PAID)
+    lte = await AnalyticsServiceDaily.get(day=today, product=analytics.PRODUCT_LTE_PAID)
+    all_paid = await AnalyticsServiceDaily.get(day=today, product=analytics.PRODUCT_ALL_PAID)
+    # Vectra paid main = 5 GB only (foreign 100 GB excluded; trial 2 GB excluded
+    # from paid totals via existing trial subtraction).
+    assert main.traffic_gb == 5.0
+    # Vectra paid LTE = 3 GB only (foreign 50 GB excluded).
+    assert lte.traffic_gb == 3.0
+    assert all_paid.traffic_gb == 8.0
+
+    trial_daily = await AnalyticsTrialDaily.get(day=today)
+    # Trial bytes = 2 GB (foreign tenant did not contaminate trial counters either).
+    assert trial_daily.traffic_gb == 2.0
+    assert trial_daily.top_user_id == 7401
+    assert trial_daily.top_user_traffic_gb == 2.0
