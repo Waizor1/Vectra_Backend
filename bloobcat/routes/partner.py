@@ -36,13 +36,37 @@ class PartnerStatusResponse(BaseModel):
     referralLink: str
 
 
+_UTM_SAFE_RE = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+
+
+def _sanitize_utm_value(raw: Optional[str], *, max_length: int) -> Optional[str]:
+    """Keep UTM values to the conservative analytics-friendly subset.
+
+    Reason: the value is rendered into a public URL and into landing-page
+    analytics events; stripping anything outside `[A-Za-z0-9._-]` avoids
+    surprises with whitespace / unicode in tracking dashboards.
+    """
+    if raw is None:
+        return None
+    cleaned = "".join(ch for ch in raw.strip() if ch in _UTM_SAFE_RE)
+    if not cleaned:
+        return None
+    return cleaned[:max_length]
+
+
 class PartnerQrCreateRequest(BaseModel):
     title: str = Field(..., max_length=120)
+    utmSource: Optional[str] = Field(None, max_length=64)
+    utmMedium: Optional[str] = Field(None, max_length=64)
+    utmCampaign: Optional[str] = Field(None, max_length=120)
 
 
 class PartnerQrPatchRequest(BaseModel):
     title: Optional[str] = Field(None, max_length=120)
     isActive: Optional[bool] = None
+    utmSource: Optional[str] = Field(None, max_length=64)
+    utmMedium: Optional[str] = Field(None, max_length=64)
+    utmCampaign: Optional[str] = Field(None, max_length=120)
 
 
 class PartnerQrResponse(BaseModel):
@@ -52,7 +76,11 @@ class PartnerQrResponse(BaseModel):
     link: Optional[str] = None
     viewsCount: Optional[int] = None
     activationsCount: Optional[int] = None
+    earningsRub: Optional[int] = None
     isActive: Optional[bool] = None
+    utmSource: Optional[str] = None
+    utmMedium: Optional[str] = None
+    utmCampaign: Optional[str] = None
 
 
 class PartnerWithdrawRequest(BaseModel):
@@ -119,7 +147,21 @@ async def _build_qr_link(title: str) -> str:
     return await _build_qr_link_from_payload(f"qr_{slug}")
 
 
-async def _build_qr_link_from_payload(payload: str) -> str:
+def _append_utm_query(base: str, utm_pairs: List[Tuple[str, str]]) -> str:
+    if not utm_pairs:
+        return base
+    sep = "&" if "?" in base else "?"
+    extra = "&".join(f"{k}={quote(v, safe='')}" for k, v in utm_pairs)
+    return f"{base}{sep}{extra}"
+
+
+async def _build_qr_link_from_payload(
+    payload: str,
+    *,
+    utm_source: Optional[str] = None,
+    utm_medium: Optional[str] = None,
+    utm_campaign: Optional[str] = None,
+) -> str:
     try:
         bot_name = await get_bot_username()
     except Exception:
@@ -127,12 +169,25 @@ async def _build_qr_link_from_payload(payload: str) -> str:
     webapp_url = (getattr(telegram_settings, "webapp_url", None) or "").strip()
     if webapp_url and webapp_url.lower().startswith("https://"):
         sep = "&" if "?" in webapp_url else "?"
-        return f"{webapp_url.rstrip('/')}{sep}startapp={quote(payload, safe='')}"
-    return f"https://t.me/{bot_name}?start={payload}"
+        base = f"{webapp_url.rstrip('/')}{sep}startapp={quote(payload, safe='')}"
+    else:
+        base = f"https://t.me/{bot_name}?start={payload}"
+    pairs: List[Tuple[str, str]] = []
+    if utm_source:
+        pairs.append(("utm_source", utm_source))
+    if utm_medium:
+        pairs.append(("utm_medium", utm_medium))
+    if utm_campaign:
+        pairs.append(("utm_campaign", utm_campaign))
+    return _append_utm_query(base, pairs)
 
 
-def _format_qr(qr: PartnerQr) -> PartnerQrResponse:
-    subtitle = f"{qr.views_count} переходов | {qr.activations_count} активаций"
+def _format_qr(qr: PartnerQr, *, earnings_rub: int = 0) -> PartnerQrResponse:
+    subtitle = (
+        f"{qr.views_count} переходов | "
+        f"{qr.activations_count} активаций | "
+        f"{earnings_rub} ₽"
+    )
     return PartnerQrResponse(
         id=str(qr.id),
         title=qr.title,
@@ -140,7 +195,11 @@ def _format_qr(qr: PartnerQr) -> PartnerQrResponse:
         link=qr.link,
         viewsCount=qr.views_count,
         activationsCount=qr.activations_count,
+        earningsRub=int(earnings_rub or 0),
         isActive=qr.is_active,
+        utmSource=getattr(qr, "utm_source", None),
+        utmMedium=getattr(qr, "utm_medium", None),
+        utmCampaign=getattr(qr, "utm_campaign", None),
     )
 
 
@@ -246,11 +305,32 @@ async def get_summary(user: Users = Depends(validate)) -> PartnerSummaryResponse
     )
 
 
+async def _earnings_by_qr(partner_id: int, qr_ids: List[uuid.UUID]) -> Dict[str, int]:
+    if not qr_ids:
+        return {}
+    try:
+        rows = await PartnerEarnings.filter(
+            partner_id=partner_id,
+            qr_code_id__in=qr_ids,
+        ).values("qr_code_id", "reward_rub")
+    except Exception as exc:
+        logger.warning("Failed to aggregate per-QR earnings for partner %s: %s", partner_id, exc)
+        return {}
+    totals: Dict[str, int] = {}
+    for row in rows:
+        qr_id = row.get("qr_code_id")
+        if not qr_id:
+            continue
+        totals[str(qr_id)] = totals.get(str(qr_id), 0) + int(row.get("reward_rub") or 0)
+    return totals
+
+
 @router.get("/qr", response_model=List[PartnerQrResponse])
 async def list_qr_codes(user: Users = Depends(validate)) -> List[PartnerQrResponse]:
     _require_partner(user)
     items = await PartnerQr.filter(owner_id=user.id).order_by("-created_at")
-    return [_format_qr(item) for item in items]
+    earnings = await _earnings_by_qr(int(user.id), [item.id for item in items])
+    return [_format_qr(item, earnings_rub=earnings.get(str(item.id), 0)) for item in items]
 
 
 @router.post("/qr", response_model=PartnerQrResponse)
@@ -259,10 +339,18 @@ async def create_qr_code(payload: PartnerQrCreateRequest, user: Users = Depends(
     title = payload.title.strip()
     if not title:
         raise HTTPException(status_code=400, detail="Title is required")
+    utm_source = _sanitize_utm_value(payload.utmSource, max_length=64)
+    utm_medium = _sanitize_utm_value(payload.utmMedium, max_length=64)
+    utm_campaign = _sanitize_utm_value(payload.utmCampaign, max_length=120)
     slug = _slugify_title(title)
     qr_id = uuid.uuid4()
     # Stable token based on UUID hex (fits into Telegram start param restrictions).
-    link = await _build_qr_link_from_payload(f"qr_{qr_id.hex}")
+    link = await _build_qr_link_from_payload(
+        f"qr_{qr_id.hex}",
+        utm_source=utm_source,
+        utm_medium=utm_medium,
+        utm_campaign=utm_campaign,
+    )
     qr = await PartnerQr.create(
         id=qr_id,
         owner=user,
@@ -272,8 +360,11 @@ async def create_qr_code(payload: PartnerQrCreateRequest, user: Users = Depends(
         is_active=True,
         views_count=0,
         activations_count=0,
+        utm_source=utm_source,
+        utm_medium=utm_medium,
+        utm_campaign=utm_campaign,
     )
-    return _format_qr(qr)
+    return _format_qr(qr, earnings_rub=0)
 
 
 @router.patch("/qr/{qr_id}", response_model=PartnerQrResponse)
@@ -291,8 +382,31 @@ async def update_qr_code(qr_id: str, payload: PartnerQrPatchRequest, user: Users
         qr.slug = _slugify_title(title)
     if payload.isActive is not None:
         qr.is_active = payload.isActive
+
+    utm_changed = False
+    if payload.utmSource is not None:
+        qr.utm_source = _sanitize_utm_value(payload.utmSource, max_length=64)
+        utm_changed = True
+    if payload.utmMedium is not None:
+        qr.utm_medium = _sanitize_utm_value(payload.utmMedium, max_length=64)
+        utm_changed = True
+    if payload.utmCampaign is not None:
+        qr.utm_campaign = _sanitize_utm_value(payload.utmCampaign, max_length=120)
+        utm_changed = True
+
+    if utm_changed:
+        # Keep the `qr_<uuidhex>` payload stable so attribution does not break;
+        # only the visible UTM tail of the link is rebuilt.
+        qr.link = await _build_qr_link_from_payload(
+            f"qr_{qr.id.hex}",
+            utm_source=qr.utm_source,
+            utm_medium=qr.utm_medium,
+            utm_campaign=qr.utm_campaign,
+        )
+
     await qr.save()
-    return _format_qr(qr)
+    earnings = await _earnings_by_qr(int(user.id), [qr.id])
+    return _format_qr(qr, earnings_rub=earnings.get(str(qr.id), 0))
 
 
 @router.delete("/qr/{qr_id}")

@@ -11,6 +11,9 @@ class PartnerQr(models.Model):
     is_active = fields.BooleanField(default=True)
     views_count = fields.IntField(default=0)
     activations_count = fields.IntField(default=0)
+    utm_source = fields.CharField(max_length=64, null=True)
+    utm_medium = fields.CharField(max_length=64, null=True)
+    utm_campaign = fields.CharField(max_length=120, null=True)
     created_at = fields.DatetimeField(auto_now_add=True)
     updated_at = fields.DatetimeField(auto_now=True)
 
