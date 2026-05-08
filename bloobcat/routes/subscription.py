@@ -35,6 +35,7 @@ from bloobcat.services.subscription_overlay import (
     get_overlay_payload,
     resume_frozen_base_if_due,
 )
+from bloobcat.services.segment_campaigns import build_active_campaign_payload
 
 logger = get_logger("routes.subscription")
 
@@ -383,6 +384,17 @@ async def activate_frozen_family(
         frozen_current_days=int(result["frozen_current_days"]),
         activated_frozen_family_days=int(result["activated_frozen_family_days"]),
     )
+
+
+@router.get("/campaigns/active")
+async def get_active_campaign(user: Users = Depends(validate)) -> Dict[str, Any]:
+    """Возвращает активную сегментную акцию для пользователя.
+
+    `campaign=null` означает «нет подходящей акции» — фронт скрывает баннер.
+    Поле `serverNowMs` нужно фронту, чтобы синхронизировать таймер
+    с серверным временем (на случай скошенных часов клиента).
+    """
+    return await build_active_campaign_payload(user)
 
 
 @router.post("/cancel-renewal")
