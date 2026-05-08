@@ -15,7 +15,11 @@ from bloobcat.logger import get_logger
 from bloobcat.db.hwid_local import HwidDeviceLocal
 from .client import RemnaWaveClient
 from .activation_logic import should_trigger_registration
-from .hwid_utils import extract_hwid_from_device, parse_remnawave_devices
+from .hwid_utils import (
+    extract_hwid_from_device,
+    is_user_already_antitwink_sanctioned,
+    parse_remnawave_devices,
+)
 from bloobcat.settings import remnawave_settings, test_mode
 from bloobcat.bot.notifications.general.referral import on_referral_registration
 from bloobcat.bot.notifications.trial.revoked_hwid import notify_trial_revoked_hwid
@@ -520,18 +524,19 @@ async def remnawave_updater():
                             # Уже санкционирован ранее за дубль HWID — сохраняем блок, чтобы не прошло повторно
                             persisted_expired_at = db_expired_at
                             persisted_expired_date = normalize_date(persisted_expired_at)
-                            is_antitwink_sanction = bool(
-                                not db_is_trial
-                                and db_used_trial
-                                and persisted_expired_date
-                                and persisted_expired_date <= msk_today
-                                and not has_paid_subscription
+                            is_antitwink_sanction = is_user_already_antitwink_sanctioned(
+                                is_trial=db_is_trial,
+                                used_trial=db_used_trial,
+                                expired_date=persisted_expired_date,
+                                today=msk_today,
+                                has_paid_subscription=has_paid_subscription,
                             )
                             if is_antitwink_sanction:
                                 block_registration = True
                             if (
                                 anti_twink_enabled
                                 and not db_key_activated
+                                and not is_antitwink_sanction
                             ):
                                 current_uuid = str(user.remnawave_uuid) if user.remnawave_uuid else None
                                 current_owner_id = (
