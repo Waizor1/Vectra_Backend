@@ -47,25 +47,60 @@ def pick_attribution_utm(
     return incoming
 
 
-async def _build_start_link(payload: str) -> str:
-    webapp_url = (getattr(telegram_settings, "webapp_url", None) or "").strip()
-    if webapp_url and webapp_url.lower().startswith("https://"):
-        sep = "&" if "?" in webapp_url else "?"
-        return f"{webapp_url.rstrip('/')}{sep}startapp={quote(payload, safe='')}"
+PartnerLinkMode = str  # narrowed to {"bot", "app"} at boundaries
 
+DEFAULT_PARTNER_LINK_MODE: PartnerLinkMode = "bot"
+
+
+def normalize_partner_link_mode(raw: str | None) -> PartnerLinkMode:
+    value = (raw or "").strip().lower()
+    if value == "app":
+        return "app"
+    return "bot"
+
+
+async def _resolve_bot_name() -> str:
     try:
         bot_name = await get_bot_username()
     except Exception:
         bot_name = "VectraConnect_bot"
-    return f"https://t.me/{bot_name}?start={payload}"
+    return bot_name
+
+
+async def _build_app_start_link(payload: str) -> str:
+    webapp_url = (getattr(telegram_settings, "webapp_url", None) or "").strip()
+    if webapp_url and webapp_url.lower().startswith("https://"):
+        sep = "&" if "?" in webapp_url else "?"
+        return f"{webapp_url.rstrip('/')}{sep}startapp={quote(payload, safe='')}"
+    bot_name = await _resolve_bot_name()
+    return f"https://t.me/{bot_name}/start?startapp={quote(payload, safe='')}"
+
+
+async def _build_chat_start_link(payload: str) -> str:
+    bot_name = await _resolve_bot_name()
+    return f"https://t.me/{bot_name}?start={quote(payload, safe='')}"
+
+
+async def build_start_link_for_mode(payload: str, mode: PartnerLinkMode) -> str:
+    if normalize_partner_link_mode(mode) == "app":
+        return await _build_app_start_link(payload)
+    return await _build_chat_start_link(payload)
+
+
+async def _build_start_link(payload: str) -> str:
+    """Legacy default link form for warm in-Telegram referrals (Mini App direct)."""
+    return await _build_app_start_link(payload)
 
 
 async def build_referral_link(user_id: int) -> str:
+    # User referrals stay on direct Mini App: warm in-Telegram traffic, +1 tap is too costly.
     return await _build_start_link(str(user_id))
 
 
-async def build_partner_link(user_id: int) -> str:
-    return await _build_start_link(f"{PARTNER_SOURCE_UTM}-{user_id}")
+async def build_partner_link(
+    user_id: int, mode: PartnerLinkMode = DEFAULT_PARTNER_LINK_MODE
+) -> str:
+    return await build_start_link_for_mode(f"{PARTNER_SOURCE_UTM}-{user_id}", mode)
 
 
 async def _resolve_numeric_referrer(

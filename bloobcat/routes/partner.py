@@ -16,7 +16,12 @@ from bloobcat.db.partner_withdrawals import PartnerWithdrawals
 from bloobcat.db.partner_earnings import PartnerEarnings
 from bloobcat.db.payments import ProcessedPayments
 from bloobcat.bot.bot import get_bot_username
-from bloobcat.funcs.referral_attribution import build_partner_link
+from bloobcat.funcs.referral_attribution import (
+    DEFAULT_PARTNER_LINK_MODE,
+    PartnerLinkMode,
+    build_partner_link,
+    normalize_partner_link_mode,
+)
 from bloobcat.funcs.validate import validate
 from bloobcat.logger import get_logger
 from bloobcat.settings import telegram_settings
@@ -33,6 +38,16 @@ class PartnerBalanceResponse(BaseModel):
 class PartnerStatusResponse(BaseModel):
     isPartner: bool
     cashbackPercent: int = 0
+    referralLink: str
+    linkMode: Literal["bot", "app"] = "bot"
+
+
+class PartnerLinkModeRequest(BaseModel):
+    mode: Literal["bot", "app"]
+
+
+class PartnerLinkModeResponse(BaseModel):
+    linkMode: Literal["bot", "app"]
     referralLink: str
 
 
@@ -158,6 +173,7 @@ def _append_utm_query(base: str, utm_pairs: List[Tuple[str, str]]) -> str:
 async def _build_qr_link_from_payload(
     payload: str,
     *,
+    mode: PartnerLinkMode = DEFAULT_PARTNER_LINK_MODE,
     utm_source: Optional[str] = None,
     utm_medium: Optional[str] = None,
     utm_campaign: Optional[str] = None,
@@ -166,12 +182,17 @@ async def _build_qr_link_from_payload(
         bot_name = await get_bot_username()
     except Exception:
         bot_name = "VectraConnect_bot"
-    webapp_url = (getattr(telegram_settings, "webapp_url", None) or "").strip()
-    if webapp_url and webapp_url.lower().startswith("https://"):
-        sep = "&" if "?" in webapp_url else "?"
-        base = f"{webapp_url.rstrip('/')}{sep}startapp={quote(payload, safe='')}"
+    resolved_mode = normalize_partner_link_mode(mode)
+    if resolved_mode == "app":
+        webapp_url = (getattr(telegram_settings, "webapp_url", None) or "").strip()
+        if webapp_url and webapp_url.lower().startswith("https://"):
+            sep = "&" if "?" in webapp_url else "?"
+            base = f"{webapp_url.rstrip('/')}{sep}startapp={quote(payload, safe='')}"
+        else:
+            base = f"https://t.me/{bot_name}/start?startapp={quote(payload, safe='')}"
     else:
-        base = f"https://t.me/{bot_name}?start={payload}"
+        # 'bot' mode: open chat with START button. Same start_param flows to /start handler.
+        base = f"https://t.me/{bot_name}?start={quote(payload, safe='')}"
     pairs: List[Tuple[str, str]] = []
     if utm_source:
         pairs.append(("utm_source", utm_source))
@@ -214,16 +235,56 @@ async def get_balance(user: Users = Depends(validate)) -> PartnerBalanceResponse
     return PartnerBalanceResponse(balanceRub=int(user.balance or 0))
 
 
+@router.patch("/link-mode", response_model=PartnerLinkModeResponse)
+async def update_link_mode(
+    payload: PartnerLinkModeRequest,
+    user: Users = Depends(validate),
+) -> PartnerLinkModeResponse:
+    """Switch between bot-chat (`?start=`) and Mini App (`?startapp=`) link forms.
+
+    Applies to both the personal partner referral link and every QR link the partner owns.
+    The Telegram `start_param` payload is preserved (e.g. `qr_<uuid>`, `partner-<uid>`),
+    so attribution survives the rebuild and any URLs the partner already shared keep working.
+    """
+    _require_partner(user)
+    new_mode = normalize_partner_link_mode(payload.mode)
+    user.partner_link_mode = new_mode
+    await user.save(update_fields=["partner_link_mode"])
+
+    # Rebuild every QR link the partner owns so the cabinet/list reflects the new form
+    # immediately (cheap: O(N) string work per partner — partners rarely have >50 QR codes).
+    try:
+        owned = await PartnerQr.filter(owner_id=user.id)
+        for qr in owned:
+            qr.link = await _build_qr_link_from_payload(
+                f"qr_{qr.id.hex}",
+                mode=new_mode,
+                utm_source=qr.utm_source,
+                utm_medium=qr.utm_medium,
+                utm_campaign=qr.utm_campaign,
+            )
+            await qr.save(update_fields=["link"])
+    except Exception as exc:
+        logger.warning(
+            "Partner %s link-mode rebuild partially failed: %s", user.id, exc
+        )
+
+    referral_link = await build_partner_link(int(user.id), new_mode)
+    return PartnerLinkModeResponse(linkMode=new_mode, referralLink=referral_link)
+
+
 @router.get("/status", response_model=PartnerStatusResponse)
 async def get_status(user: Users = Depends(validate)) -> PartnerStatusResponse:
     # This endpoint is intentionally accessible for non-partners too
     # (so the Mini App can show a clear "not activated" state).
     cashback = int(user.referral_percent()) if hasattr(user, "referral_percent") else int(getattr(user, "custom_referral_percent", 0) or 0)
-    referral_link = await build_partner_link(int(user.id))
+    link_mode = normalize_partner_link_mode(getattr(user, "partner_link_mode", None))
+    referral_link = await build_partner_link(int(user.id), link_mode)
     return PartnerStatusResponse(
         isPartner=bool(getattr(user, "is_partner", False)),
         cashbackPercent=max(0, cashback),
         referralLink=referral_link,
+        linkMode=link_mode,
     )
 
 
@@ -236,12 +297,14 @@ class PartnerSummaryResponse(BaseModel):
     subscribedCount: int
     totalIncomeRub: int
     referralLink: str
+    linkMode: Literal["bot", "app"] = "bot"
 
 
 @router.get("/summary", response_model=PartnerSummaryResponse)
 async def get_summary(user: Users = Depends(validate)) -> PartnerSummaryResponse:
     cashback = int(user.referral_percent()) if hasattr(user, "referral_percent") else int(getattr(user, "custom_referral_percent", 0) or 0)
-    referral_link = await build_partner_link(int(user.id))
+    link_mode = normalize_partner_link_mode(getattr(user, "partner_link_mode", None))
+    referral_link = await build_partner_link(int(user.id), link_mode)
 
     if not getattr(user, "is_partner", False):
         return PartnerSummaryResponse(
@@ -253,6 +316,7 @@ async def get_summary(user: Users = Depends(validate)) -> PartnerSummaryResponse
             subscribedCount=0,
             totalIncomeRub=0,
             referralLink=referral_link,
+            linkMode=link_mode,
         )
 
     # Frozen: pending withdrawals.
@@ -302,6 +366,7 @@ async def get_summary(user: Users = Depends(validate)) -> PartnerSummaryResponse
         subscribedCount=int(subscribed_count),
         totalIncomeRub=int(total_income),
         referralLink=referral_link,
+        linkMode=link_mode,
     )
 
 
@@ -344,9 +409,11 @@ async def create_qr_code(payload: PartnerQrCreateRequest, user: Users = Depends(
     utm_campaign = _sanitize_utm_value(payload.utmCampaign, max_length=120)
     slug = _slugify_title(title)
     qr_id = uuid.uuid4()
+    link_mode = normalize_partner_link_mode(getattr(user, "partner_link_mode", None))
     # Stable token based on UUID hex (fits into Telegram start param restrictions).
     link = await _build_qr_link_from_payload(
         f"qr_{qr_id.hex}",
+        mode=link_mode,
         utm_source=utm_source,
         utm_medium=utm_medium,
         utm_campaign=utm_campaign,
@@ -399,6 +466,7 @@ async def update_qr_code(qr_id: str, payload: PartnerQrPatchRequest, user: Users
         # only the visible UTM tail of the link is rebuilt.
         qr.link = await _build_qr_link_from_payload(
             f"qr_{qr.id.hex}",
+            mode=normalize_partner_link_mode(getattr(user, "partner_link_mode", None)),
             utm_source=qr.utm_source,
             utm_medium=qr.utm_medium,
             utm_campaign=qr.utm_campaign,

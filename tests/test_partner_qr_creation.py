@@ -49,7 +49,7 @@ async def test_partner_qr_create_builds_stable_link_before_persist(monkeypatch):
 
     response = await partner_module.create_qr_code(
         partner_module.PartnerQrCreateRequest(title="  Salon QR  "),
-        user=SimpleNamespace(id=101, is_partner=True),
+        user=SimpleNamespace(id=101, is_partner=True, partner_link_mode="bot"),
     )
 
     assert len(created_rows) == 1
@@ -58,7 +58,8 @@ async def test_partner_qr_create_builds_stable_link_before_persist(monkeypatch):
     assert created["slug"] == "salon_qr"
     assert created["link"] == response.link
     assert created["id"].hex in response.link
-    assert response.link.startswith("https://app.vectra-pro.net?startapp=qr_")
+    # Default mode is 'bot' — link must open the bot chat with START button, not Mini App.
+    assert response.link.startswith("https://t.me/VectraConnect_bot?start=qr_")
     # No UTM provided => link must be plain (no `utm_*` query tail).
     assert "utm_source" not in response.link
     assert "utm_medium" not in response.link
@@ -80,7 +81,7 @@ async def test_partner_qr_create_appends_sanitized_utm_query(monkeypatch):
             utmMedium="qr-code",
             utmCampaign="летний промо!",
         ),
-        user=SimpleNamespace(id=42, is_partner=True),
+        user=SimpleNamespace(id=42, is_partner=True, partner_link_mode="bot"),
     )
 
     assert len(created_rows) == 1
@@ -107,7 +108,7 @@ async def test_partner_qr_create_drops_unsafe_utm_to_none(monkeypatch):
             utmMedium=" ! @ # ",  # nothing in the safe subset -> None
             utmCampaign="campaign01",
         ),
-        user=SimpleNamespace(id=42, is_partner=True),
+        user=SimpleNamespace(id=42, is_partner=True, partner_link_mode="bot"),
     )
 
     assert len(created_rows) == 1
@@ -115,8 +116,8 @@ async def test_partner_qr_create_drops_unsafe_utm_to_none(monkeypatch):
     assert created["utm_source"] == "abc.def_ghi-1"
     assert created["utm_medium"] is None
     assert created["utm_campaign"] == "campaign01"
-    # Resulting link includes the surviving tags after the startapp payload.
-    assert "startapp=qr_" in response.link
+    # Resulting link includes the surviving tags after the start payload (bot-chat form by default).
+    assert "?start=qr_" in response.link
     assert "utm_source=abc.def_ghi-1" in response.link
     assert "utm_medium=" not in response.link  # None -> not appended
     assert "utm_campaign=campaign01" in response.link
@@ -147,8 +148,9 @@ async def test_build_qr_link_appends_utm_pairs_when_set(monkeypatch):
         SimpleNamespace(webapp_url="https://app.vectra-pro.net/"),
     )
 
+    # Default mode is 'bot' — chat-start form, ignores webapp_url.
     plain = await partner_module._build_qr_link_from_payload("qr_abc")
-    assert plain == "https://app.vectra-pro.net?startapp=qr_abc"
+    assert plain == "https://t.me/VectraConnect_bot?start=qr_abc"
 
     rich = await partner_module._build_qr_link_from_payload(
         "qr_abc",
@@ -156,7 +158,53 @@ async def test_build_qr_link_appends_utm_pairs_when_set(monkeypatch):
         utm_medium="offline",
         utm_campaign="autumn",
     )
-    assert rich.startswith("https://app.vectra-pro.net?startapp=qr_abc")
+    assert rich.startswith("https://t.me/VectraConnect_bot?start=qr_abc")
     assert "&utm_source=shop1" in rich
     assert "&utm_medium=offline" in rich
     assert "&utm_campaign=autumn" in rich
+
+
+@pytest.mark.asyncio
+async def test_build_qr_link_app_mode_uses_webapp_url(monkeypatch):
+    from bloobcat.routes import partner as partner_module
+
+    async def fake_bot_username() -> str:
+        return "VectraConnect_bot"
+
+    monkeypatch.setattr(partner_module, "get_bot_username", fake_bot_username)
+    monkeypatch.setattr(
+        partner_module,
+        "telegram_settings",
+        SimpleNamespace(webapp_url="https://app.vectra-pro.net/"),
+    )
+
+    # 'app' mode preserves the legacy direct-Mini-App form for partners who explicitly want it.
+    link = await partner_module._build_qr_link_from_payload("qr_abc", mode="app")
+    assert link == "https://app.vectra-pro.net?startapp=qr_abc"
+
+    # Without webapp_url the 'app' fallback uses t.me/<bot>/start?startapp=…
+    monkeypatch.setattr(
+        partner_module,
+        "telegram_settings",
+        SimpleNamespace(webapp_url=None),
+    )
+    link2 = await partner_module._build_qr_link_from_payload("qr_abc", mode="app")
+    assert link2 == "https://t.me/VectraConnect_bot/start?startapp=qr_abc"
+
+
+@pytest.mark.asyncio
+async def test_build_qr_link_unknown_mode_falls_back_to_bot(monkeypatch):
+    from bloobcat.routes import partner as partner_module
+
+    async def fake_bot_username() -> str:
+        return "VectraConnect_bot"
+
+    monkeypatch.setattr(partner_module, "get_bot_username", fake_bot_username)
+    monkeypatch.setattr(
+        partner_module,
+        "telegram_settings",
+        SimpleNamespace(webapp_url="https://app.vectra-pro.net/"),
+    )
+
+    link = await partner_module._build_qr_link_from_payload("qr_abc", mode="garbage")
+    assert link == "https://t.me/VectraConnect_bot?start=qr_abc"
