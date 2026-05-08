@@ -3,7 +3,6 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from fastadmin import TortoiseModelAdmin, register
 from tortoise import fields, models
 
 
@@ -129,21 +128,5 @@ class SegmentCampaign(models.Model):
         }
 
 
-@register(SegmentCampaign)
-class SegmentCampaignAdmin(TortoiseModelAdmin):
-    list_display = (
-        "id",
-        "slug",
-        "segment",
-        "discount_percent",
-        "starts_at",
-        "ends_at",
-        "priority",
-        "is_active",
-    )
-    readonly_fields = ("id", "created_at", "updated_at")
-    search_fields = ("slug", "title", "segment")
-    list_filter = ("segment", "is_active", "accent")
-    ordering = ("-priority", "-id")
-    verbose_name = "Сегментная акция"
-    verbose_name_plural = "Сегментные акции"
+# NOTE: управление кампаниями делается только через Directus
+# (collection `segment_campaigns`). FastAdmin не используется.

@@ -584,6 +584,19 @@ def apply_collection_ux(client: DirectusClient) -> None:
                 {"language": "ru-RU", "translation": "Использование промокодов"}
             ],
         },
+        "segment_campaigns": {
+            "group": "grp_promo",
+            "icon": "campaign",
+            "note": (
+                "Сегментные акции в разделе «Подписка»: баннер с обратным таймером и автоприменение скидки. "
+                "Кампания живёт между starts_at и ends_at. При нескольких подходящих кампаниях побеждает priority. "
+                "Сегменты: no_purchase_yet (первая покупка), trial_active (на триале), lapsed (подписка истекла >7 дней назад), "
+                "loyal_renewer (≥2 платежа или ≥180 дней), everyone (всем)."
+            ),
+            "sort": 4,
+            "hidden": False,
+            "translations": [{"language": "ru-RU", "translation": "Сегментные акции"}],
+        },
         # Prize wheel is deprecated in Directus UI: keep collections hidden if they still exist.
         "prize_wheel_config": {
             "group": None,
@@ -857,6 +870,39 @@ def apply_field_notes_ru(client: DirectusClient) -> None:
             "used_at": "Когда промокод был активирован.",
             "context": "Доп. контекст (payment_id и т.п.).",
         },
+        "segment_campaigns": {
+            "slug": "Машинный идентификатор кампании (для аналитики). Латиница, цифры, дефисы.",
+            "title": "Заголовок акции на витрине (виден пользователю).",
+            "subtitle": "Подзаголовок/слоган. Можно оставить пустым.",
+            "description": "Длинное описание для модалки/тултипа. Можно оставить пустым.",
+            "segment": (
+                "Целевой сегмент аудитории: no_purchase_yet | trial_active | lapsed | "
+                "loyal_renewer | everyone."
+            ),
+            "discount_percent": "Размер скидки в процентах (1..90). Показывается как pill «−X%».",
+            "applies_to_months": (
+                "JSON-массив длительностей в месяцах, к которым применима скидка. "
+                "Например [3,6,12]. Пустой массив [] = на все длительности."
+            ),
+            "accent": (
+                "Акцентная палитра карточки: gold | cyan | violet | blue | green. "
+                "Влияет на цвет рамки баннера и подсветку тарифа."
+            ),
+            "cta_label": "Подпись кнопки CTA. Пусто = подставится дефолт под сегмент.",
+            "cta_target": (
+                "Цель CTA: builder (открыть калькулятор), tariff_1m/3m/6m/12m (предвыбрать тариф) "
+                "или family (семейный тариф)."
+            ),
+            "starts_at": "Когда кампания становится активной.",
+            "ends_at": "Когда кампания завершается. От этого времени идёт обратный отсчёт таймера.",
+            "priority": (
+                "Приоритет (целое число). При нескольких совпадениях для пользователя побеждает "
+                "кампания с большим priority."
+            ),
+            "is_active": "Принудительный выключатель. Снимите галку, чтобы скрыть кампанию.",
+            "created_at": "Когда запись создана.",
+            "updated_at": "Когда запись последний раз обновлена.",
+        },
         "processed_payments": {
             "amount": "Сумма платежа. Используется в витрине и для поиска аномалий.",
             "status": "Статус обработки/зачисления платежа.",
@@ -1012,6 +1058,25 @@ def apply_field_notes_ru(client: DirectusClient) -> None:
             "used_at": "Дата использования",
             "context": "Контекст",
         },
+        "segment_campaigns": {
+            "id": "ID",
+            "slug": "Машинный slug",
+            "title": "Заголовок",
+            "subtitle": "Подзаголовок",
+            "description": "Описание",
+            "segment": "Сегмент аудитории",
+            "discount_percent": "Скидка, %",
+            "applies_to_months": "Длительности (мес)",
+            "accent": "Акцентная палитра",
+            "cta_label": "Подпись CTA",
+            "cta_target": "Цель CTA",
+            "starts_at": "Старт",
+            "ends_at": "Финиш (таймер)",
+            "priority": "Приоритет",
+            "is_active": "Активна",
+            "created_at": "Создана",
+            "updated_at": "Обновлена",
+        },
         "connections": {"at": "Дата подключения"},
         "processed_payments": {
             "amount": "Сумма",
@@ -1144,6 +1209,118 @@ def apply_field_notes_ru(client: DirectusClient) -> None:
     patch_field_meta(
         client, "partner_withdrawals", "paid_amount_rub", {"interface": "input"}
     )
+
+    # Segment campaigns: dropdowns for enum-like fields and proper datetime/json
+    # interfaces. Skipped silently if the collection isn't present yet (first
+    # backend deploy creates the table via Aerich migration before super-setup
+    # runs, so this should always succeed on prod).
+    if client.get("/collections/segment_campaigns").status_code == 200:
+        patch_field_meta(
+            client,
+            "segment_campaigns",
+            "segment",
+            {
+                "interface": "select-dropdown",
+                "options": {
+                    "choices": [
+                        {"text": "Ещё не платил (первая покупка)", "value": "no_purchase_yet"},
+                        {"text": "На триале", "value": "trial_active"},
+                        {"text": "Подписка истекла >7 дней назад", "value": "lapsed"},
+                        {"text": "Постоянный клиент (≥2 платежа / ≥180 дней)", "value": "loyal_renewer"},
+                        {"text": "Все пользователи", "value": "everyone"},
+                    ]
+                },
+            },
+        )
+        patch_field_meta(
+            client,
+            "segment_campaigns",
+            "accent",
+            {
+                "interface": "select-dropdown",
+                "options": {
+                    "choices": [
+                        {"text": "Золото", "value": "gold"},
+                        {"text": "Циан", "value": "cyan"},
+                        {"text": "Фиолетовый", "value": "violet"},
+                        {"text": "Синий", "value": "blue"},
+                        {"text": "Зелёный", "value": "green"},
+                    ]
+                },
+            },
+        )
+        patch_field_meta(
+            client,
+            "segment_campaigns",
+            "cta_target",
+            {
+                "interface": "select-dropdown",
+                "options": {
+                    "choices": [
+                        {"text": "Открыть калькулятор тарифа", "value": "builder"},
+                        {"text": "Тариф 1 месяц", "value": "tariff_1m"},
+                        {"text": "Тариф 3 месяца", "value": "tariff_3m"},
+                        {"text": "Тариф 6 месяцев", "value": "tariff_6m"},
+                        {"text": "Тариф 12 месяцев", "value": "tariff_12m"},
+                        {"text": "Семейный тариф", "value": "family"},
+                    ]
+                },
+            },
+        )
+        patch_field_meta(
+            client,
+            "segment_campaigns",
+            "applies_to_months",
+            {
+                "interface": "select-multiple-checkbox",
+                "options": {
+                    "choices": [
+                        {"text": "1 месяц", "value": 1},
+                        {"text": "3 месяца", "value": 3},
+                        {"text": "6 месяцев", "value": 6},
+                        {"text": "12 месяцев", "value": 12},
+                    ]
+                },
+            },
+        )
+        patch_field_meta(
+            client,
+            "segment_campaigns",
+            "discount_percent",
+            {"interface": "input", "options": {"min": 1, "max": 90, "step": 1}},
+        )
+        patch_field_meta(
+            client,
+            "segment_campaigns",
+            "priority",
+            {"interface": "input", "options": {"min": 0, "step": 1}},
+        )
+        patch_field_meta(client, "segment_campaigns", "starts_at", {"interface": "datetime"})
+        patch_field_meta(client, "segment_campaigns", "ends_at", {"interface": "datetime"})
+        patch_field_meta(
+            client,
+            "segment_campaigns",
+            "is_active",
+            {"interface": "boolean", "options": {"label": "Активна"}},
+        )
+        patch_field_meta(
+            client,
+            "segment_campaigns",
+            "description",
+            {"interface": "input-multiline"},
+        )
+        patch_field_meta(
+            client,
+            "segment_campaigns",
+            "created_at",
+            {"interface": "datetime", "readonly": True},
+        )
+        patch_field_meta(
+            client,
+            "segment_campaigns",
+            "updated_at",
+            {"interface": "datetime", "readonly": True},
+        )
 
 
 def ensure_admin_settings(client: DirectusClient) -> None:
@@ -3102,6 +3279,7 @@ def ensure_permissions_baseline(client: DirectusClient) -> None:
         "promo_batches",
         "promo_codes",
         "promo_usages",
+        "segment_campaigns",
         "processed_payments",
         "analytics_payment_events",
         "analytics_service_daily",
@@ -3140,6 +3318,7 @@ def ensure_permissions_baseline(client: DirectusClient) -> None:
         "error_reports",
         "in_app_notifications",
         "notification_views",
+        "segment_campaigns",
     }
     admin_rw = {
         "users",
@@ -3152,6 +3331,7 @@ def ensure_permissions_baseline(client: DirectusClient) -> None:
         "promo_batches",
         "promo_codes",
         "promo_usages",
+        "segment_campaigns",
         "connections",
         "processed_payments",
         "analytics_payment_events",
