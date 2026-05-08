@@ -736,6 +736,30 @@ async def cleanup_blocked_users():
     
     if cleanup_count > 0 or error_count > 0 or blocked_paid_active > 0:
         logger.info(f"Blocked users cleanup completed: {trial_deleted} trial + {paid_deleted} expired paid users deleted, {error_count} errors, {blocked_paid_active} active paid users preserved")
+        try:
+            from bloobcat.bot.notifications.admin import send_admin_message  # noqa: WPS433
+
+            summary_lines = [
+                "🧹 <b>Очистка заблокированных пользователей</b>",
+                f"Удалено: {trial_deleted} trial + {paid_deleted} paid (всего {cleanup_count})",
+            ]
+            if blocked_paid_active > 0:
+                summary_lines.append(
+                    f"Сохранено платных с активной подпиской: {blocked_paid_active}"
+                )
+            if blocked_trial_with_active_tariff > 0:
+                summary_lines.append(
+                    f"⚠️ trial с активным тарифом (пропущены): {blocked_trial_with_active_tariff}"
+                )
+            if error_count > 0:
+                summary_lines.append(f"❌ Ошибок: {error_count}")
+            summary_lines.append(
+                f"Порог: {app_settings.blocked_user_cleanup_days} дн."
+            )
+            summary_lines.append("#cleanup #blocked_users")
+            await send_admin_message("\n".join(summary_lines))
+        except Exception as notify_error:
+            logger.error(f"Failed to send blocked users cleanup summary to admin log: {notify_error}")
     else:
         logger.debug("No blocked users found for cleanup")
 
