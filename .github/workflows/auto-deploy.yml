@@ -1,10 +1,17 @@
 name: Auto Deploy Backend
 
+# Trigger discipline (post-2026-05-08 outage):
+# - On a `push` to main we DO NOT auto-deploy. Instead we listen for the
+#   `Backend CI` workflow's success and only then ship. This guarantees the
+#   compat-patches gate, full pytest suite, and dependency audit all pass
+#   before prod is touched.
+# - `release: published` and `workflow_dispatch` keep their existing manual
+#   semantics — useful for one-off prerelease and destructive-fallback scenarios.
 on:
-  push:
-    branches: [ main ]
-    paths:
-      - '**'
+  workflow_run:
+    workflows: ["Backend CI"]
+    types: [completed]
+    branches: [main]
   release:
     types: [ published ]
   workflow_dispatch:
@@ -22,34 +29,32 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     timeout-minutes: 35
+    # Only run when triggered by a successful Backend CI run (or an explicit manual trigger).
+    if: >-
+      ${{
+        github.event_name != 'workflow_run' ||
+        (github.event.workflow_run.conclusion == 'success' &&
+         github.event.workflow_run.head_branch == 'main')
+      }}
     permissions:
       contents: read
     environment: production
     concurrency:
       group: tvpn-backend-deploy-prod
       cancel-in-progress: ${{ vars.PRERELEASE_FULL_REINSTALL != 'true' }}
-    
+
     steps:
     - name: Checkout repository
       uses: actions/checkout@v6
-
-    - name: Setup Python
-      uses: actions/setup-python@v6
       with:
-        python-version: '3.12'
+        # When triggered by workflow_run, default ref is the upstream workflow
+        # commit (so we deploy exactly what passed CI, not whatever main is now).
+        ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
-    - name: Prepare test environment file
-      run: cp .env.example .env
-
-    - name: Install test dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
-        pip install pytest pytest-asyncio
-        pip install -e . --no-deps
-
-    - name: Run backend tests
-      run: python -m pytest tests -q
+    # Tests already ran in `Backend CI`. Re-running them here was ~3-5 minutes
+    # of duplicate work and a false-confidence vector (deploy could pass while
+    # CI lagged behind). The new workflow_run trigger above guarantees CI is
+    # green before we get here.
 
     - name: Setup SSH agent
       run: |
@@ -87,6 +92,7 @@ jobs:
           --exclude 'node_modules/' \
           --exclude 'directus/extensions/*/node_modules/' \
           --exclude 'directus/extensions/*/.npm/' \
+          --exclude '.deploy-state/' \
           ./ "$SERVER_USER@$SERVER_HOST:$PROJECT_PATH/"
 
     - name: Deploy to server
@@ -94,13 +100,30 @@ jobs:
         SERVER_HOST: ${{ secrets.SERVER_HOST }}
         SERVER_USER: ${{ secrets.SERVER_USER }}
         PROJECT_PATH: ${{ secrets.PROJECT_PATH }}
-        GITHUB_REF_TYPE: ${{ github.ref_type }}
-        GITHUB_REF_NAME: ${{ github.ref_name }}
-        GITHUB_EVENT_NAME: ${{ github.event_name }}
+        # Normalise the workflow_run trigger back into "push-to-main" semantics for
+        # the remote script. Conceptually a CI-success on main *is* a push merge —
+        # only the trigger plumbing changed in 2026-05-08. This keeps the prerelease
+        # full-reinstall gate (`event=push && branch=main && toggle=true`) intact
+        # without rewriting the remote script.
+        GITHUB_REF_TYPE: ${{ github.event_name == 'workflow_run' && 'branch' || github.ref_type }}
+        GITHUB_REF_NAME: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_branch || github.ref_name }}
+        GITHUB_EVENT_NAME: ${{ github.event_name == 'workflow_run' && 'push' || github.event_name }}
         PRERELEASE_FULL_REINSTALL: ${{ vars.PRERELEASE_FULL_REINSTALL || 'false' }}
         ALLOW_DESTRUCTIVE_DB_RESET_ONCE: ${{ github.event_name == 'workflow_dispatch' && inputs.allow_destructive_db_reset_once || 'false' }}
         DESTRUCTIVE_RESET_ACK: ${{ github.event_name == 'workflow_dispatch' && inputs.destructive_reset_ack || '' }}
         DESTRUCTIVE_RESET_ACK_TOKEN: ${{ vars.DESTRUCTIVE_RESET_ACK_TOKEN || 'RESET_DB_VOLUME_ONCE' }}
+        # Opt-in switch for the pre-built GHCR image path. Set
+        # `vars.USE_GHCR_PREBUILT_IMAGE = 'true'` in the repo's Actions variables
+        # once the `build-and-push-image` job from `Backend CI` has produced
+        # working images. Until then this stays empty and deploys keep
+        # rebuilding on the prod server (current behaviour).
+        USE_GHCR_PREBUILT_IMAGE: ${{ vars.USE_GHCR_PREBUILT_IMAGE || 'false' }}
+        # Tag to pull when the GHCR path is enabled. Defaults to `main` (latest
+        # successful CI). For commit-pinned deploys override via
+        # `vars.VECTRA_BACKEND_IMAGE_TAG = 'sha-abcdef0'`.
+        VECTRA_BACKEND_IMAGE_TAG: ${{ vars.VECTRA_BACKEND_IMAGE_TAG || 'main' }}
+        GHCR_USERNAME: ${{ github.repository_owner }}
+        GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         set -euo pipefail
         DEPLOY_LOG_FILE="$(mktemp)"
@@ -118,6 +141,11 @@ jobs:
         DESTRUCTIVE_RESET_ACK_TOKEN="${6:-RESET_DB_VOLUME_ONCE}"
         PRERELEASE_FULL_REINSTALL="${7:-false}"
         GITHUB_EVENT_NAME="${8:-}"
+        USE_GHCR_PREBUILT_IMAGE="${9:-false}"
+        VECTRA_BACKEND_IMAGE_TAG="${10:-main}"
+        GHCR_USERNAME="${11:-}"
+        GHCR_TOKEN="${12:-}"
+        export VECTRA_BACKEND_IMAGE_TAG  # picked up by docker-compose.ghcr.yml interpolation
 
         set -euo pipefail
         if [ -z "$PROJECT_PATH" ]; then
@@ -240,6 +268,31 @@ jobs:
         else
           COMPOSE_ARGS="-f docker-compose.yml"
           COMPOSE_FILES="docker-compose.yml"
+        fi
+
+        # Layer the GHCR override on top so `bloobcat` reads its image from the registry
+        # built in `Backend CI` instead of rebuilding on the prod server. Activated only
+        # when the workflow-level `USE_GHCR_PREBUILT_IMAGE` flag is `true` AND the override
+        # file is actually present in the synced source. The flag stays opt-in until the
+        # GHCR pipeline has been validated for at least one merge cycle.
+        USE_GHCR_PREBUILT_IMAGE_NORMALIZED="\$(printf '%s' "\$USE_GHCR_PREBUILT_IMAGE" | tr '[:upper:]' '[:lower:]')"
+        GHCR_DEPLOY_ACTIVE=0
+        if [ "\$USE_GHCR_PREBUILT_IMAGE_NORMALIZED" = "true" ] && [ -f docker-compose.ghcr.yml ]; then
+          if [ -z "\$GHCR_TOKEN" ] || [ -z "\$GHCR_USERNAME" ]; then
+            echo "⚠️  USE_GHCR_PREBUILT_IMAGE=true but GHCR credentials are missing; falling back to local --build path"
+          else
+            COMPOSE_ARGS="\$COMPOSE_ARGS -f docker-compose.ghcr.yml"
+            COMPOSE_FILES="\$COMPOSE_FILES,docker-compose.ghcr.yml"
+            GHCR_DEPLOY_ACTIVE=1
+            echo "🐳 GHCR deploy mode active (image tag: \$VECTRA_BACKEND_IMAGE_TAG)"
+            echo "🔐 Logging in to ghcr.io as \$GHCR_USERNAME..."
+            if ! printf '%s' "\$GHCR_TOKEN" | docker login ghcr.io -u "\$GHCR_USERNAME" --password-stdin >/dev/null 2>&1; then
+              echo "❌ ghcr.io login failed; falling back to local --build path"
+              COMPOSE_ARGS="\$(printf '%s' "\$COMPOSE_ARGS" | sed 's| -f docker-compose.ghcr.yml||')"
+              COMPOSE_FILES="\$(printf '%s' "\$COMPOSE_FILES" | sed 's|,docker-compose.ghcr.yml||')"
+              GHCR_DEPLOY_ACTIVE=0
+            fi
+          fi
         fi
 
         resolve_compose_project_name() {
@@ -513,6 +566,47 @@ jobs:
           exit 1
         fi
 
+        # Snapshot the bloobcat image *currently* serving traffic so we can roll back
+        # if the new image fails its health check. Capturing both the SHA (immutable)
+        # and the human-readable tag (compose-managed) keeps the restore step simple:
+        # `docker tag <prev_sha> <prev_tag>` + `docker compose up -d --no-build bloobcat`.
+        # If no container is running yet (first-time deploy), both stay empty and rollback
+        # is skipped — there is nothing to revert to.
+        ROLLBACK_IMAGE_SHA=""
+        ROLLBACK_IMAGE_REF=""
+        ROLLBACK_CONTAINER_ID="\$(docker compose \$COMPOSE_ARGS ps -q bloobcat 2>/dev/null | head -1 || true)"
+        if [ -n "\$ROLLBACK_CONTAINER_ID" ]; then
+          ROLLBACK_IMAGE_SHA="\$(docker inspect --format '{{.Image}}' "\$ROLLBACK_CONTAINER_ID" 2>/dev/null || true)"
+          ROLLBACK_IMAGE_REF="\$(docker inspect --format '{{.Config.Image}}' "\$ROLLBACK_CONTAINER_ID" 2>/dev/null || true)"
+          if [ -n "\$ROLLBACK_IMAGE_SHA" ] && [ -n "\$ROLLBACK_IMAGE_REF" ]; then
+            echo "📌 Captured rollback target: ref=\$ROLLBACK_IMAGE_REF sha=\$ROLLBACK_IMAGE_SHA"
+          fi
+        else
+          echo "ℹ️  No running bloobcat container found; rollback target unavailable (first-time or fresh deploy)"
+        fi
+
+        rollback_bloobcat_to_previous_image() {
+          if [ -z "\$ROLLBACK_IMAGE_SHA" ] || [ -z "\$ROLLBACK_IMAGE_REF" ]; then
+            echo "❌ Rollback target unavailable; cannot revert bloobcat"
+            return 1
+          fi
+          echo "🔁 Retagging \$ROLLBACK_IMAGE_SHA as \$ROLLBACK_IMAGE_REF and recreating bloobcat..."
+          if ! docker tag "\$ROLLBACK_IMAGE_SHA" "\$ROLLBACK_IMAGE_REF"; then
+            echo "❌ Failed to tag rollback image"
+            return 1
+          fi
+          if ! docker compose \$COMPOSE_ARGS up -d --no-build --force-recreate bloobcat; then
+            echo "❌ Failed to recreate bloobcat from rollback image"
+            return 1
+          fi
+          if wait_bloobcat_health; then
+            echo "✅ Rollback succeeded; previous bloobcat image is back online"
+            return 0
+          fi
+          echo "❌ Rollback container also failed health check"
+          return 1
+        }
+
         echo "🏗️  Starting application services with retries..."
         APP_SERVICES="bloobcat directus"
         HAS_CADDY_SERVICE=0
@@ -520,10 +614,44 @@ jobs:
           HAS_CADDY_SERVICE=1
           APP_SERVICES="$APP_SERVICES caddy"
         fi
+
+        # GHCR fast path: pull the pre-built bloobcat image first; the registry
+        # `pull` is significantly faster than a from-scratch `compose build` on
+        # the prod server (network IO vs CPU+disk for layer assembly). If the pull
+        # fails (image not yet pushed, GHCR outage, network glitch), fall back to
+        # the local build path so deploys never hard-fail on infrastructure quirks.
+        if [ "\$GHCR_DEPLOY_ACTIVE" -eq 1 ]; then
+          echo "📥 Pulling bloobcat image from GHCR (tag=\$VECTRA_BACKEND_IMAGE_TAG)..."
+          GHCR_PULL_OK=0
+          for attempt in 1 2 3; do
+            if docker compose \$COMPOSE_ARGS pull bloobcat; then
+              GHCR_PULL_OK=1
+              break
+            fi
+            rc=\$?
+            echo "⚠️  GHCR pull attempt \$attempt/3 failed (exit=\$rc)"
+            if [ "\$attempt" -lt 3 ]; then
+              echo "⚠️  retry in 10s..."
+              sleep 10
+            fi
+          done
+          if [ "\$GHCR_PULL_OK" -ne 1 ]; then
+            echo "⚠️  GHCR pull failed after retries; falling back to local --build path for this deploy"
+            COMPOSE_ARGS="\$(printf '%s' "\$COMPOSE_ARGS" | sed 's| -f docker-compose.ghcr.yml||')"
+            COMPOSE_FILES="\$(printf '%s' "\$COMPOSE_FILES" | sed 's|,docker-compose.ghcr.yml||')"
+            GHCR_DEPLOY_ACTIVE=0
+          fi
+        fi
+
         APP_DEPLOY_OK=0
         for attempt in 1 2 3; do
-          echo "app deploy attempt \$attempt/3"
-          if DOCKER_CLIENT_TIMEOUT=240 COMPOSE_HTTP_TIMEOUT=240 docker compose \$COMPOSE_ARGS up -d --build \$APP_SERVICES; then
+          echo "app deploy attempt \$attempt/3 (mode=\$([ "\$GHCR_DEPLOY_ACTIVE" -eq 1 ] && printf 'ghcr-prebuilt' || printf 'local-build'))"
+          if [ "\$GHCR_DEPLOY_ACTIVE" -eq 1 ]; then
+            APP_DEPLOY_CMD="docker compose \$COMPOSE_ARGS up -d --no-build \$APP_SERVICES"
+          else
+            APP_DEPLOY_CMD="docker compose \$COMPOSE_ARGS up -d --build \$APP_SERVICES"
+          fi
+          if DOCKER_CLIENT_TIMEOUT=240 COMPOSE_HTTP_TIMEOUT=240 eval "\$APP_DEPLOY_CMD"; then
             APP_DEPLOY_OK=1
             break
           else
@@ -608,9 +736,19 @@ jobs:
 
         echo "🩺 Waiting for bloobcat health..."
         if ! wait_bloobcat_health; then
-          echo "❌ bloobcat did not become healthy in time"
-          docker compose \$COMPOSE_ARGS ps
+          echo "❌ bloobcat did not become healthy in time — capturing diagnostics before rollback attempt"
+          docker compose \$COMPOSE_ARGS ps || true
           docker compose \$COMPOSE_ARGS logs --tail=200 bloobcat || true
+
+          # Auto-rollback (post-2026-05-08 outage): try restoring the previous
+          # image so prod traffic recovers in seconds instead of minutes. If the
+          # rollback also fails, exit hard — the new failure dominates and
+          # operator intervention is required.
+          if rollback_bloobcat_to_previous_image; then
+            echo "⚠️  Deploy failed but rollback restored the previous version. Marking the workflow as failed so the bad commit is investigated."
+          else
+            echo "❌ Rollback unsuccessful or unavailable; manual intervention required"
+          fi
           exit 1
         fi
 
@@ -839,8 +977,52 @@ jobs:
           exit 1
         fi
 
+        # Conditional Directus super-setup: it modifies Directus metadata
+        # (collections, fields, translations, permissions, presets) and runs
+        # ~30-60s every deploy. Skip when nothing in `directus/` or
+        # `scripts/directus_*.py` has changed since the last successful run.
+        # State lives in `.deploy-state/last_super_setup_sha` (excluded from rsync
+        # so it survives across deploys).
+        DEPLOY_STATE_DIR="\$PROJECT_PATH/.deploy-state"
+        SUPER_SETUP_MARKER="\$DEPLOY_STATE_DIR/last_super_setup_sha"
+        mkdir -p "\$DEPLOY_STATE_DIR"
+
+        DIRECTUS_TOUCHED=1
+        SUPER_SETUP_SKIP_REASON=""
+        if [ -d .git ]; then
+          CURRENT_DEPLOY_SHA="\$(git rev-parse HEAD 2>/dev/null || true)"
+          LAST_SUPER_SETUP_SHA=""
+          if [ -s "\$SUPER_SETUP_MARKER" ]; then
+            LAST_SUPER_SETUP_SHA="\$(cat "\$SUPER_SETUP_MARKER" 2>/dev/null || true)"
+          fi
+          if [ -n "\$LAST_SUPER_SETUP_SHA" ] && [ -n "\$CURRENT_DEPLOY_SHA" ] \
+              && git rev-parse --verify --quiet "\$LAST_SUPER_SETUP_SHA^{commit}" >/dev/null \
+              && [ "\$LAST_SUPER_SETUP_SHA" != "\$CURRENT_DEPLOY_SHA" ]; then
+            DIRECTUS_DIFF_FILE="\$(mktemp)"
+            # Only mark as "no changes" when git diff actually succeeded (exit 0)
+            # AND produced an empty list. Any failure (corrupt index, missing
+            # commit, etc.) keeps DIRECTUS_TOUCHED=1 so super-setup runs and we
+            # never silently skip it on a broken state.
+            if git diff --name-only "\$LAST_SUPER_SETUP_SHA..\$CURRENT_DEPLOY_SHA" -- 'directus/' 'scripts/directus_*.py' >"\$DIRECTUS_DIFF_FILE" 2>/dev/null; then
+              if [ ! -s "\$DIRECTUS_DIFF_FILE" ]; then
+                DIRECTUS_TOUCHED=0
+                SUPER_SETUP_SKIP_REASON="no Directus changes between \$LAST_SUPER_SETUP_SHA and \$CURRENT_DEPLOY_SHA"
+              fi
+            else
+              echo "⚠️  git diff failed while checking for Directus changes; running super-setup defensively"
+            fi
+            rm -f "\$DIRECTUS_DIFF_FILE"
+          elif [ "\$LAST_SUPER_SETUP_SHA" = "\$CURRENT_DEPLOY_SHA" ] && [ -n "\$LAST_SUPER_SETUP_SHA" ]; then
+            DIRECTUS_TOUCHED=0
+            SUPER_SETUP_SKIP_REASON="redeploying same sha \$CURRENT_DEPLOY_SHA"
+          fi
+        fi
+
         SUPER_SETUP_OK=0
-        if compose_exec bloobcat sh -lc '
+        if [ "\$DIRECTUS_TOUCHED" -eq 0 ]; then
+          echo "ℹ️  Directus super-setup skipped: \$SUPER_SETUP_SKIP_REASON"
+          SUPER_SETUP_OK=1
+        elif compose_exec bloobcat sh -lc '
           export DIRECTUS_URL="http://directus:8055"
           attempt=1
           max_attempts=4
@@ -871,6 +1053,15 @@ jobs:
           docker compose \$COMPOSE_ARGS logs --tail=150 bloobcat || true
           docker compose \$COMPOSE_ARGS logs --tail=150 directus || true
           exit 1
+        fi
+
+        # Persist current sha so the next deploy can decide whether super-setup
+        # is needed. Done only on the path where we actually re-ran setup OR on
+        # initial run where DIRECTUS_TOUCHED was 1 but the marker was empty;
+        # rewriting the same value on a no-op skip is also harmless.
+        if [ -n "\${CURRENT_DEPLOY_SHA:-}" ]; then
+          printf '%s\n' "\$CURRENT_DEPLOY_SHA" > "\$SUPER_SETUP_MARKER"
+          echo "📝 Recorded super-setup marker: \$SUPER_SETUP_MARKER -> \$CURRENT_DEPLOY_SHA"
         fi
 
         echo "Running post-super-setup runtime-state verification gate..."
@@ -953,7 +1144,11 @@ jobs:
           "$DESTRUCTIVE_RESET_ACK" \
           "$DESTRUCTIVE_RESET_ACK_TOKEN" \
           "$PRERELEASE_FULL_REINSTALL" \
-          "$GITHUB_EVENT_NAME" | tee "$DEPLOY_LOG_FILE"; then
+          "$GITHUB_EVENT_NAME" \
+          "$USE_GHCR_PREBUILT_IMAGE" \
+          "$VECTRA_BACKEND_IMAGE_TAG" \
+          "$GHCR_USERNAME" \
+          "$GHCR_TOKEN" | tee "$DEPLOY_LOG_FILE"; then
           echo "❌ Remote deploy execution failed"
           exit 1
         fi

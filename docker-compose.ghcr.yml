@@ -1,0 +1,16 @@
+# Compose override that swaps the bloobcat service from a local `build:` to a
+# pre-built GHCR image. Layered on top of `docker-compose.yml` (and optionally
+# `docker-compose.prod.yml`) when the deploy workflow has `vars.USE_GHCR_PREBUILT_IMAGE='true'`:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.ghcr.yml \
+#     pull bloobcat
+#   docker compose -f ... up -d --no-build bloobcat directus
+#
+# Tag is parameterised via `VECTRA_BACKEND_IMAGE_TAG` (default `main`) so a
+# specific commit-pinned deploy can pass `VECTRA_BACKEND_IMAGE_TAG=sha-abcdef0`.
+#
+# `build:` from the base file is preserved (compose merges this override on top),
+# but `--no-build` in the deploy command keeps compose from rebuilding the image.
+services:
+  bloobcat:
+    image: ghcr.io/waizor1/vectra-backend:${VECTRA_BACKEND_IMAGE_TAG:-main}
