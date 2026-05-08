@@ -123,6 +123,10 @@ class Users(models.Model):
     is_admin = fields.BooleanField(default=False)
     is_partner = fields.BooleanField(default=False)
     custom_referral_percent = fields.IntField(default=0)
+    # 'bot' renders share/QR links as `t.me/<bot>?start=<payload>` (chat first, START button) —
+    # the form that survives without Mini App permission.
+    # 'app' renders `t.me/<bot>/start?startapp=<payload>` (Mini App opens directly).
+    partner_link_mode = fields.CharField(max_length=8, default="bot")
     registration_date = fields.DatetimeField(auto_now_add=True)
     referrals = fields.IntField(default=0)
     # Total referral bonus (in days) earned by the user.
