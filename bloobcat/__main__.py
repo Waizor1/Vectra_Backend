@@ -9,7 +9,6 @@ from pathlib import Path
 import uvicorn  # type: ignore
 from aerich import Command  # type: ignore
 from aiogram.types import BotCommand, MenuButtonWebApp, WebAppInfo
-from fastadmin import fastapi_app as admin_app  # type: ignore
 from fastapi import FastAPI, Request  # type: ignore
 from fastapi.middleware.cors import CORSMiddleware  # type: ignore
 from tortoise import Tortoise
@@ -670,30 +669,15 @@ async def custom_fastapi_http_exception_handler(request, exc: FastAPIHTTPExcepti
 app.middleware("http")(rate_limit_middleware)
 
 
-# Ограничиваем права на создание/изменение/удаление: только суперюзеры имеют эти права
-from fastadmin import TortoiseModelAdmin
-
-
-async def only_superuser(self, user_id=None) -> bool:
-    if not user_id:
-        return False
-    user = await Admin.filter(id=user_id, is_superuser=True).first()
-    return bool(user)
-
-
-# Патчим базовые методы прав доступа для всех моделей
-TortoiseModelAdmin.has_add_permission = only_superuser
-TortoiseModelAdmin.has_change_permission = only_superuser
-TortoiseModelAdmin.has_delete_permission = only_superuser
-
 setup_router()
 include_bot_router()
 app.include_router(router)
 app.include_router(main_router)
 app.include_router(app_info.router)  # Регистрируем новый роутер
 
-# Монтируем FastAdmin после API-роутеров, чтобы не перекрывать /admin/integration
-app.mount("/admin", admin_app)
+# FastAdmin удалён: административный UI полностью переехал в Directus.
+# Наши собственные API-роутеры (включая /admin/integration) остаются
+# доступными как обычные FastAPI-эндпоинты выше.
 
 
 async def run_server():
