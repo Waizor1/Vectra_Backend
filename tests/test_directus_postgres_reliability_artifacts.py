@@ -182,8 +182,23 @@ def test_workflow_runs_blocking_migration_verify_after_health_and_before_setup_o
 def test_workflow_prerelease_full_reinstall_toggle_wiring_and_push_main_gate():
     content = _read(".github/workflows/auto-deploy.yml")
 
-    assert "branches: [ main ]" in content
-    assert "branches: [ main, master ]" not in content
+    # Post-2026-05-08: deploy is gated on a successful Backend CI run rather than
+    # a raw push. We assert both the workflow_run wiring and the normalisation
+    # that maps a workflow_run-on-main back into "push-to-main" semantics so the
+    # rest of the script (prerelease gate included) stays untouched.
+    assert 'workflows: ["Backend CI"]' in content
+    assert "types: [completed]" in content
+    assert "branches: [main]" in content
+    assert "github.event.workflow_run.conclusion == 'success'" in content
+    assert "github.event.workflow_run.head_branch == 'main'" in content
+    assert (
+        "GITHUB_EVENT_NAME: ${{ github.event_name == 'workflow_run' && 'push' || github.event_name }}"
+        in content
+    )
+    assert (
+        "GITHUB_REF_NAME: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_branch || github.ref_name }}"
+        in content
+    )
 
     assert (
         "cancel-in-progress: ${{ vars.PRERELEASE_FULL_REINSTALL != 'true' }}" in content
@@ -192,7 +207,6 @@ def test_workflow_prerelease_full_reinstall_toggle_wiring_and_push_main_gate():
         "PRERELEASE_FULL_REINSTALL: ${{ vars.PRERELEASE_FULL_REINSTALL || 'false' }}"
         in content
     )
-    assert "GITHUB_EVENT_NAME: ${{ github.event_name }}" in content
     assert 'PRERELEASE_FULL_REINSTALL="${7:-false}"' in content
     assert 'GITHUB_EVENT_NAME="${8:-}"' in content
     assert (

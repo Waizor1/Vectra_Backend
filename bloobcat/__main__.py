@@ -131,6 +131,9 @@ async def _apply_generate_schema_compat_patches(conn) -> None:
             ADD COLUMN IF NOT EXISTS "partner_link_mode"
             VARCHAR(8) NOT NULL DEFAULT 'bot';
         ALTER TABLE IF EXISTS "users"
+            ADD COLUMN IF NOT EXISTS "key_activated"
+            BOOLEAN NOT NULL DEFAULT FALSE;
+        ALTER TABLE IF EXISTS "users"
             ADD COLUMN IF NOT EXISTS "trial_started_at" TIMESTAMPTZ;
         UPDATE "users"
         SET "trial_started_at" = COALESCE("registration_date", "created_at", NOW())
