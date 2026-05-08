@@ -579,6 +579,11 @@ class ChangeDevicesRequest(BaseModel):
     lte_gb: int | None = None
 
 
+class DevicesTopupRequest(BaseModel):
+    device_count: int
+    dry_run: bool = False
+
+
 async def _create_external_lte_topup_payment(
     *,
     user: Users,
@@ -1204,6 +1209,455 @@ async def change_active_tariff_devices(
         ),
         "price": active_tariff.price,
     }
+
+
+def _compute_active_tariff_full_price(
+    active_tariff: ActiveTariffs,
+    original_tariff: Tariffs | None,
+    target_device_count: int,
+) -> tuple[int, float]:
+    """Recompute the snapshot full-period price for `target_device_count` seats
+    using the progressive multiplier of the active tariff (with fallback to the
+    base tariff when the snapshot is missing one). Returns (price_rub, multiplier)."""
+    getcontext().prec = 28
+    if original_tariff is not None:
+        base_price = original_tariff.base_price
+        multiplier = (
+            active_tariff.progressive_multiplier
+            or original_tariff.progressive_multiplier
+        )
+    else:
+        multiplier = active_tariff.progressive_multiplier or 0.9
+        n = max(1, int(active_tariff.hwid_limit or 1))
+        if n == 1:
+            base_price = active_tariff.price
+        else:
+            denom = 1 - multiplier
+            geom_sum = (1 - (multiplier**n)) / denom if denom != 0 else n
+            base_price = (
+                active_tariff.price / geom_sum
+                if geom_sum > 0
+                else active_tariff.price
+            )
+
+    mult_dec = Decimal(str(multiplier))
+    base_dec = Decimal(str(base_price))
+    if target_device_count <= 1:
+        total_dec = base_dec
+    else:
+        total_dec = base_dec
+        for k in range(2, target_device_count + 1):
+            total_dec += base_dec * (mult_dec ** (k - 1))
+    price_rub = int(total_dec.to_integral_value(rounding=ROUND_HALF_UP))
+    return price_rub, float(multiplier)
+
+
+async def _create_external_devices_topup_payment(
+    *,
+    user: Users,
+    active_tariff: ActiveTariffs,
+    amount_to_pay: float,
+    amount_from_balance: float,
+    metadata: dict[str, Any],
+) -> dict[str, Any]:
+    """Create an external payment for an in-period device top-up.
+
+    Mirrors `_create_external_lte_topup_payment` but with a description specific
+    to device top-ups so users see the right context at the payment provider.
+    """
+    from bloobcat.routes.payment import (
+        PAYMENT_CURRENCY_RUB,
+        PAYMENT_PROVIDER_PLATEGA,
+        PAYMENT_PROVIDER_YOOKASSA,
+        PlategaAPIError,
+        PlategaClient,
+        PlategaConfigError,
+        _active_payment_provider,
+        _provider_payload_json,
+        _resolve_payment_return_url,
+        _upsert_processed_payment,
+    )
+
+    provider = _active_payment_provider()
+    return_url = await _resolve_payment_return_url()
+    metadata["expected_amount"] = float(amount_to_pay)
+    metadata["expected_currency"] = PAYMENT_CURRENCY_RUB
+    metadata["payment_provider"] = provider
+
+    description = f"Дополнительные устройства пользователю {user.id}"
+
+    if provider == PAYMENT_PROVIDER_PLATEGA:
+        provider_payload = _provider_payload_json({"metadata": metadata})
+        try:
+            payment = await PlategaClient().create_transaction(
+                amount=float(amount_to_pay),
+                currency=PAYMENT_CURRENCY_RUB,
+                description=description,
+                return_url=return_url,
+                failed_url=return_url,
+                payload=provider_payload,
+            )
+        except PlategaConfigError:
+            logger.error(
+                "Platega selected for devices top-up but credentials are not configured"
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Сервис оплаты временно недоступен. Пожалуйста, попробуйте позже.",
+            )
+        except PlategaAPIError as exc:
+            logger.error(
+                "Ошибка при создании Platega-платежа за пополнение устройств",
+                extra={
+                    "user_id": user.id,
+                    "active_tariff_id": active_tariff.id,
+                    "amount": amount_to_pay,
+                    "status_code": exc.status_code,
+                },
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Сервис оплаты временно недоступен. Пожалуйста, попробуйте позже.",
+            )
+
+        await _upsert_processed_payment(
+            payment_id=payment.transaction_id,
+            user_id=user.id,
+            amount=float(amount_to_pay) + float(amount_from_balance),
+            amount_external=float(amount_to_pay),
+            amount_from_balance=float(amount_from_balance),
+            status="pending",
+            provider=PAYMENT_PROVIDER_PLATEGA,
+            payment_url=payment.redirect_url,
+            provider_payload=_provider_payload_json(
+                {
+                    "metadata": metadata,
+                    "provider_status": payment.status,
+                    "provider_response": {
+                        "transactionId": payment.transaction_id,
+                        "status": payment.status,
+                        "redirect": payment.redirect_url,
+                    },
+                }
+            ),
+        )
+        return {
+            "status": "payment_required",
+            "redirect_to": payment.redirect_url,
+            "payment_id": payment.transaction_id,
+            "provider": PAYMENT_PROVIDER_PLATEGA,
+        }
+
+    if provider != PAYMENT_PROVIDER_YOOKASSA:
+        logger.error("Unsupported devices top-up payment provider: %s", provider)
+        raise HTTPException(
+            status_code=503, detail="Сервис оплаты временно недоступен"
+        )
+
+    try:
+        payment_data = {
+            "amount": {
+                "value": str(amount_to_pay),
+                "currency": PAYMENT_CURRENCY_RUB,
+            },
+            "confirmation": {
+                "type": "redirect",
+                "return_url": return_url,
+            },
+            "metadata": metadata,
+            "capture": True,
+            "description": description,
+        }
+        idempotence_key = str(randint(100000, 999999999999))
+        payment = await asyncio.wait_for(
+            asyncio.to_thread(partial(Payment.create, payment_data, idempotence_key)),
+            timeout=30.0,
+        )
+        await _upsert_processed_payment(
+            payment_id=payment.id,
+            user_id=user.id,
+            amount=float(amount_to_pay) + float(amount_from_balance),
+            amount_external=float(amount_to_pay),
+            amount_from_balance=float(amount_from_balance),
+            status="pending",
+            provider=PAYMENT_PROVIDER_YOOKASSA,
+            payment_url=payment.confirmation.confirmation_url,
+            provider_payload=_provider_payload_json({"metadata": metadata}),
+        )
+        return {
+            "status": "payment_required",
+            "redirect_to": payment.confirmation.confirmation_url,
+            "payment_id": payment.id,
+            "provider": PAYMENT_PROVIDER_YOOKASSA,
+        }
+    except Exception as e:
+        logger.error(
+            f"Ошибка при создании платежа за пополнение устройств для {user.id}: {e}"
+        )
+        raise HTTPException(status_code=500, detail="Ошибка при создании платежа")
+
+
+@router.post("/active_tariff/devices_topup")
+async def devices_topup(
+    payload: DevicesTopupRequest, user: Users = Depends(validate)
+) -> Dict[str, Any]:
+    """Доплата за дополнительные устройства на оставшийся период подписки.
+
+    В отличие от PATCH /user/active_tariff (который перераспределяет уже оплаченную
+    стоимость и сокращает дни), этот эндпоинт оставляет дату окончания неизменной
+    и берёт с пользователя пропорциональную доплату за разницу в стоимости.
+
+    `dry_run=true` возвращает только расчёт стоимости — для предпросмотра в UI.
+    """
+    if payload.device_count is None or payload.device_count < 1:
+        raise HTTPException(
+            status_code=400, detail="Некорректное количество устройств"
+        )
+    if not user.active_tariff_id:
+        raise HTTPException(
+            status_code=400, detail="У пользователя нет активного тарифа"
+        )
+
+    active_tariff = await ActiveTariffs.get_or_none(id=user.active_tariff_id)
+    if not active_tariff:
+        raise HTTPException(status_code=404, detail="Активный тариф не найден")
+
+    is_family_member = await FamilyMembers.filter(
+        user_id=user.id, status="active"
+    ).exists()
+    if is_family_member:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Подпиской управляет организатор семьи. "
+                "Пополнение устройств доступно только владельцу подписки."
+            ),
+        )
+
+    current_date = date.today()
+    user_expired_at = normalize_date(user.expired_at)
+    if not user_expired_at or user_expired_at <= current_date:
+        raise HTTPException(
+            status_code=400,
+            detail="Пополнение устройств доступно только при активной подписке",
+        )
+    days_remaining = (user_expired_at - current_date).days
+    if days_remaining <= 1:
+        raise HTTPException(
+            status_code=400,
+            detail="Пополнение устройств недоступно в последний день подписки",
+        )
+
+    stored_limits = [
+        value for value in (user.hwid_limit, active_tariff.hwid_limit) if value
+    ]
+    current_hwid_limit = max(1, int(stored_limits[0] if stored_limits else 1))
+    new_device_count = int(payload.device_count)
+    if new_device_count <= current_hwid_limit:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Этот эндпоинт только увеличивает лимит устройств. "
+                "Для уменьшения используйте PATCH /user/active_tariff."
+            ),
+        )
+
+    original = await Tariffs.filter(
+        name=active_tariff.name, months=active_tariff.months
+    ).first()
+
+    new_full_price, multiplier = _compute_active_tariff_full_price(
+        active_tariff, original, new_device_count
+    )
+
+    active_months = int(active_tariff.months)
+    target_date_full = add_months_safe(current_date, active_months)
+    total_days_full = (target_date_full - current_date).days
+    if total_days_full <= 0:
+        raise HTTPException(
+            status_code=500,
+            detail="Не удалось рассчитать длительность тарифа",
+        )
+
+    full_price_delta = max(0, int(new_full_price) - int(active_tariff.price))
+    getcontext().prec = 28
+    extra_cost_dec = (
+        Decimal(full_price_delta)
+        * Decimal(days_remaining)
+        / Decimal(total_days_full)
+    )
+    extra_cost = int(extra_cost_dec.to_integral_value(rounding=ROUND_HALF_UP))
+
+    quote_payload = {
+        "status": "quote",
+        "new_device_count": new_device_count,
+        "current_device_count": current_hwid_limit,
+        "new_active_tariff_price": int(new_full_price),
+        "current_active_tariff_price": int(active_tariff.price),
+        "progressive_multiplier": float(multiplier),
+        "days_remaining": int(days_remaining),
+        "total_period_days": int(total_days_full),
+        "extra_cost": int(extra_cost),
+        "balance": int(user.balance or 0),
+        "expired_at": user.expired_at,
+    }
+
+    if payload.dry_run:
+        return quote_payload
+
+    if extra_cost <= 0:
+        # Бесплатное добавление слотов: апсейл по округлению. Просто применяем.
+        user.hwid_limit = new_device_count
+        await user.save(update_fields=["hwid_limit"])
+        active_tariff.hwid_limit = new_device_count
+        active_tariff.price = int(new_full_price)
+        active_tariff.progressive_multiplier = float(multiplier)
+        await active_tariff.save(
+            update_fields=["hwid_limit", "price", "progressive_multiplier"]
+        )
+
+        if user.remnawave_uuid:
+            try:
+                if user.is_device_per_user_enabled():
+                    from bloobcat.services.device_service import (
+                        sync_device_entitlements,
+                    )
+
+                    await sync_device_entitlements(user)
+                else:
+                    await remnawave_client.users.update_user(
+                        uuid=user.remnawave_uuid,
+                        expireAt=user.expired_at,
+                        hwidDeviceLimit=new_device_count,
+                    )
+            except Exception as e:
+                logger.error(
+                    f"Ошибка обновления RemnaWave при бесплатном пополнении устройств: {e}"
+                )
+
+        return {
+            "status": "ok",
+            "new_expired_at": user.expired_at,
+            "hwid_limit": new_device_count,
+            "price": int(new_full_price),
+            "extra_cost": 0,
+        }
+
+    if user.balance >= extra_cost:
+        # Полностью с баланса
+        old_hwid_limit = current_hwid_limit
+        old_expired_at = user.expired_at
+        user.balance -= extra_cost
+        user.hwid_limit = new_device_count
+        await user.save(update_fields=["balance", "hwid_limit"])
+
+        active_tariff.hwid_limit = new_device_count
+        active_tariff.price = int(new_full_price)
+        active_tariff.progressive_multiplier = float(multiplier)
+        await active_tariff.save(
+            update_fields=["hwid_limit", "price", "progressive_multiplier"]
+        )
+
+        payment_id = (
+            f"balance_devices_topup_{user.id}_"
+            f"{int(datetime.now().timestamp())}_{randint(100, 999)}"
+        )
+        await ProcessedPayments.create(
+            payment_id=payment_id,
+            user_id=user.id,
+            amount=extra_cost,
+            amount_external=0,
+            amount_from_balance=extra_cost,
+            status="succeeded",
+        )
+
+        try:
+            from bloobcat.routes.payment import _award_partner_cashback
+
+            await _award_partner_cashback(
+                payment_id=str(payment_id),
+                referral_user=user,
+                amount_rub_total=int(extra_cost),
+            )
+        except Exception as partner_exc:
+            logger.warning(
+                "Не удалось начислить партнёрский кэшбек за пополнение устройств с баланса %s: %s",
+                payment_id,
+                partner_exc,
+            )
+
+        if user.remnawave_uuid:
+            try:
+                if user.is_device_per_user_enabled():
+                    from bloobcat.services.device_service import (
+                        sync_device_entitlements,
+                    )
+
+                    await sync_device_entitlements(user)
+                else:
+                    await remnawave_client.users.update_user(
+                        uuid=user.remnawave_uuid,
+                        expireAt=user.expired_at,
+                        hwidDeviceLimit=new_device_count,
+                    )
+            except Exception as e:
+                logger.error(
+                    f"Ошибка обновления RemnaWave при пополнении устройств с баланса: {e}"
+                )
+
+        try:
+            await notify_active_tariff_change(
+                user=user,
+                tariff_name=active_tariff.name,
+                months=int(active_tariff.months),
+                old_limit=old_hwid_limit,
+                new_limit=new_device_count,
+                old_lte_gb=int(getattr(active_tariff, "lte_gb_total", 0) or 0),
+                new_lte_gb=int(getattr(active_tariff, "lte_gb_total", 0) or 0),
+                old_price=int(active_tariff.price),
+                new_price=int(new_full_price),
+                old_expired_at=old_expired_at,
+                new_expired_at=user.expired_at,
+                auto_renew_enabled=(
+                    bool(user.renew_id)
+                    and payment_settings.auto_renewal_mode == "yookassa"
+                ),
+            )
+        except Exception as e:
+            logger.error(
+                f"Ошибка отправки уведомления о пополнении устройств с баланса: {e}"
+            )
+
+        return {
+            "status": "ok",
+            "new_expired_at": user.expired_at,
+            "hwid_limit": new_device_count,
+            "price": int(new_full_price),
+            "extra_cost": int(extra_cost),
+            "amount_from_balance": int(extra_cost),
+            "amount_external": 0,
+        }
+
+    # Балансa не хватает — внешний платёж на разницу
+    amount_to_pay = max(1, extra_cost - int(user.balance or 0))
+    amount_from_balance = max(0, extra_cost - amount_to_pay)
+    metadata = {
+        "user_id": user.id,
+        "devices_topup": True,
+        "new_device_count": new_device_count,
+        "previous_device_count": current_hwid_limit,
+        "new_active_tariff_price": int(new_full_price),
+        "previous_active_tariff_price": int(active_tariff.price),
+        "new_progressive_multiplier": float(multiplier),
+        "amount_from_balance": amount_from_balance,
+    }
+    return await _create_external_devices_topup_payment(
+        user=user,
+        active_tariff=active_tariff,
+        amount_to_pay=float(amount_to_pay),
+        amount_from_balance=float(amount_from_balance),
+        metadata=metadata,
+    )
 
 
 @router.get("/family/{familyurl}")

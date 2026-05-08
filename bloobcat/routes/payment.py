@@ -33,6 +33,7 @@ from bloobcat.bot.bot import get_bot_username
 from bloobcat.bot.notifications.admin import (
     on_payment,
     cancel_subscription,
+    notify_active_tariff_change,
     notify_lte_topup,
     notify_manual_payment_canceled,
 )
@@ -3463,6 +3464,183 @@ async def yookassa_webhook(request: Request, secret: str):
                     payment.id,
                     e_ref_cashback,
                 )
+            return {"status": "ok"}
+
+        if data.get("devices_topup"):
+            new_device_count = int(data.get("new_device_count") or 0)
+            new_active_tariff_price = data.get("new_active_tariff_price")
+            new_progressive_multiplier = data.get("new_progressive_multiplier")
+            amount_from_balance = _round_rub(data.get("amount_from_balance", 0))
+            active_tariff = (
+                await ActiveTariffs.get_or_none(id=user.active_tariff_id)
+                if user.active_tariff_id
+                else None
+            )
+            if not active_tariff or new_device_count <= 0:
+                logger.error(
+                    "Пополнение устройств: активный тариф или количество устройств "
+                    f"не найдено для пользователя {user.id}",
+                )
+                await _mark_payment_effect_failed(
+                    payment_id=str(payment.id),
+                    error="Active tariff or device count missing for devices topup",
+                )
+                return {
+                    "status": "error",
+                    "message": "Active tariff or device count missing",
+                }
+
+            old_hwid_limit = int(active_tariff.hwid_limit or 0)
+            old_expired_at = user.expired_at
+
+            if amount_from_balance > 0:
+                initial_balance = user.balance
+                user.balance = max(0, user.balance - amount_from_balance)
+                await user.save(update_fields=["balance"])
+                logger.info(
+                    "Пополнение устройств: списано %.2f с бонусного баланса "
+                    "пользователя %s. Баланс до: %s, после: %s",
+                    amount_from_balance,
+                    user.id,
+                    initial_balance,
+                    user.balance,
+                )
+
+            user.hwid_limit = new_device_count
+            await user.save(update_fields=["hwid_limit"])
+
+            active_tariff.hwid_limit = new_device_count
+            update_fields = ["hwid_limit"]
+            try:
+                if new_active_tariff_price is not None:
+                    active_tariff.price = int(new_active_tariff_price)
+                    update_fields.append("price")
+            except (TypeError, ValueError):
+                pass
+            try:
+                if new_progressive_multiplier is not None:
+                    active_tariff.progressive_multiplier = float(
+                        new_progressive_multiplier
+                    )
+                    update_fields.append("progressive_multiplier")
+            except (TypeError, ValueError):
+                pass
+            await active_tariff.save(update_fields=update_fields)
+
+            if user.remnawave_uuid:
+                if user.is_device_per_user_enabled():
+                    await _sync_device_per_user_after_payment(
+                        user, source="webhook_devices_topup"
+                    )
+                else:
+                    remnawave_client = None
+                    try:
+                        await _refresh_payment_processing_lease(
+                            payment_id=str(payment.id),
+                            user_id=int(user.id),
+                            source="webhook_devices_topup_remna_pre",
+                        )
+                        remnawave_client = RemnaWaveClient(
+                            remnawave_settings.url,
+                            remnawave_settings.token.get_secret_value(),
+                        )
+                        await _await_payment_external_call(
+                            remnawave_client.users.update_user(
+                                uuid=user.remnawave_uuid,
+                                expireAt=user.expired_at,
+                                hwidDeviceLimit=new_device_count,
+                            ),
+                            operation="webhook_devices_topup_remnawave_update_user",
+                        )
+                        await _refresh_payment_processing_lease(
+                            payment_id=str(payment.id),
+                            user_id=int(user.id),
+                            source="webhook_devices_topup_remna_post",
+                        )
+                    except Exception as e:
+                        logger.error(
+                            "Пополнение устройств: ошибка обновления RemnaWave "
+                            f"для {user.id}: {e}"
+                        )
+                    finally:
+                        if remnawave_client:
+                            try:
+                                await remnawave_client.close()
+                            except Exception:
+                                pass
+
+            amount_external = float(payment.amount.value)
+            total_amount = amount_external + amount_from_balance
+            await _mark_payment_effect_success(
+                payment_id=str(payment.id),
+                user_id=user.id,
+                amount=total_amount,
+                amount_external=amount_external,
+                amount_from_balance=amount_from_balance,
+                status="succeeded",
+                provider=provider,
+            )
+
+            try:
+                await notify_active_tariff_change(
+                    user=user,
+                    tariff_name=active_tariff.name,
+                    months=int(active_tariff.months),
+                    old_limit=old_hwid_limit,
+                    new_limit=new_device_count,
+                    old_lte_gb=int(active_tariff.lte_gb_total or 0),
+                    new_lte_gb=int(active_tariff.lte_gb_total or 0),
+                    old_price=int(
+                        data.get("previous_active_tariff_price")
+                        or active_tariff.price
+                    ),
+                    new_price=int(active_tariff.price),
+                    old_expired_at=old_expired_at,
+                    new_expired_at=user.expired_at,
+                    auto_renew_enabled=(
+                        bool(user.renew_id)
+                        and payment_settings.auto_renewal_mode == "yookassa"
+                    ),
+                )
+            except Exception as e:
+                logger.error(
+                    "Пополнение устройств: не удалось отправить уведомление "
+                    f"пользователю {user.id}: {e}"
+                )
+
+            try:
+                await _award_partner_cashback(
+                    payment_id=str(payment.id),
+                    referral_user=user,
+                    amount_rub_total=int(_round_rub(total_amount)),
+                )
+            except Exception as e_partner:
+                logger.warning(
+                    "Пополнение устройств: не удалось начислить партнёрский "
+                    "кэшбек для payment %s: %s",
+                    payment.id,
+                    e_partner,
+                )
+            try:
+                await _award_standard_referral_cashback(
+                    payment_id=str(payment.id),
+                    referral_user=user,
+                    amount_external_rub=int(_round_rub(amount_external)),
+                )
+            except Exception as e_ref_cashback:
+                logger.warning(
+                    "Пополнение устройств: не удалось начислить обычный "
+                    "реферальный кэшбек для payment %s: %s",
+                    payment.id,
+                    e_ref_cashback,
+                )
+            logger.info(
+                "Пополнение устройств успешно: user=%s, %s -> %s, price=%s",
+                user.id,
+                old_hwid_limit,
+                new_device_count,
+                int(active_tariff.price),
+            )
             return {"status": "ok"}
 
         try:
