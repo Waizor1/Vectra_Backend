@@ -2,6 +2,8 @@ import asyncio
 from collections import defaultdict
 from datetime import date, datetime, time, timezone, timedelta
 
+from tortoise.expressions import Q
+
 from bloobcat.db.active_tariff import ActiveTariffs
 from bloobcat.db.notifications import NotificationMarks
 from bloobcat.db.users import Users
@@ -122,7 +124,7 @@ async def lte_usage_limiter_once() -> int:
         msk_today = datetime.now(MSK_TZ).date()
 
         active_tariffs = await ActiveTariffs.filter(
-            lte_gb_total__gt=0
+            Q(lte_gb_total__gt=0) | Q(user__lte_gb_total__gt=0)
         ).prefetch_related("user")
         active_by_uuid: dict[str, ActiveTariffs] = {}
         min_start = msk_today
@@ -317,7 +319,6 @@ async def lte_usage_limiter_once() -> int:
 
         non_trial_users = await Users.filter(
             is_trial=False,
-            is_subscribed=False,
             active_tariff_id__isnull=True,
             lte_gb_total__not_isnull=True,
             lte_gb_total__gt=0,
@@ -423,9 +424,9 @@ async def lte_usage_limiter_quick_once(recent_minutes: int = 30) -> int:
         return 0
 
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=recent_minutes)
-    active_tariffs = await ActiveTariffs.filter(lte_gb_total__gt=0).prefetch_related(
-        "user"
-    )
+    active_tariffs = await ActiveTariffs.filter(
+        Q(lte_gb_total__gt=0) | Q(user__lte_gb_total__gt=0)
+    ).prefetch_related("user")
     targets: list[ActiveTariffs] = []
     for tariff in active_tariffs:
         user = tariff.user
