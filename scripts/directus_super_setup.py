@@ -1108,6 +1108,37 @@ def apply_field_notes_ru(client: DirectusClient) -> None:
             "triage_updated_at": "Обновлен",
             "created_at": "Создан",
             "reported_at": "Время на клиенте",
+            "fingerprint": "Группа (fingerprint)",
+            "occurrences": "Кол-во повторов",
+            "first_seen_at": "Первое появление",
+            "last_seen_at": "Последнее появление",
+            "app_version": "Версия фронта",
+            "commit_sha": "Commit",
+            "bundle_hash": "Bundle hash",
+            "session_id": "Сессия",
+            "platform": "Платформа",
+            "tg_platform": "Telegram platform",
+            "tg_version": "Telegram version",
+            "viewport_w": "Ширина окна",
+            "viewport_h": "Высота окна",
+            "dpr": "DPR",
+            "connection_type": "Тип сети",
+            "locale": "Локаль",
+            "breadcrumbs": "Действия пользователя",
+            "severity_hint": "Подсказка severity",
+            "request_id": "Request ID",
+            "page_age_ms": "Возраст страницы (мс)",
+            "document_ready_state": "readyState",
+            "document_visibility_state": "visibilityState",
+            "online": "Онлайн",
+            "save_data": "Save-Data",
+            "hardware_concurrency": "Ядра CPU",
+            "device_memory": "Память устройства (ГБ)",
+            "js_heap_used_mb": "JS heap used (MB)",
+            "js_heap_total_mb": "JS heap total (MB)",
+            "js_heap_limit_mb": "JS heap limit (MB)",
+            "sw_controller": "Service Worker",
+            "referrer": "Referrer",
         },
         "in_app_notifications": {
             "id": "ID",
@@ -1611,6 +1642,9 @@ def apply_error_reports_form_ux(client: DirectusClient) -> None:
 
     widths = {
         "id": "quarter",
+        "occurrences": "quarter",
+        "last_seen_at": "half",
+        "first_seen_at": "half",
         "created_at": "half",
         "reported_at": "half",
         "triage_severity": "quarter",
@@ -1618,25 +1652,81 @@ def apply_error_reports_form_ux(client: DirectusClient) -> None:
         "triage_due_at": "half",
         "triage_owner": "quarter",
         "type": "quarter",
+        "app_version": "quarter",
+        "platform": "quarter",
+        "tg_platform": "quarter",
+        "tg_version": "quarter",
+        "locale": "quarter",
+        "connection_type": "quarter",
+        "viewport_w": "quarter",
+        "viewport_h": "quarter",
+        "dpr": "quarter",
+        "online": "quarter",
+        "save_data": "quarter",
+        "hardware_concurrency": "quarter",
+        "device_memory": "quarter",
+        "js_heap_used_mb": "quarter",
+        "js_heap_total_mb": "quarter",
+        "js_heap_limit_mb": "quarter",
+        "page_age_ms": "quarter",
+        "document_ready_state": "quarter",
+        "document_visibility_state": "quarter",
         "code": "half",
+        "fingerprint": "half",
+        "session_id": "half",
+        "request_id": "half",
+        "commit_sha": "half",
+        "bundle_hash": "half",
+        "sw_controller": "full",
+        "referrer": "full",
+        "severity_hint": "quarter",
         "user_id": "quarter",
-        "route": "half",
+        "route": "full",
+        "href": "full",
+        "user_agent": "full",
         "message": "full",
+        "stack": "full",
+        "extra": "full",
+        "breadcrumbs": "full",
         "triage_note": "full",
     }
     sort = {
-        "created_at": 1,
-        "reported_at": 2,
+        # Triage-first ordering: spike status above all else.
+        "occurrences": 1,
+        "last_seen_at": 2,
         "triage_severity": 3,
         "triage_status": 4,
         "triage_due_at": 5,
         "triage_owner": 6,
         "type": 7,
         "code": 8,
-        "user_id": 9,
-        "route": 10,
-        "message": 11,
-        "triage_note": 12,
+        "fingerprint": 9,
+        "first_seen_at": 10,
+        "created_at": 11,
+        "reported_at": 12,
+        "app_version": 13,
+        "commit_sha": 14,
+        "bundle_hash": 15,
+        "platform": 16,
+        "tg_platform": 17,
+        "tg_version": 18,
+        "locale": 19,
+        "connection_type": 20,
+        "viewport_w": 21,
+        "viewport_h": 22,
+        "dpr": 23,
+        "session_id": 24,
+        "request_id": 25,
+        "severity_hint": 26,
+        "user_id": 27,
+        "route": 28,
+        "href": 29,
+        "user_agent": 30,
+        "message": 31,
+        "stack": 32,
+        "extra": 33,
+        "breadcrumbs": 34,
+        "triage_note": 35,
     }
 
     for field, width in widths.items():
@@ -1649,7 +1739,49 @@ def apply_error_reports_form_ux(client: DirectusClient) -> None:
         client, "error_reports", "message", {"interface": "input-multiline"}
     )
     patch_field_meta(
+        client, "error_reports", "stack", {"interface": "input-multiline"}
+    )
+    patch_field_meta(
+        client, "error_reports", "user_agent", {"interface": "input-multiline"}
+    )
+    patch_field_meta(
         client, "error_reports", "triage_note", {"interface": "input-multiline"}
+    )
+    patch_field_meta(
+        client,
+        "error_reports",
+        "extra",
+        {"interface": "input-code", "options": {"language": "json"}},
+    )
+    patch_field_meta(
+        client,
+        "error_reports",
+        "breadcrumbs",
+        {"interface": "input-code", "options": {"language": "json"}},
+    )
+    patch_field_meta(
+        client,
+        "error_reports",
+        "first_seen_at",
+        {"interface": "datetime", "readonly": True},
+    )
+    patch_field_meta(
+        client,
+        "error_reports",
+        "last_seen_at",
+        {"interface": "datetime", "readonly": True},
+    )
+    patch_field_meta(
+        client,
+        "error_reports",
+        "occurrences",
+        {"interface": "input", "readonly": True},
+    )
+    patch_field_meta(
+        client,
+        "error_reports",
+        "fingerprint",
+        {"interface": "input", "readonly": True},
     )
 
 
