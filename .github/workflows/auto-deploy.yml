@@ -447,6 +447,30 @@ jobs:
           docker rm -f "$container_name"
         }
 
+        # Snapshot the bloobcat image *currently* serving traffic so we can roll back
+        # if the new image fails its health check. Capturing both the SHA (immutable)
+        # and the human-readable tag (compose-managed) keeps the restore step simple:
+        # `docker tag <prev_sha> <prev_tag>` + `docker compose up -d --no-build bloobcat`.
+        # If no container is running yet (first-time deploy), both stay empty and rollback
+        # is skipped — there is nothing to revert to.
+        # ORDER MATTERS: this MUST run BEFORE `cleanup_stale_fixed_name_container "bloobcat"`
+        # below, because compose declares `container_name: bloobcat` (fixed name), and the
+        # cleanup helper does `docker rm -f bloobcat` for any container with our compose
+        # project label. Capturing AFTER cleanup is a no-op — the container is already
+        # gone — which is the bug fixed in this commit.
+        ROLLBACK_IMAGE_SHA=""
+        ROLLBACK_IMAGE_REF=""
+        ROLLBACK_CONTAINER_ID="\$(docker compose \$COMPOSE_ARGS ps -q bloobcat 2>/dev/null | head -1 || true)"
+        if [ -n "\$ROLLBACK_CONTAINER_ID" ]; then
+          ROLLBACK_IMAGE_SHA="\$(docker inspect --format '{{.Image}}' "\$ROLLBACK_CONTAINER_ID" 2>/dev/null || true)"
+          ROLLBACK_IMAGE_REF="\$(docker inspect --format '{{.Config.Image}}' "\$ROLLBACK_CONTAINER_ID" 2>/dev/null || true)"
+          if [ -n "\$ROLLBACK_IMAGE_SHA" ] && [ -n "\$ROLLBACK_IMAGE_REF" ]; then
+            echo "📌 Captured rollback target: ref=\$ROLLBACK_IMAGE_REF sha=\$ROLLBACK_IMAGE_SHA"
+          fi
+        else
+          echo "ℹ️  No running bloobcat container found; rollback target unavailable (first-time or fresh deploy)"
+        fi
+
         cleanup_stale_fixed_name_container "bloobcat_db" "true"
         cleanup_stale_fixed_name_container "bloobcat" "true"
         cleanup_stale_fixed_name_container "bloobcat_directus" "true"
@@ -564,25 +588,6 @@ jobs:
           echo "❌ Non-destructive DB credential reconcile failed"
           docker compose \$COMPOSE_ARGS logs --tail=200 bloobcat_db || true
           exit 1
-        fi
-
-        # Snapshot the bloobcat image *currently* serving traffic so we can roll back
-        # if the new image fails its health check. Capturing both the SHA (immutable)
-        # and the human-readable tag (compose-managed) keeps the restore step simple:
-        # `docker tag <prev_sha> <prev_tag>` + `docker compose up -d --no-build bloobcat`.
-        # If no container is running yet (first-time deploy), both stay empty and rollback
-        # is skipped — there is nothing to revert to.
-        ROLLBACK_IMAGE_SHA=""
-        ROLLBACK_IMAGE_REF=""
-        ROLLBACK_CONTAINER_ID="\$(docker compose \$COMPOSE_ARGS ps -q bloobcat 2>/dev/null | head -1 || true)"
-        if [ -n "\$ROLLBACK_CONTAINER_ID" ]; then
-          ROLLBACK_IMAGE_SHA="\$(docker inspect --format '{{.Image}}' "\$ROLLBACK_CONTAINER_ID" 2>/dev/null || true)"
-          ROLLBACK_IMAGE_REF="\$(docker inspect --format '{{.Config.Image}}' "\$ROLLBACK_CONTAINER_ID" 2>/dev/null || true)"
-          if [ -n "\$ROLLBACK_IMAGE_SHA" ] && [ -n "\$ROLLBACK_IMAGE_REF" ]; then
-            echo "📌 Captured rollback target: ref=\$ROLLBACK_IMAGE_REF sha=\$ROLLBACK_IMAGE_SHA"
-          fi
-        else
-          echo "ℹ️  No running bloobcat container found; rollback target unavailable (first-time or fresh deploy)"
         fi
 
         rollback_bloobcat_to_previous_image() {
