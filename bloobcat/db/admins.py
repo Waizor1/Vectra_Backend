@@ -1,7 +1,4 @@
-from uuid import UUID
-
 import bcrypt
-from fastadmin import TortoiseModelAdmin, register, WidgetType
 from tortoise import fields
 from tortoise.models import Model
 
@@ -9,6 +6,14 @@ from bloobcat.settings import admin_settings
 
 
 class Admin(Model):
+    """Legacy admin row used to bootstrap the Directus migration.
+
+    The actual admin UI is Directus; this table is kept so
+    `scripts/migrate_admins_to_directus.py` can read existing rows and
+    so `Admin.init()` keeps a single seed admin record consistent with
+    settings. New admin management happens entirely in Directus.
+    """
+
     username = fields.CharField(max_length=255, unique=True)
     hash_password = fields.CharField(max_length=255)
     is_superuser = fields.BooleanField(default=False)
@@ -30,53 +35,3 @@ class Admin(Model):
 
     def __str__(self):
         return self.username
-
-
-@register(Admin)
-class UserAdmin(TortoiseModelAdmin):
-    list_display = ("id", "username", "is_superuser", "is_active")
-    list_display_links = ("id", "username")
-    list_filter = ("id", "username", "is_superuser", "is_active")
-    search_fields = ("username",)
-    fieldsets = (
-        (None, {"fields": ("username", "hash_password")} ),
-        ("Permissions", {"fields": ("is_superuser", "is_active")} ),
-    )
-    formfield_overrides = {
-        "hash_password": (WidgetType.PasswordInput, {"passwordModalForm": True}),
-    }
-
-    async def authenticate(
-        self, username: str, password: str
-    ) -> UUID | int | None:
-        user = await Admin.filter(username=username, is_active=True).first()
-        if not user:
-            return None
-        if not bcrypt.checkpw(password.encode(), user.hash_password.encode()):
-            return None
-        return user.id
-
-    async def change_password(self, id: UUID | int, password: str) -> None:
-        user = await Admin.filter(id=id).first()
-        if not user:
-            return
-        user.hash_password = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
-        await user.save(update_fields=("hash_password",))
-
-    async def has_add_permission(self, user_id: UUID | int | None = None) -> bool:
-        if not user_id:
-            return False
-        user = await Admin.filter(id=user_id, is_superuser=True).first()
-        return bool(user)
-
-    async def has_change_permission(self, user_id: UUID | int | None = None) -> bool:
-        if not user_id:
-            return False
-        user = await Admin.filter(id=user_id, is_superuser=True).first()
-        return bool(user)
-
-    async def has_delete_permission(self, user_id: UUID | int | None = None) -> bool:
-        if not user_id:
-            return False
-        user = await Admin.filter(id=user_id, is_superuser=True).first()
-        return bool(user)

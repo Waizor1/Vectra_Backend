@@ -5,7 +5,6 @@ import hmac
 from datetime import datetime, date
 from typing import Any, Dict, Optional
 
-from fastadmin import TortoiseModelAdmin, register, WidgetType
 from pydantic import BaseModel as FastAdminBaseModel, Field, field_validator, model_validator
 from tortoise import fields, models
 
@@ -135,72 +134,8 @@ class PromoCodeUpdateSchema(FastAdminBaseModel):
     disabled: bool = Field(False, description="Отключен")
 
 
-# ------------------ FastAdmin ------------------
-@register(PromoBatch)
-class PromoBatchAdmin(TortoiseModelAdmin):
-    list_display = ("id", "title", "created_by", "created_at")
-    readonly_fields = ("id", "created_at")
-    search_fields = ("title", "id")
-    list_filter = ("created_by",)
-    ordering = ("-id",)
-    verbose_name = "Партии промокодов"
-    verbose_name_plural = "Партии промокодов"
-
-
-@register(PromoCode)
-class PromoCodeAdmin(TortoiseModelAdmin):
-    list_display = (
-        "id", "batch_id", "name", "max_activations", "per_user_limit", "expires_at", "disabled", "created_at"
-    )
-    readonly_fields = ("id", "created_at")
-    search_fields = ("id", "name", "code_hmac")
-    list_filter = ("batch_id", "disabled")
-    ordering = ("-id",)
-    verbose_name = "Промокоды"
-    verbose_name_plural = "Промокоды"
-
-    # Кастомные схемы для создания и обновления (если поддерживается версией fastadmin)
-    create_schema = PromoCodeCreateSchema
-    update_schema = PromoCodeUpdateSchema
-
-    # Примечание: поле code_hmac остаётся текстовым без кастомного виджета,
-    # вводите исходный промокод или готовый 64-символьный HMAC (hex)
-
-    async def save_model(self, pk, form_data=None):
-        """Гарантируем генерацию HMAC на сервере. Если введён не hex — считаем, что это исходный код."""
-        if form_data is None:
-            form_data = {}
-        # Приоритет сырого кода, если схема всё-таки подставила raw_code
-        if "raw_code" in form_data:
-            raw_code = str(form_data.get("raw_code") or "").strip()
-            if raw_code:
-                from bloobcat.settings import promo_settings
-                if not promo_settings.hmac_secret:
-                    raise ValueError("PROMO_HMAC_SECRET не настроен")
-                secret = promo_settings.hmac_secret.get_secret_value().encode()
-                form_data["code_hmac"] = hmac.new(secret, raw_code.encode(), hashlib.sha256).hexdigest()
-            form_data.pop("raw_code", None)
-        # Если формы не было поля raw_code, используем code_hmac как универсальное поле ввода
-        if "code_hmac" in form_data:
-            val = str(form_data.get("code_hmac") or "").strip()
-            if val:
-                is_hex = len(val) == 64 and all(c in "0123456789abcdef" for c in val.lower())
-                if not is_hex:
-                    # Пользователь ввёл исходный код — генерируем HMAC
-                    from bloobcat.settings import promo_settings
-                    if not promo_settings.hmac_secret:
-                        raise ValueError("PROMO_HMAC_SECRET не настроен")
-                    secret = promo_settings.hmac_secret.get_secret_value().encode()
-                    form_data["code_hmac"] = hmac.new(secret, val.encode(), hashlib.sha256).hexdigest()
-        return await super().save_model(pk, form_data)
-
-
-@register(PromoUsage)
-class PromoUsageAdmin(TortoiseModelAdmin):
-    list_display = ("id", "promo_code_id", "user_id", "used_at")
-    readonly_fields = ("id", "used_at")
-    search_fields = ("promo_code_id", "user_id")
-    list_filter = ("promo_code_id",)
-    ordering = ("-id",)
-    verbose_name = "Использования промокодов"
-    verbose_name_plural = "Использования промокодов"
+# Управление промокодами и партиями делается только через Directus
+# (collections promo_batches / promo_codes / promo_usages).
+# HMAC-преобразование raw_code теперь должно делаться в Directus flow
+# или через скрипт scripts/seed_promo_codes.py (если оператор импортирует
+# коды массово). FastAdmin регистрации удалены вместе с уходом FastAdmin.

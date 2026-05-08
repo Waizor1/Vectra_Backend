@@ -1,4 +1,3 @@
-from fastadmin import TortoiseModelAdmin, register
 from tortoise import fields, models
 from tortoise.contrib.pydantic import pydantic_model_creator
 
@@ -237,44 +236,3 @@ class Tariffs(models.Model):
 Tariffs_Pydantic = pydantic_model_creator(Tariffs, name="Tariffs")
 
 
-@register(Tariffs)
-class UsersModelAdmin(TortoiseModelAdmin):
-    list_display = (
-        "order",
-        "name",
-        "months",
-        "is_active",
-        "family_plan_enabled",
-        "final_price_default",
-        "final_price_family",
-        "base_price",
-        "progressive_multiplier",
-        "devices_limit_default",
-        "devices_limit_family",
-        "lte_enabled",
-        "lte_price_per_gb",
-        "lte_min_gb",
-        "lte_max_gb",
-        "lte_step_gb",
-        "storefront_badge",
-    )
-    list_editable = (
-        "order",
-        "is_active",
-        "family_plan_enabled",
-        "final_price_default",
-        "final_price_family",
-        "base_price",
-        "progressive_multiplier",
-        "devices_limit_default",
-        "devices_limit_family",
-        "lte_enabled",
-        "lte_price_per_gb",
-        "lte_min_gb",
-        "lte_max_gb",
-        "lte_step_gb",
-        "storefront_badge",
-    )
-    ordering = ("order",)
-    verbose_name = "Тарифы"
-    verbose_name_plural = "Тарифы"

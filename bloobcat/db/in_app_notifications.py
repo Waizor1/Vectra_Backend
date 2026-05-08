@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from fastadmin import TortoiseModelAdmin, register
 from tortoise import fields, models
 
 if TYPE_CHECKING:
@@ -53,46 +52,6 @@ class InAppNotification(models.Model):
         if self.auto_hide_seconds is not None and self.auto_hide_seconds < 1:
             raise ValueError("auto_hide_seconds must be >= 1 or null")
         await super().save(*args, **kwargs)
-
-
-@register(InAppNotification)
-class InAppNotificationAdmin(TortoiseModelAdmin):
-    list_display = (
-        "id",
-        "title",
-        "start_at",
-        "end_at",
-        "max_per_user",
-        "max_per_session",
-        "auto_hide_seconds",
-        "is_active",
-        "created_at",
-    )
-    list_editable = (
-        "title",
-        "max_per_user",
-        "max_per_session",
-        "auto_hide_seconds",
-        "is_active",
-    )
-    search_fields = ("title", "body")
-    list_filter = ("is_active",)
-    ordering = ("-created_at",)
-    readonly_fields = ("id", "created_at", "updated_at")
-    fieldsets = (
-        (None, {"fields": ("title", "body", "is_active")}),
-        (
-            "Расписание",
-            {"fields": ("start_at", "end_at")},
-        ),
-        (
-            "Лимиты",
-            {"fields": ("max_per_user", "max_per_session", "auto_hide_seconds")},
-        ),
-        ("Системные", {"fields": ("id", "created_at", "updated_at")}),
-    )
-    verbose_name = "In-App уведомление"
-    verbose_name_plural = "In-App уведомления"
 
 
 class NotificationView(models.Model):
