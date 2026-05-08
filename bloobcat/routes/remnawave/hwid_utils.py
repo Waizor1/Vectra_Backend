@@ -140,6 +140,27 @@ def has_duplicate_hwid(user_uuid: str, hwid_index: Dict[str, set]) -> bool:
     return False
 
 
+def is_user_already_antitwink_sanctioned(
+    is_trial: bool,
+    used_trial: bool,
+    expired_date,
+    today,
+    has_paid_subscription: bool,
+) -> bool:
+    """True если юзер уже получил анти-твинк санкцию в одном из прошлых тиков catcher-а.
+
+    Why: иначе при каждом тике (каждые 10 минут) повторно сработает блок отзыва триала
+    у юзера с дублирующим HWID без платной подписки — будет спам в админ-чат и в DM юзеру.
+    """
+    return bool(
+        not is_trial
+        and used_trial
+        and expired_date is not None
+        and expired_date <= today
+        and not has_paid_subscription
+    )
+
+
 async def cleanup_user_hwid_devices(user_id: int, user_uuid: Union[str, object]) -> None:
     """
     Удаляет все HWID устройства пользователя в RemnaWave.
