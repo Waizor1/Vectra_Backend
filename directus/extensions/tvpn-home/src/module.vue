@@ -5286,4 +5286,113 @@ onMounted(() => {
 		min-width: 0;
 	}
 }
+
+/* Узкие смартфоны (iPhone SE / 360-414px portrait): уплотняем тапы и убираем горизонтальный скролл. */
+@media (max-width: 480px) {
+	.page {
+		padding: 8px;
+		gap: 8px;
+		overflow-x: hidden;
+	}
+
+	.panel {
+		padding: 10px;
+		border-radius: 12px;
+	}
+
+	.home-hero {
+		padding: 12px;
+		gap: 10px;
+		border-radius: 14px;
+	}
+
+	.home-hero__title {
+		font-size: 18px;
+		line-height: 1.25;
+	}
+
+	.home-hero__subtitle {
+		font-size: 13px;
+	}
+
+	.home-hero__cta-row {
+		flex-direction: column;
+		gap: 8px;
+	}
+
+	.home-hero__cta {
+		width: 100%;
+		min-height: 44px;
+		font-size: 14px;
+	}
+
+	/* Тапы по KPI-карточкам должны быть удобными большим пальцем. */
+	.kpi-grid {
+		gap: 8px;
+	}
+
+	.kpi-grid > * {
+		padding: 12px;
+		min-height: 72px;
+	}
+
+	.nav--premium {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+		padding: 6px;
+		overflow: visible;
+	}
+
+	.nav--premium .nav__item {
+		width: 100%;
+		min-height: 44px;
+		justify-content: flex-start;
+	}
+
+	/* Чарты на мобильном: даём им «дышать», но фиксируем минимальную высоту. */
+	.panel--chart-hub {
+		padding: 8px;
+	}
+
+	.chart-hub__stats {
+		gap: 6px;
+	}
+
+	/* Кнопки в админских тулбарах: единый minimum tap-area. */
+	.ops-toolbar button,
+	.notification-presets__btn,
+	.home-hero__cta {
+		min-height: 44px;
+	}
+
+	/* Жёстко ограничиваем ширину инпутов чтобы не вылазили за viewport. */
+	.notification-form input,
+	.notification-form textarea,
+	.notification-form select {
+		max-width: 100%;
+		box-sizing: border-box;
+	}
+
+	/* Hide легендарных рядов с datatable scroll — даём только важные колонки. */
+	.widgets__row {
+		grid-template-columns: 1fr;
+	}
+}
+
+/* Очень узкий экран (Galaxy Fold / iPhone SE 1-gen): убираем оставшиеся горизонтальные хвосты. */
+@media (max-width: 360px) {
+	.page {
+		padding: 6px;
+	}
+
+	.panel,
+	.home-hero {
+		padding: 8px;
+	}
+
+	.home-hero__title {
+		font-size: 16px;
+	}
+}
 </style>

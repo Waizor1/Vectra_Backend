@@ -1632,4 +1632,41 @@ onMounted(() => {
     min-width: 240px;
   }
 }
+
+/* Узкие смартфоны: вертикальный nav, full-width кнопки, 44px tap targets. */
+@media (max-width: 480px) {
+  .page { padding: 8px; gap: 8px; overflow-x: hidden; }
+  .panel { padding: 10px; border-radius: 12px; }
+  .hero { padding: 12px; }
+  .hero__title { font-size: 18px; line-height: 1.25; }
+  .hero__subtitle { font-size: 13px; }
+
+  .nav--premium {
+    flex-direction: column;
+    overflow: visible;
+  }
+  .nav--premium .nav__brand,
+  .nav--premium .nav__section {
+    min-width: 0;
+    width: 100%;
+  }
+  .nav--premium .nav__item {
+    min-height: 44px;
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .control-links { grid-template-columns: 1fr; }
+  .kpi-grid { grid-template-columns: 1fr; gap: 8px; }
+  .kpi-grid > * { padding: 12px; min-height: 72px; }
+
+  /* Inputs и кнопки достигают минимум 44px для удобного тапа. */
+  input, select, textarea { min-height: 44px; font-size: 16px; }
+  :deep(.v-button) { min-height: 44px; }
+}
+
+@media (max-width: 360px) {
+  .page { padding: 6px; }
+  .panel, .hero { padding: 8px; }
+}
 </style>
