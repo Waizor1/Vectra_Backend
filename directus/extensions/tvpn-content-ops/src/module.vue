@@ -733,4 +733,44 @@ onMounted(() => {
 		width: 100%;
 	}
 }
+
+/* Узкие смартфоны (≤480px): уплотняем, добавляем 44px tap targets, скрываем горизонтальный скролл. */
+@media (max-width: 480px) {
+	.ops-page {
+		padding: 8px;
+		overflow-x: hidden;
+	}
+
+	.toolbar-numbers {
+		grid-template-columns: 1fr;
+	}
+
+	.hero__toolbar {
+		gap: 8px;
+	}
+
+	.nav__item {
+		min-height: 44px;
+	}
+
+	input, select, textarea {
+		min-height: 44px;
+		font-size: 16px;
+	}
+
+	:deep(.v-button) {
+		min-height: 44px;
+	}
+
+	/* Carousel-/таблицы в Quick Search должны прокручиваться сами, без вылета за viewport. */
+	.quick-search {
+		overflow-x: auto;
+	}
+}
+
+@media (max-width: 360px) {
+	.ops-page {
+		padding: 6px;
+	}
+}
 </style>

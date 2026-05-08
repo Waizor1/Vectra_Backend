@@ -475,8 +475,25 @@ def apply_collection_ux(client: DirectusClient) -> None:
             "icon": "people",
             "note": "Пользователи, подписки, лимиты, блокировки",
             "sort": 1,
-            "display_template": "{{username}} — {{full_name}}",
+            "display_template": "{{username}} · {{full_name}}",
             "hidden": False,
+            # Сортируем список по дате регистрации (новые сверху) по умолчанию.
+            "sort_field": "registration_date",
+            # Архив = блокировка: «удалить» в UI просто переключает is_blocked.
+            "archive_field": "is_blocked",
+            "archive_value": "true",
+            "unarchive_value": "false",
+            "archive_app_filter": True,
+            # Whitelist полей для «Дублировать»: НЕ копируем UUID/баланс/RemnaWave,
+            # это ломает учёт. Берём только профиль/настройки/лимиты.
+            "item_duplication_fields": [
+                "language_code",
+                "lte_gb_total",
+                "hwid_limit",
+                "is_trial",
+                "is_partner",
+                "custom_referral_percent",
+            ],
             "translations": [{"language": "ru-RU", "translation": "Пользователи"}],
         },
         "active_tariffs": {
@@ -1727,6 +1744,84 @@ def ensure_users_presentation_dividers(client: DirectusClient) -> None:
         "referral_first_payment_rewarded": {
             "interface": "toggle",
             "options": {"label": "Награда за первый платеж"},
+        },
+        # M2O связи: показываем читаемые шаблоны вместо голого ID.
+        "referred_by": {
+            "interface": "select-dropdown-m2o",
+            "display": "related-values",
+            "display_options": {
+                "template": "{{username}} · {{full_name}}",
+            },
+            "options": {
+                "template": "{{username}} · {{full_name}}",
+                "enableCreate": False,
+            },
+        },
+        "active_tariff": {
+            "interface": "select-dropdown-m2o",
+            "display": "related-values",
+            "display_options": {
+                "template": "{{name}} · {{months}} мес",
+            },
+            "options": {
+                "template": "{{name}} · {{months}} мес · {{final_price_default}}₽",
+                "enableCreate": False,
+            },
+        },
+        # Цветные «бейджи» для bool-флагов в форме редактирования.
+        "is_blocked": {
+            "interface": "boolean",
+            "display": "boolean",
+            "display_options": {
+                "labelOn": "Заблокирован",
+                "labelOff": "OK",
+                "iconOn": "block",
+                "iconOff": "check_circle",
+                "colorOn": "var(--danger)",
+                "colorOff": "var(--success)",
+            },
+        },
+        "is_trial": {
+            "interface": "boolean",
+            "display": "boolean",
+            "display_options": {
+                "labelOn": "На триале",
+                "labelOff": "—",
+                "iconOn": "schedule",
+                "colorOn": "var(--primary)",
+            },
+        },
+        "is_partner": {
+            "interface": "boolean",
+            "display": "boolean",
+            "display_options": {
+                "labelOn": "Партнёр",
+                "labelOff": "—",
+                "iconOn": "handshake",
+                "colorOn": "var(--purple, #A855F7)",
+            },
+        },
+        "is_subscribed": {
+            "interface": "boolean",
+            "display": "boolean",
+            "display_options": {
+                "labelOn": "Подписан",
+                "labelOff": "Без подписки",
+                "iconOn": "check_circle",
+                "iconOff": "cancel",
+                "colorOn": "var(--success)",
+                "colorOff": "var(--foreground-subdued)",
+            },
+        },
+        "is_admin": {
+            "interface": "boolean",
+            "display": "boolean",
+            "display_options": {
+                "labelOn": "Админ",
+                "labelOff": "—",
+                "iconOn": "shield_person",
+                "colorOn": "var(--warning)",
+            },
         },
     }
     for field, meta_patch in explicit_interfaces.items():
@@ -4771,6 +4866,40 @@ def ensure_role_presets(client: DirectusClient) -> None:
             ],
             "default_sort": "-registration_date",
             "bookmarks": [
+                {
+                    "bookmark": "Пользователи · Активные",
+                    "sort": "-registration_date",
+                    "filter": {
+                        "_and": [
+                            {"is_subscribed": {"_eq": True}},
+                            {"is_blocked": {"_eq": False}},
+                        ]
+                    },
+                    "color": "#22C55E",
+                },
+                {
+                    "bookmark": "Пользователи · На триале",
+                    "sort": "-trial_started_at",
+                    "filter": {"is_trial": {"_eq": True}},
+                    "color": "#0EA5E9",
+                },
+                {
+                    "bookmark": "Пользователи · Партнёры",
+                    "sort": "-balance",
+                    "filter": {"is_partner": {"_eq": True}},
+                    "color": "#A855F7",
+                },
+                {
+                    "bookmark": "Пользователи · Без RemnaWave UUID",
+                    "sort": "-registration_date",
+                    "filter": {
+                        "_and": [
+                            {"is_subscribed": {"_eq": True}},
+                            {"remnawave_uuid": {"_null": True}},
+                        ]
+                    },
+                    "color": "#EF4444",
+                },
                 {
                     "bookmark": "Пользователи · Риск",
                     "sort": "-registration_date",
