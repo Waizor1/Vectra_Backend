@@ -24,11 +24,13 @@ def _read(relative_path: str) -> str:
 
 def test_admin_widgets_rejects_non_admin_before_routes():
     source_url = (ROOT / "directus/extensions/admin-widgets/src/index.js").as_uri()
-    legacy_source = _read("directus/extensions/endpoints/admin-widgets/index.js")
+    src_source = _read("directus/extensions/admin-widgets/src/index.js")
     dist_source = _read("directus/extensions/admin-widgets/dist/index.js")
 
-    assert "function isAdminRequest(req)" in legacy_source
-    assert "router.use((req, res, next)" in legacy_source
+    # Guard the canonical top-level package (Directus 11 only loads these,
+    # the legacy by-type endpoints/<name>/index.js layout was purged).
+    assert "function isAdminRequest(req)" in src_source
+    assert "router.use((req, res, next)" in src_source
     assert "Admin access required" in dist_source
 
     _node(
@@ -75,10 +77,10 @@ def test_admin_widgets_rejects_non_admin_before_routes():
 
 def test_tariff_preview_proxy_is_admin_only():
     endpoint_url = (ROOT / "directus/extensions/tariff-studio/src/index.js").as_uri()
-    legacy_source = _read("directus/extensions/endpoints/tariff-studio/index.js")
+    src_source = _read("directus/extensions/tariff-studio/src/index.js")
     dist_source = _read("directus/extensions/tariff-studio/dist/index.js")
 
-    assert "Admin access required" in legacy_source
+    assert "Admin access required" in src_source
     assert "Admin access required" in dist_source
 
     _node(
@@ -137,10 +139,10 @@ def test_tariff_preview_proxy_is_admin_only():
 
 def test_promo_hmac_hook_fails_closed_without_secret_and_hashes_with_secret():
     hook_url = (ROOT / "directus/extensions/promo-code-hmac/src/index.js").as_uri()
-    legacy_source = _read("directus/extensions/hooks/promo-code-hmac/index.js")
+    src_source = _read("directus/extensions/promo-code-hmac/src/index.js")
     dist_source = _read("directus/extensions/promo-code-hmac/dist/index.js")
 
-    assert "PROMO_HMAC_SECRET is not configured" in legacy_source
+    assert "PROMO_HMAC_SECRET is not configured" in src_source
     assert "PROMO_HMAC_SECRET is not configured" in dist_source
 
     _node(
