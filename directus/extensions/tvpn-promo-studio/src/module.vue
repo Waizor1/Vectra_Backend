@@ -16,17 +16,25 @@
             <span class="nav__item-icon"><v-icon name="workspace_premium" /></span>
             <span class="nav__item-label">Studio</span>
           </router-link>
+          <router-link class="nav__item" :to="{ path: '/tvpn-segment-studio' }">
+            <span class="nav__item-icon"><v-icon name="campaign" /></span>
+            <span class="nav__item-label">Сегментные акции</span>
+          </router-link>
+          <router-link class="nav__item" :to="{ path: '/tvpn-tariff-studio' }">
+            <span class="nav__item-icon"><v-icon name="tune" /></span>
+            <span class="nav__item-label">Тарифы</span>
+          </router-link>
           <router-link class="nav__item" :to="{ path: '/tvpn-home' }">
             <span class="nav__item-icon"><v-icon name="home" /></span>
             <span class="nav__item-label">Главная</span>
           </router-link>
           <router-link class="nav__item" :to="{ path: '/content/promo_batches' }">
             <span class="nav__item-icon"><v-icon name="inventory_2" /></span>
-            <span class="nav__item-label">Кампании</span>
+            <span class="nav__item-label">Raw кампании</span>
           </router-link>
           <router-link class="nav__item" :to="{ path: '/content/promo_codes' }">
             <span class="nav__item-icon"><v-icon name="confirmation_number" /></span>
-            <span class="nav__item-label">Промокоды</span>
+            <span class="nav__item-label">Raw промокоды</span>
           </router-link>
         </div>
       </div>

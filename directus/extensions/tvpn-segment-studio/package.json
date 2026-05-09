@@ -1,6 +1,6 @@
 {
-  "name": "tvpn-content-ops",
-  "version": "1.2.0",
+  "name": "tvpn-segment-studio",
+  "version": "1.0.0",
   "type": "module",
   "keywords": [
     "directus-extension"

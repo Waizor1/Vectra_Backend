@@ -1,7 +1,6 @@
 import asyncio
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
-import json
 
 from bloobcat.db.users import Users
 from bloobcat.db.notifications import NotificationMarks
@@ -32,21 +31,6 @@ async def _send_referral_prompt_if_due(user: Users, now_msk: datetime) -> bool:
         return False
 
     should_send_now = _should_send_today(now_msk)
-    # region agent log
-    try:
-        with open("/Users/urijgurov/Documents/resilcio/documents/PROJECTS/Разработки/Vectra/VectraConnectbot/.cursor/debug.log", "a", encoding="utf-8") as f:
-            f.write(json.dumps({
-                "sessionId": "debug-session",
-                "runId": "pre-fix",
-                "hypothesisId": "A",
-                "location": "bloobcat/tasks/referral_prompts.py:_send_referral_prompt_if_due",
-                "message": "Referral prompt decision (pre-send gate)",
-                "data": {"daysSince": days_since, "shouldSendNow": should_send_now},
-                "timestamp": int(datetime.now().timestamp() * 1000),
-            }, ensure_ascii=False) + "\n")
-    except Exception:
-        pass
-    # endregion
 
     # Важно: не "догоняем" пропущенные этапы (7/14/30) пачкой.
     # Отправляем только самый актуальный этап для текущего days_since.
@@ -60,23 +44,6 @@ async def _send_referral_prompt_if_due(user: Users, now_msk: datetime) -> bool:
             .order_by("-sent_at")
             .first()
         )
-        # region agent log
-        try:
-            last_age_days = None
-            if last_30d and last_30d.sent_at:
-                last_age_days = (now_msk.date() - last_30d.sent_at.astimezone(MOSCOW).date()).days
-            with open("/Users/urijgurov/Documents/resilcio/documents/PROJECTS/Разработки/Vectra/VectraConnectbot/.cursor/debug.log", "a", encoding="utf-8") as f:
-                f.write(json.dumps({
-                    "sessionId": "debug-session",
-                    "runId": "pre-fix",
-                    "hypothesisId": "B",
-                    "location": "bloobcat/tasks/referral_prompts.py:_send_referral_prompt_if_due",
-                    "message": "30d last mark age",
-                    "data": {"lastAgeDays": last_age_days, "hasLast": bool(last_30d)},
-                    "timestamp": int(datetime.now().timestamp() * 1000),
-                }, ensure_ascii=False) + "\n")
-        except Exception:
-            pass
         # endregion
 
         if last_30d is None:
