@@ -111,17 +111,40 @@ function openTarget() {
 .id-link-editor__open {
   min-width: 72px;
   height: 40px;
-  border: 0;
+  border: 1px solid var(--theme--primary, #6b7cff);
   border-radius: var(--theme--border-radius, 8px);
-  padding: 0 12px;
+  padding: 0 14px;
   font-weight: 600;
   cursor: pointer;
-  color: #fff;
-  background: linear-gradient(135deg, #5b7dff 0%, #6d5cff 100%);
+  color: var(--theme--primary-foreground, #fff);
+  background: var(--theme--primary, #6b7cff);
+  transition: filter 0.15s ease, transform 0.15s ease;
+}
+
+.id-link-editor__open:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.id-link-editor__open:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.id-link-editor__open:focus-visible {
+  outline: 2px solid var(--theme--primary, #6b7cff);
+  outline-offset: 2px;
 }
 
 .id-link-editor__open:disabled {
   opacity: 0.45;
   cursor: not-allowed;
+}
+
+@media (max-width: 480px) {
+  .id-link-editor__input,
+  .id-link-editor__open {
+    min-height: 44px;
+    height: auto;
+    font-size: 16px;
+  }
 }
 </style>
