@@ -589,7 +589,9 @@ def test_directus_super_setup_aligns_user_relations_with_cascade_delete_action()
 
 
 def test_remnawave_sync_hook_has_predelete_fk_safety_cleanup_for_users():
-    content = _read("directus/extensions/hooks/remnawave-sync/index.js")
+    # The legacy by-type extensions/hooks/<name>/index.js layout was purged;
+    # Directus 11 only loads top-level packages with their own package.json.
+    content = _read("directus/extensions/remnawave-sync/src/index.js")
 
     assert "const SCHEMA_CAPABILITY_CACHE = {" in content
     assert "tables: new Map()," in content
@@ -747,7 +749,7 @@ def test_remnawave_sync_extension_variants_keep_predelete_fk_safety_cleanup_for_
 def test_remnawave_sync_users_cleanup_transaction_rolls_back_on_mutation_failure_proxy():
     script = textwrap.dedent(
         """
-        import registerHook from './directus/extensions/hooks/remnawave-sync/index.js';
+        import registerHook from './directus/extensions/remnawave-sync/src/index.js';
 
         const deepClone = (value) => JSON.parse(JSON.stringify(value));
 
@@ -866,7 +868,7 @@ def test_remnawave_sync_users_cleanup_transaction_rolls_back_on_mutation_failure
 def test_remnawave_sync_users_cleanup_ignores_oversized_numeric_string_ids_proxy():
     script = textwrap.dedent(
         """
-        import registerHook from './directus/extensions/hooks/remnawave-sync/index.js';
+        import registerHook from './directus/extensions/remnawave-sync/src/index.js';
 
         const cleanupTargets = [];
 
