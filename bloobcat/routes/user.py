@@ -396,12 +396,18 @@ async def check(user: Users = Depends(validate)) -> Dict[str, Any]:
                     "devices_decrease_remaining": remaining_decreases,
                 }
 
-        if active_tariff_data is None and bool(user.is_trial):
-            trial_lte_total = (
-                float(user.lte_gb_total)
-                if user.lte_gb_total is not None
-                else float(await read_trial_lte_limit_gb())
-            )
+        if active_tariff_data is None and (
+            bool(user.is_trial)
+            or (user.lte_gb_total is not None and user.lte_gb_total > 0)
+        ):
+            if bool(user.is_trial):
+                trial_lte_total = (
+                    float(user.lte_gb_total)
+                    if user.lte_gb_total is not None
+                    else float(await read_trial_lte_limit_gb())
+                )
+            else:
+                trial_lte_total = float(user.lte_gb_total or 0)
             trial_lte_used = (
                 await _fetch_trial_lte_used_gb(user)
                 if trial_lte_total > 0
