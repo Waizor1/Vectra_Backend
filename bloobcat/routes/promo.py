@@ -150,6 +150,13 @@ async def redeem_promo(req: PromoValidateRequest, user=Depends(validate)):
         if isinstance(extend_days, int) and extend_days > 0:
             await user.extend_subscription(extend_days)
 
+        # 1.5) Активация триал-аккаунта: создаём синтетический ActiveTariffs,
+        # чтобы пользователь мог пользоваться платными top-up LTE/устройств.
+        if effects.get("activate_account"):
+            from bloobcat.services.promo_activation import activate_trial_account
+
+            await activate_trial_account(user, effects=effects)
+
         # 2) Увеличение лимита устройств (HWID)
         add_hwid = effects.get("add_hwid")
         if isinstance(add_hwid, int) and add_hwid > 0:
