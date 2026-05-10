@@ -448,6 +448,167 @@ def test_admin_widgets_utm_stats_route_registered_and_returns_shape():
     )
 
 
+def test_admin_widgets_utm_stats_timeseries_route_registered():
+    """The /utm-stats/timeseries route must be present in src + dist, accept
+    `utm` + `bucket` params, and reject missing utm with 400."""
+
+    source_url = (ROOT / "directus/extensions/admin-widgets/src/index.js").as_uri()
+    src_source = _read("directus/extensions/admin-widgets/src/index.js")
+    dist_source = _read("directus/extensions/admin-widgets/dist/index.js")
+
+    assert '"/utm-stats/timeseries"' in src_source, "timeseries route missing from src"
+    assert "/utm-stats/timeseries" in dist_source, "timeseries route missing from dist"
+    assert "date_trunc" in src_source, "timeseries must bucket via date_trunc"
+    assert "utm is required" in src_source
+
+    _node(
+        f"""
+        import registerEndpoint from {source_url!r};
+
+        const routes = new Map();
+        const router = {{
+          use() {{}},
+          get(path, fn) {{ routes.set(path, fn); }},
+          post() {{}},
+        }};
+
+        const fakeDatabase = (table) => {{
+          const qb = {{
+            select() {{ return qb; }},
+            where(conds) {{
+              if (conds && typeof conds === 'object' && conds.table_name === 'users') {{
+                qb.first = async () => ({{ table_name: 'users' }});
+              }} else {{
+                qb.first = async () => null;
+              }}
+              return qb;
+            }},
+            count() {{ return qb; }},
+            sum() {{ return qb; }},
+            first: async () => null,
+          }};
+          return qb;
+        }};
+        fakeDatabase.raw = async (sql) => ({{
+          rows: [
+            {{ bucket_ts: '2026-05-01T00:00:00Z', registrations: 7, paid_count: 1, revenue_rub: 150 }},
+            {{ bucket_ts: '2026-05-02T00:00:00Z', registrations: 12, paid_count: 3, revenue_rub: 450 }},
+          ],
+        }});
+
+        registerEndpoint(router, {{ database: fakeDatabase }});
+        const handler = routes.get('/utm-stats/timeseries');
+        if (!handler) throw new Error('timeseries route was not registered');
+
+        // Missing utm → 400.
+        let badStatus = 0;
+        let badPayload = null;
+        await handler(
+          {{ query: {{}} }},
+          {{
+            status(code) {{ badStatus = code; return this; }},
+            json(payload) {{ badPayload = payload; return payload; }},
+          }},
+        );
+        if (badStatus !== 400) throw new Error(`expected 400 for missing utm, got ${{badStatus}}`);
+        if (!String(badPayload?.error).includes('utm is required')) throw new Error('unexpected missing-utm payload');
+
+        // Valid utm + week bucket → buckets returned.
+        let captured = null;
+        await handler(
+          {{ query: {{ utm: 'qr_rt_launch_2026_05', bucket: 'week', since: '2026-05-01' }} }},
+          {{
+            json(payload) {{ captured = payload; return payload; }},
+            status() {{ throw new Error('valid request must not be rejected'); }},
+          }},
+        );
+        if (!captured) throw new Error('handler did not respond');
+        if (captured.utm !== 'qr_rt_launch_2026_05') throw new Error('utm not echoed');
+        if (captured.bucket !== 'week') throw new Error('bucket not coerced to week');
+        if (!Array.isArray(captured.buckets) || captured.buckets.length !== 2) throw new Error('buckets missing or wrong shape');
+        if (captured.buckets[0].registrations !== 7) throw new Error('registration count not passed through');
+        if (captured.buckets[1].revenue_rub !== 450) throw new Error('revenue not passed through');
+        """
+    )
+
+
+def test_admin_widgets_utm_stats_funnel_route_registered():
+    """The /utm-stats/funnel route must be present, require utm, and compute
+    step-to-step + step-to-total ratios from the SQL aggregate row."""
+
+    source_url = (ROOT / "directus/extensions/admin-widgets/src/index.js").as_uri()
+    src_source = _read("directus/extensions/admin-widgets/src/index.js")
+    dist_source = _read("directus/extensions/admin-widgets/dist/index.js")
+
+    assert '"/utm-stats/funnel"' in src_source, "funnel route missing from src"
+    assert "/utm-stats/funnel" in dist_source, "funnel route missing from dist"
+    assert "ratio_total" in src_source
+    assert "ratio_prev" in src_source
+
+    _node(
+        f"""
+        import registerEndpoint from {source_url!r};
+
+        const routes = new Map();
+        const router = {{
+          use() {{}},
+          get(path, fn) {{ routes.set(path, fn); }},
+          post() {{}},
+        }};
+
+        const fakeDatabase = (table) => {{
+          const qb = {{
+            select() {{ return qb; }},
+            where(conds) {{
+              if (conds && typeof conds === 'object' && conds.table_name === 'users') {{
+                qb.first = async () => ({{ table_name: 'users' }});
+              }} else {{
+                qb.first = async () => null;
+              }}
+              return qb;
+            }},
+            count() {{ return qb; }},
+            sum() {{ return qb; }},
+            first: async () => null,
+          }};
+          return qb;
+        }};
+        fakeDatabase.raw = async (sql) => ({{
+          rows: [{{
+            total: 100,
+            registered: 75,
+            used_trial: 60,
+            key_activated: 35,
+            active_subscription: 18,
+            paid: 0,
+          }}],
+        }});
+
+        registerEndpoint(router, {{ database: fakeDatabase }});
+        const handler = routes.get('/utm-stats/funnel');
+        if (!handler) throw new Error('funnel route was not registered');
+
+        let captured = null;
+        await handler(
+          {{ query: {{ utm: 'qr_rt_launch_2026_05' }} }},
+          {{
+            json(payload) {{ captured = payload; return payload; }},
+            status() {{ throw new Error('valid request must not be rejected'); }},
+          }},
+        );
+        if (!captured) throw new Error('handler did not respond');
+        if (captured.utm !== 'qr_rt_launch_2026_05') throw new Error('utm not echoed');
+        if (!Array.isArray(captured.steps) || captured.steps.length !== 6) throw new Error('expected 6 funnel steps');
+        if (captured.steps[0].key !== 'total' || captured.steps[0].count !== 100) throw new Error('step 0 must be total=100');
+        if (captured.steps[1].key !== 'registered' || captured.steps[1].count !== 75) throw new Error('step 1 must be registered=75');
+        if (Math.abs(captured.steps[1].ratio_total - 0.75) > 0.001) throw new Error('step 1 ratio_total wrong');
+        if (Math.abs(captured.steps[1].ratio_prev - 0.75) > 0.001) throw new Error('step 1 ratio_prev wrong (75/100)');
+        if (Math.abs(captured.steps[2].ratio_prev - 0.80) > 0.001) throw new Error('step 2 ratio_prev wrong (60/75)');
+        if (captured.steps[5].count !== 0) throw new Error('paid step missing');
+        """
+    )
+
+
 def test_tvpn_utm_stats_module_extension_loads():
     """The tvpn-utm-stats module bundle must declare the right id and call /admin-widgets/utm-stats."""
 

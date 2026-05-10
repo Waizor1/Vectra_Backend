@@ -37,6 +37,18 @@
     </template>
 
     <template #actions>
+      <div class="bucket-toggle" role="group" aria-label="Шаг графика">
+        <button
+          type="button"
+          :class="['bucket-toggle__btn', bucket === 'day' ? 'bucket-toggle__btn--active' : '']"
+          @click="setBucket('day')"
+        >День</button>
+        <button
+          type="button"
+          :class="['bucket-toggle__btn', bucket === 'week' ? 'bucket-toggle__btn--active' : '']"
+          @click="setBucket('week')"
+        >Неделя</button>
+      </div>
       <v-button secondary :disabled="!sources.length" @click="exportCsv">
         <v-icon name="download" left />
         Экспорт CSV
@@ -81,8 +93,12 @@
               />
             </label>
             <label class="field field--compact">
-              <span>С даты регистрации</span>
-              <input v-model="filters.since" type="date" class="input" @change="refresh" />
+              <span>С даты</span>
+              <input v-model="filters.since" type="date" class="input" @change="onRangeChange" />
+            </label>
+            <label class="field field--compact">
+              <span>До даты</span>
+              <input v-model="filters.until" type="date" class="input" @change="onRangeChange" />
             </label>
             <label class="field field--compact">
               <span>Лимит строк</span>
@@ -90,6 +106,16 @@
                 <option v-for="opt in limitOptions" :key="opt" :value="opt">{{ opt }}</option>
               </select>
             </label>
+          </div>
+          <div class="hero__presets">
+            <span class="hero__presets-label">Период:</span>
+            <button
+              v-for="preset in datePresets"
+              :key="preset.key"
+              type="button"
+              :class="['preset-btn', activePreset === preset.key ? 'preset-btn--active' : '']"
+              @click="applyPreset(preset.key)"
+            >{{ preset.label }}</button>
           </div>
         </section>
 
@@ -127,6 +153,77 @@
             </div>
           </section>
 
+          <section v-if="insights" class="insights">
+            <div class="insights__card">
+              <div class="insights__label">Регистрации</div>
+              <div class="insights__value">{{ formatNumber(insights.registrations) }}</div>
+              <div :class="['insights__delta', deltaClass(insights.registrations_delta)]">
+                {{ formatDelta(insights.registrations_delta) }}
+              </div>
+              <div class="insights__hint">vs предыдущий период {{ insights.period_days }}д</div>
+            </div>
+            <div class="insights__card">
+              <div class="insights__label">Платных юзеров</div>
+              <div class="insights__value">{{ formatNumber(insights.paid) }}</div>
+              <div :class="['insights__delta', deltaClass(insights.paid_delta)]">
+                {{ formatDelta(insights.paid_delta) }}
+              </div>
+              <div class="insights__hint">{{ formatPercent(insights.paid, insights.registrations) }} от регистраций</div>
+            </div>
+            <div class="insights__card">
+              <div class="insights__label">Выручка</div>
+              <div class="insights__value">{{ formatRub(insights.revenue) }}</div>
+              <div :class="['insights__delta', deltaClass(insights.revenue_delta)]">
+                {{ formatDelta(insights.revenue_delta, true) }}
+              </div>
+              <div class="insights__hint">ARPU {{ formatRub(insights.arpu) }}</div>
+            </div>
+            <div class="insights__card">
+              <div class="insights__label">Доля косвенных</div>
+              <div class="insights__value">{{ formatPercent(insights.indirect_users, insights.registrations) }}</div>
+              <div class="insights__hint">D {{ formatNumber(insights.direct_users) }} · I {{ formatNumber(insights.indirect_users) }}</div>
+            </div>
+          </section>
+
+          <section v-if="compareSet.size > 0" class="compare-panel">
+            <div class="compare-panel__head">
+              <div>
+                <strong>Сравнение: {{ compareSet.size }} {{ compareSet.size === 1 ? 'кампания' : 'кампании' }}</strong>
+                <span class="compare-panel__hint">Снять чекбоксы или кликнуть «Сбросить», чтобы выйти.</span>
+              </div>
+              <div class="compare-panel__actions">
+                <v-button x-small secondary @click="clearCompare">Сбросить</v-button>
+              </div>
+            </div>
+            <div v-if="compareLoading" class="compare-panel__loading">
+              <v-progress-circular indeterminate small />
+              <span>Подгружаем серии…</span>
+            </div>
+            <template v-else>
+              <div class="compare-panel__legend">
+                <div
+                  v-for="(item, idx) in compareSeries"
+                  :key="item.utm"
+                  class="compare-legend-item"
+                  :style="{ '--legend-color': compareColors[idx % compareColors.length] }"
+                >
+                  <span class="compare-legend-item__swatch"></span>
+                  <span class="compare-legend-item__label">{{ item.utm || '— без UTM —' }}</span>
+                </div>
+              </div>
+              <div class="compare-panel__chart" v-html="renderCompareSvg(640, 220)"></div>
+              <div class="compare-panel__metric-tabs">
+                <button
+                  v-for="m in compareMetricOptions"
+                  :key="m.key"
+                  type="button"
+                  :class="['metric-tab', compareMetric === m.key ? 'metric-tab--active' : '']"
+                  @click="compareMetric = m.key"
+                >{{ m.label }}</button>
+              </div>
+            </template>
+          </section>
+
           <section v-if="sources.length === 0" class="state-card">
             <v-icon name="inbox" />
             <div class="state-card__title">Нет данных по выбранным фильтрам</div>
@@ -148,6 +245,9 @@
               <table class="table">
                 <thead>
                   <tr>
+                    <th class="table__col table__col--check">
+                      <span class="th-tooltip" title="Сравнить выбранные">⇄</span>
+                    </th>
                     <th
                       v-for="col in columns"
                       :key="col.key"
@@ -167,6 +267,16 @@
                       :class="['table__row--clickable', expanded.has(row.utm ?? '__no_utm__') ? 'table__row--expanded' : '']"
                       @click="toggleExpand(row)"
                     >
+                      <td class="table__col table__col--check" @click.stop>
+                        <input
+                          type="checkbox"
+                          class="compare-checkbox"
+                          :checked="compareSet.has(row.utm ?? '__no_utm__')"
+                          :disabled="!compareSet.has(row.utm ?? '__no_utm__') && compareSet.size >= 5"
+                          :title="compareSet.size >= 5 && !compareSet.has(row.utm ?? '__no_utm__') ? 'Максимум 5 кампаний для сравнения' : 'Добавить в сравнение'"
+                          @change="toggleCompare(row)"
+                        />
+                      </td>
                       <td class="table__col table__col--utm">
                         <button
                           v-if="row.utm"
@@ -220,7 +330,43 @@
                       <td class="table__col table__col--date">{{ formatDate(row.last_seen) }}</td>
                     </tr>
                     <tr v-if="expanded.has(row.utm ?? '__no_utm__')" class="table__row--detail">
-                      <td :colspan="columns.length">
+                      <td :colspan="columns.length + 1">
+                        <div class="detail-layout">
+                          <div class="detail-pane detail-pane--chart">
+                            <div class="detail-pane__head">
+                              <span class="detail-pane__title">Динамика по {{ bucket === 'day' ? 'дням' : 'неделям' }}</span>
+                              <span v-if="detailCache.get(row.utm ?? '__no_utm__')?.timeseries" class="detail-pane__hint">
+                                {{ detailCache.get(row.utm ?? '__no_utm__').timeseries.buckets.length }} точек
+                              </span>
+                            </div>
+                            <div v-if="isDetailLoading(row)" class="detail-loading">
+                              <v-progress-circular indeterminate small />
+                              <span>Подгружаем…</span>
+                            </div>
+                            <div
+                              v-else-if="hasDetail(row)"
+                              class="detail-chart"
+                              v-html="renderTimeseriesSvg(detailCache.get(row.utm ?? '__no_utm__').timeseries, 520, 200)"
+                            ></div>
+                            <div v-else class="detail-empty">Нет данных</div>
+                          </div>
+                          <div class="detail-pane detail-pane--funnel">
+                            <div class="detail-pane__head">
+                              <span class="detail-pane__title">Воронка</span>
+                              <span class="detail-pane__hint">% от total / % от пред. шага</span>
+                            </div>
+                            <div v-if="isDetailLoading(row)" class="detail-loading">
+                              <v-progress-circular indeterminate small />
+                              <span>Подгружаем…</span>
+                            </div>
+                            <div
+                              v-else-if="hasDetail(row)"
+                              class="detail-funnel"
+                              v-html="renderFunnelSvg(detailCache.get(row.utm ?? '__no_utm__').funnel, 360, 240)"
+                            ></div>
+                            <div v-else class="detail-empty">Нет данных</div>
+                          </div>
+                        </div>
                         <div class="detail-grid">
                           <div class="detail-card">
                             <div class="detail-card__label">Конверсия в регистрацию</div>
@@ -286,7 +432,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted } from "vue";
+import { ref, reactive, computed, onMounted, watch } from "vue";
 import { useApi } from "@directus/extensions-sdk";
 
 const api = useApi();
@@ -296,20 +442,50 @@ const errorMessage = ref("");
 const sources = ref([]);
 const totals = reactive({ users_total: 0, users_with_utm: 0, users_no_utm: 0 });
 const generatedAt = ref(null);
-const filtersApplied = reactive({ utm_prefix: null, since: null, limit: 200 });
+const filtersApplied = reactive({ utm_prefix: null, since: null, until: null, limit: 200 });
 
 const limitOptions = [50, 100, 200, 500, 1000];
 
 const filters = reactive({
   utm_prefix: "",
   since: "",
+  until: "",
   limit: 200,
 });
 
-// Client-side state: local search + sort + expanded rows.
+// Period presets — keep semantics consistent with /utm-stats `until` being
+// EXCLUSIVE (we add 1 day to the "до даты" so today's "vчера 00:00" up to
+// "сегодня 23:59" reads naturally).
+const datePresets = [
+  { key: "today", label: "Сегодня" },
+  { key: "last_7d", label: "7 дней" },
+  { key: "last_30d", label: "30 дней" },
+  { key: "last_90d", label: "90 дней" },
+  { key: "this_month", label: "Этот месяц" },
+  { key: "last_month", label: "Прошлый месяц" },
+  { key: "all_time", label: "Всё время" },
+];
+const activePreset = ref("last_30d");
+const bucket = ref("day");
+
+// Client-side state: local search + sort + expanded rows + compare set.
 const localSearch = ref("");
 const sort = reactive({ key: "users_total", dir: "desc" });
 const expanded = ref(new Set());
+const compareSet = ref(new Set());
+const compareMetric = ref("registrations");
+const compareMetricOptions = [
+  { key: "registrations", label: "Регистрации" },
+  { key: "paid_count", label: "Платные" },
+  { key: "revenue_rub", label: "Выручка" },
+];
+const compareSeries = ref([]);
+const compareLoading = ref(false);
+const compareColors = ["#58a6ff", "#3bc9db", "#b692f6", "#f59f00", "#ff6b6b"];
+
+// Detail cache: { 'utm-key' -> { timeseries, funnel, loading: bool, ts: number } }
+const detailCache = ref(new Map());
+const DETAIL_TTL_MS = 60_000;
 
 // Columns descriptor drives header rendering AND sort dispatch. `alignClass`
 // keeps numeric vs UTM vs date alignment in sync with body cells.
@@ -394,9 +570,196 @@ function sortIndicator(key) {
 function toggleExpand(row) {
   const key = row.utm ?? "__no_utm__";
   const next = new Set(expanded.value);
-  if (next.has(key)) next.delete(key);
-  else next.add(key);
+  if (next.has(key)) {
+    next.delete(key);
+  } else {
+    next.add(key);
+    loadDetail(row);
+  }
   expanded.value = next;
+  syncUrl();
+}
+
+function hasDetail(row) {
+  const entry = detailCache.value.get(row.utm ?? "__no_utm__");
+  return !!(entry && entry.timeseries && entry.funnel && !entry.loading);
+}
+
+function isDetailLoading(row) {
+  const entry = detailCache.value.get(row.utm ?? "__no_utm__");
+  return !!(entry && entry.loading);
+}
+
+async function loadDetail(row) {
+  const key = row.utm ?? "__no_utm__";
+  const existing = detailCache.value.get(key);
+  const now = Date.now();
+  if (existing && existing.timeseries && now - existing.ts < DETAIL_TTL_MS) return;
+
+  const map = new Map(detailCache.value);
+  map.set(key, { ...(existing || {}), loading: true, ts: now });
+  detailCache.value = map;
+
+  try {
+    const params = {
+      utm: key,
+      bucket: bucket.value,
+    };
+    if (filters.since) params.since = filters.since;
+    if (filters.until) params.until = exclusiveUntil(filters.until);
+    const [tsResp, funResp] = await Promise.all([
+      api.get("/admin-widgets/utm-stats/timeseries", { params }),
+      api.get("/admin-widgets/utm-stats/funnel", { params }),
+    ]);
+    const map2 = new Map(detailCache.value);
+    map2.set(key, {
+      timeseries: tsResp?.data ?? { buckets: [] },
+      funnel: funResp?.data ?? { steps: [] },
+      loading: false,
+      ts: Date.now(),
+    });
+    detailCache.value = map2;
+  } catch (err) {
+    const map2 = new Map(detailCache.value);
+    map2.set(key, { loading: false, ts: Date.now(), error: err?.message ?? "load failed" });
+    detailCache.value = map2;
+  }
+}
+
+function toggleCompare(row) {
+  const key = row.utm ?? "__no_utm__";
+  const next = new Set(compareSet.value);
+  if (next.has(key)) {
+    next.delete(key);
+  } else {
+    if (next.size >= 5) return;
+    next.add(key);
+  }
+  compareSet.value = next;
+  refreshCompareSeries();
+  syncUrl();
+}
+
+function clearCompare() {
+  compareSet.value = new Set();
+  compareSeries.value = [];
+  syncUrl();
+}
+
+async function refreshCompareSeries() {
+  if (compareSet.value.size === 0) {
+    compareSeries.value = [];
+    return;
+  }
+  compareLoading.value = true;
+  try {
+    const items = await Promise.all(
+      Array.from(compareSet.value).map(async (key) => {
+        const params = { utm: key, bucket: bucket.value };
+        if (filters.since) params.since = filters.since;
+        if (filters.until) params.until = exclusiveUntil(filters.until);
+        const resp = await api.get("/admin-widgets/utm-stats/timeseries", { params });
+        return resp?.data ?? { utm: key, buckets: [] };
+      })
+    );
+    compareSeries.value = items;
+  } catch (err) {
+    compareSeries.value = [];
+  } finally {
+    compareLoading.value = false;
+  }
+}
+
+watch(compareMetric, () => {
+  // re-render only — series already loaded
+});
+
+function setBucket(value) {
+  if (bucket.value === value) return;
+  bucket.value = value;
+  // Invalidate detail cache so the open rows reload at the new granularity.
+  detailCache.value = new Map();
+  // Reload chart data for currently expanded rows.
+  for (const key of expanded.value) {
+    const src = sources.value.find((s) => (s.utm ?? "__no_utm__") === key);
+    if (src) loadDetail(src);
+  }
+  refreshCompareSeries();
+  syncUrl();
+}
+
+// Period preset → since/until ISO dates (yyyy-mm-dd).
+function applyPreset(key) {
+  activePreset.value = key;
+  const today = new Date();
+  const isoDate = (d) => d.toISOString().slice(0, 10);
+  const subDays = (d, n) => {
+    const r = new Date(d);
+    r.setDate(r.getDate() - n);
+    return r;
+  };
+  switch (key) {
+    case "today":
+      filters.since = isoDate(today);
+      filters.until = isoDate(today);
+      break;
+    case "last_7d":
+      filters.since = isoDate(subDays(today, 7));
+      filters.until = isoDate(today);
+      break;
+    case "last_30d":
+      filters.since = isoDate(subDays(today, 30));
+      filters.until = isoDate(today);
+      break;
+    case "last_90d":
+      filters.since = isoDate(subDays(today, 90));
+      filters.until = isoDate(today);
+      break;
+    case "this_month": {
+      const start = new Date(today.getFullYear(), today.getMonth(), 1);
+      filters.since = isoDate(start);
+      filters.until = isoDate(today);
+      break;
+    }
+    case "last_month": {
+      const start = new Date(today.getFullYear(), today.getMonth() - 1, 1);
+      const end = new Date(today.getFullYear(), today.getMonth(), 0);
+      filters.since = isoDate(start);
+      filters.until = isoDate(end);
+      break;
+    }
+    case "all_time":
+      filters.since = "";
+      filters.until = "";
+      break;
+  }
+  detailCache.value = new Map();
+  refresh();
+  refreshCompareSeries();
+  syncUrl();
+}
+
+function onRangeChange() {
+  // User edited a date manually — drop the active preset.
+  activePreset.value = "custom";
+  detailCache.value = new Map();
+  refresh();
+  refreshCompareSeries();
+  syncUrl();
+}
+
+// Convert "до даты" date string (inclusive in user's mind) → exclusive ISO
+// upper bound: end of that day + 1ms. `?until=` in the backend uses
+// `created_at < until` so we add 1 day.
+function exclusiveUntil(yyyyMmDd) {
+  if (!yyyyMmDd) return "";
+  try {
+    const d = new Date(yyyyMmDd + "T00:00:00Z");
+    d.setUTCDate(d.getUTCDate() + 1);
+    return d.toISOString().slice(0, 10);
+  } catch {
+    return yyyyMmDd;
+  }
 }
 
 function setExactFilter(utm) {
@@ -502,14 +865,24 @@ async function refresh() {
     if (trimmedPrefix) params.utm_prefix = trimmedPrefix;
     const trimmedSince = (filters.since || "").trim();
     if (trimmedSince) params.since = trimmedSince;
+    const trimmedUntil = (filters.until || "").trim();
+    if (trimmedUntil) params.until = exclusiveUntil(trimmedUntil);
     if (filters.limit) params.limit = filters.limit;
 
-    const resp = await api.get("/admin-widgets/utm-stats", { params });
+    const [resp, prevTotals] = await Promise.all([
+      api.get("/admin-widgets/utm-stats", { params }),
+      // Previous-period totals for the insights delta. Same length window
+      // immediately preceding the current one. We only need a single
+      // aggregate, so we fetch the same endpoint with a shifted range.
+      loadPreviousPeriodTotals(params),
+    ]);
     const data = resp?.data ?? {};
     sources.value = Array.isArray(data.sources) ? data.sources : [];
     Object.assign(totals, data.totals ?? {});
     Object.assign(filtersApplied, data.filters_applied ?? {});
     generatedAt.value = data.generated_at ?? null;
+    previousTotals.value = prevTotals;
+    detailCache.value = new Map();
   } catch (err) {
     errorMessage.value = err?.response?.data?.error || err?.message || "Не удалось загрузить статистику";
     sources.value = [];
@@ -518,8 +891,314 @@ async function refresh() {
   }
 }
 
+const previousTotals = ref(null);
+
+async function loadPreviousPeriodTotals(currentParams) {
+  if (!currentParams.since || !currentParams.until) return null;
+  try {
+    const sinceD = new Date(currentParams.since + "T00:00:00Z");
+    const untilD = new Date(currentParams.until + "T00:00:00Z");
+    const lenMs = untilD - sinceD;
+    if (lenMs <= 0) return null;
+    const prevUntil = sinceD;
+    const prevSince = new Date(sinceD.getTime() - lenMs);
+    const params = {
+      ...currentParams,
+      since: prevSince.toISOString().slice(0, 10),
+      until: prevUntil.toISOString().slice(0, 10),
+      limit: 1000,
+    };
+    const resp = await api.get("/admin-widgets/utm-stats", { params });
+    const data = resp?.data ?? {};
+    const rows = Array.isArray(data.sources) ? data.sources : [];
+    return aggregateRows(rows);
+  } catch {
+    return null;
+  }
+}
+
+function aggregateRows(rows) {
+  return rows.reduce(
+    (acc, r) => ({
+      registrations: acc.registrations + Number(r.users_registered || 0),
+      paid: acc.paid + Number(r.users_paid || 0),
+      revenue: acc.revenue + Number(r.revenue_rub || 0),
+      direct_users: acc.direct_users + Number(r.users_direct || 0),
+      indirect_users: acc.indirect_users + Number(r.users_indirect || 0),
+    }),
+    { registrations: 0, paid: 0, revenue: 0, direct_users: 0, indirect_users: 0 }
+  );
+}
+
+const insights = computed(() => {
+  const agg = aggregateRows(sources.value);
+  const prev = previousTotals.value;
+  const periodDays = (() => {
+    if (!filters.since || !filters.until) return null;
+    const a = new Date(filters.since + "T00:00:00Z");
+    const b = new Date(filters.until + "T00:00:00Z");
+    return Math.max(1, Math.round((b - a) / 86400000) + 1);
+  })();
+  const delta = (curr, prev) => {
+    if (prev == null) return null;
+    if (prev === 0) return curr > 0 ? 1 : 0;
+    return (curr - prev) / prev;
+  };
+  return {
+    registrations: agg.registrations,
+    paid: agg.paid,
+    revenue: agg.revenue,
+    arpu: agg.paid > 0 ? agg.revenue / agg.paid : 0,
+    direct_users: agg.direct_users,
+    indirect_users: agg.indirect_users,
+    period_days: periodDays,
+    registrations_delta: delta(agg.registrations, prev?.registrations),
+    paid_delta: delta(agg.paid, prev?.paid),
+    revenue_delta: delta(agg.revenue, prev?.revenue),
+  };
+});
+
+function deltaClass(d) {
+  if (d == null) return "insights__delta--neutral";
+  if (d > 0.005) return "insights__delta--up";
+  if (d < -0.005) return "insights__delta--down";
+  return "insights__delta--neutral";
+}
+
+function formatDelta(d, isMoney) {
+  if (d == null) return "—";
+  const pct = (d * 100).toFixed(1);
+  const sign = d > 0 ? "+" : "";
+  return `${sign}${pct}%`;
+}
+
+// ===== SVG renderers — no external libs ==================================
+// Build a small line chart for one timeseries object. Returns a raw SVG
+// string injected via v-html. We render three lines: registrations, paid,
+// revenue (normalized to its own axis on the right).
+function renderTimeseriesSvg(ts, w, h) {
+  const buckets = ts?.buckets ?? [];
+  const padL = 36, padR = 36, padT = 14, padB = 26;
+  const innerW = w - padL - padR;
+  const innerH = h - padT - padB;
+  if (!buckets.length) {
+    return `<svg viewBox="0 0 ${w} ${h}" width="${w}" height="${h}"><text x="${w/2}" y="${h/2}" text-anchor="middle" fill="#6e7681" font-family="Inter, sans-serif" font-size="13">Нет точек</text></svg>`;
+  }
+  const maxReg = Math.max(1, ...buckets.map((b) => b.registrations));
+  const maxPaid = Math.max(1, ...buckets.map((b) => b.paid_count));
+  const maxRev = Math.max(1, ...buckets.map((b) => b.revenue_rub));
+  const maxLeft = Math.max(maxReg, maxPaid);
+  const x = (i) => padL + (buckets.length === 1 ? innerW / 2 : (i * innerW) / (buckets.length - 1));
+  const yLeft = (v) => padT + innerH - (v / maxLeft) * innerH;
+  const yRight = (v) => padT + innerH - (v / maxRev) * innerH;
+  const seriesPath = (vals, scaler) =>
+    vals.map((v, i) => (i === 0 ? `M ${x(i)} ${scaler(v)}` : `L ${x(i)} ${scaler(v)}`)).join(" ");
+
+  const regPath = seriesPath(buckets.map((b) => b.registrations), yLeft);
+  const paidPath = seriesPath(buckets.map((b) => b.paid_count), yLeft);
+  const revPath = seriesPath(buckets.map((b) => b.revenue_rub), yRight);
+
+  const axisTicksLeft = 4;
+  const axisY = [];
+  for (let i = 0; i <= axisTicksLeft; i++) {
+    const val = Math.round((maxLeft * i) / axisTicksLeft);
+    const yy = padT + innerH - (i / axisTicksLeft) * innerH;
+    axisY.push(`<line x1="${padL}" y1="${yy}" x2="${w - padR}" y2="${yy}" stroke="rgba(110,118,129,0.12)" stroke-width="1" />`);
+    axisY.push(`<text x="${padL - 6}" y="${yy + 4}" text-anchor="end" fill="#6e7681" font-family="Inter, sans-serif" font-size="10">${val}</text>`);
+  }
+  // X labels: first, mid, last
+  const labelIdx = buckets.length <= 1 ? [0] : [0, Math.floor(buckets.length / 2), buckets.length - 1];
+  const xLabels = labelIdx
+    .map((i) => {
+      const d = buckets[i]?.bucket_ts ? new Date(buckets[i].bucket_ts) : null;
+      const text = d ? `${String(d.getUTCDate()).padStart(2, "0")}.${String(d.getUTCMonth() + 1).padStart(2, "0")}` : "";
+      return `<text x="${x(i)}" y="${h - padB + 14}" text-anchor="middle" fill="#6e7681" font-family="Inter, sans-serif" font-size="10">${text}</text>`;
+    })
+    .join("");
+
+  return `
+<svg viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" style="overflow: visible;">
+  ${axisY.join("")}
+  <path d="${regPath}" stroke="#3bc9db" stroke-width="2" fill="none" stroke-linejoin="round" stroke-linecap="round" />
+  <path d="${paidPath}" stroke="#b692f6" stroke-width="2" fill="none" stroke-dasharray="4 3" stroke-linejoin="round" stroke-linecap="round" />
+  <path d="${revPath}" stroke="#f59f00" stroke-width="2" fill="none" stroke-dasharray="1 4" stroke-linejoin="round" stroke-linecap="round" />
+  ${xLabels}
+  <g font-family="Inter, sans-serif" font-size="11" font-weight="600">
+    <rect x="${padL}" y="${padT - 8}" width="190" height="0" fill="transparent"/>
+    <circle cx="${padL + 6}" cy="${padT}" r="3" fill="#3bc9db"/>
+    <text x="${padL + 14}" y="${padT + 3}" fill="#c9d1d9">Регистрации</text>
+    <circle cx="${padL + 95}" cy="${padT}" r="3" fill="#b692f6"/>
+    <text x="${padL + 103}" y="${padT + 3}" fill="#c9d1d9">Платные</text>
+    <circle cx="${padL + 170}" cy="${padT}" r="3" fill="#f59f00"/>
+    <text x="${padL + 178}" y="${padT + 3}" fill="#c9d1d9">Выручка</text>
+  </g>
+</svg>`;
+}
+
+// Funnel rendering — vertical stack of bars, width proportional to count
+// from the previous step. Each bar shows label + count + ratio_prev + ratio_total.
+function renderFunnelSvg(funnel, w, h) {
+  const steps = funnel?.steps ?? [];
+  if (!steps.length) {
+    return `<svg viewBox="0 0 ${w} ${h}" width="${w}" height="${h}"><text x="${w/2}" y="${h/2}" text-anchor="middle" fill="#6e7681" font-family="Inter, sans-serif" font-size="13">Нет данных</text></svg>`;
+  }
+  const padL = 12, padR = 12;
+  const innerW = w - padL - padR;
+  const total = steps[0].count || 1;
+  const rowH = (h - 8) / steps.length;
+  const colorScale = ["#3bc9db", "#66d9e8", "#74c0fc", "#7950f2", "#b692f6", "#f06595"];
+  const bars = steps.map((s, i) => {
+    const fraction = total > 0 ? s.count / total : 0;
+    const barW = Math.max(8, fraction * innerW);
+    const barX = padL + (innerW - barW) / 2;
+    const y = i * rowH;
+    const ratioPrev = i === 0 ? 1 : s.ratio_prev || 0;
+    const ratioTotal = s.ratio_total || 0;
+    const labelText = s.label || s.key;
+    const countText = (s.count || 0).toLocaleString("ru-RU");
+    const subText = i === 0 ? "" : ` · ${(ratioPrev * 100).toFixed(1)}% от пред · ${(ratioTotal * 100).toFixed(1)}% от total`;
+    return `
+      <rect x="${barX}" y="${y + 4}" width="${barW}" height="${rowH - 12}" rx="4" fill="${colorScale[i % colorScale.length]}" opacity="0.85"/>
+      <text x="${padL + 4}" y="${y + 18}" fill="#c9d1d9" font-family="Inter, sans-serif" font-size="11" font-weight="700">${labelText}</text>
+      <text x="${w - padR - 4}" y="${y + 18}" text-anchor="end" fill="#0d1117" font-family="Inter, sans-serif" font-size="11" font-weight="800">${countText}</text>
+      <text x="${padL + 4}" y="${y + rowH - 4}" fill="rgba(201, 209, 217, 0.55)" font-family="Inter, sans-serif" font-size="9.5">${subText}</text>
+    `;
+  });
+  return `<svg viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" style="overflow: visible;">${bars.join("")}</svg>`;
+}
+
+// Compare overlay chart — multi-series line on a single axis. Metric chosen
+// by `compareMetric`. Colors come from `compareColors` indexed by series.
+function renderCompareSvg(w, h) {
+  const series = compareSeries.value;
+  const padL = 40, padR = 16, padT = 12, padB = 28;
+  const innerW = w - padL - padR;
+  const innerH = h - padT - padB;
+  if (!series.length) {
+    return `<svg viewBox="0 0 ${w} ${h}" width="${w}" height="${h}"><text x="${w/2}" y="${h/2}" text-anchor="middle" fill="#6e7681" font-family="Inter, sans-serif" font-size="13">Подгрузка серий…</text></svg>`;
+  }
+  const metric = compareMetric.value;
+  // Compute global x axis as union of all timestamps, sorted.
+  const allTs = new Set();
+  for (const s of series) {
+    for (const b of s.buckets ?? []) {
+      if (b.bucket_ts) allTs.add(b.bucket_ts);
+    }
+  }
+  const xs = Array.from(allTs).sort();
+  if (xs.length === 0) {
+    return `<svg viewBox="0 0 ${w} ${h}" width="${w}" height="${h}"><text x="${w/2}" y="${h/2}" text-anchor="middle" fill="#6e7681" font-family="Inter, sans-serif" font-size="13">Нет точек в выбранном диапазоне</text></svg>`;
+  }
+  const tsIdx = new Map(xs.map((t, i) => [t, i]));
+
+  // Build value matrix per series, aligned to xs (gaps filled with 0).
+  const matrix = series.map((s) => {
+    const arr = new Array(xs.length).fill(0);
+    for (const b of s.buckets ?? []) {
+      const i = tsIdx.get(b.bucket_ts);
+      if (i != null) arr[i] = Number(b[metric] || 0);
+    }
+    return arr;
+  });
+  const max = Math.max(1, ...matrix.flat());
+  const x = (i) => padL + (xs.length === 1 ? innerW / 2 : (i * innerW) / (xs.length - 1));
+  const y = (v) => padT + innerH - (v / max) * innerH;
+
+  const lines = matrix.map((vals, idx) => {
+    const color = compareColors[idx % compareColors.length];
+    const path = vals.map((v, i) => (i === 0 ? `M ${x(i)} ${y(v)}` : `L ${x(i)} ${y(v)}`)).join(" ");
+    return `<path d="${path}" stroke="${color}" stroke-width="2" fill="none" stroke-linejoin="round" stroke-linecap="round" />`;
+  });
+
+  const axisY = [];
+  for (let i = 0; i <= 4; i++) {
+    const val = Math.round((max * i) / 4);
+    const yy = padT + innerH - (i / 4) * innerH;
+    axisY.push(`<line x1="${padL}" y1="${yy}" x2="${w - padR}" y2="${yy}" stroke="rgba(110,118,129,0.12)" stroke-width="1" />`);
+    axisY.push(`<text x="${padL - 6}" y="${yy + 4}" text-anchor="end" fill="#6e7681" font-family="Inter, sans-serif" font-size="10">${val}</text>`);
+  }
+  const labelIdx = xs.length <= 1 ? [0] : [0, Math.floor(xs.length / 2), xs.length - 1];
+  const xLabels = labelIdx
+    .map((i) => {
+      const d = new Date(xs[i]);
+      const text = `${String(d.getUTCDate()).padStart(2, "0")}.${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+      return `<text x="${x(i)}" y="${h - padB + 14}" text-anchor="middle" fill="#6e7681" font-family="Inter, sans-serif" font-size="10">${text}</text>`;
+    })
+    .join("");
+  return `<svg viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" style="overflow: visible;">${axisY.join("")}${lines.join("")}${xLabels}</svg>`;
+}
+
+// ===== URL state sync =====================================================
+// Encode the relevant filters/state into the URL hash so views are bookmarkable
+// and shareable. Reads on mount and writes after any change.
+function readUrlState() {
+  try {
+    const hash = window.location.hash || "";
+    const q = hash.startsWith("#") ? hash.slice(1) : hash;
+    if (!q.includes("=")) return;
+    const params = new URLSearchParams(q.split("?").pop());
+    if (params.has("prefix")) filters.utm_prefix = params.get("prefix");
+    if (params.has("since")) filters.since = params.get("since");
+    if (params.has("until")) filters.until = params.get("until");
+    if (params.has("preset")) activePreset.value = params.get("preset");
+    if (params.has("bucket") && (params.get("bucket") === "day" || params.get("bucket") === "week")) {
+      bucket.value = params.get("bucket");
+    }
+    if (params.has("limit")) {
+      const n = Number(params.get("limit"));
+      if (Number.isFinite(n) && n > 0) filters.limit = n;
+    }
+    if (params.has("search")) localSearch.value = params.get("search");
+    if (params.has("sort")) {
+      const [k, d] = params.get("sort").split(":");
+      if (k) { sort.key = k; sort.dir = d === "asc" ? "asc" : "desc"; }
+    }
+    if (params.has("compare")) {
+      compareSet.value = new Set(params.get("compare").split(",").filter(Boolean));
+    }
+    if (params.has("expand")) {
+      expanded.value = new Set(params.get("expand").split(",").filter(Boolean));
+    }
+  } catch {}
+}
+
+let urlSyncTimer = null;
+function syncUrl() {
+  if (urlSyncTimer) clearTimeout(urlSyncTimer);
+  urlSyncTimer = setTimeout(() => {
+    try {
+      const params = new URLSearchParams();
+      if (filters.utm_prefix) params.set("prefix", filters.utm_prefix);
+      if (filters.since) params.set("since", filters.since);
+      if (filters.until) params.set("until", filters.until);
+      if (activePreset.value && activePreset.value !== "last_30d") params.set("preset", activePreset.value);
+      if (bucket.value !== "day") params.set("bucket", bucket.value);
+      if (filters.limit && filters.limit !== 200) params.set("limit", String(filters.limit));
+      if (localSearch.value) params.set("search", localSearch.value);
+      if (sort.key && (sort.key !== "users_total" || sort.dir !== "desc")) params.set("sort", `${sort.key}:${sort.dir}`);
+      if (compareSet.value.size) params.set("compare", Array.from(compareSet.value).join(","));
+      if (expanded.value.size) params.set("expand", Array.from(expanded.value).join(","));
+      const qs = params.toString();
+      const base = window.location.pathname + window.location.search;
+      window.history.replaceState(null, "", qs ? `${base}#${qs}` : base);
+    } catch {}
+  }, 200);
+}
+
+watch(() => sort.key, syncUrl);
+watch(() => sort.dir, syncUrl);
+watch(localSearch, syncUrl);
+watch(() => filters.utm_prefix, syncUrl);
+
 onMounted(() => {
-  refresh();
+  readUrlState();
+  // Apply default preset if none in URL.
+  if (!filters.since && !filters.until && activePreset.value === "last_30d") {
+    applyPreset("last_30d");
+  } else {
+    refresh();
+    if (compareSet.value.size > 0) refreshCompareSeries();
+  }
 });
 </script>
 
@@ -972,6 +1651,316 @@ onMounted(() => {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+}
+
+/* ===== Date presets ===== */
+.hero__presets {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px dashed rgba(110, 118, 129, 0.18);
+}
+
+.hero__presets-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 700;
+  color: rgba(201, 209, 217, 0.62);
+  margin-right: 4px;
+}
+
+.preset-btn {
+  font: inherit;
+  font-size: 12px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(110, 118, 129, 0.25);
+  background: rgba(33, 38, 45, 0.55);
+  color: #c9d1d9;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+
+.preset-btn:hover {
+  background: rgba(88, 166, 255, 0.08);
+  color: #79b8ff;
+  border-color: rgba(88, 166, 255, 0.35);
+}
+
+.preset-btn--active {
+  background: rgba(88, 166, 255, 0.18);
+  color: #79b8ff;
+  border-color: rgba(88, 166, 255, 0.55);
+  font-weight: 700;
+}
+
+/* ===== Bucket toggle (in actions) ===== */
+.bucket-toggle {
+  display: inline-flex;
+  border: 1px solid rgba(110, 118, 129, 0.25);
+  border-radius: 8px;
+  overflow: hidden;
+  height: 32px;
+  margin-right: 4px;
+}
+
+.bucket-toggle__btn {
+  font: inherit;
+  padding: 0 12px;
+  border: 0;
+  background: transparent;
+  color: #c9d1d9;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  transition: background 0.12s, color 0.12s;
+}
+
+.bucket-toggle__btn:hover {
+  background: rgba(88, 166, 255, 0.08);
+  color: #79b8ff;
+}
+
+.bucket-toggle__btn--active {
+  background: rgba(88, 166, 255, 0.18);
+  color: #79b8ff;
+}
+
+/* ===== Insights summary ===== */
+.insights {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.insights__card {
+  padding: 16px 18px;
+  border-radius: 12px;
+  border: 1px solid rgba(110, 118, 129, 0.18);
+  background: linear-gradient(135deg, rgba(33, 38, 45, 0.65), rgba(13, 17, 23, 0.65));
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.insights__label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 700;
+  color: rgba(201, 209, 217, 0.62);
+}
+
+.insights__value {
+  font-size: 24px;
+  font-weight: 800;
+  color: #f0f6fc;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+
+.insights__delta {
+  font-size: 12px;
+  font-weight: 700;
+  margin-top: 2px;
+}
+
+.insights__delta--up { color: #51cf66; }
+.insights__delta--down { color: #ff6b6b; }
+.insights__delta--neutral { color: rgba(201, 209, 217, 0.55); }
+
+.insights__hint {
+  font-size: 11.5px;
+  color: rgba(201, 209, 217, 0.55);
+}
+
+/* ===== Compare panel ===== */
+.compare-panel {
+  padding: 20px 22px;
+  border-radius: 14px;
+  border: 1px solid rgba(151, 117, 250, 0.25);
+  background: linear-gradient(135deg, rgba(33, 38, 45, 0.75), rgba(13, 17, 23, 0.75));
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.compare-panel__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.compare-panel__head strong { color: #b692f6; }
+
+.compare-panel__hint {
+  display: block;
+  font-size: 11.5px;
+  color: rgba(201, 209, 217, 0.55);
+  margin-top: 2px;
+}
+
+.compare-panel__loading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: rgba(201, 209, 217, 0.65);
+}
+
+.compare-panel__legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.compare-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 11.5px;
+  color: #c9d1d9;
+}
+
+.compare-legend-item__swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  background: var(--legend-color, #58a6ff);
+  display: inline-block;
+}
+
+.compare-panel__chart {
+  width: 100%;
+  overflow-x: auto;
+}
+
+.compare-panel__metric-tabs {
+  display: flex;
+  gap: 4px;
+  padding-top: 4px;
+  border-top: 1px dashed rgba(110, 118, 129, 0.2);
+}
+
+.metric-tab {
+  font: inherit;
+  font-size: 12px;
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: rgba(33, 38, 45, 0.55);
+  color: rgba(201, 209, 217, 0.7);
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+
+.metric-tab:hover {
+  background: rgba(88, 166, 255, 0.08);
+  color: #79b8ff;
+}
+
+.metric-tab--active {
+  background: rgba(88, 166, 255, 0.18);
+  color: #79b8ff;
+  border-color: rgba(88, 166, 255, 0.35);
+}
+
+/* ===== Compare checkbox column ===== */
+.table__col--check {
+  width: 36px;
+  text-align: center;
+  padding: 4px 0 !important;
+}
+
+.th-tooltip {
+  display: inline-block;
+  color: rgba(201, 209, 217, 0.55);
+  font-weight: 700;
+}
+
+.compare-checkbox {
+  cursor: pointer;
+  accent-color: #b692f6;
+  width: 16px;
+  height: 16px;
+}
+
+/* ===== Expanded-row detail panes ===== */
+.detail-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
+  gap: 16px;
+  margin-bottom: 18px;
+}
+
+@media (max-width: 1100px) {
+  .detail-layout { grid-template-columns: 1fr; }
+}
+
+.detail-pane {
+  padding: 14px 16px;
+  border-radius: 12px;
+  border: 1px solid rgba(110, 118, 129, 0.18);
+  background: linear-gradient(135deg, rgba(33, 38, 45, 0.65), rgba(13, 17, 23, 0.65));
+  min-height: 240px;
+  display: flex;
+  flex-direction: column;
+}
+
+.detail-pane__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.detail-pane__title {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 700;
+  color: rgba(201, 209, 217, 0.72);
+}
+
+.detail-pane__hint {
+  font-size: 11px;
+  color: rgba(201, 209, 217, 0.45);
+}
+
+.detail-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  flex: 1;
+  color: rgba(201, 209, 217, 0.55);
+  font-size: 12px;
+}
+
+.detail-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  color: rgba(110, 118, 129, 0.7);
+  font-size: 13px;
+}
+
+.detail-chart,
+.detail-funnel {
+  flex: 1;
+}
+
+.detail-chart svg,
+.detail-funnel svg {
+  width: 100%;
+  height: auto;
+  display: block;
 }
 
 .state-card {

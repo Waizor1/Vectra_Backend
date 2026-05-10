@@ -2127,6 +2127,7 @@ export default function registerEndpoint(router, { database }) {
   router.get("/utm-stats", async (req, res) => {
     try {
       const since = toUtcDate(req.query.since);
+      const until = toUtcDate(req.query.until);
       const utmPrefix = String(req.query.utm_prefix ?? "").trim();
       const limit = toInt(req.query.limit, 200, 1, 1000);
 
@@ -2151,6 +2152,10 @@ export default function registerEndpoint(router, { database }) {
       if (since) {
         filters.push("u.created_at >= ?");
         bindings.push(since.toISOString());
+      }
+      if (until) {
+        filters.push("u.created_at < ?");
+        bindings.push(until.toISOString());
       }
       if (utmPrefix) {
         // prefix match; allow exact match too via the LIKE wildcard
@@ -2306,6 +2311,7 @@ export default function registerEndpoint(router, { database }) {
         },
         filters_applied: {
           since: since ? since.toISOString() : null,
+          until: until ? until.toISOString() : null,
           utm_prefix: utmPrefix || null,
           limit,
         },
@@ -2315,6 +2321,248 @@ export default function registerEndpoint(router, { database }) {
       res
         .status(500)
         .json({ error: "Failed to build utm-stats payload", details: String(err?.message || err) });
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // GET /admin-widgets/utm-stats/timeseries
+  //
+  // Daily/weekly time-series for a single exact UTM tag. Returns buckets with
+  // registration count, paid-user count and revenue. Drives the per-campaign
+  // mini-chart in the expanded row of the UTM Stats dashboard.
+  //
+  // Query params:
+  //   - utm        REQUIRED — exact tag (or "__no_utm__" for the null bucket)
+  //   - since      ISO date (default = utm first_seen)
+  //   - until      ISO date (default = now)
+  //   - bucket     "day" | "week" (default "day")
+  // -------------------------------------------------------------------------
+  router.get("/utm-stats/timeseries", async (req, res) => {
+    try {
+      const utm = String(req.query.utm ?? "").trim();
+      if (!utm) {
+        return res.status(400).json({ error: "utm is required" });
+      }
+      const isNullBucket = utm === "__no_utm__";
+      const since = toUtcDate(req.query.since);
+      const until = toUtcDate(req.query.until);
+      const bucketRaw = String(req.query.bucket ?? "day").toLowerCase();
+      const bucket = bucketRaw === "week" ? "week" : "day";
+
+      const hasUsers = await hasTable("users");
+      if (!hasUsers) {
+        return res.json({
+          utm,
+          bucket,
+          buckets: [],
+          filters_applied: {
+            since: since ? since.toISOString() : null,
+            until: until ? until.toISOString() : null,
+          },
+          generated_at: new Date().toISOString(),
+        });
+      }
+      const hasPayments = await hasTable("processed_payments");
+      const hasPaymentStatus = hasPayments && (await hasColumn("processed_payments", "status"));
+
+      // Truncation expression depends on bucket. Postgres `date_trunc` rounds
+      // down to the day or ISO-week boundary; we cast back to date for clean
+      // bucket keys in the response.
+      const truncExpr = `date_trunc('${bucket}', u.created_at)`;
+      const filters = isNullBucket
+        ? ["(u.utm IS NULL OR u.utm = '')"]
+        : ["u.utm = ?"];
+      const bindings = isNullBucket ? [] : [utm];
+      if (since) {
+        filters.push("u.created_at >= ?");
+        bindings.push(since.toISOString());
+      }
+      if (until) {
+        filters.push("u.created_at < ?");
+        bindings.push(until.toISOString());
+      }
+      const whereSql = `WHERE ${filters.join(" AND ")}`;
+
+      // Two CTEs: registrations (per-bucket COUNT) and payments (per-bucket
+      // SUM/COUNT). LEFT JOIN so an empty payment bucket still renders.
+      let paymentsCte = "";
+      let paymentsJoin = "";
+      let paymentsSelect = "0::bigint AS paid_count, 0::numeric AS revenue_rub";
+      if (hasPayments) {
+        const statusFilter = hasPaymentStatus ? "AND p.status = 'succeeded'" : "";
+        const payFilters = isNullBucket
+          ? ["(u2.utm IS NULL OR u2.utm = '')"]
+          : ["u2.utm = ?"];
+        const payBindings = isNullBucket ? [] : [utm];
+        if (since) { payFilters.push("u2.created_at >= ?"); payBindings.push(since.toISOString()); }
+        if (until) { payFilters.push("u2.created_at < ?"); payBindings.push(until.toISOString()); }
+        // Payments are bucketed by the PAYMENT date, not user creation, so we
+        // truncate on `p.created_at` (or `processed_at` if present). Falls
+        // back to created_at on the payment.
+        const hasProcessedAt = hasPayments && (await hasColumn("processed_payments", "processed_at"));
+        const payDateCol = hasProcessedAt ? "p.processed_at" : "p.created_at";
+        paymentsCte = `,
+        payments_per_bucket AS (
+          SELECT
+            date_trunc('${bucket}', ${payDateCol}) AS bucket_ts,
+            COUNT(DISTINCT p.user_id) AS paid_count,
+            COALESCE(SUM(p.amount), 0) AS revenue_rub
+          FROM processed_payments p
+          INNER JOIN users u2 ON u2.id = p.user_id
+          WHERE ${payFilters.join(" AND ")}
+            ${statusFilter}
+          GROUP BY date_trunc('${bucket}', ${payDateCol})
+        )`;
+        bindings.push(...payBindings);
+        paymentsJoin = "FULL OUTER JOIN payments_per_bucket pb ON pb.bucket_ts = r.bucket_ts";
+        paymentsSelect = "COALESCE(pb.paid_count, 0) AS paid_count, COALESCE(pb.revenue_rub, 0) AS revenue_rub";
+      }
+
+      const sql = `
+        WITH regs AS (
+          SELECT
+            ${truncExpr} AS bucket_ts,
+            COUNT(*) AS registrations
+          FROM users u
+          ${whereSql}
+          GROUP BY ${truncExpr}
+        )${paymentsCte}
+        SELECT
+          COALESCE(r.bucket_ts, pb.bucket_ts) AS bucket_ts,
+          COALESCE(r.registrations, 0) AS registrations,
+          ${paymentsSelect}
+        FROM regs r
+        ${paymentsJoin}
+        ORDER BY bucket_ts ASC
+      `;
+      const raw = await database.raw(sql, bindings);
+      const rows = raw?.rows ?? raw ?? [];
+
+      const buckets = rows.map((row) => ({
+        bucket_ts: row.bucket_ts ? new Date(row.bucket_ts).toISOString() : null,
+        registrations: Number(row.registrations ?? 0),
+        paid_count: Number(row.paid_count ?? 0),
+        revenue_rub: Number(row.revenue_rub ?? 0),
+      }));
+
+      res.json({
+        utm,
+        bucket,
+        buckets,
+        filters_applied: {
+          since: since ? since.toISOString() : null,
+          until: until ? until.toISOString() : null,
+        },
+        generated_at: new Date().toISOString(),
+      });
+    } catch (err) {
+      res
+        .status(500)
+        .json({ error: "Failed to build utm-stats timeseries payload", details: String(err?.message || err) });
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // GET /admin-widgets/utm-stats/funnel
+  //
+  // Returns the conversion funnel for a single exact UTM tag — five ordered
+  // steps with absolute counts plus the step-to-step conversion ratio. Used
+  // by the expanded-row funnel visualization.
+  //
+  // Steps: total → registered → used_trial → key_activated → active_subscription → paid
+  //
+  // `ratio_total` = step / total
+  // `ratio_prev`  = step / previous_step (drops the funnel level by level)
+  // -------------------------------------------------------------------------
+  router.get("/utm-stats/funnel", async (req, res) => {
+    try {
+      const utm = String(req.query.utm ?? "").trim();
+      if (!utm) {
+        return res.status(400).json({ error: "utm is required" });
+      }
+      const isNullBucket = utm === "__no_utm__";
+      const since = toUtcDate(req.query.since);
+      const until = toUtcDate(req.query.until);
+
+      const hasUsers = await hasTable("users");
+      if (!hasUsers) {
+        return res.json({
+          utm,
+          steps: [],
+          generated_at: new Date().toISOString(),
+        });
+      }
+      const hasPayments = await hasTable("processed_payments");
+      const hasPaymentStatus = hasPayments && (await hasColumn("processed_payments", "status"));
+
+      const filters = isNullBucket
+        ? ["(u.utm IS NULL OR u.utm = '')"]
+        : ["u.utm = ?"];
+      const bindings = isNullBucket ? [] : [utm];
+      if (since) { filters.push("u.created_at >= ?"); bindings.push(since.toISOString()); }
+      if (until) { filters.push("u.created_at < ?"); bindings.push(until.toISOString()); }
+      const whereSql = `WHERE ${filters.join(" AND ")}`;
+
+      let paidSelect = "0::bigint AS paid";
+      let paidJoin = "";
+      if (hasPayments) {
+        const statusFilter = hasPaymentStatus ? "AND p.status = 'succeeded'" : "";
+        paidJoin = `LEFT JOIN LATERAL (
+          SELECT COUNT(DISTINCT p.user_id) AS paid_inner
+          FROM processed_payments p
+          WHERE p.user_id IN (SELECT id FROM users u ${whereSql})
+            ${statusFilter}
+        ) paid_data ON true`;
+        paidSelect = "COALESCE(paid_data.paid_inner, 0) AS paid";
+      }
+
+      const sql = `
+        SELECT
+          COUNT(*) AS total,
+          COUNT(*) FILTER (WHERE u.is_registered = true) AS registered,
+          COUNT(*) FILTER (WHERE u.used_trial = true) AS used_trial,
+          COUNT(*) FILTER (WHERE u.key_activated = true) AS key_activated,
+          COUNT(*) FILTER (WHERE u.expired_at IS NOT NULL AND u.expired_at > CURRENT_DATE) AS active_subscription,
+          ${paidSelect}
+        FROM users u
+        ${paidJoin}
+        ${whereSql}
+      `;
+      // hasPayments path uses bindings twice (subquery + outer where).
+      const finalBindings = hasPayments ? [...bindings, ...bindings] : bindings;
+      const raw = await database.raw(sql, finalBindings);
+      const row = raw?.rows?.[0] ?? raw?.[0] ?? {};
+
+      const stepDefs = [
+        { key: "total", label: "Всего", count: Number(row.total ?? 0) },
+        { key: "registered", label: "Зарегистрировались", count: Number(row.registered ?? 0) },
+        { key: "used_trial", label: "Активировали триал", count: Number(row.used_trial ?? 0) },
+        { key: "key_activated", label: "Подключили Happ", count: Number(row.key_activated ?? 0) },
+        { key: "active_subscription", label: "Активная подписка", count: Number(row.active_subscription ?? 0) },
+        { key: "paid", label: "Заплатили", count: Number(row.paid ?? 0) },
+      ];
+      const total = stepDefs[0].count || 0;
+      let prev = total;
+      const steps = stepDefs.map((step, i) => {
+        const ratioTotal = total > 0 ? step.count / total : 0;
+        const ratioPrev = i === 0 ? 1 : prev > 0 ? step.count / prev : 0;
+        prev = step.count;
+        return { ...step, ratio_total: ratioTotal, ratio_prev: ratioPrev };
+      });
+
+      res.json({
+        utm,
+        steps,
+        filters_applied: {
+          since: since ? since.toISOString() : null,
+          until: until ? until.toISOString() : null,
+        },
+        generated_at: new Date().toISOString(),
+      });
+    } catch (err) {
+      res
+        .status(500)
+        .json({ error: "Failed to build utm-stats funnel payload", details: String(err?.message || err) });
     }
   });
 }
