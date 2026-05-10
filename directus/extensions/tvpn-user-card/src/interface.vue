@@ -237,12 +237,36 @@
             <div v-if="data.user.utm" class="tvpn-user-card__panel-row">
               <span class="tvpn-user-card__provider-label">UTM</span>
               <span class="tvpn-user-card__chip tvpn-user-card__chip--mono">{{ data.user.utm }}</span>
+              <span v-if="attributionBadge" class="tvpn-user-card__badge" :class="attributionBadge.class">{{ attributionBadge.label }}</span>
             </div>
+            <div v-if="attributionInheritedFrom" class="tvpn-user-card__panel-row tvpn-user-card__muted">
+              унаследован от
+              <button class="tvpn-user-card__chip tvpn-user-card__chip--link" type="button" @click="openUser(attributionInheritedFrom.id)">
+                {{ attributionInheritedFrom.full_name || attributionInheritedFrom.username || attributionInheritedFrom.id }}
+              </button>
+              <span class="tvpn-user-card__muted">depth {{ attributionInheritedFrom.depth }}</span>
+            </div>
+            <details v-if="attributionChain.length" class="tvpn-user-card__details">
+              <summary>Цепочка атрибуции ({{ attributionChain.length }}{{ data.referrals.attribution.chain_truncated ? '+' : '' }})</summary>
+              <ol class="tvpn-user-card__chain">
+                <li v-for="item in attributionChain" :key="item.id" class="tvpn-user-card__chain-item">
+                  <span class="tvpn-user-card__muted">depth {{ item.depth }}</span>
+                  <button class="tvpn-user-card__chip tvpn-user-card__chip--link" type="button" @click="openUser(item.id)">
+                    {{ item.full_name || item.username || item.id }}
+                  </button>
+                  <span v-if="item.is_partner" class="tvpn-user-card__badge tvpn-user-card__badge--info">partner</span>
+                  <span v-if="item.utm" class="tvpn-user-card__chip tvpn-user-card__chip--mono">{{ item.utm }}</span>
+                  <span v-if="item.utm_is_campaign" class="tvpn-user-card__badge tvpn-user-card__badge--ok">campaign</span>
+                </li>
+              </ol>
+            </details>
           </div>
           <div class="tvpn-user-card__panel">
             <div class="tvpn-user-card__panel-label">Кого привёл</div>
             <div class="tvpn-user-card__panel-body">
-              <span class="tvpn-user-card__chip">{{ data.referrals.referrals_count }} рефералов</span>
+              <span class="tvpn-user-card__chip">{{ data.referrals.referrals_count }} прямых</span>
+              <span v-if="downstreamExtra > 0" class="tvpn-user-card__chip">+ {{ downstreamExtra }} вниз по цепочке</span>
+              <span class="tvpn-user-card__chip">всего: {{ data.referrals.downstream_count ?? data.referrals.referrals_count }}</span>
               <span v-if="data.referrals.referral_bonus_days_total" class="tvpn-user-card__chip">бонус: {{ data.referrals.referral_bonus_days_total }} д.</span>
               <span v-if="data.referrals.is_partner" class="tvpn-user-card__badge tvpn-user-card__badge--info">partner</span>
               <span v-if="data.referrals.custom_referral_percent" class="tvpn-user-card__chip">кастом %: {{ data.referrals.custom_referral_percent }}</span>
@@ -393,6 +417,26 @@ const statusBadges = computed(() => {
 });
 
 const rawJson = computed(() => (data.value ? JSON.stringify(data.value, null, 2) : ""));
+
+const attributionChain = computed(() => data.value?.referrals?.attribution?.chain ?? []);
+const attributionInheritedFrom = computed(() => data.value?.referrals?.attribution?.inherited_from ?? null);
+const attributionBadge = computed(() => {
+  const src = data.value?.referrals?.attribution?.source;
+  if (!src) return null;
+  const map = {
+    inherited: { label: "inherited", class: "tvpn-user-card__badge--ok" },
+    direct: { label: "direct", class: "tvpn-user-card__badge--info" },
+    "partner-default": { label: "partner-default", class: "tvpn-user-card__badge--muted" },
+    "referral-no-utm": { label: "no-utm", class: "tvpn-user-card__badge--muted" },
+    organic: { label: "organic", class: "tvpn-user-card__badge--muted" },
+  };
+  return map[src] || null;
+});
+const downstreamExtra = computed(() => {
+  const total = Number(data.value?.referrals?.downstream_count ?? 0);
+  const direct = Number(data.value?.referrals?.referrals_count ?? 0);
+  return Math.max(0, total - direct);
+});
 
 function providerEmoji(p) {
   const m = { telegram: "✈", google: "G", yandex: "Я", apple: "", password: "✉" };
@@ -800,6 +844,22 @@ function openUser(id) {
 }
 .tvpn-user-card__details[open] summary {
   margin-bottom: 8px;
+}
+
+.tvpn-user-card__chain {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0 0 0 4px;
+  list-style: none;
+  font-size: 12px;
+}
+.tvpn-user-card__chain-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
 }
 
 .tvpn-user-card__table {

@@ -1644,6 +1644,88 @@ export default function registerEndpoint(router, { database }) {
       };
       const iso = (v) => (v ? new Date(v).toISOString() : null);
 
+      // Mirror of Python is_campaign_utm() in bloobcat/funcs/referral_attribution.py:
+      // a non-empty utm that is not the generic "partner" marker is a campaign tag.
+      const isCampaignUtm = (raw) => {
+        const n = String(raw ?? "").trim();
+        return n !== "" && n !== "partner";
+      };
+
+      // Attribution chain — walk referred_by upward, depth-capped to keep the
+      // recursive CTE bounded even on adversarial chains.
+      const ATTRIBUTION_CHAIN_MAX_DEPTH = 10;
+      let attributionChainRows = [];
+      if (userRow.referred_by) {
+        try {
+          const raw = await database.raw(
+            `WITH RECURSIVE chain AS (
+                SELECT id, referred_by, utm, full_name, username, is_partner, 0 AS depth
+                FROM users WHERE id = ?
+                UNION ALL
+                SELECT u.id, u.referred_by, u.utm, u.full_name, u.username, u.is_partner, c.depth + 1
+                FROM users u
+                INNER JOIN chain c ON u.id = c.referred_by
+                WHERE c.depth < ?
+              )
+              SELECT id, referred_by, utm, full_name, username, is_partner, depth
+              FROM chain WHERE depth > 0 ORDER BY depth ASC`,
+            [userId, ATTRIBUTION_CHAIN_MAX_DEPTH]
+          );
+          attributionChainRows = raw?.rows ?? raw ?? [];
+        } catch (_e) {
+          attributionChainRows = [];
+        }
+      }
+
+      // Downstream count — total descendants attributed to this user via referred_by.
+      // Pairs with PR feat/acquisition-source-attribution: campaign roots see the full
+      // funnel including multi-hop invitees that inherited their utm tag.
+      let downstreamCount = 0;
+      try {
+        const raw = await database.raw(
+          `WITH RECURSIVE descendants AS (
+              SELECT id FROM users WHERE referred_by = ?
+              UNION ALL
+              SELECT u.id FROM users u INNER JOIN descendants d ON u.referred_by = d.id
+            )
+            SELECT COUNT(*)::int AS count FROM descendants`,
+          [userId]
+        );
+        const rows = raw?.rows ?? raw ?? [];
+        downstreamCount = Number(rows[0]?.count ?? 0) || 0;
+      } catch (_e) {
+        downstreamCount = 0;
+      }
+
+      const ownUtmRaw = userRow.utm == null ? null : String(userRow.utm).trim();
+      const ownUtm = ownUtmRaw && ownUtmRaw.length > 0 ? ownUtmRaw : null;
+      const ownIsCampaign = isCampaignUtm(ownUtm);
+      const chainItems = (attributionChainRows || []).map((row) => ({
+        id: String(row.id),
+        depth: Number(row.depth ?? 0),
+        utm: row.utm == null || row.utm === "" ? null : String(row.utm),
+        utm_is_campaign: isCampaignUtm(row.utm),
+        full_name: row.full_name || null,
+        username: row.username || null,
+        is_partner: !!row.is_partner,
+      }));
+      const inheritedAncestor = ownIsCampaign
+        ? chainItems.find((item) => item.utm === ownUtm) || null
+        : null;
+      const campaignRoot = chainItems.find((item) => item.utm_is_campaign) || null;
+      let attributionSource;
+      if (ownIsCampaign) {
+        attributionSource = inheritedAncestor ? "inherited" : "direct";
+      } else if (ownUtm === "partner") {
+        attributionSource = "partner-default";
+      } else if (!ownUtm && userRow.referred_by) {
+        attributionSource = "referral-no-utm";
+      } else if (!ownUtm) {
+        attributionSource = "organic";
+      } else {
+        attributionSource = "direct";
+      }
+
       const userIdBig = (() => {
         try {
           return BigInt(userIdRaw);
@@ -1924,6 +2006,32 @@ export default function registerEndpoint(router, { database }) {
           custom_referral_percent: num(userRow.custom_referral_percent),
           is_partner: !!userRow.is_partner,
           partner_link_mode: userRow.partner_link_mode || null,
+          downstream_count: downstreamCount,
+          attribution: {
+            source: attributionSource,
+            own_utm: ownUtm,
+            own_is_campaign: ownIsCampaign,
+            chain: chainItems,
+            chain_truncated: chainItems.length >= ATTRIBUTION_CHAIN_MAX_DEPTH,
+            inherited_from: inheritedAncestor
+              ? {
+                  id: inheritedAncestor.id,
+                  depth: inheritedAncestor.depth,
+                  full_name: inheritedAncestor.full_name,
+                  username: inheritedAncestor.username,
+                  utm: inheritedAncestor.utm,
+                }
+              : null,
+            campaign_root: campaignRoot
+              ? {
+                  id: campaignRoot.id,
+                  depth: campaignRoot.depth,
+                  full_name: campaignRoot.full_name,
+                  username: campaignRoot.username,
+                  utm: campaignRoot.utm,
+                }
+              : null,
+          },
         },
         risk: {
           indicators,
