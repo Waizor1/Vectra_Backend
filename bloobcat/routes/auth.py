@@ -237,6 +237,7 @@ async def _apply_web_referral_attribution(user: Users, start_param_raw: str | No
         current_utm,
         utm,
         force_partner_source=is_partner_source_utm(utm),
+        referrer_utm=getattr(referrer, "utm", None),
     )
     if next_utm != (current_utm or None):
         user.utm = next_utm

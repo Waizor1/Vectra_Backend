@@ -59,10 +59,21 @@ async def _apply_referral_attribution_existing_user(
         and is_partner_source_utm(utm)
     )
 
+    # Pre-fetch referrer (if any) so we can reuse it for both the
+    # downstream-attribution inheritance step and the bind block below.
+    referrer = None
+    if (
+        referred_by
+        and int(referred_by) != int(db_user.id)
+        and current_referred_by == 0
+    ):
+        referrer = await Users.get_or_none(id=int(referred_by))
+
     next_utm = pick_attribution_utm(
         current_utm,
         utm,
         force_partner_source=should_force_partner_source,
+        referrer_utm=getattr(referrer, "utm", None) if referrer else None,
     )
     if next_utm != ((current_utm or "").strip() or None):
         db_user.utm = next_utm
@@ -75,7 +86,6 @@ async def _apply_referral_attribution_existing_user(
         and int(referred_by) != int(db_user.id)
         and current_referred_by == 0
     ):
-        referrer = await Users.get_or_none(id=int(referred_by))
         if referrer:
             db_user.referred_by = int(referred_by)
             if "referred_by" not in update_fields:

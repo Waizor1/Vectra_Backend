@@ -1096,10 +1096,15 @@ class Users(models.Model):
             should_force_partner_source = bool(
                 can_set_referrer and is_partner_source_utm(utm)
             )
+            # Pre-fetch referrer (if any) so we can reuse it for both the
+            # downstream-attribution inheritance step and the bind block below.
+            if can_set_referrer and referred_by is not None:
+                referrer = await cls.get_or_none(id=int(referred_by))
             next_utm = pick_attribution_utm(
                 current_utm,
                 utm,
                 force_partner_source=should_force_partner_source,
+                referrer_utm=getattr(referrer, "utm", None) if referrer else None,
             )
             if next_utm != (current_utm or None):
                 user.utm = next_utm
@@ -1123,35 +1128,33 @@ class Users(models.Model):
                         "Referral bind skipped: referred_by unexpectedly missing for user=%s",
                         user.id,
                     )
+                elif referrer is None:
+                    logger.info(
+                        "Referral bind skipped: referrer not found (user=%s referred_by=%s is_new=%s)",
+                        user.id,
+                        referred_by,
+                        is_new,
+                    )
                 else:
                     referred_by_value = int(referred_by)
-                    referrer = await cls.get_or_none(id=referred_by)
-                    if referrer:
-                        rows_updated = await cls.filter(
-                            id=user.id,
-                            referred_by__isnull=True,
-                            is_registered=False,
-                        ).update(referred_by=referred_by_value)
-                        if rows_updated:
-                            user.referred_by = referred_by_value
-                            logger.info(
-                                "Referral bind: user=%s referred_by=%s (is_new=%s)",
-                                user.id,
-                                referred_by,
-                                is_new,
-                            )
-                        else:
-                            logger.debug(
-                                "Referral bind skipped by atomic guard: user=%s provided_referred_by=%s",
-                                user.id,
-                                referred_by,
-                            )
-                    else:
+                    rows_updated = await cls.filter(
+                        id=user.id,
+                        referred_by__isnull=True,
+                        is_registered=False,
+                    ).update(referred_by=referred_by_value)
+                    if rows_updated:
+                        user.referred_by = referred_by_value
                         logger.info(
-                            "Referral bind skipped: referrer not found (user=%s referred_by=%s is_new=%s)",
+                            "Referral bind: user=%s referred_by=%s (is_new=%s)",
                             user.id,
                             referred_by,
                             is_new,
+                        )
+                    else:
+                        logger.debug(
+                            "Referral bind skipped by atomic guard: user=%s provided_referred_by=%s",
+                            user.id,
+                            referred_by,
                         )
             elif referred_by:
                 # Extra visibility for debugging referrals that "didn't stick".
