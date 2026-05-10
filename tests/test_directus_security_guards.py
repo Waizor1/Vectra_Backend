@@ -317,3 +317,125 @@ def test_promo_hmac_hook_fails_closed_without_secret_and_hashes_with_secret():
         if (!/^[0-9a-f]{{64}}$/.test(hashed.code_hmac || '')) throw new Error('code_hmac is not a sha256 hex hmac');
         """
     )
+
+
+def test_admin_widgets_utm_stats_route_registered_and_returns_shape():
+    """The /utm-stats route must be present in src + dist, group users by utm,
+    and return the expected JSON shape (sources/totals/filters_applied/generated_at)."""
+
+    source_url = (ROOT / "directus/extensions/admin-widgets/src/index.js").as_uri()
+    src_source = _read("directus/extensions/admin-widgets/src/index.js")
+    dist_source = _read("directus/extensions/admin-widgets/dist/index.js")
+
+    assert '"/utm-stats"' in src_source, "utm-stats route missing from src"
+    assert "/utm-stats" in dist_source, "utm-stats route missing from dist"
+    assert "users_active_subscription" in src_source
+    assert "Failed to build utm-stats payload" in src_source
+
+    _node(
+        f"""
+        import registerEndpoint from {source_url!r};
+
+        const routes = new Map();
+        const router = {{
+          use() {{}},
+          get(path, fn) {{ routes.set(path, fn); }},
+          post() {{}},
+        }};
+
+        // Fake database: only `users` table exists; processed_payments / columns
+        // calls return empty so the no-payments branch of the SQL is exercised.
+        const fakeDatabase = (table) => {{
+          const qb = {{
+            select() {{ return qb; }},
+            where(conds) {{
+              if (conds && typeof conds === 'object' && conds.table_name === 'users') {{
+                qb.first = async () => ({{ table_name: 'users' }});
+              }} else {{
+                qb.first = async () => null;
+              }}
+              return qb;
+            }},
+            count() {{ return qb; }},
+            sum() {{ return qb; }},
+            first: async () => null,
+          }};
+          return qb;
+        }};
+        const groupedRows = [
+          {{
+            utm: 'qr_rt_launch_2026_05',
+            users_total: 142,
+            users_registered: 95,
+            users_used_trial: 78,
+            users_key_activated: 47,
+            users_active_subscription: 22,
+            first_seen: '2026-05-10T00:00:00Z',
+            last_seen: '2026-06-15T12:34:56Z',
+          }},
+          {{
+            utm: null,
+            users_total: 4500,
+            users_registered: 3200,
+            users_used_trial: 2100,
+            users_key_activated: 1800,
+            users_active_subscription: 950,
+            first_seen: '2024-01-01T00:00:00Z',
+            last_seen: '2026-06-20T00:00:00Z',
+          }},
+        ];
+        fakeDatabase.raw = async (sql) => {{
+          if (sql.includes('grouped AS')) return {{ rows: groupedRows }};
+          return {{
+            rows: [
+              {{ users_total: 4642, users_with_utm: 142, users_no_utm: 4500 }},
+            ],
+          }};
+        }};
+
+        registerEndpoint(router, {{ database: fakeDatabase }});
+        const handler = routes.get('/utm-stats');
+        if (!handler) throw new Error('utm-stats route was not registered');
+
+        let captured = null;
+        await handler(
+          {{ query: {{ since: '2026-05-01', utm_prefix: 'qr_', limit: '50' }} }},
+          {{
+            json(payload) {{ captured = payload; return payload; }},
+            status() {{ throw new Error('handler returned non-200 status'); }},
+          }},
+        );
+        if (!captured) throw new Error('handler did not respond');
+        if (!Array.isArray(captured.sources)) throw new Error('sources missing or not array');
+        if (captured.sources.length !== 2) throw new Error('expected 2 sources rows');
+        if (captured.sources[0].utm !== 'qr_rt_launch_2026_05') throw new Error('first source must be top-utm');
+        if (captured.sources[1].utm !== null) throw new Error('second source utm must normalize to null');
+        if (captured.sources[0].users_paid !== 0) throw new Error('users_paid must default to 0 without payments table');
+        if (captured.sources[0].revenue_rub !== 0) throw new Error('revenue_rub must default to 0 without payments table');
+        if (typeof captured.totals?.users_total !== 'number') throw new Error('totals.users_total must be a number');
+        if (captured.filters_applied?.utm_prefix !== 'qr_') throw new Error('filters_applied.utm_prefix not echoed');
+        if (captured.filters_applied?.limit !== 50) throw new Error('filters_applied.limit not coerced to number');
+        if (!captured.generated_at) throw new Error('generated_at missing');
+        """
+    )
+
+
+def test_tvpn_utm_stats_module_extension_loads():
+    """The tvpn-utm-stats module bundle must declare the right id and call /admin-widgets/utm-stats."""
+
+    dist_path = ROOT / "directus/extensions/tvpn-utm-stats/dist/index.js"
+    src_source = _read("directus/extensions/tvpn-utm-stats/src/index.js")
+    module_source = _read("directus/extensions/tvpn-utm-stats/src/module.vue")
+    dist_source = _read("directus/extensions/tvpn-utm-stats/dist/index.js")
+
+    assert 'id: ROUTE_PATH' in src_source or '"tvpn-utm-stats"' in src_source
+    assert "tvpn-utm-stats" in dist_source
+    assert "/admin-widgets/utm-stats" in module_source
+    assert "useApi" in module_source
+    assert "useApi" in dist_source
+
+    subprocess.run(
+        ["node", "--check", str(dist_path)],
+        cwd=ROOT,
+        check=True,
+    )
