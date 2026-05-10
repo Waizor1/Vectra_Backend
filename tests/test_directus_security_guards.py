@@ -591,6 +591,87 @@ def test_admin_widgets_user_card_attribution_chain_payload():
     )
 
 
+def test_tvpn_user_card_bootstrap_hook_inserts_field_when_missing():
+    """The bootstrap hook must idempotently ensure a presentation field on the
+    `users` collection bound to interface=`tvpn-user-card`. First boot inserts;
+    second boot must NOT overwrite (so manual operator tweaks survive)."""
+
+    src_path = ROOT / "directus/extensions/tvpn-user-card-bootstrap/src/index.js"
+    dist_path = ROOT / "directus/extensions/tvpn-user-card-bootstrap/dist/index.js"
+    pkg_path = ROOT / "directus/extensions/tvpn-user-card-bootstrap/package.json"
+    src_source = src_path.read_text(encoding="utf-8")
+    pkg_source = pkg_path.read_text(encoding="utf-8")
+
+    assert '"type": "hook"' in pkg_source, "bootstrap must register as a hook extension"
+    assert "tvpn-user-card" in src_source
+    assert "directus_fields" in src_source
+    assert "init(\"app.after\"" in src_source, "must hook on app.after to run after Directus boot"
+
+    subprocess.run(["node", "--check", str(dist_path)], cwd=ROOT, check=True)
+
+    source_url = src_path.as_uri()
+    _node(
+        f"""
+        import registerHook from {source_url!r};
+
+        // Capture mode: track .where() conds and .insert() payloads.
+        let lookups = 0;
+        let inserts = [];
+        let lookupResult = null;
+
+        const fakeDatabase = (table) => {{
+          let conds = null;
+          const qb = {{
+            where(c) {{ conds = c; return qb; }},
+            first: async () => {{
+              if (table !== 'directus_fields') throw new Error('unexpected table: ' + table);
+              lookups += 1;
+              return lookupResult;
+            }},
+            insert: async (row) => {{
+              if (table !== 'directus_fields') throw new Error('unexpected insert table: ' + table);
+              inserts.push({{ row, conds }});
+            }},
+          }};
+          return qb;
+        }};
+
+        const initHandlers = new Map();
+        const hookContext = {{
+          init(event, fn) {{ initHandlers.set(event, fn); }},
+          filter() {{}},
+          action() {{}},
+          schedule() {{}},
+          embed() {{}},
+        }};
+        const accessors = {{ database: fakeDatabase, logger: {{ info() {{}}, error() {{}}, warn() {{}} }} }};
+
+        registerHook(hookContext, accessors);
+        const handler = initHandlers.get('app.after');
+        if (!handler) throw new Error('app.after not registered');
+
+        // First boot: directus_fields has no row for users.tvpn_user_card_presentation → insert.
+        lookupResult = null;
+        await handler({{ }});
+        if (lookups !== 1) throw new Error(`expected 1 lookup, got ${{lookups}}`);
+        if (inserts.length !== 1) throw new Error(`expected 1 insert, got ${{inserts.length}}`);
+        const inserted = inserts[0].row;
+        if (inserted.collection !== 'users') throw new Error('collection must be users');
+        if (inserted.field !== 'tvpn_user_card_presentation') throw new Error('field name must be the presentation alias');
+        if (inserted.interface !== 'tvpn-user-card') throw new Error('interface must be tvpn-user-card');
+        if (!inserted.special.includes('alias')) throw new Error('special must mark this as alias');
+        const opts = JSON.parse(inserted.options);
+        if (opts.endpoint !== '/admin-widgets/user-card') throw new Error('endpoint option must point at admin-widgets');
+
+        // Second boot: row exists → NO insert (idempotency + no clobber).
+        lookupResult = {{ id: 42, collection: 'users', field: 'tvpn_user_card_presentation', interface: 'tvpn-user-card' }};
+        inserts = [];
+        await handler({{ }});
+        if (inserts.length !== 0) throw new Error(`second boot must not insert when field exists, got ${{inserts.length}} inserts`);
+        """
+    )
+
+
 def test_admin_widgets_user_card_attribution_handles_organic_user():
     """Organic users (no referrer, no utm) must yield attribution.source='organic'
     and an empty chain — and the referred_by-gated chain CTE must not be issued."""
