@@ -17,5 +17,8 @@
     "path": "dist/index.js",
     "source": "src/index.js",
     "host": "^11.17.3"
+  },
+  "dependencies": {
+    "qrcode-generator": "^2.0.4"
   }
 }

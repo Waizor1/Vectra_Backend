@@ -49,6 +49,10 @@
           @click="setBucket('week')"
         >Неделя</button>
       </div>
+      <v-button primary @click="openCampaignBuilder">
+        <v-icon name="campaign" left />
+        Создать кампанию
+      </v-button>
       <v-button secondary :disabled="!sources.length" @click="exportCsv">
         <v-icon name="download" left />
         Экспорт CSV
@@ -429,13 +433,376 @@
       </div>
     </div>
   </private-view>
+
+  <!-- ===== Campaign Builder Modal ===== -->
+  <div v-if="campaignBuilder.open" class="cb-overlay" @click.self="closeCampaignBuilder">
+    <div class="cb-modal" role="dialog" aria-label="Создать кампанию">
+      <header class="cb-modal__head">
+        <div>
+          <div class="cb-modal__kicker">Создать кампанию</div>
+          <h2 class="cb-modal__title">Сборка UTM-кампании</h2>
+          <p class="cb-modal__sub">
+            Сформируй UTM-тег и забери готовый пакет: ссылки для веба и Telegram, QR-коды и
+            сниппеты для постов на форумах, в каналах и личных сообщениях.
+          </p>
+        </div>
+        <button type="button" class="cb-modal__close" aria-label="Закрыть" @click="closeCampaignBuilder">×</button>
+      </header>
+
+      <section class="cb-section">
+        <div class="cb-section__title">UTM-тег</div>
+        <div class="cb-form">
+          <label class="cb-field cb-field--utm">
+            <span class="cb-field__label">Имя тега</span>
+            <input
+              v-model="campaignBuilder.utm"
+              type="text"
+              class="cb-input"
+              placeholder="напр. qr_rt_launch_2026_05_hero"
+              maxlength="50"
+              @input="onCampaignUtmInput"
+            />
+            <span v-if="campaignBuilder.error" class="cb-field__error">{{ campaignBuilder.error }}</span>
+            <span v-else class="cb-field__hint">
+              Латинские буквы, цифры, нижнее подчёркивание. До 50 символов. Литерал «partner» — зарезервирован.
+            </span>
+          </label>
+          <label class="cb-field">
+            <span class="cb-field__label">Подпись (внутренняя)</span>
+            <input
+              v-model="campaignBuilder.label"
+              type="text"
+              class="cb-input"
+              placeholder="напр. RuTracker · Шапка"
+              maxlength="120"
+            />
+            <span class="cb-field__hint">Используется в текстах сниппетов. Можно оставить пустым.</span>
+          </label>
+        </div>
+
+        <div class="cb-templates">
+          <div class="cb-templates__title">Быстрые шаблоны</div>
+          <div class="cb-templates__list">
+            <button
+              v-for="tpl in campaignTemplates"
+              :key="tpl.key"
+              type="button"
+              class="cb-tpl-btn"
+              :title="tpl.hint"
+              @click="applyCampaignTemplate(tpl)"
+            >{{ tpl.label }}</button>
+          </div>
+        </div>
+      </section>
+
+      <section v-if="!campaignBuilder.error && campaignBuilder.utm" class="cb-section">
+        <div class="cb-section__title">Сгенерированные ссылки</div>
+        <div class="cb-urls">
+          <div v-for="link in campaignLinks" :key="link.key" class="cb-url">
+            <div class="cb-url__head">
+              <span class="cb-url__icon"><v-icon :name="link.icon" small /></span>
+              <span class="cb-url__name">{{ link.name }}</span>
+            </div>
+            <code class="cb-url__value">{{ link.url }}</code>
+            <div class="cb-url__actions">
+              <button type="button" class="cb-mini-btn" @click="copy(link.url, link.key)">
+                {{ copied === link.key ? 'Скопировано ✓' : 'Копировать' }}
+              </button>
+              <button type="button" class="cb-mini-btn" @click="downloadQr(link)">QR · SVG</button>
+            </div>
+            <div class="cb-url__qr" v-html="renderQrSvg(link.url, 140)"></div>
+          </div>
+        </div>
+      </section>
+
+      <section v-if="!campaignBuilder.error && campaignBuilder.utm" class="cb-section">
+        <div class="cb-section__title">Сниппеты для постов</div>
+        <div class="cb-snips">
+          <div v-for="snip in campaignSnippets" :key="snip.key" class="cb-snip">
+            <div class="cb-snip__head">
+              <span class="cb-snip__name">{{ snip.name }}</span>
+              <button type="button" class="cb-mini-btn" @click="copy(snip.body, 'snip_' + snip.key)">
+                {{ copied === 'snip_' + snip.key ? 'Скопировано ✓' : 'Копировать' }}
+              </button>
+            </div>
+            <textarea class="cb-snip__body" rows="4" readonly>{{ snip.body }}</textarea>
+            <div class="cb-snip__hint">{{ snip.hint }}</div>
+          </div>
+        </div>
+      </section>
+
+      <footer class="cb-modal__foot">
+        <div class="cb-foot__hint">
+          Пока что кампания не сохраняется в Directus — Phase 2 принесёт коллекцию `utm_campaigns` с историей,
+          архивом и заметками. Сейчас ты получаешь готовый пакет ассетов и сразу применяешь тег в дашборд.
+        </div>
+        <div class="cb-foot__actions">
+          <v-button secondary @click="closeCampaignBuilder">Отмена</v-button>
+          <v-button
+            primary
+            :disabled="!!campaignBuilder.error || !campaignBuilder.utm"
+            @click="applyCampaignAsFilter"
+          >Применить как фильтр</v-button>
+        </div>
+      </footer>
+    </div>
+  </div>
 </template>
 
 <script setup>
 import { ref, reactive, computed, onMounted, watch } from "vue";
 import { useApi } from "@directus/extensions-sdk";
+import qrcodeGenerator from "qrcode-generator";
 
 const api = useApi();
+
+// ===== Campaign builder state =============================================
+// Phase 1: in-memory only. No persistence yet — Phase 2 will introduce a
+// `utm_campaigns` Directus collection for label/description/notes/history.
+// Right now the builder hands the operator a ready asset pack (URLs + QRs +
+// snippets) and applies the tag to the dashboard filters on confirm.
+const campaignBuilder = reactive({
+  open: false,
+  utm: "",
+  label: "",
+  error: "",
+});
+const copied = ref("");
+const RESERVED_UTMS = new Set(["partner"]);
+const UTM_RE = /^[A-Za-z0-9_]+$/;
+
+const APP_BASE = "https://app.vectra-pro.net";
+const BOT_HANDLE = "VectraConnect_bot";
+
+const campaignTemplates = [
+  {
+    key: "rt_post_section",
+    label: "RuTracker · секция поста",
+    hint: "qr_rt_launch_<YYYY_MM>_<секция>",
+    apply: () => `qr_rt_launch_${monthStamp()}_section`,
+  },
+  {
+    key: "tg_channel_post",
+    label: "Telegram · пост в канале",
+    hint: "qr_tg_<канал>_<YYYY_MM_DD>",
+    apply: () => `qr_tg_channel_${dateStamp()}`,
+  },
+  {
+    key: "ig_story",
+    label: "Instagram · сторис",
+    hint: "ig_story_<YYYY_MM_DD>",
+    apply: () => `ig_story_${dateStamp()}`,
+  },
+  {
+    key: "google_ads",
+    label: "Google Ads · кампания",
+    hint: "google_ads_<YYYY_MM>",
+    apply: () => `google_ads_${monthStamp()}`,
+  },
+  {
+    key: "youtube_video",
+    label: "YouTube · видео",
+    hint: "yt_<slug>_<YYYY_MM>",
+    apply: () => `yt_video_${monthStamp()}`,
+  },
+  {
+    key: "blogger_outreach",
+    label: "Блогер · упоминание",
+    hint: "blogger_<ник>_<YYYY_MM>",
+    apply: () => `blogger_handle_${monthStamp()}`,
+  },
+];
+
+function dateStamp() {
+  const d = new Date();
+  return `${d.getUTCFullYear()}_${String(d.getUTCMonth() + 1).padStart(2, "0")}_${String(d.getUTCDate()).padStart(2, "0")}`;
+}
+
+function monthStamp() {
+  const d = new Date();
+  return `${d.getUTCFullYear()}_${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+}
+
+function openCampaignBuilder() {
+  campaignBuilder.open = true;
+  campaignBuilder.utm = "";
+  campaignBuilder.label = "";
+  campaignBuilder.error = "";
+  copied.value = "";
+}
+
+function closeCampaignBuilder() {
+  campaignBuilder.open = false;
+}
+
+function applyCampaignTemplate(tpl) {
+  campaignBuilder.utm = tpl.apply();
+  campaignBuilder.error = validateUtm(campaignBuilder.utm);
+}
+
+function onCampaignUtmInput() {
+  campaignBuilder.error = validateUtm(campaignBuilder.utm);
+}
+
+function validateUtm(value) {
+  const v = (value || "").trim();
+  if (!v) return "";
+  if (v.length > 50) return "Максимум 50 символов.";
+  if (!UTM_RE.test(v)) return "Только латинские буквы, цифры и подчёркивание.";
+  if (RESERVED_UTMS.has(v)) return "Литерал «partner» зарезервирован системой — выбери другой.";
+  return "";
+}
+
+const campaignLinks = computed(() => {
+  const utm = campaignBuilder.utm.trim();
+  if (!utm) return [];
+  return [
+    {
+      key: "web",
+      name: "Веб-кабинет",
+      icon: "language",
+      url: `${APP_BASE}?start=${utm}`,
+    },
+    {
+      key: "bot",
+      name: "Telegram-бот",
+      icon: "telegram",
+      url: `https://t.me/${BOT_HANDLE}?start=${utm}`,
+    },
+    {
+      key: "miniapp",
+      name: "Telegram Mini App",
+      icon: "rocket_launch",
+      url: `https://t.me/${BOT_HANDLE}/start?startapp=${utm}`,
+    },
+  ];
+});
+
+const campaignSnippets = computed(() => {
+  const utm = campaignBuilder.utm.trim();
+  if (!utm) return [];
+  const label = campaignBuilder.label.trim() || "Vectra Connect";
+  const webUrl = `${APP_BASE}?start=${utm}`;
+  const botUrl = `https://t.me/${BOT_HANDLE}?start=${utm}`;
+  return [
+    {
+      key: "bbcode",
+      name: "BBCode (RuTracker / phpBB)",
+      hint: "Вставить в пост на форуме. Промокод RUTRACKER применится автоматически после регистрации.",
+      body: [
+        `[b]${label}[/b]`,
+        `[url=${webUrl}]${APP_BASE}[/url] · [url=${botUrl}]@${BOT_HANDLE}[/url]`,
+        "",
+        `[i]10 дней бесплатно · работает в РФ · YouTube без рекламы. Промокод [b]RUTRACKER[/b] активирует подписку.[/i]`,
+      ].join("\n"),
+    },
+    {
+      key: "markdown",
+      name: "Markdown (Telegram, Notion, GitHub)",
+      hint: "Подходит для Telegram-каналов с разрешённым Markdown и постов в Notion.",
+      body: [
+        `**${label}**`,
+        `[${APP_BASE}](${webUrl}) · [@${BOT_HANDLE}](${botUrl})`,
+        "",
+        "10 дней бесплатно · работает в РФ · YouTube без рекламы.",
+        "Промокод **RUTRACKER** активирует подписку.",
+      ].join("\n"),
+    },
+    {
+      key: "plain",
+      name: "Plain text (DM / SMS / любое)",
+      hint: "Голый текст без разметки. Подходит для личных сообщений и SMS.",
+      body: [
+        `${label}`,
+        `${webUrl}`,
+        `${botUrl}`,
+        "",
+        "10 дней бесплатно. Промокод RUTRACKER активирует подписку.",
+      ].join("\n"),
+    },
+    {
+      key: "html",
+      name: "HTML (письмо, сайт)",
+      hint: "Готовый <a>-тег для встраивания в HTML-письма или статичные сайты.",
+      body:
+        `<p><strong>${label}</strong><br />\n` +
+        `<a href="${webUrl}">${APP_BASE}</a> · <a href="${botUrl}">@${BOT_HANDLE}</a><br />\n` +
+        `10 дней бесплатно. Промокод <code>RUTRACKER</code> активирует подписку.</p>`,
+    },
+  ];
+});
+
+// QR encoder — produces an inline SVG string at any size. ErrorCorrection L
+// is enough for short URLs and keeps QR density low (more scannable on
+// imperfect prints).
+function renderQrSvg(text, size) {
+  if (!text) return "";
+  try {
+    const qr = qrcodeGenerator(0, "M");
+    qr.addData(text);
+    qr.make();
+    const moduleCount = qr.getModuleCount();
+    const cell = size / moduleCount;
+    const rects = [];
+    for (let r = 0; r < moduleCount; r++) {
+      for (let c = 0; c < moduleCount; c++) {
+        if (qr.isDark(r, c)) {
+          const x = (c * cell).toFixed(2);
+          const y = (r * cell).toFixed(2);
+          const s = cell.toFixed(2);
+          rects.push(`<rect x="${x}" y="${y}" width="${s}" height="${s}" fill="#f0f6fc"/>`);
+        }
+      }
+    }
+    return `<svg viewBox="0 0 ${size} ${size}" width="${size}" height="${size}" xmlns="http://www.w3.org/2000/svg" style="background:#0d1117;border-radius:6px;padding:6px;box-sizing:content-box;display:block;">${rects.join("")}</svg>`;
+  } catch (err) {
+    return `<div class="cb-qr-error">QR не сгенерирован: ${String(err?.message || err)}</div>`;
+  }
+}
+
+function downloadQr(link) {
+  const svg = renderQrSvg(link.url, 320);
+  const blob = new Blob([svg], { type: "image/svg+xml;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  const utm = (campaignBuilder.utm || "campaign").replace(/[^a-zA-Z0-9_]/g, "_");
+  a.download = `vectra_qr_${utm}_${link.key}.svg`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+async function copy(text, key) {
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+    }
+    copied.value = key;
+    setTimeout(() => {
+      if (copied.value === key) copied.value = "";
+    }, 1800);
+  } catch {
+    /* swallow — user can still select text manually */
+  }
+}
+
+function applyCampaignAsFilter() {
+  if (campaignBuilder.error || !campaignBuilder.utm) return;
+  const utm = campaignBuilder.utm.trim();
+  closeCampaignBuilder();
+  setExactFilter(utm);
+}
 
 const loading = ref(false);
 const errorMessage = ref("");
@@ -1961,6 +2328,340 @@ onMounted(() => {
   width: 100%;
   height: auto;
   display: block;
+}
+
+/* ===== Campaign Builder modal ===== */
+.cb-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(13, 17, 23, 0.78);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  z-index: 9000;
+  overflow-y: auto;
+  padding: 40px 20px 60px;
+}
+
+.cb-modal {
+  width: min(960px, 100%);
+  background: linear-gradient(135deg, rgba(33, 38, 45, 0.96), rgba(13, 17, 23, 0.98));
+  border: 1px solid rgba(151, 117, 250, 0.32);
+  border-radius: 16px;
+  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.55);
+  color: #c9d1d9;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 24px 26px 22px;
+  font-family: Inter, sans-serif;
+}
+
+.cb-modal__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid rgba(110, 118, 129, 0.18);
+}
+
+.cb-modal__kicker {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 700;
+  color: #b692f6;
+}
+
+.cb-modal__title {
+  margin: 4px 0 6px;
+  font-size: 22px;
+  font-weight: 800;
+  color: #f0f6fc;
+}
+
+.cb-modal__sub {
+  margin: 0;
+  font-size: 13px;
+  color: rgba(201, 209, 217, 0.7);
+  max-width: 640px;
+  line-height: 1.45;
+}
+
+.cb-modal__close {
+  background: rgba(110, 118, 129, 0.12);
+  border: 1px solid rgba(110, 118, 129, 0.25);
+  color: #c9d1d9;
+  font-size: 20px;
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.cb-modal__close:hover {
+  background: rgba(255, 107, 107, 0.12);
+  border-color: rgba(255, 107, 107, 0.45);
+  color: #ff6b6b;
+}
+
+.cb-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.cb-section__title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 700;
+  color: rgba(201, 209, 217, 0.62);
+}
+
+.cb-form {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) minmax(260px, 1fr);
+  gap: 14px;
+}
+
+@media (max-width: 720px) {
+  .cb-form { grid-template-columns: 1fr; }
+}
+
+.cb-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.cb-field__label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 700;
+  color: rgba(201, 209, 217, 0.62);
+}
+
+.cb-input {
+  background: rgba(13, 17, 23, 0.65);
+  border: 1px solid rgba(110, 118, 129, 0.32);
+  border-radius: 8px;
+  padding: 10px 12px;
+  color: #f0f6fc;
+  font-size: 13px;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  transition: border-color 0.12s, background 0.12s;
+}
+
+.cb-input:focus {
+  outline: 0;
+  border-color: rgba(151, 117, 250, 0.55);
+  background: rgba(13, 17, 23, 0.85);
+}
+
+.cb-field__hint {
+  font-size: 11px;
+  color: rgba(201, 209, 217, 0.5);
+}
+
+.cb-field__error {
+  font-size: 11.5px;
+  color: #ff6b6b;
+  font-weight: 600;
+}
+
+.cb-templates {
+  margin-top: 6px;
+}
+
+.cb-templates__title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 700;
+  color: rgba(201, 209, 217, 0.62);
+  margin-bottom: 6px;
+}
+
+.cb-templates__list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.cb-tpl-btn {
+  font: inherit;
+  font-size: 11.5px;
+  padding: 5px 11px;
+  border-radius: 999px;
+  border: 1px solid rgba(151, 117, 250, 0.25);
+  background: rgba(151, 117, 250, 0.08);
+  color: #b692f6;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+
+.cb-tpl-btn:hover {
+  background: rgba(151, 117, 250, 0.18);
+  border-color: rgba(151, 117, 250, 0.55);
+  color: #d6c0ff;
+}
+
+.cb-urls {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+}
+
+.cb-url {
+  padding: 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(110, 118, 129, 0.18);
+  background: linear-gradient(135deg, rgba(33, 38, 45, 0.55), rgba(13, 17, 23, 0.55));
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.cb-url__head {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 700;
+  font-size: 12px;
+  color: #79b8ff;
+}
+
+.cb-url__value {
+  display: block;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 11.5px;
+  color: #c9d1d9;
+  background: rgba(13, 17, 23, 0.85);
+  padding: 8px 10px;
+  border-radius: 6px;
+  overflow-wrap: break-word;
+  word-break: break-all;
+  line-height: 1.35;
+  border: 1px solid rgba(110, 118, 129, 0.18);
+}
+
+.cb-url__actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.cb-mini-btn {
+  font: inherit;
+  font-size: 11.5px;
+  padding: 5px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(110, 118, 129, 0.32);
+  background: rgba(33, 38, 45, 0.55);
+  color: #c9d1d9;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+
+.cb-mini-btn:hover {
+  background: rgba(88, 166, 255, 0.16);
+  color: #79b8ff;
+  border-color: rgba(88, 166, 255, 0.45);
+}
+
+.cb-url__qr {
+  display: flex;
+  justify-content: center;
+}
+
+.cb-snips {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+@media (max-width: 720px) {
+  .cb-snips { grid-template-columns: 1fr; }
+}
+
+.cb-snip {
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(110, 118, 129, 0.18);
+  background: linear-gradient(135deg, rgba(33, 38, 45, 0.55), rgba(13, 17, 23, 0.55));
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cb-snip__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.cb-snip__name {
+  font-size: 12px;
+  font-weight: 700;
+  color: rgba(201, 209, 217, 0.72);
+}
+
+.cb-snip__body {
+  font: inherit;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 11.5px;
+  line-height: 1.45;
+  background: rgba(13, 17, 23, 0.85);
+  color: #c9d1d9;
+  border: 1px solid rgba(110, 118, 129, 0.22);
+  border-radius: 6px;
+  padding: 8px 10px;
+  resize: vertical;
+  min-height: 88px;
+}
+
+.cb-snip__hint {
+  font-size: 11px;
+  color: rgba(201, 209, 217, 0.5);
+}
+
+.cb-modal__foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding-top: 14px;
+  border-top: 1px solid rgba(110, 118, 129, 0.18);
+}
+
+.cb-foot__hint {
+  font-size: 11.5px;
+  color: rgba(201, 209, 217, 0.55);
+  max-width: 560px;
+  line-height: 1.45;
+}
+
+.cb-foot__actions {
+  display: flex;
+  gap: 8px;
+}
+
+.cb-qr-error {
+  font-size: 11px;
+  color: #ff6b6b;
+  padding: 8px;
+  background: rgba(255, 107, 107, 0.08);
+  border-radius: 6px;
 }
 
 .state-card {
