@@ -1493,4 +1493,467 @@ export default function registerEndpoint(router, { database }) {
       res.status(500).json({ error: "Failed to build promo-studio analytics", details: String(err?.message || err) });
     }
   });
+
+  // Single comprehensive user card payload for the tvpn-user-card interface.
+  // Aggregates identity, login methods, subscription, finance, devices, activity,
+  // referrals and risk indicators for one user id. Postgres-only (uses NOW()/interval).
+  router.get("/user-card/:user_id", async (req, res) => {
+    const userIdRaw = String(req.params.user_id || "").trim();
+    if (!/^-?\d+$/.test(userIdRaw)) {
+      return res.status(400).json({ error: "Invalid user id" });
+    }
+    const userId = userIdRaw;
+    const WEB_USER_ID_FLOOR = 8_000_000_000_000_000n;
+
+    if (!(await hasTable("users"))) {
+      return res.status(404).json({ error: "users table not found" });
+    }
+
+    try {
+      const userRow = await database("users").where({ id: userId }).first();
+      if (!userRow) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      const hasIdentities = await hasTable("auth_identities");
+      const hasPasswordCred = await hasTable("auth_password_credentials");
+      const hasPayments = await hasTable("processed_payments");
+      const hasActiveTariffs = await hasTable("active_tariffs");
+      const hasUserDevices = await hasTable("user_devices");
+      const hasConnections = await hasTable("connections");
+      const hasAuditEvents = await hasTable("auth_audit_events");
+      const hasUserDevicesLastOnline = hasUserDevices && (await hasColumn("user_devices", "last_online_at"));
+
+      const [
+        authIdentities,
+        passwordCred,
+        paymentsAgg,
+        paymentsAllAgg,
+        recentPayments,
+        activeTariff,
+        devicesAgg,
+        connectionsAgg,
+        referrer,
+        recentAudit,
+      ] = await Promise.all([
+        hasIdentities
+          ? database("auth_identities")
+              .where({ user_id: userId })
+              .orderBy("linked_at", "asc")
+          : Promise.resolve([]),
+        hasPasswordCred
+          ? database("auth_password_credentials").where({ user_id: userId }).first()
+          : Promise.resolve(null),
+        hasPayments
+          ? database("processed_payments")
+              .where({ user_id: userId, status: "succeeded" })
+              .select(
+                database.raw(
+                  `COUNT(*)::int AS count,
+                   COALESCE(SUM(amount),0)::numeric AS total_amount,
+                   COALESCE(SUM(amount_external),0)::numeric AS total_external,
+                   COALESCE(SUM(amount_from_balance),0)::numeric AS total_from_balance,
+                   COALESCE(SUM(CASE WHEN processed_at >= NOW() - INTERVAL '30 days' THEN amount ELSE 0 END),0)::numeric AS amount_30d,
+                   COALESCE(SUM(CASE WHEN processed_at >= NOW() - INTERVAL '7 days' THEN amount ELSE 0 END),0)::numeric AS amount_7d,
+                   MAX(processed_at) AS last_succeeded_at`
+                )
+              )
+              .first()
+          : Promise.resolve({}),
+        hasPayments
+          ? database("processed_payments")
+              .where({ user_id: userId })
+              .select(
+                database.raw(
+                  `COUNT(*)::int AS total_count,
+                   COUNT(*) FILTER (WHERE status = 'refunded')::int AS refunded_count,
+                   COUNT(*) FILTER (WHERE status = 'canceled')::int AS canceled_count,
+                   COUNT(*) FILTER (WHERE status = 'pending')::int AS pending_count,
+                   COUNT(DISTINCT provider)::int AS providers_used`
+                )
+              )
+              .first()
+          : Promise.resolve({}),
+        hasPayments
+          ? database("processed_payments")
+              .where({ user_id: userId })
+              .orderBy("processed_at", "desc")
+              .limit(8)
+              .select(
+                "id",
+                "payment_id",
+                "provider",
+                "status",
+                "amount",
+                "amount_external",
+                "amount_from_balance",
+                "processed_at"
+              )
+          : Promise.resolve([]),
+        userRow.active_tariff_id && hasActiveTariffs
+          ? database("active_tariffs").where({ id: userRow.active_tariff_id }).first()
+          : Promise.resolve(null),
+        hasUserDevices
+          ? database("user_devices")
+              .where({ user_id: userId })
+              .select(
+                database.raw(
+                  hasUserDevicesLastOnline
+                    ? `COUNT(*)::int AS total,
+                       COUNT(*) FILTER (WHERE last_online_at >= NOW() - INTERVAL '7 days')::int AS active_7d,
+                       MAX(last_online_at) AS last_online_at`
+                    : `COUNT(*)::int AS total,
+                       0::int AS active_7d,
+                       NULL::timestamptz AS last_online_at`
+                )
+              )
+              .first()
+          : Promise.resolve({ total: 0, active_7d: 0, last_online_at: null }),
+        hasConnections
+          ? database("connections")
+              .where({ user_id: userId })
+              .select(
+                database.raw(
+                  `COUNT(*)::int AS days_total,
+                   COUNT(*) FILTER (WHERE "at" >= (NOW() - INTERVAL '30 days')::date)::int AS days_30d,
+                   COUNT(*) FILTER (WHERE "at" >= (NOW() - INTERVAL '7 days')::date)::int AS days_7d,
+                   MAX("at") AS last_day`
+                )
+              )
+              .first()
+          : Promise.resolve({}),
+        userRow.referred_by
+          ? database("users")
+              .where({ id: userRow.referred_by })
+              .select("id", "full_name", "username", "is_partner")
+              .first()
+          : Promise.resolve(null),
+        hasAuditEvents
+          ? database("auth_audit_events")
+              .where({ user_id: userId })
+              .orderBy("created_at", "desc")
+              .limit(8)
+              .select("id", "provider", "action", "result", "reason", "created_at")
+          : Promise.resolve([]),
+      ]);
+
+      const num = (v) => {
+        if (v === null || v === undefined) return 0;
+        const n = Number(v);
+        return Number.isFinite(n) ? n : 0;
+      };
+      const iso = (v) => (v ? new Date(v).toISOString() : null);
+
+      const userIdBig = (() => {
+        try {
+          return BigInt(userIdRaw);
+        } catch (_e) {
+          return null;
+        }
+      })();
+      const isWebUser = userIdBig !== null && userIdBig >= WEB_USER_ID_FLOOR;
+
+      // Identity providers — derive from id heuristic + auth_identities + password creds.
+      const providers = [];
+      if (!isWebUser) {
+        providers.push({
+          provider: "telegram",
+          external_id: userIdRaw,
+          display_name: userRow.full_name || null,
+          username: userRow.username || null,
+          email: null,
+          email_verified: null,
+          linked_at: iso(userRow.created_at) || iso(userRow.registration_date),
+          last_login_at: null,
+          source: "primary",
+        });
+      }
+      if (passwordCred) {
+        providers.push({
+          provider: "password",
+          external_id: passwordCred.email_normalized || null,
+          display_name: null,
+          username: null,
+          email: passwordCred.email_normalized || null,
+          email_verified: !!passwordCred.email_verified,
+          linked_at: iso(passwordCred.created_at),
+          last_login_at: iso(passwordCred.updated_at),
+          source: "credential",
+        });
+      }
+      for (const ident of authIdentities) {
+        providers.push({
+          provider: ident.provider,
+          external_id: ident.provider_subject,
+          display_name: ident.display_name || null,
+          username: null,
+          email: ident.email || null,
+          email_verified: !!ident.email_verified,
+          linked_at: iso(ident.linked_at),
+          last_login_at: iso(ident.last_login_at),
+          source: "oauth",
+          avatar_url: ident.avatar_url || null,
+        });
+      }
+
+      // Subscription / LTE
+      const lteTotal = userRow.lte_gb_total ?? activeTariff?.lte_gb_total ?? 0;
+      const lteUsed = num(activeTariff?.lte_gb_used);
+      const lteRemaining = Math.max(0, num(lteTotal) - lteUsed);
+      const ltePct =
+        num(lteTotal) > 0 ? Math.min(100, Math.max(0, (lteUsed / num(lteTotal)) * 100)) : 0;
+
+      const today = new Date();
+      today.setUTCHours(0, 0, 0, 0);
+      let daysLeft = null;
+      if (userRow.expired_at) {
+        const exp = new Date(userRow.expired_at);
+        exp.setUTCHours(0, 0, 0, 0);
+        daysLeft = Math.round((exp.getTime() - today.getTime()) / 86400000);
+      }
+      const isExpired = daysLeft !== null && daysLeft < 0;
+      const isActiveSub = !!userRow.expired_at && !isExpired;
+
+      // Finance
+      const totalAmount = num(paymentsAgg?.total_amount);
+      const totalExternal = num(paymentsAgg?.total_external);
+      const totalFromBalance = num(paymentsAgg?.total_from_balance);
+      const amount30d = num(paymentsAgg?.amount_30d);
+      const amount7d = num(paymentsAgg?.amount_7d);
+      const succeededCount = num(paymentsAgg?.count);
+      const refundedCount = num(paymentsAllAgg?.refunded_count);
+      const canceledCount = num(paymentsAllAgg?.canceled_count);
+      const pendingCount = num(paymentsAllAgg?.pending_count);
+      const totalAttempts = num(paymentsAllAgg?.total_count);
+      const refundRatio = succeededCount > 0 ? refundedCount / succeededCount : 0;
+      const lastPayment =
+        Array.isArray(recentPayments) && recentPayments.length > 0 ? recentPayments[0] : null;
+
+      // Risk indicators (soft heuristics, not policy)
+      const indicators = [];
+      if (userRow.is_blocked) {
+        indicators.push({
+          level: "warn",
+          code: "blocked",
+          label: "Заблокирован ботом",
+          detail: userRow.blocked_at ? `с ${iso(userRow.blocked_at)}` : null,
+        });
+      }
+      if (userRow.used_trial && !succeededCount) {
+        indicators.push({
+          level: "info",
+          code: "trial-only",
+          label: "Использовал триал, без оплат",
+          detail: userRow.trial_started_at ? `триал с ${iso(userRow.trial_started_at)}` : null,
+        });
+      }
+      if (refundedCount >= 1 && refundRatio >= 0.34) {
+        indicators.push({
+          level: "warn",
+          code: "high-refund-ratio",
+          label: `Высокая доля возвратов: ${(refundRatio * 100).toFixed(0)}%`,
+          detail: `${refundedCount} возвратов из ${succeededCount} оплат`,
+        });
+      }
+      if (num(userRow.failed_message_count) >= 5) {
+        indicators.push({
+          level: "warn",
+          code: "delivery-failures",
+          label: `${userRow.failed_message_count} подряд неуспешных доставок`,
+          detail: userRow.last_failed_message_at ? `последняя ${iso(userRow.last_failed_message_at)}` : null,
+        });
+      }
+      if (num(devicesAgg?.total) > num(userRow.hwid_limit ?? activeTariff?.hwid_limit ?? 0) && num(userRow.hwid_limit ?? activeTariff?.hwid_limit ?? 0) > 0) {
+        indicators.push({
+          level: "warn",
+          code: "devices-over-limit",
+          label: `Устройств больше лимита (${devicesAgg.total} > ${userRow.hwid_limit ?? activeTariff?.hwid_limit})`,
+          detail: null,
+        });
+      }
+      if (providers.length === 0) {
+        indicators.push({
+          level: "info",
+          code: "no-login-methods",
+          label: "Нет связанных методов входа",
+          detail: "Ни telegram, ни password, ни OAuth identity",
+        });
+      } else if (providers.length >= 3) {
+        indicators.push({
+          level: "info",
+          code: "many-login-methods",
+          label: `Привязано методов входа: ${providers.length}`,
+          detail: providers.map((p) => p.provider).join(", "),
+        });
+      }
+      if (num(userRow.referrals) >= 25) {
+        indicators.push({
+          level: "info",
+          code: "high-referrals",
+          label: `Много рефералов: ${userRow.referrals}`,
+          detail: null,
+        });
+      }
+      if (num(connectionsAgg?.days_total) === 0 && isActiveSub) {
+        indicators.push({
+          level: "info",
+          code: "active-no-connections",
+          label: "Активная подписка, но 0 коннектов",
+          detail: null,
+        });
+      }
+
+      res.json({
+        user: {
+          id: String(userRow.id),
+          username: userRow.username || null,
+          full_name: userRow.full_name || null,
+          email: userRow.email || null,
+          language_code: userRow.language_code || null,
+          is_admin: !!userRow.is_admin,
+          is_partner: !!userRow.is_partner,
+          is_registered: !!userRow.is_registered,
+          is_subscribed: !!userRow.is_subscribed,
+          is_blocked: !!userRow.is_blocked,
+          is_trial: !!userRow.is_trial,
+          used_trial: !!userRow.used_trial,
+          key_activated: !!userRow.key_activated,
+          remnawave_uuid: userRow.remnawave_uuid || null,
+          balance: num(userRow.balance),
+          custom_referral_percent: num(userRow.custom_referral_percent),
+          partner_link_mode: userRow.partner_link_mode || null,
+          utm: userRow.utm || null,
+          registration_date: iso(userRow.registration_date),
+          created_at: iso(userRow.created_at),
+          connected_at: iso(userRow.connected_at),
+          blocked_at: iso(userRow.blocked_at),
+          trial_started_at: iso(userRow.trial_started_at),
+          last_hwid_reset: iso(userRow.last_hwid_reset),
+          last_failed_message_at: iso(userRow.last_failed_message_at),
+          failed_message_count: num(userRow.failed_message_count),
+          prize_wheel_attempts: num(userRow.prize_wheel_attempts),
+          device_per_user_enabled: userRow.device_per_user_enabled,
+          is_web_user: isWebUser,
+        },
+        providers,
+        subscription: {
+          expired_at: userRow.expired_at ? new Date(userRow.expired_at).toISOString() : null,
+          days_left: daysLeft,
+          is_expired: isExpired,
+          is_active: isActiveSub,
+          active_tariff: activeTariff
+            ? {
+                id: activeTariff.id,
+                name: activeTariff.name || null,
+                months: num(activeTariff.months),
+                price: num(activeTariff.price),
+                hwid_limit: num(activeTariff.hwid_limit),
+                lte_price_per_gb: num(activeTariff.lte_price_per_gb),
+                lte_autopay_free: !!activeTariff.lte_autopay_free,
+              }
+            : null,
+          hwid_limit_effective: num(userRow.hwid_limit ?? activeTariff?.hwid_limit ?? 0),
+          hwid_limit_user: userRow.hwid_limit !== null && userRow.hwid_limit !== undefined ? num(userRow.hwid_limit) : null,
+          lte_total_gb: num(lteTotal),
+          lte_used_gb: lteUsed,
+          lte_remaining_gb: lteRemaining,
+          lte_used_percent: ltePct,
+          lte_personal_override: userRow.lte_gb_total !== null && userRow.lte_gb_total !== undefined,
+        },
+        finance: {
+          balance: num(userRow.balance),
+          total_succeeded_count: succeededCount,
+          total_succeeded_amount: totalAmount,
+          total_external_amount: totalExternal,
+          total_from_balance_amount: totalFromBalance,
+          amount_30d: amount30d,
+          amount_7d: amount7d,
+          last_succeeded_at: iso(paymentsAgg?.last_succeeded_at),
+          refunded_count: refundedCount,
+          canceled_count: canceledCount,
+          pending_count: pendingCount,
+          total_attempts: totalAttempts,
+          providers_used: num(paymentsAllAgg?.providers_used),
+          refund_ratio: refundRatio,
+          last_payment: lastPayment
+            ? {
+                id: lastPayment.id,
+                payment_id: lastPayment.payment_id,
+                provider: lastPayment.provider,
+                status: lastPayment.status,
+                amount: num(lastPayment.amount),
+                amount_external: num(lastPayment.amount_external),
+                amount_from_balance: num(lastPayment.amount_from_balance),
+                processed_at: iso(lastPayment.processed_at),
+              }
+            : null,
+          recent: (recentPayments || []).map((p) => ({
+            id: p.id,
+            payment_id: p.payment_id,
+            provider: p.provider,
+            status: p.status,
+            amount: num(p.amount),
+            amount_external: num(p.amount_external),
+            amount_from_balance: num(p.amount_from_balance),
+            processed_at: iso(p.processed_at),
+          })),
+        },
+        devices: {
+          total: num(devicesAgg?.total),
+          active_7d: num(devicesAgg?.active_7d),
+          last_online_at: iso(devicesAgg?.last_online_at),
+        },
+        connections: {
+          days_total: num(connectionsAgg?.days_total),
+          days_30d: num(connectionsAgg?.days_30d),
+          days_7d: num(connectionsAgg?.days_7d),
+          last_day: connectionsAgg?.last_day ? new Date(connectionsAgg.last_day).toISOString() : null,
+        },
+        referrals: {
+          referred_by: userRow.referred_by ? String(userRow.referred_by) : null,
+          referrer: referrer
+            ? {
+                id: String(referrer.id),
+                full_name: referrer.full_name || null,
+                username: referrer.username || null,
+                is_partner: !!referrer.is_partner,
+              }
+            : null,
+          referrals_count: num(userRow.referrals),
+          referral_bonus_days_total: num(userRow.referral_bonus_days_total),
+          custom_referral_percent: num(userRow.custom_referral_percent),
+          is_partner: !!userRow.is_partner,
+          partner_link_mode: userRow.partner_link_mode || null,
+        },
+        risk: {
+          indicators,
+          recent_audit: (recentAudit || []).map((row) => ({
+            id: row.id,
+            provider: row.provider || null,
+            action: row.action,
+            result: row.result,
+            reason: row.reason || null,
+            created_at: iso(row.created_at),
+          })),
+        },
+        meta: {
+          generated_at: new Date().toISOString(),
+          tables_present: {
+            auth_identities: hasIdentities,
+            auth_password_credentials: hasPasswordCred,
+            processed_payments: hasPayments,
+            active_tariffs: hasActiveTariffs,
+            user_devices: hasUserDevices,
+            user_devices_last_online: hasUserDevicesLastOnline,
+            connections: hasConnections,
+            auth_audit_events: hasAuditEvents,
+          },
+        },
+      });
+    } catch (err) {
+      res
+        .status(500)
+        .json({ error: "Failed to build user-card payload", details: String(err?.message || err) });
+    }
+  });
 }
