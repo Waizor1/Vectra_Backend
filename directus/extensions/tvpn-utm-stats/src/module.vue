@@ -37,6 +37,10 @@
     </template>
 
     <template #actions>
+      <v-button secondary :disabled="!sources.length" @click="exportCsv">
+        <v-icon name="download" left />
+        Экспорт CSV
+      </v-button>
       <v-button secondary :loading="loading" @click="refresh">
         <v-icon name="refresh" left />
         Обновить
@@ -58,13 +62,22 @@
 
           <div class="hero__right">
             <label class="field field--compact">
-              <span>Префикс UTM</span>
+              <span>Префикс UTM (сервер)</span>
               <input
                 v-model="filters.utm_prefix"
                 type="text"
                 class="input"
                 placeholder="напр. qr_rt_"
                 @keyup.enter="refresh"
+              />
+            </label>
+            <label class="field field--compact">
+              <span>Поиск (локально)</span>
+              <input
+                v-model="localSearch"
+                type="text"
+                class="input"
+                placeholder="фильтр по подстроке"
               />
             </label>
             <label class="field field--compact">
@@ -122,77 +135,140 @@
 
           <section v-else class="table-card">
             <div class="table-card__head">
-              <div>Источники по конверсии</div>
+              <div>Источники по конверсии — {{ visibleSources.length }} из {{ sources.length }}</div>
               <div class="table-card__hint">
-                Сортировка по убыванию total. В ячейках «Всего», «Активная подписка», «Платных», «Доход» под основной цифрой —
-                сплит на прямых (D) и косвенных (I): прямой = пришёл прямо с UTM-ссылки, косвенный = приглашён прямым через реферал
-                (тег унаследован через PR feat/acquisition-source-attribution).
+                <strong>Клик по тегу UTM</strong> — поставить точный фильтр на сервер и подгрузить только эту кампанию.
+                <strong>Клик по заголовку</strong> — сортировка по столбцу (↑ asc / ↓ desc / × сброс).
+                <strong>Клик по строке</strong> — раскрыть метрики кампании (конверсия по воронке, ARPU, длительность жизни тега).
+                В ячейках «Всего», «Активная подписка», «Платных», «Доход» под основной цифрой — сплит на прямых (D) и косвенных (I)
+                согласно PR feat/acquisition-source-attribution.
               </div>
             </div>
             <div class="table-wrap">
               <table class="table">
                 <thead>
                   <tr>
-                    <th class="table__col table__col--utm">UTM</th>
-                    <th class="table__col table__col--num">Всего</th>
-                    <th class="table__col table__col--num">Регистр.</th>
-                    <th class="table__col table__col--num">Триал</th>
-                    <th class="table__col table__col--num">Активация ключа</th>
-                    <th class="table__col table__col--num">Активная подписка</th>
-                    <th class="table__col table__col--num">Платных</th>
-                    <th class="table__col table__col--num">Доход, ₽</th>
-                    <th class="table__col table__col--date">Первый</th>
-                    <th class="table__col table__col--date">Последний</th>
+                    <th
+                      v-for="col in columns"
+                      :key="col.key"
+                      :class="['table__col', col.alignClass, 'table__col--sortable', sort.key === col.key ? 'table__col--sorted' : '']"
+                      @click="toggleSort(col.key)"
+                    >
+                      <span class="sort-head">
+                        <span>{{ col.label }}</span>
+                        <span class="sort-indicator">{{ sortIndicator(col.key) }}</span>
+                      </span>
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
-                  <tr v-for="row in sources" :key="row.utm ?? '__no_utm__'">
-                    <td class="table__col table__col--utm">
-                      <span v-if="row.utm" class="tag tag--campaign">{{ row.utm }}</span>
-                      <span v-else class="tag tag--null">— без UTM —</span>
-                    </td>
-                    <td class="table__col table__col--num">
-                      <div class="cell-stack">
-                        <div class="cell-stack__main">{{ formatNumber(row.users_total) }}</div>
-                        <div class="cell-stack__split">
-                          <span class="split-pill split-pill--direct">D {{ formatNumber(row.users_direct) }}</span>
-                          <span class="split-pill split-pill--indirect">I {{ formatNumber(row.users_indirect) }}</span>
+                  <template v-for="row in visibleSources" :key="row.utm ?? '__no_utm__'">
+                    <tr
+                      :class="['table__row--clickable', expanded.has(row.utm ?? '__no_utm__') ? 'table__row--expanded' : '']"
+                      @click="toggleExpand(row)"
+                    >
+                      <td class="table__col table__col--utm">
+                        <button
+                          v-if="row.utm"
+                          type="button"
+                          class="tag tag--campaign tag--clickable"
+                          :title="'Подгрузить только ' + row.utm"
+                          @click.stop="setExactFilter(row.utm)"
+                        >{{ row.utm }}</button>
+                        <span v-else class="tag tag--null">— без UTM —</span>
+                      </td>
+                      <td class="table__col table__col--num">
+                        <div class="cell-stack">
+                          <div class="cell-stack__main">{{ formatNumber(row.users_total) }}</div>
+                          <div class="cell-stack__split">
+                            <span class="split-pill split-pill--direct">D {{ formatNumber(row.users_direct) }}</span>
+                            <span class="split-pill split-pill--indirect">I {{ formatNumber(row.users_indirect) }}</span>
+                          </div>
                         </div>
-                      </div>
-                    </td>
-                    <td class="table__col table__col--num">{{ formatNumber(row.users_registered) }}</td>
-                    <td class="table__col table__col--num">{{ formatNumber(row.users_used_trial) }}</td>
-                    <td class="table__col table__col--num">{{ formatNumber(row.users_key_activated) }}</td>
-                    <td class="table__col table__col--num">
-                      <div class="cell-stack">
-                        <div class="cell-stack__main">{{ formatNumber(row.users_active_subscription) }}</div>
-                        <div class="cell-stack__split">
-                          <span class="split-pill split-pill--direct">D {{ formatNumber(row.users_active_subscription_direct) }}</span>
-                          <span class="split-pill split-pill--indirect">I {{ formatNumber(row.users_active_subscription_indirect) }}</span>
+                      </td>
+                      <td class="table__col table__col--num">{{ formatNumber(row.users_registered) }}</td>
+                      <td class="table__col table__col--num">{{ formatNumber(row.users_used_trial) }}</td>
+                      <td class="table__col table__col--num">{{ formatNumber(row.users_key_activated) }}</td>
+                      <td class="table__col table__col--num">
+                        <div class="cell-stack">
+                          <div class="cell-stack__main">{{ formatNumber(row.users_active_subscription) }}</div>
+                          <div class="cell-stack__split">
+                            <span class="split-pill split-pill--direct">D {{ formatNumber(row.users_active_subscription_direct) }}</span>
+                            <span class="split-pill split-pill--indirect">I {{ formatNumber(row.users_active_subscription_indirect) }}</span>
+                          </div>
                         </div>
-                      </div>
-                    </td>
-                    <td class="table__col table__col--num">
-                      <div class="cell-stack">
-                        <div class="cell-stack__main">{{ formatNumber(row.users_paid) }}</div>
-                        <div class="cell-stack__split">
-                          <span class="split-pill split-pill--direct">D {{ formatNumber(row.users_paid_direct) }}</span>
-                          <span class="split-pill split-pill--indirect">I {{ formatNumber(row.users_paid_indirect) }}</span>
+                      </td>
+                      <td class="table__col table__col--num">
+                        <div class="cell-stack">
+                          <div class="cell-stack__main">{{ formatNumber(row.users_paid) }}</div>
+                          <div class="cell-stack__split">
+                            <span class="split-pill split-pill--direct">D {{ formatNumber(row.users_paid_direct) }}</span>
+                            <span class="split-pill split-pill--indirect">I {{ formatNumber(row.users_paid_indirect) }}</span>
+                          </div>
                         </div>
-                      </div>
-                    </td>
-                    <td class="table__col table__col--num">
-                      <div class="cell-stack">
-                        <div class="cell-stack__main">{{ formatRub(row.revenue_rub) }}</div>
-                        <div class="cell-stack__split">
-                          <span class="split-pill split-pill--direct">D {{ formatRub(row.revenue_rub_direct) }}</span>
-                          <span class="split-pill split-pill--indirect">I {{ formatRub(row.revenue_rub_indirect) }}</span>
+                      </td>
+                      <td class="table__col table__col--num">
+                        <div class="cell-stack">
+                          <div class="cell-stack__main">{{ formatRub(row.revenue_rub) }}</div>
+                          <div class="cell-stack__split">
+                            <span class="split-pill split-pill--direct">D {{ formatRub(row.revenue_rub_direct) }}</span>
+                            <span class="split-pill split-pill--indirect">I {{ formatRub(row.revenue_rub_indirect) }}</span>
+                          </div>
                         </div>
-                      </div>
-                    </td>
-                    <td class="table__col table__col--date">{{ formatDate(row.first_seen) }}</td>
-                    <td class="table__col table__col--date">{{ formatDate(row.last_seen) }}</td>
-                  </tr>
+                      </td>
+                      <td class="table__col table__col--date">{{ formatDate(row.first_seen) }}</td>
+                      <td class="table__col table__col--date">{{ formatDate(row.last_seen) }}</td>
+                    </tr>
+                    <tr v-if="expanded.has(row.utm ?? '__no_utm__')" class="table__row--detail">
+                      <td :colspan="columns.length">
+                        <div class="detail-grid">
+                          <div class="detail-card">
+                            <div class="detail-card__label">Конверсия в регистрацию</div>
+                            <div class="detail-card__value">{{ formatPercent(row.users_registered, row.users_total) }}</div>
+                            <div class="detail-card__hint">{{ formatNumber(row.users_registered) }} / {{ formatNumber(row.users_total) }}</div>
+                          </div>
+                          <div class="detail-card">
+                            <div class="detail-card__label">Конверсия в триал</div>
+                            <div class="detail-card__value">{{ formatPercent(row.users_used_trial, row.users_total) }}</div>
+                            <div class="detail-card__hint">{{ formatNumber(row.users_used_trial) }} / {{ formatNumber(row.users_total) }}</div>
+                          </div>
+                          <div class="detail-card">
+                            <div class="detail-card__label">Конверсия в платных</div>
+                            <div class="detail-card__value">{{ formatPercent(row.users_paid, row.users_total) }}</div>
+                            <div class="detail-card__hint">{{ formatNumber(row.users_paid) }} / {{ formatNumber(row.users_total) }}</div>
+                          </div>
+                          <div class="detail-card">
+                            <div class="detail-card__label">ARPU (по платным)</div>
+                            <div class="detail-card__value">{{ formatRub(arpu(row)) }}</div>
+                            <div class="detail-card__hint">{{ formatRub(row.revenue_rub) }} / {{ formatNumber(row.users_paid) }}</div>
+                          </div>
+                          <div class="detail-card">
+                            <div class="detail-card__label">Доля косвенных</div>
+                            <div class="detail-card__value">{{ formatPercent(row.users_indirect, row.users_total) }}</div>
+                            <div class="detail-card__hint">D {{ formatNumber(row.users_direct) }} · I {{ formatNumber(row.users_indirect) }}</div>
+                          </div>
+                          <div class="detail-card">
+                            <div class="detail-card__label">Длительность жизни тега</div>
+                            <div class="detail-card__value">{{ campaignDuration(row) }}</div>
+                            <div class="detail-card__hint">{{ formatDate(row.first_seen) }} → {{ formatDate(row.last_seen) }}</div>
+                          </div>
+                        </div>
+                        <div v-if="subTags(row).length" class="sub-tags">
+                          <div class="sub-tags__label">Сабтеги в текущей выборке (одного префикса)</div>
+                          <div class="sub-tags__list">
+                            <button
+                              v-for="sub in subTags(row)"
+                              :key="sub.utm"
+                              type="button"
+                              class="tag tag--campaign tag--clickable"
+                              :title="'Подгрузить только ' + sub.utm"
+                              @click.stop="setExactFilter(sub.utm)"
+                            >{{ sub.utm }} · {{ formatNumber(sub.users_total) }}</button>
+                          </div>
+                        </div>
+                      </td>
+                    </tr>
+                  </template>
                 </tbody>
               </table>
             </div>
@@ -230,10 +306,126 @@ const filters = reactive({
   limit: 200,
 });
 
+// Client-side state: local search + sort + expanded rows.
+const localSearch = ref("");
+const sort = reactive({ key: "users_total", dir: "desc" });
+const expanded = ref(new Set());
+
+// Columns descriptor drives header rendering AND sort dispatch. `alignClass`
+// keeps numeric vs UTM vs date alignment in sync with body cells.
+const columns = [
+  { key: "utm", label: "UTM", alignClass: "table__col--utm" },
+  { key: "users_total", label: "Всего", alignClass: "table__col--num" },
+  { key: "users_registered", label: "Регистр.", alignClass: "table__col--num" },
+  { key: "users_used_trial", label: "Триал", alignClass: "table__col--num" },
+  { key: "users_key_activated", label: "Активация ключа", alignClass: "table__col--num" },
+  { key: "users_active_subscription", label: "Активная подписка", alignClass: "table__col--num" },
+  { key: "users_paid", label: "Платных", alignClass: "table__col--num" },
+  { key: "revenue_rub", label: "Доход, ₽", alignClass: "table__col--num" },
+  { key: "first_seen", label: "Первый", alignClass: "table__col--date" },
+  { key: "last_seen", label: "Последний", alignClass: "table__col--date" },
+];
+
 const withUtmPercent = computed(() => {
   if (!totals.users_total) return 0;
   return Math.round((totals.users_with_utm / totals.users_total) * 100);
 });
+
+// Filter (local) -> sort -> render. Filtering and sorting both run client-side
+// against the rows fetched by the server prefix filter, so toggling search /
+// sort never hits the API.
+const visibleSources = computed(() => {
+  const needle = localSearch.value.trim().toLowerCase();
+  let rows = sources.value;
+  if (needle) {
+    rows = rows.filter((row) => {
+      const utm = (row.utm || "").toLowerCase();
+      return utm.includes(needle) || (!row.utm && needle === "null");
+    });
+  }
+  if (!sort.key) return rows;
+  const dir = sort.dir === "asc" ? 1 : -1;
+  const sortKey = sort.key;
+  return [...rows].sort((a, b) => {
+    const av = a[sortKey];
+    const bv = b[sortKey];
+    // null/undefined / utm comparison
+    if (av == null && bv == null) return 0;
+    if (av == null) return 1; // empty goes last
+    if (bv == null) return -1;
+    if (typeof av === "number" && typeof bv === "number") return (av - bv) * dir;
+    return String(av).localeCompare(String(bv), "ru") * dir;
+  });
+});
+
+// Sub-tags = rows whose utm starts with current row's utm + "_" or "." or "/".
+// Surfaced when expanding a row so the user can drill into per-section
+// breakdowns of a campaign family (e.g. qr_rt_launch_2026_05 -> _hero/_about).
+function subTags(row) {
+  if (!row.utm) return [];
+  const base = row.utm;
+  return sources.value.filter((other) => {
+    if (!other.utm || other.utm === base) return false;
+    return other.utm.startsWith(base + "_") || other.utm.startsWith(base + ".") || other.utm.startsWith(base + "/");
+  });
+}
+
+function toggleSort(key) {
+  if (sort.key !== key) {
+    sort.key = key;
+    // Numeric columns default to desc (biggest channel first); textual to asc.
+    const numeric = ["users_total","users_registered","users_used_trial","users_key_activated","users_active_subscription","users_paid","revenue_rub"];
+    sort.dir = numeric.includes(key) || key === "first_seen" || key === "last_seen" ? "desc" : "asc";
+    return;
+  }
+  if (sort.dir === "desc") {
+    sort.dir = "asc";
+  } else if (sort.dir === "asc") {
+    sort.key = null;
+    sort.dir = "desc";
+  }
+}
+
+function sortIndicator(key) {
+  if (sort.key !== key) return "";
+  return sort.dir === "asc" ? "↑" : "↓";
+}
+
+function toggleExpand(row) {
+  const key = row.utm ?? "__no_utm__";
+  const next = new Set(expanded.value);
+  if (next.has(key)) next.delete(key);
+  else next.add(key);
+  expanded.value = next;
+}
+
+function setExactFilter(utm) {
+  if (!utm) return;
+  filters.utm_prefix = utm;
+  expanded.value = new Set();
+  refresh();
+}
+
+function arpu(row) {
+  if (!row.users_paid || row.users_paid <= 0) return 0;
+  return (row.revenue_rub || 0) / row.users_paid;
+}
+
+function campaignDuration(row) {
+  if (!row.first_seen || !row.last_seen) return "—";
+  try {
+    const start = new Date(row.first_seen);
+    const end = new Date(row.last_seen);
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return "—";
+    const days = Math.round((end - start) / 86400000);
+    if (days <= 0) return "в течение одного дня";
+    if (days === 1) return "1 день";
+    if (days < 5) return `${days} дня`;
+    return `${days} дней`;
+  } catch {
+    return "—";
+  }
+}
 
 function formatNumber(value) {
   if (value === null || value === undefined) return "—";
@@ -245,6 +437,15 @@ function formatRub(value) {
   return `${Math.round(Number(value)).toLocaleString("ru-RU")} ₽`;
 }
 
+function formatPercent(part, whole) {
+  const w = Number(whole);
+  if (!w || w <= 0) return "—";
+  const p = Number(part) || 0;
+  const pct = (p / w) * 100;
+  if (pct >= 10) return `${pct.toFixed(1)}%`;
+  return `${pct.toFixed(2)}%`;
+}
+
 function formatDate(iso) {
   if (!iso) return "—";
   try {
@@ -254,6 +455,42 @@ function formatDate(iso) {
   } catch {
     return "—";
   }
+}
+
+function csvEscape(value) {
+  if (value === null || value === undefined) return "";
+  const s = String(value);
+  if (s.includes(",") || s.includes('"') || s.includes("\n")) {
+    return `"${s.replace(/"/g, '""')}"`;
+  }
+  return s;
+}
+
+function exportCsv() {
+  if (!visibleSources.value.length) return;
+  const header = [
+    "utm","users_total","users_direct","users_indirect",
+    "users_registered","users_used_trial","users_key_activated",
+    "users_active_subscription","users_active_subscription_direct","users_active_subscription_indirect",
+    "users_paid","users_paid_direct","users_paid_indirect",
+    "revenue_rub","revenue_rub_direct","revenue_rub_indirect",
+    "first_seen","last_seen",
+  ];
+  const body = visibleSources.value.map((row) =>
+    header.map((key) => csvEscape(row[key] ?? (key === "utm" ? "" : 0))).join(",")
+  );
+  const csv = [header.join(","), ...body].join("\n");
+  const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "");
+  const prefixPart = (filters.utm_prefix || "all").replace(/[^a-zA-Z0-9_]/g, "_");
+  a.download = `utm-stats_${prefixPart}_${stamp}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }
 
 async function refresh() {
@@ -599,6 +836,7 @@ onMounted(() => {
 
 .tag {
   display: inline-flex;
+  align-items: center;
   padding: 4px 10px;
   border-radius: 999px;
   font-family: ui-monospace, SFMono-Regular, monospace;
@@ -615,6 +853,125 @@ onMounted(() => {
   background: rgba(110, 118, 129, 0.12);
   color: #6e7681;
   border: 1px solid rgba(110, 118, 129, 0.25);
+}
+
+.tag--clickable {
+  cursor: pointer;
+  font: inherit;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 12px;
+  line-height: 1.2;
+  transition: background 0.15s, color 0.15s, border-color 0.15s, transform 0.05s;
+}
+
+.tag--clickable:hover {
+  background: rgba(88, 166, 255, 0.22);
+  color: #79b8ff;
+  border-color: rgba(88, 166, 255, 0.45);
+}
+
+.tag--clickable:active {
+  transform: translateY(1px);
+}
+
+.table__col--sortable {
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.12s, color 0.12s;
+}
+
+.table__col--sortable:hover {
+  background: rgba(88, 166, 255, 0.05);
+  color: #79b8ff;
+}
+
+.table__col--sorted {
+  color: #58a6ff;
+}
+
+.sort-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sort-indicator {
+  min-width: 10px;
+  text-align: center;
+  font-weight: 700;
+  color: #58a6ff;
+}
+
+.table__row--clickable {
+  cursor: pointer;
+  transition: background 0.12s;
+}
+
+.table__row--expanded {
+  background: rgba(88, 166, 255, 0.04);
+}
+
+.table__row--detail > td {
+  background: rgba(13, 17, 23, 0.55);
+  border-top: 0;
+  padding: 18px 22px 22px;
+}
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 12px;
+}
+
+.detail-card {
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(110, 118, 129, 0.18);
+  background: linear-gradient(135deg, rgba(33, 38, 45, 0.55), rgba(13, 17, 23, 0.55));
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.detail-card__label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: rgba(201, 209, 217, 0.62);
+  font-weight: 700;
+}
+
+.detail-card__value {
+  font-size: 18px;
+  font-weight: 700;
+  color: #f0f6fc;
+  font-variant-numeric: tabular-nums;
+}
+
+.detail-card__hint {
+  font-size: 11.5px;
+  color: rgba(201, 209, 217, 0.55);
+}
+
+.sub-tags {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px dashed rgba(110, 118, 129, 0.2);
+}
+
+.sub-tags__label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: rgba(201, 209, 217, 0.62);
+  font-weight: 700;
+  margin-bottom: 8px;
+}
+
+.sub-tags__list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 .state-card {
