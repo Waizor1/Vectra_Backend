@@ -290,6 +290,11 @@
                           @click.stop="setExactFilter(row.utm)"
                         >{{ row.utm }}</button>
                         <span v-else class="tag tag--null">— без UTM —</span>
+                        <span
+                          v-if="savedCampaignFor(row.utm)"
+                          class="utm-label"
+                          :title="savedCampaignFor(row.utm).description || savedCampaignFor(row.utm).label || ''"
+                        >{{ savedCampaignFor(row.utm).label || '(сохранена)' }}</span>
                       </td>
                       <td class="table__col table__col--num">
                         <div class="cell-stack">
@@ -439,15 +444,63 @@
     <div class="cb-modal" role="dialog" aria-label="Создать кампанию">
       <header class="cb-modal__head">
         <div>
-          <div class="cb-modal__kicker">Создать кампанию</div>
+          <div class="cb-modal__kicker">{{ campaignBuilder.savedId ? 'Кампания · сохранена' : 'Создать кампанию' }}</div>
           <h2 class="cb-modal__title">Сборка UTM-кампании</h2>
           <p class="cb-modal__sub">
             Сформируй UTM-тег и забери готовый пакет: ссылки для веба и Telegram, QR-коды и
-            сниппеты для постов на форумах, в каналах и личных сообщениях.
+            сниппеты для постов на форумах, в каналах и личных сообщениях. Сохрани в Directus,
+            чтобы метка, описание и заметки остались между сессиями.
           </p>
         </div>
         <button type="button" class="cb-modal__close" aria-label="Закрыть" @click="closeCampaignBuilder">×</button>
       </header>
+
+      <section v-if="savedCampaigns.length" class="cb-section">
+        <div class="cb-section__title">Мои кампании ({{ savedCampaigns.length }})</div>
+        <div class="cb-saved">
+          <div class="cb-saved__filter">
+            <label class="cb-saved__opt">
+              <input type="radio" name="status" :value="'active'" v-model="savedStatusFilter" @change="loadSavedCampaigns()" />
+              <span>Активные</span>
+            </label>
+            <label class="cb-saved__opt">
+              <input type="radio" name="status" :value="'archived'" v-model="savedStatusFilter" @change="loadSavedCampaigns()" />
+              <span>Архив</span>
+            </label>
+            <label class="cb-saved__opt">
+              <input type="radio" name="status" :value="'all'" v-model="savedStatusFilter" @change="loadSavedCampaigns()" />
+              <span>Все</span>
+            </label>
+            <input
+              v-model="savedSearch"
+              type="text"
+              class="cb-input cb-saved__search"
+              placeholder="Поиск по utm или подписи"
+              @keyup.enter="loadSavedCampaigns()"
+            />
+          </div>
+          <div class="cb-saved__list">
+            <div
+              v-for="camp in savedCampaigns"
+              :key="camp.id"
+              :class="['cb-saved-row', campaignBuilder.savedId === camp.id ? 'cb-saved-row--selected' : '', camp.status === 'archived' ? 'cb-saved-row--archived' : '']"
+              @click="selectSavedCampaign(camp)"
+            >
+              <div class="cb-saved-row__main">
+                <span class="cb-saved-row__utm">{{ camp.utm }}</span>
+                <span v-if="camp.label" class="cb-saved-row__label">· {{ camp.label }}</span>
+              </div>
+              <div class="cb-saved-row__meta">
+                <span v-if="camp.status === 'archived'" class="cb-saved-row__pill cb-saved-row__pill--archived">архив</span>
+                <span class="cb-saved-row__date">{{ shortDate(camp.updated_at || camp.created_at) }}</span>
+              </div>
+            </div>
+            <div v-if="!savedCampaigns.length" class="cb-saved__empty">
+              По выбранному фильтру нет кампаний.
+            </div>
+          </div>
+        </div>
+      </section>
 
       <section class="cb-section">
         <div class="cb-section__title">UTM-тег</div>
@@ -477,6 +530,35 @@
               maxlength="120"
             />
             <span class="cb-field__hint">Используется в текстах сниппетов. Можно оставить пустым.</span>
+          </label>
+          <label class="cb-field">
+            <span class="cb-field__label">Промокод (на кнопку CTA)</span>
+            <input
+              v-model="campaignBuilder.promoCode"
+              type="text"
+              class="cb-input"
+              placeholder="RUTRACKER"
+              maxlength="64"
+            />
+            <span class="cb-field__hint">Подставляется в сниппеты. По умолчанию — RUTRACKER.</span>
+          </label>
+          <label class="cb-field cb-field--full">
+            <span class="cb-field__label">Описание</span>
+            <textarea
+              v-model="campaignBuilder.description"
+              class="cb-input"
+              rows="2"
+              placeholder="что это, зачем, когда запустили"
+            ></textarea>
+          </label>
+          <label class="cb-field cb-field--full">
+            <span class="cb-field__label">Заметки</span>
+            <textarea
+              v-model="campaignBuilder.notes"
+              class="cb-input"
+              rows="2"
+              placeholder="внутренние пометки — что сделали, что увидели, к каким выводам пришли"
+            ></textarea>
           </label>
         </div>
 
@@ -532,12 +614,29 @@
       </section>
 
       <footer class="cb-modal__foot">
-        <div class="cb-foot__hint">
-          Пока что кампания не сохраняется в Directus — Phase 2 принесёт коллекцию `utm_campaigns` с историей,
-          архивом и заметками. Сейчас ты получаешь готовый пакет ассетов и сразу применяешь тег в дашборд.
+        <div v-if="campaignBuilder.saveMessage" :class="['cb-foot__msg', campaignBuilder.saveError ? 'cb-foot__msg--error' : 'cb-foot__msg--ok']">
+          {{ campaignBuilder.saveMessage }}
         </div>
         <div class="cb-foot__actions">
           <v-button secondary @click="closeCampaignBuilder">Отмена</v-button>
+          <v-button
+            v-if="campaignBuilder.savedId && campaignBuilder.savedStatus !== 'archived'"
+            warning
+            :loading="campaignBuilder.archiving"
+            @click="archiveCampaign"
+          >Архивировать</v-button>
+          <v-button
+            v-if="campaignBuilder.savedId && campaignBuilder.savedStatus === 'archived'"
+            secondary
+            :loading="campaignBuilder.saving"
+            @click="unarchiveCampaign"
+          >Восстановить</v-button>
+          <v-button
+            secondary
+            :disabled="!!campaignBuilder.error || !campaignBuilder.utm"
+            :loading="campaignBuilder.saving"
+            @click="saveCampaign"
+          >{{ campaignBuilder.savedId ? 'Обновить' : 'Сохранить' }}</v-button>
           <v-button
             primary
             :disabled="!!campaignBuilder.error || !campaignBuilder.utm"
@@ -565,8 +664,24 @@ const campaignBuilder = reactive({
   open: false,
   utm: "",
   label: "",
+  description: "",
+  notes: "",
+  promoCode: "RUTRACKER",
   error: "",
+  saving: false,
+  archiving: false,
+  saveMessage: "",
+  saveError: false,
+  savedId: null,
+  savedStatus: null,
 });
+
+// Saved-campaigns list — fetched from /admin-widgets/utm-campaigns. Used in
+// the modal sidebar and to cross-link labels in the main dashboard table.
+const savedCampaigns = ref([]);
+const savedCampaignsByUtm = ref(new Map());
+const savedStatusFilter = ref("active");
+const savedSearch = ref("");
 const copied = ref("");
 const RESERVED_UTMS = new Set(["partner"]);
 const UTM_RE = /^[A-Za-z0-9_]+$/;
@@ -623,16 +738,159 @@ function monthStamp() {
   return `${d.getUTCFullYear()}_${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
 }
 
-function openCampaignBuilder() {
-  campaignBuilder.open = true;
+function resetCampaignBuilderForm() {
   campaignBuilder.utm = "";
   campaignBuilder.label = "";
+  campaignBuilder.description = "";
+  campaignBuilder.notes = "";
+  campaignBuilder.promoCode = "RUTRACKER";
   campaignBuilder.error = "";
+  campaignBuilder.saving = false;
+  campaignBuilder.archiving = false;
+  campaignBuilder.saveMessage = "";
+  campaignBuilder.saveError = false;
+  campaignBuilder.savedId = null;
+  campaignBuilder.savedStatus = null;
+}
+
+function openCampaignBuilder() {
+  resetCampaignBuilderForm();
+  campaignBuilder.open = true;
   copied.value = "";
+  loadSavedCampaigns();
 }
 
 function closeCampaignBuilder() {
   campaignBuilder.open = false;
+}
+
+async function loadSavedCampaigns() {
+  try {
+    const params = {
+      status: savedStatusFilter.value,
+    };
+    if (savedSearch.value && savedSearch.value.trim()) {
+      params.search = savedSearch.value.trim();
+    }
+    const resp = await api.get("/admin-widgets/utm-campaigns", { params });
+    const arr = Array.isArray(resp?.data?.campaigns) ? resp.data.campaigns : [];
+    savedCampaigns.value = arr;
+    const map = new Map();
+    for (const c of arr) {
+      if (c.utm) map.set(c.utm, c);
+    }
+    savedCampaignsByUtm.value = map;
+  } catch (err) {
+    // Soft fail — collection might not exist yet on a fresh env.
+    savedCampaigns.value = [];
+    savedCampaignsByUtm.value = new Map();
+  }
+}
+
+function selectSavedCampaign(camp) {
+  campaignBuilder.utm = camp.utm;
+  campaignBuilder.label = camp.label ?? "";
+  campaignBuilder.description = camp.description ?? "";
+  campaignBuilder.notes = camp.notes ?? "";
+  campaignBuilder.promoCode = camp.promo_code ?? "RUTRACKER";
+  campaignBuilder.error = validateUtm(camp.utm);
+  campaignBuilder.savedId = camp.id;
+  campaignBuilder.savedStatus = camp.status ?? "active";
+  campaignBuilder.saveMessage = "";
+  campaignBuilder.saveError = false;
+  copied.value = "";
+}
+
+async function saveCampaign() {
+  if (campaignBuilder.error || !campaignBuilder.utm) return;
+  campaignBuilder.saving = true;
+  campaignBuilder.saveMessage = "";
+  campaignBuilder.saveError = false;
+  try {
+    const payload = {
+      utm: campaignBuilder.utm.trim(),
+      label: campaignBuilder.label.trim() || null,
+      description: campaignBuilder.description.trim() || null,
+      notes: campaignBuilder.notes.trim() || null,
+      promo_code: campaignBuilder.promoCode.trim() || null,
+    };
+    if (campaignBuilder.savedId) {
+      // Update existing.
+      const resp = await api.patch(`/admin-widgets/utm-campaigns/${campaignBuilder.savedId}`, payload);
+      const camp = resp?.data?.campaign;
+      if (camp) {
+        campaignBuilder.savedId = camp.id;
+        campaignBuilder.savedStatus = camp.status;
+      }
+      campaignBuilder.saveMessage = "Кампания обновлена.";
+    } else {
+      // Create new.
+      const resp = await api.post(`/admin-widgets/utm-campaigns`, payload);
+      const camp = resp?.data?.campaign;
+      if (camp) {
+        campaignBuilder.savedId = camp.id;
+        campaignBuilder.savedStatus = camp.status;
+      }
+      campaignBuilder.saveMessage = "Кампания сохранена в Directus.";
+    }
+    await loadSavedCampaigns();
+  } catch (err) {
+    campaignBuilder.saveError = true;
+    const apiErr = err?.response?.data?.error;
+    if (apiErr === "Campaign already exists for this utm") {
+      campaignBuilder.saveMessage = "Тег уже есть в Directus — выбери из списка слева для обновления.";
+    } else {
+      campaignBuilder.saveMessage = apiErr || err?.message || "Не удалось сохранить.";
+    }
+  } finally {
+    campaignBuilder.saving = false;
+  }
+}
+
+async function archiveCampaign() {
+  if (!campaignBuilder.savedId) return;
+  campaignBuilder.archiving = true;
+  campaignBuilder.saveMessage = "";
+  try {
+    await api.delete(`/admin-widgets/utm-campaigns/${campaignBuilder.savedId}`);
+    campaignBuilder.savedStatus = "archived";
+    campaignBuilder.saveMessage = "Кампания заархивирована.";
+    await loadSavedCampaigns();
+  } catch (err) {
+    campaignBuilder.saveError = true;
+    campaignBuilder.saveMessage = err?.response?.data?.error || err?.message || "Не удалось архивировать.";
+  } finally {
+    campaignBuilder.archiving = false;
+  }
+}
+
+async function unarchiveCampaign() {
+  if (!campaignBuilder.savedId) return;
+  campaignBuilder.saving = true;
+  campaignBuilder.saveMessage = "";
+  try {
+    const resp = await api.patch(`/admin-widgets/utm-campaigns/${campaignBuilder.savedId}`, { status: "active" });
+    const camp = resp?.data?.campaign;
+    if (camp) campaignBuilder.savedStatus = camp.status;
+    campaignBuilder.saveMessage = "Кампания восстановлена.";
+    await loadSavedCampaigns();
+  } catch (err) {
+    campaignBuilder.saveError = true;
+    campaignBuilder.saveMessage = err?.response?.data?.error || err?.message || "Не удалось восстановить.";
+  } finally {
+    campaignBuilder.saving = false;
+  }
+}
+
+function shortDate(iso) {
+  if (!iso) return "—";
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return "—";
+    return d.toLocaleDateString("ru-RU", { day: "2-digit", month: "short" });
+  } catch {
+    return "—";
+  }
 }
 
 function applyCampaignTemplate(tpl) {
@@ -682,18 +940,23 @@ const campaignSnippets = computed(() => {
   const utm = campaignBuilder.utm.trim();
   if (!utm) return [];
   const label = campaignBuilder.label.trim() || "Vectra Connect";
+  const promo = (campaignBuilder.promoCode || "").trim().toUpperCase();
+  const promoLine = promo ? ` Промокод **${promo}** активирует подписку.` : "";
+  const promoLineBb = promo ? ` Промокод [b]${promo}[/b] активирует подписку.` : "";
+  const promoLinePlain = promo ? ` Промокод ${promo} активирует подписку.` : "";
+  const promoLineHtml = promo ? ` Промокод <code>${promo}</code> активирует подписку.` : "";
   const webUrl = `${APP_BASE}?start=${utm}`;
   const botUrl = `https://t.me/${BOT_HANDLE}?start=${utm}`;
   return [
     {
       key: "bbcode",
       name: "BBCode (RuTracker / phpBB)",
-      hint: "Вставить в пост на форуме. Промокод RUTRACKER применится автоматически после регистрации.",
+      hint: `Вставить в пост на форуме.${promo ? ` Промокод ${promo} применится автоматически после регистрации.` : ""}`,
       body: [
         `[b]${label}[/b]`,
         `[url=${webUrl}]${APP_BASE}[/url] · [url=${botUrl}]@${BOT_HANDLE}[/url]`,
         "",
-        `[i]10 дней бесплатно · работает в РФ · YouTube без рекламы. Промокод [b]RUTRACKER[/b] активирует подписку.[/i]`,
+        `[i]10 дней бесплатно · работает в РФ · YouTube без рекламы.${promoLineBb}[/i]`,
       ].join("\n"),
     },
     {
@@ -704,8 +967,7 @@ const campaignSnippets = computed(() => {
         `**${label}**`,
         `[${APP_BASE}](${webUrl}) · [@${BOT_HANDLE}](${botUrl})`,
         "",
-        "10 дней бесплатно · работает в РФ · YouTube без рекламы.",
-        "Промокод **RUTRACKER** активирует подписку.",
+        `10 дней бесплатно · работает в РФ · YouTube без рекламы.${promoLine}`,
       ].join("\n"),
     },
     {
@@ -717,7 +979,7 @@ const campaignSnippets = computed(() => {
         `${webUrl}`,
         `${botUrl}`,
         "",
-        "10 дней бесплатно. Промокод RUTRACKER активирует подписку.",
+        `10 дней бесплатно.${promoLinePlain}`,
       ].join("\n"),
     },
     {
@@ -727,7 +989,7 @@ const campaignSnippets = computed(() => {
       body:
         `<p><strong>${label}</strong><br />\n` +
         `<a href="${webUrl}">${APP_BASE}</a> · <a href="${botUrl}">@${BOT_HANDLE}</a><br />\n` +
-        `10 дней бесплатно. Промокод <code>RUTRACKER</code> активирует подписку.</p>`,
+        `10 дней бесплатно.${promoLineHtml}</p>`,
     },
   ];
 });
@@ -1566,7 +1828,17 @@ onMounted(() => {
     refresh();
     if (compareSet.value.size > 0) refreshCompareSeries();
   }
+  // Load saved campaigns in background so the main table can render labels
+  // for utms with registered campaigns. Soft-fails on missing collection.
+  loadSavedCampaigns();
 });
+
+// Lookup helper for the main table — returns the saved campaign (if any) for
+// a given utm string. Used by the UTM cell renderer to surface the label.
+function savedCampaignFor(utm) {
+  if (!utm) return null;
+  return savedCampaignsByUtm.value.get(utm) || null;
+}
 </script>
 
 <style scoped>
@@ -2662,6 +2934,191 @@ onMounted(() => {
   padding: 8px;
   background: rgba(255, 107, 107, 0.08);
   border-radius: 6px;
+}
+
+/* ===== Saved campaigns list ===== */
+.cb-saved {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.cb-saved__filter {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.cb-saved__opt {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: rgba(201, 209, 217, 0.72);
+  cursor: pointer;
+}
+
+.cb-saved__opt input {
+  accent-color: #b692f6;
+}
+
+.cb-saved__search {
+  flex: 1;
+  min-width: 180px;
+  font-size: 12px;
+  padding: 6px 10px;
+}
+
+.cb-saved__list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid rgba(110, 118, 129, 0.18);
+  border-radius: 8px;
+  padding: 4px;
+  background: rgba(13, 17, 23, 0.45);
+}
+
+.cb-saved-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s;
+  border: 1px solid transparent;
+}
+
+.cb-saved-row:hover {
+  background: rgba(151, 117, 250, 0.08);
+  border-color: rgba(151, 117, 250, 0.25);
+}
+
+.cb-saved-row--selected {
+  background: rgba(151, 117, 250, 0.18);
+  border-color: rgba(151, 117, 250, 0.55);
+}
+
+.cb-saved-row--archived {
+  opacity: 0.55;
+}
+
+.cb-saved-row__main {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+
+.cb-saved-row__utm {
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  color: #79b8ff;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cb-saved-row__label {
+  color: rgba(201, 209, 217, 0.72);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cb-saved-row__meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.cb-saved-row__pill {
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(110, 118, 129, 0.18);
+  color: rgba(201, 209, 217, 0.62);
+}
+
+.cb-saved-row__pill--archived {
+  background: rgba(255, 107, 107, 0.12);
+  color: #ff8585;
+}
+
+.cb-saved-row__date {
+  font-size: 11px;
+  color: rgba(201, 209, 217, 0.45);
+  white-space: nowrap;
+}
+
+.cb-saved__empty {
+  font-size: 12px;
+  color: rgba(110, 118, 129, 0.7);
+  padding: 16px;
+  text-align: center;
+}
+
+/* ===== Modal form additions ===== */
+.cb-field--full {
+  grid-column: 1 / -1;
+}
+
+.cb-field textarea.cb-input {
+  font-family: Inter, sans-serif;
+  resize: vertical;
+  min-height: 56px;
+}
+
+.cb-foot__msg {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 6px 10px;
+  border-radius: 6px;
+  flex: 1;
+  margin-right: 12px;
+}
+
+.cb-foot__msg--ok {
+  background: rgba(81, 207, 102, 0.12);
+  color: #51cf66;
+  border: 1px solid rgba(81, 207, 102, 0.32);
+}
+
+.cb-foot__msg--error {
+  background: rgba(255, 107, 107, 0.12);
+  color: #ff8585;
+  border: 1px solid rgba(255, 107, 107, 0.32);
+}
+
+/* ===== Main table cross-link label ===== */
+.utm-label {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 8px;
+  font-size: 11px;
+  font-weight: 700;
+  border-radius: 4px;
+  background: rgba(182, 146, 246, 0.14);
+  color: #d6c0ff;
+  border: 1px solid rgba(182, 146, 246, 0.28);
+  white-space: nowrap;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+  cursor: default;
 }
 
 .state-card {
