@@ -75,6 +75,140 @@ def test_admin_widgets_rejects_non_admin_before_routes():
     )
 
 
+def test_admin_widgets_user_card_route_registered_and_validates_input():
+    """The /user-card/:user_id route must be present in src + dist, validate ids and return 404 for missing users."""
+
+    source_url = (ROOT / "directus/extensions/admin-widgets/src/index.js").as_uri()
+    src_source = _read("directus/extensions/admin-widgets/src/index.js")
+    dist_source = _read("directus/extensions/admin-widgets/dist/index.js")
+
+    assert '"/user-card/:user_id"' in src_source, "user-card route missing from src"
+    assert "/user-card/" in dist_source, "user-card route missing from dist"
+    assert "Invalid user id" in src_source
+    assert "User not found" in src_source
+
+    _node(
+        f"""
+        import registerEndpoint from {source_url!r};
+
+        const routes = new Map();
+        const router = {{
+          use() {{}},
+          get(path, fn) {{ routes.set(path, fn); }},
+          post() {{}},
+        }};
+
+        const fakeBuilder = () => {{
+          const qb = {{
+            where() {{ return qb; }},
+            select() {{ return qb; }},
+            orderBy() {{ return qb; }},
+            limit() {{ return qb; }},
+            count() {{ return qb; }},
+            min() {{ return qb; }},
+            first: async () => null,
+          }};
+          return qb;
+        }};
+        const fakeDatabase = (table) => fakeBuilder();
+        fakeDatabase.raw = (sql) => sql;
+
+        registerEndpoint(router, {{ database: fakeDatabase }});
+        const handler = routes.get('/user-card/:user_id');
+        if (!handler) throw new Error('user-card route was not registered');
+
+        // Invalid id: non-numeric must return 400 BEFORE touching DB.
+        let invalidStatus = 0;
+        let invalidPayload = null;
+        await handler(
+          {{ params: {{ user_id: 'abc' }} }},
+          {{
+            status(code) {{ invalidStatus = code; return this; }},
+            json(payload) {{ invalidPayload = payload; return payload; }},
+          }},
+        );
+        if (invalidStatus !== 400) throw new Error(`expected 400 for invalid id, got ${{invalidStatus}}`);
+        if (!String(invalidPayload?.error).includes('Invalid user id')) throw new Error('unexpected invalid-id payload');
+
+        // Missing user: information_schema lookup returns null, then users lookup returns null → 404.
+        const presentTablesRouter = routes.get('/user-card/:user_id');
+        let missingStatus = 0;
+        let missingPayload = null;
+        const tableAwareDatabase = (table) => {{
+          const qb = {{
+            where() {{ return qb; }},
+            select() {{ return qb; }},
+            orderBy() {{ return qb; }},
+            limit() {{ return qb; }},
+            count() {{ return qb; }},
+            min() {{ return qb; }},
+            first: async () => {{
+              if (table === 'information_schema.tables') {{
+                return {{ table_name: 'users' }};
+              }}
+              if (table === 'users') {{
+                return null;
+              }}
+              return null;
+            }},
+          }};
+          return qb;
+        }};
+        tableAwareDatabase.raw = (sql) => sql;
+
+        const router2 = {{
+          use() {{}},
+          get(path, fn) {{ if (path === '/user-card/:user_id') routes.set(path, fn); }},
+          post() {{}},
+        }};
+        registerEndpoint(router2, {{ database: tableAwareDatabase }});
+        const handler2 = routes.get('/user-card/:user_id');
+
+        await handler2(
+          {{ params: {{ user_id: '12345' }} }},
+          {{
+            status(code) {{ missingStatus = code; return this; }},
+            json(payload) {{ missingPayload = payload; return payload; }},
+          }},
+        );
+        if (missingStatus !== 404) throw new Error(`expected 404 for missing user, got ${{missingStatus}}`);
+        if (!String(missingPayload?.error).includes('User not found')) throw new Error('unexpected missing-user payload');
+        """
+    )
+
+
+def test_tvpn_user_card_interface_extension_loads():
+    """The tvpn-user-card interface bundle must declare the right id/types and call the admin-widgets endpoint.
+
+    The dist imports from `@directus/extensions-sdk` and `vue`, which are host-provided
+    externals that only resolve inside the Directus admin runtime — therefore the
+    extension is validated statically here. ``node --check`` is used to confirm the
+    dist parses as valid JavaScript.
+    """
+
+    dist_path = ROOT / "directus/extensions/tvpn-user-card/dist/index.js"
+    src_source = _read("directus/extensions/tvpn-user-card/src/index.js")
+    interface_source = _read("directus/extensions/tvpn-user-card/src/interface.vue")
+    dist_source = _read("directus/extensions/tvpn-user-card/dist/index.js")
+
+    assert 'id: "tvpn-user-card"' in src_source
+    assert "tvpn-user-card" in dist_source
+    assert '"alias"' in src_source
+    assert "/admin-widgets/user-card" in src_source
+    # The Vue side must call the admin-widgets endpoint and not embed a hard-coded base URL.
+    assert "endpointBase" in interface_source
+    assert "useApi" in interface_source
+    # Sanity: the bundle must reach for useApi (admin-widgets call) and define the interface id.
+    assert "useApi" in dist_source
+    assert '"tvpn-user-card"' in dist_source or "'tvpn-user-card'" in dist_source
+
+    subprocess.run(
+        ["node", "--check", str(dist_path)],
+        cwd=ROOT,
+        check=True,
+    )
+
+
 def test_tariff_preview_proxy_is_admin_only():
     endpoint_url = (ROOT / "directus/extensions/tariff-studio/src/index.js").as_uri()
     src_source = _read("directus/extensions/tariff-studio/src/index.js")
