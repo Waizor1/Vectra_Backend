@@ -43,6 +43,8 @@ def test_admin_widgets_rejects_non_admin_before_routes():
           use(fn) {{ middleware.push(fn); }},
           get(path, fn) {{ routes.push(['GET', path, fn]); }},
           post(path, fn) {{ routes.push(['POST', path, fn]); }},
+          patch(path, fn) {{ routes.push(['PATCH', path, fn]); }},
+          delete(path, fn) {{ routes.push(['DELETE', path, fn]); }},
         }};
 
         registerEndpoint(router, {{ database: () => {{ throw new Error('database must not run during guard smoke'); }} }});
@@ -96,6 +98,8 @@ def test_admin_widgets_user_card_route_registered_and_validates_input():
           use() {{}},
           get(path, fn) {{ routes.set(path, fn); }},
           post() {{}},
+          patch() {{}},
+          delete() {{}},
         }};
 
         const fakeBuilder = () => {{
@@ -160,6 +164,8 @@ def test_admin_widgets_user_card_route_registered_and_validates_input():
           use() {{}},
           get(path, fn) {{ if (path === '/user-card/:user_id') routes.set(path, fn); }},
           post() {{}},
+          patch() {{}},
+          delete() {{}},
         }};
         registerEndpoint(router2, {{ database: tableAwareDatabase }});
         const handler2 = routes.get('/user-card/:user_id');
@@ -353,6 +359,8 @@ def test_admin_widgets_utm_stats_route_registered_and_returns_shape():
           use() {{}},
           get(path, fn) {{ routes.set(path, fn); }},
           post() {{}},
+          patch() {{}},
+          delete() {{}},
         }};
 
         // Fake database: only `users` table exists; processed_payments / columns
@@ -470,6 +478,8 @@ def test_admin_widgets_utm_stats_timeseries_route_registered():
           use() {{}},
           get(path, fn) {{ routes.set(path, fn); }},
           post() {{}},
+          patch() {{}},
+          delete() {{}},
         }};
 
         const fakeDatabase = (table) => {{
@@ -554,6 +564,8 @@ def test_admin_widgets_utm_stats_funnel_route_registered():
           use() {{}},
           get(path, fn) {{ routes.set(path, fn); }},
           post() {{}},
+          patch() {{}},
+          delete() {{}},
         }};
 
         const fakeDatabase = (table) => {{
@@ -609,6 +621,151 @@ def test_admin_widgets_utm_stats_funnel_route_registered():
     )
 
 
+def test_admin_widgets_utm_campaigns_crud_routes_registered():
+    """utm-campaigns CRUD routes must be present and reject invalid utm."""
+
+    source_url = (ROOT / "directus/extensions/admin-widgets/src/index.js").as_uri()
+    src_source = _read("directus/extensions/admin-widgets/src/index.js")
+    dist_source = _read("directus/extensions/admin-widgets/dist/index.js")
+
+    assert '"/utm-campaigns"' in src_source, "utm-campaigns list route missing"
+    assert '"/utm-campaigns/by-utm/:utm"' in src_source, "utm-campaigns by-utm route missing"
+    assert '"/utm-campaigns/:id"' in src_source, "utm-campaigns update/delete route missing"
+    assert "utm_campaigns" in dist_source
+    assert "Campaign already exists" in src_source
+
+    _node(
+        f"""
+        import registerEndpoint from {source_url!r};
+
+        const routes = new Map();
+        const router = {{
+          use() {{}},
+          get(path, fn) {{ routes.set('GET ' + path, fn); }},
+          post(path, fn) {{ routes.set('POST ' + path, fn); }},
+          patch(path, fn) {{ routes.set('PATCH ' + path, fn); }},
+          delete(path, fn) {{ routes.set('DELETE ' + path, fn); }},
+        }};
+
+        // Fake database. Only `utm_campaigns` answers as existing table.
+        const tableState = {{ utm_campaigns: [] }};
+        function makeQb(table) {{
+          const qb = {{
+            _conds: null,
+            _table: table,
+            select() {{ return qb; }},
+            where(conds) {{
+              if (typeof conds === 'function') {{
+                // Ignore search builder callbacks in the fake.
+                return qb;
+              }}
+              if (conds && typeof conds === 'object' && conds.table_name === 'utm_campaigns') {{
+                qb.first = async () => ({{ table_name: 'utm_campaigns' }});
+                qb.then = (resolve) => resolve([{{ table_name: 'utm_campaigns' }}]);
+              }} else if (table === 'utm_campaigns') {{
+                qb._conds = conds;
+                qb.first = async () => tableState.utm_campaigns.find((r) => Object.keys(conds||{{}}).every((k) => r[k] === conds[k])) || null;
+                qb.then = (resolve) => resolve(
+                  tableState.utm_campaigns.filter((r) => Object.keys(conds||{{}}).every((k) => r[k] === conds[k]))
+                );
+              }} else {{
+                qb.first = async () => null;
+                qb.then = (resolve) => resolve([]);
+              }}
+              return qb;
+            }},
+            orderBy() {{ return qb; }},
+            limit() {{ return qb; }},
+            count() {{ return qb; }},
+            sum() {{ return qb; }},
+            first: async () => null,
+            update: async () => undefined,
+            // Thenable so `await fakeDatabase(table).select().orderBy().limit()` resolves to rows.
+            then(resolve) {{
+              resolve(table === 'utm_campaigns' ? tableState.utm_campaigns : []);
+            }},
+          }};
+          qb.insert = (row) => {{
+            const arr = Array.isArray(row) ? row : [row];
+            for (const r of arr) {{
+              if (table === 'utm_campaigns') {{
+                tableState.utm_campaigns.push({{ id: tableState.utm_campaigns.length + 1, ...r }});
+              }}
+            }}
+            return {{
+              returning: async () => arr.map(() => tableState.utm_campaigns[tableState.utm_campaigns.length - 1]),
+            }};
+          }};
+          return qb;
+        }}
+        const fakeDatabase = (table) => makeQb(table);
+        fakeDatabase.raw = async () => ({{ rows: [] }});
+        fakeDatabase.fn = {{ now: () => new Date() }};
+        fakeDatabase.schema = {{ hasTable: async () => true, createTable: async () => undefined }};
+
+        registerEndpoint(router, {{ database: fakeDatabase }});
+        const listHandler = routes.get('GET /utm-campaigns');
+        if (!listHandler) throw new Error('list route missing');
+        const createHandler = routes.get('POST /utm-campaigns');
+        if (!createHandler) throw new Error('create route missing');
+        const updateHandler = routes.get('PATCH /utm-campaigns/:id');
+        if (!updateHandler) throw new Error('update route missing');
+        const deleteHandler = routes.get('DELETE /utm-campaigns/:id');
+        if (!deleteHandler) throw new Error('delete route missing');
+
+        // List should return [] initially.
+        let captured;
+        await listHandler(
+          {{ query: {{ status: 'active' }} }},
+          {{ json(p) {{ captured = p; return p; }}, status() {{ throw new Error('list rejected'); }} }},
+        );
+        if (!Array.isArray(captured?.campaigns)) throw new Error('list shape wrong');
+
+        // Create with invalid utm → 400.
+        let badStatus = 0;
+        let badPayload = null;
+        await createHandler(
+          {{ body: {{ utm: 'bad utm with space' }}, accountability: {{ user: 'admin' }} }},
+          {{
+            status(code) {{ badStatus = code; return this; }},
+            json(p) {{ badPayload = p; return p; }},
+          }},
+        );
+        if (badStatus !== 400) throw new Error(`expected 400 for bad utm, got ${{badStatus}}`);
+        if (!String(badPayload?.error).includes('utm must match')) throw new Error('bad payload: ' + String(badPayload?.error));
+
+        // Create with reserved partner → 400.
+        badStatus = 0; badPayload = null;
+        await createHandler(
+          {{ body: {{ utm: 'partner' }}, accountability: {{ user: 'admin' }} }},
+          {{
+            status(code) {{ badStatus = code; return this; }},
+            json(p) {{ badPayload = p; return p; }},
+          }},
+        );
+        if (badStatus !== 400) throw new Error('reserved utm must 400');
+        """
+    )
+
+
+def test_tvpn_utm_campaigns_bootstrap_extension_loads():
+    """The bootstrap hook must compile and reference the campaigns table."""
+
+    dist_path = ROOT / "directus/extensions/tvpn-utm-campaigns-bootstrap/dist/index.js"
+    src_source = _read("directus/extensions/tvpn-utm-campaigns-bootstrap/src/index.js")
+
+    assert "utm_campaigns" in src_source
+    assert "app.after" in src_source
+    assert "directus_collections" in src_source
+    assert "directus_fields" in src_source
+
+    subprocess.run(
+        ["node", "--check", str(dist_path)],
+        cwd=ROOT,
+        check=True,
+    )
+
+
 def test_tvpn_utm_stats_module_extension_loads():
     """The tvpn-utm-stats module bundle must declare the right id and call /admin-widgets/utm-stats."""
 
@@ -655,6 +812,8 @@ def test_admin_widgets_user_card_attribution_chain_payload():
           use() {{}},
           get(path, fn) {{ routes.set(path, fn); }},
           post() {{}},
+          patch() {{}},
+          delete() {{}},
         }};
 
         const userRow = {{
@@ -876,6 +1035,8 @@ def test_admin_widgets_user_card_attribution_handles_organic_user():
           use() {{}},
           get(path, fn) {{ routes.set(path, fn); }},
           post() {{}},
+          patch() {{}},
+          delete() {{}},
         }};
 
         const userRow = {{

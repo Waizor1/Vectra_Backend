@@ -2565,4 +2565,195 @@ export default function registerEndpoint(router, { database }) {
         .json({ error: "Failed to build utm-stats funnel payload", details: String(err?.message || err) });
     }
   });
+
+  // =========================================================================
+  // utm_campaigns CRUD
+  //
+  // Persistence for campaign metadata, scoped to the dashboard. Backed by the
+  // `utm_campaigns` table created by tvpn-utm-campaigns-bootstrap. All routes
+  // gracefully no-op (returning empty/404) if the table doesn't exist yet, so
+  // the frontend can render without persistence in fresh environments.
+  // =========================================================================
+
+  const CAMPAIGN_FIELDS = [
+    "id","utm","label","description","status","partner_user_id",
+    "promo_code","notes","tags","created_at","updated_at","created_by",
+  ];
+  const UTM_RE = /^[A-Za-z0-9_]+$/;
+
+  function normalizeCampaignRow(row) {
+    if (!row) return null;
+    let tags = null;
+    if (row.tags !== null && row.tags !== undefined) {
+      if (typeof row.tags === "string") {
+        try { tags = JSON.parse(row.tags); } catch { tags = null; }
+      } else {
+        tags = row.tags;
+      }
+    }
+    return {
+      id: row.id,
+      utm: row.utm,
+      label: row.label ?? null,
+      description: row.description ?? null,
+      status: row.status ?? "active",
+      partner_user_id: row.partner_user_id ?? null,
+      promo_code: row.promo_code ?? null,
+      notes: row.notes ?? null,
+      tags,
+      created_at: row.created_at ? new Date(row.created_at).toISOString() : null,
+      updated_at: row.updated_at ? new Date(row.updated_at).toISOString() : null,
+      created_by: row.created_by ?? null,
+    };
+  }
+
+  function validateCampaignPayload(body, { requireUtm } = {}) {
+    if (!body || typeof body !== "object") return "Empty body";
+    if (requireUtm) {
+      const utm = String(body.utm ?? "").trim();
+      if (!utm) return "utm is required";
+      if (utm.length > 64) return "utm must be <= 64 chars";
+      if (!UTM_RE.test(utm)) return "utm must match [A-Za-z0-9_]+";
+      if (utm === "partner") return "utm cannot be the reserved literal 'partner'";
+    }
+    if (body.label !== undefined && body.label !== null && String(body.label).length > 200) {
+      return "label must be <= 200 chars";
+    }
+    if (body.status !== undefined && body.status !== null && !["active","archived"].includes(String(body.status))) {
+      return "status must be 'active' or 'archived'";
+    }
+    return null;
+  }
+
+  // GET /admin-widgets/utm-campaigns?status=active|archived&search=...
+  router.get("/utm-campaigns", async (req, res) => {
+    try {
+      const hasCampaigns = await hasTable("utm_campaigns");
+      if (!hasCampaigns) {
+        return res.json({ campaigns: [], generated_at: new Date().toISOString() });
+      }
+      const status = String(req.query.status ?? "active").trim();
+      const search = String(req.query.search ?? "").trim();
+      let q = database("utm_campaigns").select(CAMPAIGN_FIELDS);
+      if (status === "active" || status === "archived") {
+        q = q.where("status", status);
+      } else if (status === "all") {
+        // no filter
+      }
+      if (search) {
+        q = q.where(function () {
+          this.where("utm", "ilike", `%${search}%`).orWhere("label", "ilike", `%${search}%`);
+        });
+      }
+      const rows = await q.orderBy("updated_at", "desc").limit(500);
+      res.json({
+        campaigns: rows.map(normalizeCampaignRow),
+        generated_at: new Date().toISOString(),
+      });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to list utm-campaigns", details: String(err?.message || err) });
+    }
+  });
+
+  // GET /admin-widgets/utm-campaigns/by-utm/:utm
+  router.get("/utm-campaigns/by-utm/:utm", async (req, res) => {
+    try {
+      const hasCampaigns = await hasTable("utm_campaigns");
+      if (!hasCampaigns) return res.json({ campaign: null });
+      const utm = String(req.params.utm ?? "").trim();
+      if (!utm) return res.status(400).json({ error: "utm is required" });
+      const row = await database("utm_campaigns").where({ utm }).first();
+      res.json({ campaign: normalizeCampaignRow(row) });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to fetch utm-campaign", details: String(err?.message || err) });
+    }
+  });
+
+  // POST /admin-widgets/utm-campaigns
+  // Body: { utm, label?, description?, status?, partner_user_id?, promo_code?, notes?, tags? }
+  // Upsert semantics on `utm` — same tag creates once, then PATCH for updates.
+  router.post("/utm-campaigns", async (req, res) => {
+    try {
+      const hasCampaigns = await hasTable("utm_campaigns");
+      if (!hasCampaigns) {
+        return res.status(503).json({ error: "utm_campaigns collection not yet bootstrapped" });
+      }
+      const validation = validateCampaignPayload(req.body, { requireUtm: true });
+      if (validation) return res.status(400).json({ error: validation });
+
+      const utm = String(req.body.utm).trim();
+      const existing = await database("utm_campaigns").where({ utm }).first();
+      if (existing) {
+        return res.status(409).json({ error: "Campaign already exists for this utm", campaign: normalizeCampaignRow(existing) });
+      }
+      const now = new Date().toISOString();
+      const createdBy = req.accountability?.user || null;
+      const insertRow = {
+        utm,
+        label: req.body.label ?? null,
+        description: req.body.description ?? null,
+        status: req.body.status === "archived" ? "archived" : "active",
+        partner_user_id: req.body.partner_user_id ?? null,
+        promo_code: req.body.promo_code ?? null,
+        notes: req.body.notes ?? null,
+        tags: req.body.tags ? JSON.stringify(req.body.tags) : null,
+        created_at: now,
+        updated_at: now,
+        created_by: createdBy,
+      };
+      const [inserted] = await database("utm_campaigns").insert(insertRow).returning(CAMPAIGN_FIELDS);
+      res.json({ campaign: normalizeCampaignRow(inserted) });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to create utm-campaign", details: String(err?.message || err) });
+    }
+  });
+
+  // PATCH /admin-widgets/utm-campaigns/:id
+  // Body: any subset of label, description, status, partner_user_id, promo_code, notes, tags
+  router.patch("/utm-campaigns/:id", async (req, res) => {
+    try {
+      const hasCampaigns = await hasTable("utm_campaigns");
+      if (!hasCampaigns) return res.status(503).json({ error: "utm_campaigns collection not yet bootstrapped" });
+      const id = toInt(req.params.id, 0, 1, 1_000_000_000);
+      if (!id) return res.status(400).json({ error: "id is required" });
+      const validation = validateCampaignPayload(req.body, { requireUtm: false });
+      if (validation) return res.status(400).json({ error: validation });
+
+      const updateRow = { updated_at: new Date().toISOString() };
+      const settable = ["label", "description", "status", "partner_user_id", "promo_code", "notes"];
+      for (const key of settable) {
+        if (req.body[key] !== undefined) updateRow[key] = req.body[key];
+      }
+      if (req.body.tags !== undefined) {
+        updateRow.tags = req.body.tags === null ? null : JSON.stringify(req.body.tags);
+      }
+      const existing = await database("utm_campaigns").where({ id }).first();
+      if (!existing) return res.status(404).json({ error: "campaign not found" });
+      await database("utm_campaigns").where({ id }).update(updateRow);
+      const fresh = await database("utm_campaigns").where({ id }).first();
+      res.json({ campaign: normalizeCampaignRow(fresh) });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to update utm-campaign", details: String(err?.message || err) });
+    }
+  });
+
+  // DELETE /admin-widgets/utm-campaigns/:id — soft archive
+  router.delete("/utm-campaigns/:id", async (req, res) => {
+    try {
+      const hasCampaigns = await hasTable("utm_campaigns");
+      if (!hasCampaigns) return res.status(503).json({ error: "utm_campaigns collection not yet bootstrapped" });
+      const id = toInt(req.params.id, 0, 1, 1_000_000_000);
+      if (!id) return res.status(400).json({ error: "id is required" });
+      const existing = await database("utm_campaigns").where({ id }).first();
+      if (!existing) return res.status(404).json({ error: "campaign not found" });
+      await database("utm_campaigns").where({ id }).update({
+        status: "archived",
+        updated_at: new Date().toISOString(),
+      });
+      const fresh = await database("utm_campaigns").where({ id }).first();
+      res.json({ campaign: normalizeCampaignRow(fresh) });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to archive utm-campaign", details: String(err?.message || err) });
+    }
+  });
 }
