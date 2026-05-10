@@ -2566,6 +2566,107 @@ export default function registerEndpoint(router, { database }) {
     }
   });
 
+  // -------------------------------------------------------------------------
+  // GET /admin-widgets/utm-stats/cohort
+  //
+  // Returns weekly registration cohorts for a single UTM tag, with conversion
+  // funnel metrics computed cumulatively per cohort. Cohorts are bucketed by
+  // ISO week of `users.created_at`, so each row represents users who first
+  // showed up that week, and the columns show how many of THOSE users went
+  // on to convert.
+  //
+  // Query params:
+  //   - utm        REQUIRED — exact tag (or "__no_utm__" for null bucket)
+  //   - since      ISO date (default = 90 days ago)
+  //   - until      ISO date (default = now)
+  //   - weeks      Optional cap on cohorts returned (default 16)
+  // -------------------------------------------------------------------------
+  router.get("/utm-stats/cohort", async (req, res) => {
+    try {
+      const utm = String(req.query.utm ?? "").trim();
+      if (!utm) return res.status(400).json({ error: "utm is required" });
+      const isNullBucket = utm === "__no_utm__";
+      const since = toUtcDate(req.query.since);
+      const until = toUtcDate(req.query.until);
+      const weeksCap = toInt(req.query.weeks, 16, 1, 52);
+
+      const hasUsers = await hasTable("users");
+      if (!hasUsers) return res.json({ utm, cohorts: [], generated_at: new Date().toISOString() });
+      const hasPayments = await hasTable("processed_payments");
+      const hasPaymentStatus = hasPayments && (await hasColumn("processed_payments", "status"));
+
+      const filters = isNullBucket
+        ? ["(u.utm IS NULL OR u.utm = '')"]
+        : ["u.utm = ?"];
+      const bindings = isNullBucket ? [] : [utm];
+      if (since) { filters.push("u.created_at >= ?"); bindings.push(since.toISOString()); }
+      if (until) { filters.push("u.created_at < ?"); bindings.push(until.toISOString()); }
+      const whereSql = `WHERE ${filters.join(" AND ")}`;
+
+      const paidJoin = hasPayments
+        ? `LEFT JOIN LATERAL (
+            SELECT COUNT(DISTINCT p.user_id) AS paid_inner
+            FROM processed_payments p
+            WHERE p.user_id = u.id
+              ${hasPaymentStatus ? "AND p.status = 'succeeded'" : ""}
+          ) paid_data ON true`
+        : "";
+      const paidExpr = hasPayments ? "paid_data.paid_inner" : "0";
+
+      const sql = `
+        SELECT
+          date_trunc('week', u.created_at) AS cohort_week,
+          COUNT(*) AS cohort_size,
+          COUNT(*) FILTER (WHERE u.is_registered = true) AS registered,
+          COUNT(*) FILTER (WHERE u.used_trial = true) AS trial,
+          COUNT(*) FILTER (WHERE u.key_activated = true) AS activated,
+          COUNT(*) FILTER (WHERE u.expired_at IS NOT NULL AND u.expired_at > CURRENT_DATE) AS active_now,
+          SUM(${paidExpr}) AS paid
+        FROM users u
+        ${paidJoin}
+        ${whereSql}
+        GROUP BY date_trunc('week', u.created_at)
+        ORDER BY cohort_week DESC
+        LIMIT ${weeksCap}
+      `;
+      const raw = await database.raw(sql, bindings);
+      const rows = raw?.rows ?? raw ?? [];
+
+      const cohorts = rows.map((row) => {
+        const size = Number(row.cohort_size || 0);
+        const fmt = (k) => Number(row[k] || 0);
+        const ratio = (k) => (size > 0 ? fmt(k) / size : 0);
+        return {
+          cohort_week: row.cohort_week ? new Date(row.cohort_week).toISOString() : null,
+          cohort_size: size,
+          registered: fmt("registered"),
+          trial: fmt("trial"),
+          activated: fmt("activated"),
+          active_now: fmt("active_now"),
+          paid: fmt("paid"),
+          ratio_registered: ratio("registered"),
+          ratio_trial: ratio("trial"),
+          ratio_activated: ratio("activated"),
+          ratio_active_now: ratio("active_now"),
+          ratio_paid: ratio("paid"),
+        };
+      });
+
+      res.json({
+        utm,
+        cohorts,
+        filters_applied: {
+          since: since ? since.toISOString() : null,
+          until: until ? until.toISOString() : null,
+          weeks: weeksCap,
+        },
+        generated_at: new Date().toISOString(),
+      });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to build utm-stats cohort payload", details: String(err?.message || err) });
+    }
+  });
+
   // =========================================================================
   // utm_campaigns CRUD
   //

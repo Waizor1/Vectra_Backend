@@ -121,6 +121,24 @@
               @click="applyPreset(preset.key)"
             >{{ preset.label }}</button>
           </div>
+
+          <div class="hero__views">
+            <span class="hero__presets-label">Виды:</span>
+            <button
+              v-for="view in savedViews"
+              :key="view.id"
+              type="button"
+              class="view-btn"
+              :title="view.created_at ? 'Сохранён ' + shortDate(view.created_at) : ''"
+              @click="loadSavedView(view)"
+            >
+              <span>{{ view.name }}</span>
+              <span class="view-btn__close" @click.stop="deleteSavedView(view.id)" title="Удалить вид">×</span>
+            </button>
+            <button type="button" class="view-btn view-btn--save" @click="saveCurrentView">
+              + Сохранить вид
+            </button>
+          </div>
         </section>
 
         <section v-if="loading" class="state-card">
@@ -186,6 +204,32 @@
               <div class="insights__label">Доля косвенных</div>
               <div class="insights__value">{{ formatPercent(insights.indirect_users, insights.registrations) }}</div>
               <div class="insights__hint">D {{ formatNumber(insights.direct_users) }} · I {{ formatNumber(insights.indirect_users) }}</div>
+            </div>
+          </section>
+
+          <section v-if="smartInsights.length" class="smart-insights">
+            <div class="smart-insights__head">
+              <span class="smart-insights__title">Автонаблюдения</span>
+              <span class="smart-insights__hint">Топ-{{ smartInsights.length }} событий vs предыдущий период · по-сильному сигналу</span>
+            </div>
+            <div class="smart-insights__list">
+              <div
+                v-for="ins in smartInsights"
+                :key="ins.key"
+                :class="['smart-insights__card', 'smart-insights__card--' + ins.kind]"
+              >
+                <div class="smart-insights__icon">{{ ins.icon }}</div>
+                <div class="smart-insights__body">
+                  <div class="smart-insights__text">{{ ins.text }}</div>
+                  <div class="smart-insights__sub">{{ ins.sub }}</div>
+                </div>
+                <button
+                  v-if="ins.utm"
+                  type="button"
+                  class="smart-insights__action"
+                  @click="setExactFilter(ins.utm)"
+                >Открыть</button>
+              </div>
             </div>
           </section>
 
@@ -421,6 +465,62 @@
                             >{{ sub.utm }} · {{ formatNumber(sub.users_total) }}</button>
                           </div>
                         </div>
+
+                        <div class="cohort-panel">
+                          <div class="cohort-panel__head">
+                            <span class="cohort-panel__title">Когорты по неделям регистрации</span>
+                            <button
+                              type="button"
+                              class="cohort-panel__toggle"
+                              @click.stop="toggleCohortView(row)"
+                            >
+                              {{ isCohortShown(row) ? 'Скрыть' : 'Показать когорты' }}
+                            </button>
+                          </div>
+                          <div v-if="isCohortShown(row)">
+                            <div v-if="isCohortLoading(row)" class="detail-loading">
+                              <v-progress-circular indeterminate small />
+                              <span>Считаем когорты…</span>
+                            </div>
+                            <div v-else-if="cohortDataFor(row)?.cohorts?.length" class="cohort-table">
+                              <table class="cohort-grid">
+                                <thead>
+                                  <tr>
+                                    <th>Неделя</th>
+                                    <th>Размер</th>
+                                    <th>Регистр.</th>
+                                    <th>Триал</th>
+                                    <th>Подкл. Happ</th>
+                                    <th>Актив. сейчас</th>
+                                    <th>Платных</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  <tr v-for="(c, i) in cohortDataFor(row).cohorts" :key="i">
+                                    <td class="cohort-grid__week">{{ shortDate(c.cohort_week) }}</td>
+                                    <td class="cohort-grid__num">{{ formatNumber(c.cohort_size) }}</td>
+                                    <td class="cohort-grid__num" :style="cohortCellStyle(c.ratio_registered)">
+                                      {{ formatNumber(c.registered) }} <span class="cohort-pct">{{ ratioPercent(c.ratio_registered) }}</span>
+                                    </td>
+                                    <td class="cohort-grid__num" :style="cohortCellStyle(c.ratio_trial)">
+                                      {{ formatNumber(c.trial) }} <span class="cohort-pct">{{ ratioPercent(c.ratio_trial) }}</span>
+                                    </td>
+                                    <td class="cohort-grid__num" :style="cohortCellStyle(c.ratio_activated)">
+                                      {{ formatNumber(c.activated) }} <span class="cohort-pct">{{ ratioPercent(c.ratio_activated) }}</span>
+                                    </td>
+                                    <td class="cohort-grid__num" :style="cohortCellStyle(c.ratio_active_now)">
+                                      {{ formatNumber(c.active_now) }} <span class="cohort-pct">{{ ratioPercent(c.ratio_active_now) }}</span>
+                                    </td>
+                                    <td class="cohort-grid__num" :style="cohortCellStyle(c.ratio_paid, 'paid')">
+                                      {{ formatNumber(c.paid) }} <span class="cohort-pct">{{ ratioPercent(c.ratio_paid) }}</span>
+                                    </td>
+                                  </tr>
+                                </tbody>
+                              </table>
+                            </div>
+                            <div v-else class="cohort-empty">Нет когорт в выбранном диапазоне.</div>
+                          </div>
+                        </div>
                       </td>
                     </tr>
                   </template>
@@ -598,6 +698,20 @@
       </section>
 
       <section v-if="!campaignBuilder.error && campaignBuilder.utm" class="cb-section">
+        <div class="cb-section__head-row">
+          <div class="cb-section__title">Полный пакет ассетов</div>
+          <button type="button" class="cb-bundle-btn" :disabled="campaignBuilder.bundling" @click="downloadBundle">
+            {{ campaignBuilder.bundling ? 'Готовим архив…' : 'Скачать пакет (.zip)' }}
+          </button>
+        </div>
+        <div class="cb-bundle-hint">
+          Архив включает: 3 QR-кода в SVG (web, bot, mini-app) + все 4 сниппета в .txt-файлах +
+          README.md с инструкциями + manifest.json для системы. Готово к раздаче маркетологам/копирайтерам
+          без доступа к Directus.
+        </div>
+      </section>
+
+      <section v-if="!campaignBuilder.error && campaignBuilder.utm" class="cb-section">
         <div class="cb-section__title">Сниппеты для постов</div>
         <div class="cb-snips">
           <div v-for="snip in campaignSnippets" :key="snip.key" class="cb-snip">
@@ -652,6 +766,7 @@
 import { ref, reactive, computed, onMounted, watch } from "vue";
 import { useApi } from "@directus/extensions-sdk";
 import qrcodeGenerator from "qrcode-generator";
+import JSZip from "jszip";
 
 const api = useApi();
 
@@ -670,11 +785,19 @@ const campaignBuilder = reactive({
   error: "",
   saving: false,
   archiving: false,
+  bundling: false,
   saveMessage: "",
   saveError: false,
   savedId: null,
   savedStatus: null,
 });
+
+// Cohort retention state — fetched lazily on row expand + "Показать когорты".
+const cohortCache = ref(new Map());
+
+// Named saved views — localStorage-backed bookmarks of current dashboard state.
+const VIEWS_LS_KEY = "tvpn_utm_stats_saved_views_v1";
+const savedViews = ref([]);
 
 // Saved-campaigns list — fetched from /admin-widgets/utm-campaigns. Used in
 // the modal sidebar and to cross-link labels in the main dashboard table.
@@ -890,6 +1013,370 @@ function shortDate(iso) {
     return d.toLocaleDateString("ru-RU", { day: "2-digit", month: "short" });
   } catch {
     return "—";
+  }
+}
+
+// ===== Cohort retention ===================================================
+function cohortDataFor(row) {
+  const key = row.utm ?? "__no_utm__";
+  const entry = cohortCache.value.get(key);
+  return entry && !entry.loading ? entry.data : null;
+}
+
+function isCohortShown(row) {
+  const key = row.utm ?? "__no_utm__";
+  const entry = cohortCache.value.get(key);
+  return !!(entry && entry.shown);
+}
+
+function isCohortLoading(row) {
+  const key = row.utm ?? "__no_utm__";
+  const entry = cohortCache.value.get(key);
+  return !!(entry && entry.loading);
+}
+
+async function toggleCohortView(row) {
+  const key = row.utm ?? "__no_utm__";
+  const existing = cohortCache.value.get(key);
+  const map = new Map(cohortCache.value);
+  if (existing && existing.shown) {
+    map.set(key, { ...existing, shown: false });
+    cohortCache.value = map;
+    return;
+  }
+  if (existing && existing.data) {
+    map.set(key, { ...existing, shown: true });
+    cohortCache.value = map;
+    return;
+  }
+  map.set(key, { loading: true, shown: true });
+  cohortCache.value = map;
+  try {
+    const params = { utm: key, weeks: 16 };
+    if (filters.since) params.since = filters.since;
+    if (filters.until) params.until = exclusiveUntil(filters.until);
+    const resp = await api.get("/admin-widgets/utm-stats/cohort", { params });
+    const map2 = new Map(cohortCache.value);
+    map2.set(key, { loading: false, shown: true, data: resp?.data ?? { cohorts: [] } });
+    cohortCache.value = map2;
+  } catch (err) {
+    const map2 = new Map(cohortCache.value);
+    map2.set(key, { loading: false, shown: true, data: { cohorts: [] }, error: err?.message });
+    cohortCache.value = map2;
+  }
+}
+
+function ratioPercent(r) {
+  const v = Number(r) || 0;
+  if (v <= 0) return "0%";
+  if (v >= 0.1) return `${(v * 100).toFixed(1)}%`;
+  return `${(v * 100).toFixed(2)}%`;
+}
+
+// Color-code conversion cells by ratio for easy spotting of strong cohorts.
+// `paid` uses a stricter scale (paid conversions ≥ 5% is already excellent).
+function cohortCellStyle(ratio, kind) {
+  const r = Number(ratio) || 0;
+  let v = r;
+  if (kind === "paid") v = Math.min(1, r * 12); // stretch so 8% paid lights up bright
+  const alpha = Math.min(0.45, v * 0.45);
+  return `background: rgba(81, 207, 102, ${alpha.toFixed(3)});`;
+}
+
+// ===== Smart insights =====================================================
+// Heuristic ranking of rows by abs(delta) × importance vs the previous period.
+// Each row's prev-period numbers come from `previousTotals`-style aggregated
+// fetch — but we want PER-ROW comparison, so we hit /utm-stats again with the
+// shifted range and join by utm.
+const previousRows = ref([]);
+
+async function loadPreviousPeriodRows(currentParams) {
+  if (!currentParams.since || !currentParams.until) return [];
+  try {
+    const sinceD = new Date(currentParams.since + "T00:00:00Z");
+    const untilD = new Date(currentParams.until + "T00:00:00Z");
+    const lenMs = untilD - sinceD;
+    if (lenMs <= 0) return [];
+    const prevUntil = sinceD;
+    const prevSince = new Date(sinceD.getTime() - lenMs);
+    const params = {
+      ...currentParams,
+      since: prevSince.toISOString().slice(0, 10),
+      until: prevUntil.toISOString().slice(0, 10),
+      limit: 1000,
+    };
+    const resp = await api.get("/admin-widgets/utm-stats", { params });
+    return Array.isArray(resp?.data?.sources) ? resp.data.sources : [];
+  } catch {
+    return [];
+  }
+}
+
+const smartInsights = computed(() => {
+  const curRows = sources.value;
+  const prevRows = previousRows.value;
+  if (!curRows.length) return [];
+  const prevByUtm = new Map(prevRows.map((r) => [r.utm ?? "__no_utm__", r]));
+  const ranked = [];
+
+  for (const c of curRows) {
+    const key = c.utm ?? "__no_utm__";
+    const p = prevByUtm.get(key);
+    const label = savedCampaignsByUtm.value.get(c.utm)?.label || c.utm || "— без UTM —";
+
+    // Revenue movers (big absolute change or big % change with non-trivial base).
+    if (p) {
+      const dR = (c.revenue_rub || 0) - (p.revenue_rub || 0);
+      const dPaid = (c.users_paid || 0) - (p.users_paid || 0);
+      const dReg = (c.users_registered || 0) - (p.users_registered || 0);
+
+      if (Math.abs(dR) >= 1500) {
+        const pct = p.revenue_rub > 0 ? dR / p.revenue_rub : (dR > 0 ? 1 : 0);
+        ranked.push({
+          key: "rev:" + key,
+          utm: c.utm,
+          score: Math.abs(dR) * (1 + Math.min(1, Math.abs(pct))),
+          kind: dR > 0 ? "up" : "down",
+          icon: dR > 0 ? "🚀" : "📉",
+          text: `${label} ${dR > 0 ? "приносит" : "потеряла"} ${formatRubInline(Math.abs(dR))} ${dR > 0 ? "vs прошлый период" : "vs прошлый период"}`,
+          sub: `${formatNumber(c.revenue_rub)} ₽ сейчас · было ${formatNumber(p.revenue_rub)} ₽ (${signedPercent(pct)})`,
+        });
+      }
+
+      if (Math.abs(dPaid) >= 3) {
+        const pct = p.users_paid > 0 ? dPaid / p.users_paid : (dPaid > 0 ? 1 : 0);
+        ranked.push({
+          key: "paid:" + key,
+          utm: c.utm,
+          score: Math.abs(dPaid) * 50 * (1 + Math.min(1, Math.abs(pct))),
+          kind: dPaid > 0 ? "up" : "down",
+          icon: dPaid > 0 ? "💸" : "🚪",
+          text: `${label}: ${dPaid > 0 ? "+" : ""}${dPaid} платных юзеров`,
+          sub: `${formatNumber(c.users_paid)} сейчас · было ${formatNumber(p.users_paid)} (${signedPercent(pct)})`,
+        });
+      }
+
+      if (Math.abs(dReg) >= 10) {
+        const pct = p.users_registered > 0 ? dReg / p.users_registered : (dReg > 0 ? 1 : 0);
+        ranked.push({
+          key: "reg:" + key,
+          utm: c.utm,
+          score: Math.abs(dReg) * 10 * (1 + Math.min(1, Math.abs(pct))),
+          kind: dReg > 0 ? "up" : "down",
+          icon: dReg > 0 ? "📈" : "📉",
+          text: `${label}: ${dReg > 0 ? "+" : ""}${dReg} регистраций`,
+          sub: `${formatNumber(c.users_registered)} сейчас · было ${formatNumber(p.users_registered)} (${signedPercent(pct)})`,
+        });
+      }
+    } else if (c.users_paid > 0 && c.users_total >= 10) {
+      // Brand new campaign with meaningful traction.
+      ranked.push({
+        key: "new:" + key,
+        utm: c.utm,
+        score: (c.users_paid || 1) * 80,
+        kind: "new",
+        icon: "✨",
+        text: `Новая кампания ${label} принесла ${c.users_paid} платных`,
+        sub: `${formatNumber(c.users_registered)} регистраций · ${formatNumber(c.revenue_rub)} ₽`,
+      });
+    }
+  }
+
+  // Cross-row anomaly: campaign with paid-conversion >2× the median.
+  const paidConversions = curRows
+    .filter((r) => r.users_registered >= 10)
+    .map((r) => (r.users_paid || 0) / Math.max(1, r.users_registered));
+  if (paidConversions.length >= 3) {
+    const sorted = [...paidConversions].sort((a, b) => a - b);
+    const median = sorted[Math.floor(sorted.length / 2)];
+    for (const c of curRows) {
+      if (c.users_registered < 10) continue;
+      const conv = (c.users_paid || 0) / c.users_registered;
+      if (median > 0 && conv >= median * 2 && conv > 0.02) {
+        const label = savedCampaignsByUtm.value.get(c.utm)?.label || c.utm || "— без UTM —";
+        ranked.push({
+          key: "conv:" + (c.utm ?? "__no_utm__"),
+          utm: c.utm,
+          score: conv * 1000,
+          kind: "up",
+          icon: "🎯",
+          text: `${label} конвертит в платных в ${(conv / median).toFixed(1)}× выше среднего`,
+          sub: `${(conv * 100).toFixed(2)}% при медиане ${(median * 100).toFixed(2)}%`,
+        });
+      }
+    }
+  }
+
+  ranked.sort((a, b) => b.score - a.score);
+  return ranked.slice(0, 5);
+});
+
+function formatRubInline(value) {
+  return `${Math.round(value).toLocaleString("ru-RU")} ₽`;
+}
+
+function signedPercent(p) {
+  if (p == null || !Number.isFinite(p)) return "—";
+  const v = (p * 100).toFixed(1);
+  return p >= 0 ? `+${v}%` : `${v}%`;
+}
+
+// ===== Saved views ========================================================
+function loadSavedViewsFromStorage() {
+  try {
+    const raw = localStorage.getItem(VIEWS_LS_KEY);
+    if (!raw) {
+      savedViews.value = [];
+      return;
+    }
+    const arr = JSON.parse(raw);
+    savedViews.value = Array.isArray(arr) ? arr : [];
+  } catch {
+    savedViews.value = [];
+  }
+}
+
+function persistSavedViews() {
+  try {
+    localStorage.setItem(VIEWS_LS_KEY, JSON.stringify(savedViews.value));
+  } catch {}
+}
+
+function captureViewState() {
+  return {
+    utm_prefix: filters.utm_prefix,
+    since: filters.since,
+    until: filters.until,
+    preset: activePreset.value,
+    bucket: bucket.value,
+    limit: filters.limit,
+    search: localSearch.value,
+    sort: { key: sort.key, dir: sort.dir },
+    compare: Array.from(compareSet.value),
+  };
+}
+
+function saveCurrentView() {
+  const name = (window.prompt("Имя вида:", suggestViewName()) || "").trim();
+  if (!name) return;
+  const view = {
+    id: `v_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    name,
+    state: captureViewState(),
+    created_at: new Date().toISOString(),
+  };
+  savedViews.value = [view, ...savedViews.value].slice(0, 20);
+  persistSavedViews();
+}
+
+function suggestViewName() {
+  const parts = [];
+  if (filters.utm_prefix) parts.push(filters.utm_prefix);
+  parts.push(activePreset.value || "custom");
+  return parts.join(" · ");
+}
+
+function loadSavedView(view) {
+  if (!view?.state) return;
+  const s = view.state;
+  filters.utm_prefix = s.utm_prefix || "";
+  filters.since = s.since || "";
+  filters.until = s.until || "";
+  if (s.preset) activePreset.value = s.preset;
+  if (s.bucket) bucket.value = s.bucket;
+  if (s.limit) filters.limit = s.limit;
+  localSearch.value = s.search || "";
+  if (s.sort?.key) { sort.key = s.sort.key; sort.dir = s.sort.dir || "desc"; }
+  compareSet.value = new Set(Array.isArray(s.compare) ? s.compare : []);
+  detailCache.value = new Map();
+  cohortCache.value = new Map();
+  refresh();
+  refreshCompareSeries();
+  syncUrl();
+}
+
+function deleteSavedView(id) {
+  savedViews.value = savedViews.value.filter((v) => v.id !== id);
+  persistSavedViews();
+}
+
+// ===== Bundle export (zip of all campaign assets) =========================
+async function downloadBundle() {
+  if (campaignBuilder.bundling) return;
+  if (campaignBuilder.error || !campaignBuilder.utm) return;
+  campaignBuilder.bundling = true;
+  try {
+    const zip = new JSZip();
+    const utm = campaignBuilder.utm.trim();
+    const label = campaignBuilder.label.trim() || "Vectra Connect";
+    const promo = (campaignBuilder.promoCode || "").trim().toUpperCase();
+
+    // QR codes as SVG, one per channel.
+    for (const link of campaignLinks.value) {
+      const svg = renderQrSvg(link.url, 480);
+      zip.file(`qr/qr_${link.key}.svg`, svg);
+    }
+
+    // Snippets as separate .txt files for easy copy-paste.
+    for (const snip of campaignSnippets.value) {
+      zip.file(`snippets/${snip.key}.txt`, snip.body);
+    }
+
+    // Manifest with structured metadata for downstream tooling.
+    const manifest = {
+      utm,
+      label,
+      description: campaignBuilder.description || null,
+      notes: campaignBuilder.notes || null,
+      promo_code: promo || null,
+      generated_at: new Date().toISOString(),
+      urls: campaignLinks.value.reduce((acc, l) => ({ ...acc, [l.key]: l.url }), {}),
+    };
+    zip.file("manifest.json", JSON.stringify(manifest, null, 2));
+
+    // README with operator instructions.
+    const readme = `# Vectra Connect · кампания ${label}
+
+UTM-тег: \`${utm}\`
+${campaignBuilder.description ? `\n${campaignBuilder.description}\n` : ""}
+
+## Что внутри
+
+- \`qr/qr_web.svg\` — QR для веб-кабинета (\`${campaignLinks.value[0].url}\`)
+- \`qr/qr_bot.svg\` — QR для Telegram-бота (\`${campaignLinks.value[1].url}\`)
+- \`qr/qr_miniapp.svg\` — QR для Telegram Mini App (\`${campaignLinks.value[2].url}\`)
+- \`snippets/bbcode.txt\` — готовый пост для RuTracker / phpBB
+- \`snippets/markdown.txt\` — для Telegram-каналов / Notion / GitHub
+- \`snippets/plain.txt\` — обычный текст для DM / SMS
+- \`snippets/html.txt\` — HTML для писем и сайтов
+- \`manifest.json\` — машиночитаемые метаданные пакета
+
+## Промокод
+
+${promo ? `Активирует подписку: **${promo}**` : "Промокод не привязан к этой кампании."}
+
+## Аналитика
+
+Видимость по этому UTM-тегу — в Directus UTM Stats:
+https://admin.vectra-pro.net/admin/tvpn-utm-stats
+
+Поставь фильтр «Префикс UTM» = \`${utm}\` чтобы увидеть только эту кампанию.
+`;
+    zip.file("README.md", readme);
+
+    const blob = await zip.generateAsync({ type: "blob" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `vectra_campaign_${utm.replace(/[^a-zA-Z0-9_]/g, "_")}.zip`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  } catch (err) {
+    /* swallow — user can still copy snippets manually */
+  } finally {
+    campaignBuilder.bundling = false;
   }
 }
 
@@ -1498,13 +1985,16 @@ async function refresh() {
     if (trimmedUntil) params.until = exclusiveUntil(trimmedUntil);
     if (filters.limit) params.limit = filters.limit;
 
-    const [resp, prevTotals] = await Promise.all([
+    const [resp, prevTotals, prevRows] = await Promise.all([
       api.get("/admin-widgets/utm-stats", { params }),
       // Previous-period totals for the insights delta. Same length window
       // immediately preceding the current one. We only need a single
       // aggregate, so we fetch the same endpoint with a shifted range.
       loadPreviousPeriodTotals(params),
+      // Previous-period per-row data drives the smart-insights ranking.
+      loadPreviousPeriodRows(params),
     ]);
+    previousRows.value = prevRows;
     const data = resp?.data ?? {};
     sources.value = Array.isArray(data.sources) ? data.sources : [];
     Object.assign(totals, data.totals ?? {});
@@ -1831,6 +2321,7 @@ onMounted(() => {
   // Load saved campaigns in background so the main table can render labels
   // for utms with registered campaigns. Soft-fails on missing collection.
   loadSavedCampaigns();
+  loadSavedViewsFromStorage();
 });
 
 // Lookup helper for the main table — returns the saved campaign (if any) for
@@ -3100,6 +3591,286 @@ function savedCampaignFor(utm) {
   background: rgba(255, 107, 107, 0.12);
   color: #ff8585;
   border: 1px solid rgba(255, 107, 107, 0.32);
+}
+
+/* ===== Smart insights ===== */
+.smart-insights {
+  padding: 16px 18px;
+  border-radius: 14px;
+  border: 1px solid rgba(81, 207, 102, 0.22);
+  background: linear-gradient(135deg, rgba(33, 38, 45, 0.65), rgba(13, 17, 23, 0.65));
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.smart-insights__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.smart-insights__title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 700;
+  color: #51cf66;
+}
+
+.smart-insights__hint {
+  font-size: 11px;
+  color: rgba(201, 209, 217, 0.5);
+}
+
+.smart-insights__list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 8px;
+}
+
+.smart-insights__card {
+  display: grid;
+  grid-template-columns: 28px 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(110, 118, 129, 0.18);
+  background: rgba(13, 17, 23, 0.55);
+}
+
+.smart-insights__card--up { border-color: rgba(81, 207, 102, 0.32); }
+.smart-insights__card--down { border-color: rgba(255, 107, 107, 0.32); }
+.smart-insights__card--new { border-color: rgba(182, 146, 246, 0.32); }
+
+.smart-insights__icon {
+  font-size: 18px;
+  text-align: center;
+}
+
+.smart-insights__text {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #f0f6fc;
+  line-height: 1.3;
+}
+
+.smart-insights__sub {
+  font-size: 11px;
+  color: rgba(201, 209, 217, 0.55);
+  margin-top: 2px;
+}
+
+.smart-insights__action {
+  font: inherit;
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(88, 166, 255, 0.32);
+  background: rgba(88, 166, 255, 0.08);
+  color: #79b8ff;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.smart-insights__action:hover {
+  background: rgba(88, 166, 255, 0.18);
+}
+
+/* ===== Saved views (named bookmarks) ===== */
+.hero__views {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.view-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font: inherit;
+  font-size: 11.5px;
+  padding: 4px 10px 4px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(102, 217, 232, 0.32);
+  background: rgba(59, 201, 219, 0.08);
+  color: #66d9e8;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+
+.view-btn:hover {
+  background: rgba(59, 201, 219, 0.18);
+  border-color: rgba(59, 201, 219, 0.55);
+}
+
+.view-btn--save {
+  background: rgba(110, 118, 129, 0.08);
+  color: rgba(201, 209, 217, 0.72);
+  border-color: rgba(110, 118, 129, 0.25);
+}
+
+.view-btn--save:hover {
+  color: #79b8ff;
+  border-color: rgba(88, 166, 255, 0.55);
+  background: rgba(88, 166, 255, 0.12);
+}
+
+.view-btn__close {
+  font-size: 14px;
+  line-height: 1;
+  color: rgba(201, 209, 217, 0.45);
+  padding: 0 2px;
+  margin-left: 2px;
+  border-radius: 3px;
+}
+
+.view-btn__close:hover {
+  color: #ff6b6b;
+  background: rgba(255, 107, 107, 0.12);
+}
+
+/* ===== Cohort retention matrix ===== */
+.cohort-panel {
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px dashed rgba(110, 118, 129, 0.2);
+}
+
+.cohort-panel__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.cohort-panel__title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 700;
+  color: rgba(201, 209, 217, 0.72);
+}
+
+.cohort-panel__toggle {
+  font: inherit;
+  font-size: 11.5px;
+  padding: 5px 11px;
+  border-radius: 6px;
+  border: 1px solid rgba(110, 118, 129, 0.32);
+  background: rgba(33, 38, 45, 0.55);
+  color: #c9d1d9;
+  cursor: pointer;
+}
+
+.cohort-panel__toggle:hover {
+  background: rgba(88, 166, 255, 0.16);
+  color: #79b8ff;
+  border-color: rgba(88, 166, 255, 0.45);
+}
+
+.cohort-table {
+  overflow-x: auto;
+}
+
+.cohort-grid {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  background: rgba(13, 17, 23, 0.55);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.cohort-grid th {
+  text-align: right;
+  padding: 8px 10px;
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 700;
+  color: rgba(201, 209, 217, 0.62);
+  background: rgba(33, 38, 45, 0.6);
+  border-bottom: 1px solid rgba(110, 118, 129, 0.22);
+}
+
+.cohort-grid th:first-child { text-align: left; }
+
+.cohort-grid td {
+  padding: 7px 10px;
+  border-bottom: 1px solid rgba(110, 118, 129, 0.1);
+}
+
+.cohort-grid tbody tr:hover td {
+  background: rgba(88, 166, 255, 0.04);
+}
+
+.cohort-grid__week {
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  color: rgba(201, 209, 217, 0.72);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.cohort-grid__num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: #f0f6fc;
+}
+
+.cohort-pct {
+  margin-left: 4px;
+  font-size: 10.5px;
+  color: rgba(201, 209, 217, 0.5);
+  font-weight: 500;
+}
+
+.cohort-empty {
+  padding: 18px;
+  text-align: center;
+  color: rgba(110, 118, 129, 0.7);
+  font-size: 12px;
+}
+
+/* ===== Campaign builder · bundle export ===== */
+.cb-section__head-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.cb-bundle-btn {
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 700;
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid rgba(81, 207, 102, 0.35);
+  background: rgba(81, 207, 102, 0.16);
+  color: #51cf66;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.cb-bundle-btn:hover:not(:disabled) {
+  background: rgba(81, 207, 102, 0.28);
+  border-color: rgba(81, 207, 102, 0.6);
+}
+
+.cb-bundle-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.cb-bundle-hint {
+  font-size: 11.5px;
+  color: rgba(201, 209, 217, 0.55);
+  line-height: 1.5;
 }
 
 /* ===== Main table cross-link label ===== */
