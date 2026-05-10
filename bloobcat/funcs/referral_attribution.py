@@ -25,26 +25,50 @@ def is_partner_source_utm(raw: str | None) -> bool:
     return normalized == PARTNER_SOURCE_UTM or normalized.startswith("qr_")
 
 
+def is_campaign_utm(raw: str | None) -> bool:
+    """Return True if `raw` is a specific campaign tag worth propagating downstream.
+
+    A campaign tag is any non-empty utm value that is NOT the generic
+    `partner` marker. `qr_*` campaign tokens, custom UTM strings, and any other
+    non-generic source qualify; the bare `partner` marker does not, since it
+    carries no campaign provenance.
+    """
+    normalized = normalize_source_utm(raw)
+    if not normalized:
+        return False
+    return normalized != PARTNER_SOURCE_UTM
+
+
 def pick_attribution_utm(
     current_utm: str | None,
     incoming_utm: str | None,
     *,
     force_partner_source: bool = False,
+    referrer_utm: str | None = None,
 ) -> str | None:
     current = normalize_source_utm(current_utm)
     incoming = normalize_source_utm(incoming_utm)
-    if not incoming:
-        return current or None
 
-    if force_partner_source and is_partner_source_utm(incoming):
+    if not incoming:
+        result: str | None = current or None
+    elif force_partner_source and is_partner_source_utm(incoming):
         # Preserve an already-bound QR token over a later generic partner marker.
         if current.startswith("qr_") and incoming == PARTNER_SOURCE_UTM:
-            return current
-        return incoming
+            result = current
+        else:
+            result = incoming
+    elif current:
+        result = current
+    else:
+        result = incoming
 
-    if current:
-        return current
-    return incoming
+    # Downstream attribution: when the user's resolved utm is empty or just
+    # the generic `partner` marker, inherit the campaign tag from the referrer
+    # so multi-hop conversions stay attributed to the original campaign source.
+    if referrer_utm and is_campaign_utm(referrer_utm) and not is_campaign_utm(result):
+        result = normalize_source_utm(referrer_utm)
+
+    return result or None
 
 
 PartnerLinkMode = str  # narrowed to {"bot", "app"} at boundaries
