@@ -1520,6 +1520,7 @@ export default function registerEndpoint(router, { database }) {
       const hasPayments = await hasTable("processed_payments");
       const hasActiveTariffs = await hasTable("active_tariffs");
       const hasUserDevices = await hasTable("user_devices");
+      const hasHwidLocal = await hasTable("hwid_devices_local");
       const hasConnections = await hasTable("connections");
       const hasAuditEvents = await hasTable("auth_audit_events");
       const hasUserDevicesLastOnline = hasUserDevices && (await hasColumn("user_devices", "last_online_at"));
@@ -1593,21 +1594,38 @@ export default function registerEndpoint(router, { database }) {
         userRow.active_tariff_id && hasActiveTariffs
           ? database("active_tariffs").where({ id: userRow.active_tariff_id }).first()
           : Promise.resolve(null),
-        hasUserDevices
-          ? database("user_devices")
-              .where({ user_id: userId })
-              .select(
-                database.raw(
-                  hasUserDevicesLastOnline
-                    ? `COUNT(*)::int AS total,
-                       COUNT(*) FILTER (WHERE last_online_at >= NOW() - INTERVAL '7 days')::int AS active_7d,
-                       MAX(last_online_at) AS last_online_at`
-                    : `COUNT(*)::int AS total,
-                       0::int AS active_7d,
-                       NULL::timestamptz AS last_online_at`
+        // Devices aggregate — union of two device-inventory sources so the card
+        // shows accurate counts for both schemes:
+        //   1) user_devices — populated only when device-per-user is enabled.
+        //   2) hwid_devices_local — local registry of HWIDs seen on Remnawave
+        //      (covers legacy users who never opt into device-per-user).
+        // Dedupe by hwid so the same physical device isn't double-counted.
+        hasUserDevices || hasHwidLocal
+          ? database.raw(
+              `WITH d AS (
+                  ${hasUserDevices
+                    ? `SELECT hwid,
+                              ${hasUserDevicesLastOnline ? "last_online_at" : "NULL::timestamptz AS last_online_at"}
+                         FROM user_devices
+                        WHERE user_id = ? AND hwid IS NOT NULL`
+                    : "SELECT NULL::text AS hwid, NULL::timestamptz AS last_online_at WHERE FALSE"}
+                  ${hasUserDevices && hasHwidLocal ? "UNION" : ""}
+                  ${hasHwidLocal
+                    ? `SELECT hwid, last_seen_at AS last_online_at
+                         FROM hwid_devices_local
+                        WHERE telegram_user_id = ?`
+                    : ""}
                 )
-              )
-              .first()
+                SELECT COUNT(DISTINCT hwid)::int AS total,
+                       COUNT(DISTINCT hwid) FILTER (
+                         WHERE last_online_at >= NOW() - INTERVAL '7 days'
+                       )::int AS active_7d,
+                       MAX(last_online_at) AS last_online_at
+                  FROM d`,
+              hasUserDevices && hasHwidLocal
+                ? [userId, userId]
+                : [userId]
+            ).then((raw) => (raw?.rows?.[0] ?? raw?.[0] ?? { total: 0, active_7d: 0, last_online_at: null }))
           : Promise.resolve({ total: 0, active_7d: 0, last_online_at: null }),
         hasConnections
           ? database("connections")
@@ -1617,6 +1635,7 @@ export default function registerEndpoint(router, { database }) {
                   `COUNT(*)::int AS days_total,
                    COUNT(*) FILTER (WHERE "at" >= (NOW() - INTERVAL '30 days')::date)::int AS days_30d,
                    COUNT(*) FILTER (WHERE "at" >= (NOW() - INTERVAL '7 days')::date)::int AS days_7d,
+                   MIN("at") AS first_day,
                    MAX("at") AS last_day`
                 )
               )
@@ -1736,18 +1755,29 @@ export default function registerEndpoint(router, { database }) {
       const isWebUser = userIdBig !== null && userIdBig >= WEB_USER_ID_FLOOR;
 
       // Identity providers — derive from id heuristic + auth_identities + password creds.
+      // For non-web users the bot user_id IS the telegram subject, so an OAuth
+      // auth_identities row with provider='telegram' and matching subject would
+      // otherwise produce a visually duplicated card. Merge it into the synthetic
+      // primary entry instead of appending a second row.
       const providers = [];
+      const telegramIdentityMatch = authIdentities.find(
+        (ident) => ident && ident.provider === "telegram" && String(ident.provider_subject) === userIdRaw
+      );
       if (!isWebUser) {
         providers.push({
           provider: "telegram",
           external_id: userIdRaw,
-          display_name: userRow.full_name || null,
+          display_name: userRow.full_name || telegramIdentityMatch?.display_name || null,
           username: userRow.username || null,
           email: null,
           email_verified: null,
-          linked_at: iso(userRow.created_at) || iso(userRow.registration_date),
-          last_login_at: null,
+          linked_at:
+            iso(userRow.created_at) ||
+            iso(userRow.registration_date) ||
+            iso(telegramIdentityMatch?.linked_at),
+          last_login_at: iso(telegramIdentityMatch?.last_login_at),
           source: "primary",
+          avatar_url: telegramIdentityMatch?.avatar_url || null,
         });
       }
       if (passwordCred) {
@@ -1764,6 +1794,9 @@ export default function registerEndpoint(router, { database }) {
         });
       }
       for (const ident of authIdentities) {
+        if (ident === telegramIdentityMatch && !isWebUser) {
+          continue;
+        }
         providers.push({
           provider: ident.provider,
           external_id: ident.provider_subject,
@@ -1934,7 +1967,12 @@ export default function registerEndpoint(router, { database }) {
                 lte_autopay_free: !!activeTariff.lte_autopay_free,
               }
             : null,
-          hwid_limit_effective: num(userRow.hwid_limit ?? activeTariff?.hwid_limit ?? 0),
+          hwid_limit_effective:
+            userRow.hwid_limit !== null && userRow.hwid_limit !== undefined
+              ? num(userRow.hwid_limit)
+              : activeTariff?.hwid_limit !== null && activeTariff?.hwid_limit !== undefined
+                ? num(activeTariff.hwid_limit)
+                : null,
           hwid_limit_user: userRow.hwid_limit !== null && userRow.hwid_limit !== undefined ? num(userRow.hwid_limit) : null,
           lte_total_gb: num(lteTotal),
           lte_used_gb: lteUsed,
@@ -1989,6 +2027,7 @@ export default function registerEndpoint(router, { database }) {
           days_total: num(connectionsAgg?.days_total),
           days_30d: num(connectionsAgg?.days_30d),
           days_7d: num(connectionsAgg?.days_7d),
+          first_day: connectionsAgg?.first_day ? new Date(connectionsAgg.first_day).toISOString() : null,
           last_day: connectionsAgg?.last_day ? new Date(connectionsAgg.last_day).toISOString() : null,
         },
         referrals: {
@@ -2053,6 +2092,7 @@ export default function registerEndpoint(router, { database }) {
             active_tariffs: hasActiveTariffs,
             user_devices: hasUserDevices,
             user_devices_last_online: hasUserDevicesLastOnline,
+            hwid_devices_local: hasHwidLocal,
             connections: hasConnections,
             auth_audit_events: hasAuditEvents,
           },
