@@ -2120,9 +2120,15 @@ export default function registerEndpoint(router, { database }) {
       const whereSql = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
 
       // Payments aggregate per utm (only when the table exists).
+      // The `direct`/`indirect` split mirrors the user-side split: direct =
+      // users with `referred_by IS NULL` (came in straight from the UTM link),
+      // indirect = users with `referred_by IS NOT NULL` (downstream invitees
+      // who inherited the campaign tag via PR feat/acquisition-source-attribution).
       let paymentsCte = "";
       let paymentsJoin = "";
-      let paymentsSelect = "0::bigint AS users_paid, 0::numeric AS revenue_rub";
+      let paymentsSelect =
+        "0::bigint AS users_paid, 0::bigint AS users_paid_direct, 0::bigint AS users_paid_indirect, " +
+        "0::numeric AS revenue_rub, 0::numeric AS revenue_rub_direct, 0::numeric AS revenue_rub_indirect";
       if (hasPayments) {
         const statusFilter = hasPaymentStatus ? "AND p.status = 'succeeded'" : "";
         paymentsCte = `,
@@ -2130,7 +2136,11 @@ export default function registerEndpoint(router, { database }) {
           SELECT
             u2.utm AS utm,
             COUNT(DISTINCT p.user_id) AS users_paid,
-            COALESCE(SUM(p.amount), 0) AS revenue_rub
+            COUNT(DISTINCT p.user_id) FILTER (WHERE u2.referred_by IS NULL) AS users_paid_direct,
+            COUNT(DISTINCT p.user_id) FILTER (WHERE u2.referred_by IS NOT NULL) AS users_paid_indirect,
+            COALESCE(SUM(p.amount), 0) AS revenue_rub,
+            COALESCE(SUM(p.amount) FILTER (WHERE u2.referred_by IS NULL), 0) AS revenue_rub_direct,
+            COALESCE(SUM(p.amount) FILTER (WHERE u2.referred_by IS NOT NULL), 0) AS revenue_rub_indirect
           FROM processed_payments p
           INNER JOIN users u2 ON u2.id = p.user_id
           WHERE 1=1
@@ -2138,7 +2148,13 @@ export default function registerEndpoint(router, { database }) {
           GROUP BY u2.utm
         )`;
         paymentsJoin = "LEFT JOIN payments_per_utm ppu ON ppu.utm IS NOT DISTINCT FROM g.utm";
-        paymentsSelect = "COALESCE(ppu.users_paid, 0) AS users_paid, COALESCE(ppu.revenue_rub, 0) AS revenue_rub";
+        paymentsSelect =
+          "COALESCE(ppu.users_paid, 0) AS users_paid, " +
+          "COALESCE(ppu.users_paid_direct, 0) AS users_paid_direct, " +
+          "COALESCE(ppu.users_paid_indirect, 0) AS users_paid_indirect, " +
+          "COALESCE(ppu.revenue_rub, 0) AS revenue_rub, " +
+          "COALESCE(ppu.revenue_rub_direct, 0) AS revenue_rub_direct, " +
+          "COALESCE(ppu.revenue_rub_indirect, 0) AS revenue_rub_indirect";
       }
 
       const sql = `
@@ -2146,10 +2162,14 @@ export default function registerEndpoint(router, { database }) {
           SELECT
             u.utm AS utm,
             COUNT(*) AS users_total,
+            COUNT(*) FILTER (WHERE u.referred_by IS NULL) AS users_direct,
+            COUNT(*) FILTER (WHERE u.referred_by IS NOT NULL) AS users_indirect,
             COUNT(*) FILTER (WHERE u.is_registered = true) AS users_registered,
             COUNT(*) FILTER (WHERE u.used_trial = true) AS users_used_trial,
             COUNT(*) FILTER (WHERE u.key_activated = true) AS users_key_activated,
             COUNT(*) FILTER (WHERE u.expired_at IS NOT NULL AND u.expired_at > CURRENT_DATE) AS users_active_subscription,
+            COUNT(*) FILTER (WHERE u.expired_at IS NOT NULL AND u.expired_at > CURRENT_DATE AND u.referred_by IS NULL) AS users_active_subscription_direct,
+            COUNT(*) FILTER (WHERE u.expired_at IS NOT NULL AND u.expired_at > CURRENT_DATE AND u.referred_by IS NOT NULL) AS users_active_subscription_indirect,
             MIN(u.created_at) AS first_seen,
             MAX(u.created_at) AS last_seen
           FROM users u
@@ -2159,10 +2179,14 @@ export default function registerEndpoint(router, { database }) {
         SELECT
           g.utm,
           g.users_total,
+          g.users_direct,
+          g.users_indirect,
           g.users_registered,
           g.users_used_trial,
           g.users_key_activated,
           g.users_active_subscription,
+          g.users_active_subscription_direct,
+          g.users_active_subscription_indirect,
           g.first_seen,
           g.last_seen,
           ${paymentsSelect}
@@ -2180,12 +2204,20 @@ export default function registerEndpoint(router, { database }) {
         return {
           utm,
           users_total: Number(row.users_total ?? 0),
+          users_direct: Number(row.users_direct ?? 0),
+          users_indirect: Number(row.users_indirect ?? 0),
           users_registered: Number(row.users_registered ?? 0),
           users_used_trial: Number(row.users_used_trial ?? 0),
           users_key_activated: Number(row.users_key_activated ?? 0),
           users_active_subscription: Number(row.users_active_subscription ?? 0),
+          users_active_subscription_direct: Number(row.users_active_subscription_direct ?? 0),
+          users_active_subscription_indirect: Number(row.users_active_subscription_indirect ?? 0),
           users_paid: Number(row.users_paid ?? 0),
+          users_paid_direct: Number(row.users_paid_direct ?? 0),
+          users_paid_indirect: Number(row.users_paid_indirect ?? 0),
           revenue_rub: Number(row.revenue_rub ?? 0),
+          revenue_rub_direct: Number(row.revenue_rub_direct ?? 0),
+          revenue_rub_indirect: Number(row.revenue_rub_indirect ?? 0),
           first_seen: row.first_seen ? new Date(row.first_seen).toISOString() : null,
           last_seen: row.last_seen ? new Date(row.last_seen).toISOString() : null,
         };
