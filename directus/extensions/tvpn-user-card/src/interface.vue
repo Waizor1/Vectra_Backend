@@ -58,8 +58,8 @@
                 {{ providerEmoji(p.provider) }}
               </span>
               <span class="tvpn-user-card__provider-name">{{ providerLabel(p.provider) }}</span>
-              <span v-if="p.email_verified" class="tvpn-user-card__badge tvpn-user-card__badge--ok">verified</span>
-              <span v-else-if="p.email_verified === false" class="tvpn-user-card__badge tvpn-user-card__badge--warn">unverified</span>
+              <span v-if="p.email && p.email_verified" class="tvpn-user-card__badge tvpn-user-card__badge--ok">verified</span>
+              <span v-else-if="p.email && p.email_verified === false" class="tvpn-user-card__badge tvpn-user-card__badge--warn">unverified</span>
             </div>
             <div class="tvpn-user-card__provider-body">
               <div v-if="p.external_id" class="tvpn-user-card__provider-row">
@@ -115,7 +115,7 @@
           </div>
           <div class="tvpn-user-card__kpi">
             <div class="tvpn-user-card__kpi-label">Лимит устройств</div>
-            <div class="tvpn-user-card__kpi-value">{{ data.subscription.hwid_limit_effective || '—' }}</div>
+            <div class="tvpn-user-card__kpi-value">{{ data.subscription.hwid_limit_effective ?? '—' }}</div>
             <div v-if="data.subscription.hwid_limit_user !== null" class="tvpn-user-card__kpi-meta">
               персональный override: {{ data.subscription.hwid_limit_user }}
             </div>
@@ -195,13 +195,14 @@
         <div class="tvpn-user-card__kpis">
           <div class="tvpn-user-card__kpi">
             <div class="tvpn-user-card__kpi-label">Регистрация</div>
-            <div class="tvpn-user-card__kpi-value">{{ formatDate(data.user.registration_date) }}</div>
-            <div class="tvpn-user-card__kpi-meta">{{ relative(data.user.registration_date) }}</div>
+            <div class="tvpn-user-card__kpi-value">{{ formatDate(registrationDate) }}</div>
+            <div v-if="registrationDate" class="tvpn-user-card__kpi-meta">{{ relative(registrationDate) }}</div>
           </div>
           <div class="tvpn-user-card__kpi">
             <div class="tvpn-user-card__kpi-label">Первый коннект</div>
-            <div class="tvpn-user-card__kpi-value">{{ data.user.connected_at ? formatDate(data.user.connected_at) : '—' }}</div>
-            <div v-if="data.user.connected_at" class="tvpn-user-card__kpi-meta">{{ relative(data.user.connected_at) }}</div>
+            <div class="tvpn-user-card__kpi-value">{{ data.connections.first_day ? formatDate(data.connections.first_day) : '—' }}</div>
+            <div v-if="data.connections.first_day" class="tvpn-user-card__kpi-meta">{{ relative(data.connections.first_day) }}</div>
+            <div v-if="lastOnlineAt" class="tvpn-user-card__kpi-meta">последний онлайн: {{ relative(lastOnlineAt) }}</div>
           </div>
           <div class="tvpn-user-card__kpi">
             <div class="tvpn-user-card__kpi-label">Дни с коннектом</div>
@@ -417,6 +418,16 @@ const statusBadges = computed(() => {
 });
 
 const rawJson = computed(() => (data.value ? JSON.stringify(data.value, null, 2) : ""));
+
+// Registration: prefer the explicit bot-side first-start date; fall back to the
+// Tortoise auto-stamped created_at so web-only users (no registration_date) still
+// render a meaningful date instead of an em-dash.
+const registrationDate = computed(() => data.value?.user?.registration_date || data.value?.user?.created_at || null);
+
+// "Last online" prefers user_devices.last_online_at (per-device telemetry); if
+// device-per-user is off, fall back to users.connected_at which is overwritten
+// by the catcher to the most recent online timestamp.
+const lastOnlineAt = computed(() => data.value?.devices?.last_online_at || data.value?.user?.connected_at || null);
 
 const attributionChain = computed(() => data.value?.referrals?.attribution?.chain ?? []);
 const attributionInheritedFrom = computed(() => data.value?.referrals?.attribution?.inherited_from ?? null);
