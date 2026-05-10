@@ -123,7 +123,11 @@
           <section v-else class="table-card">
             <div class="table-card__head">
               <div>Источники по конверсии</div>
-              <div class="table-card__hint">Сортировка по убыванию total — самый большой канал сверху</div>
+              <div class="table-card__hint">
+                Сортировка по убыванию total. В ячейках «Всего», «Активная подписка», «Платных», «Доход» под основной цифрой —
+                сплит на прямых (D) и косвенных (I): прямой = пришёл прямо с UTM-ссылки, косвенный = приглашён прямым через реферал
+                (тег унаследован через PR feat/acquisition-source-attribution).
+              </div>
             </div>
             <div class="table-wrap">
               <table class="table">
@@ -147,13 +151,45 @@
                       <span v-if="row.utm" class="tag tag--campaign">{{ row.utm }}</span>
                       <span v-else class="tag tag--null">— без UTM —</span>
                     </td>
-                    <td class="table__col table__col--num">{{ formatNumber(row.users_total) }}</td>
+                    <td class="table__col table__col--num">
+                      <div class="cell-stack">
+                        <div class="cell-stack__main">{{ formatNumber(row.users_total) }}</div>
+                        <div class="cell-stack__split">
+                          <span class="split-pill split-pill--direct">D {{ formatNumber(row.users_direct) }}</span>
+                          <span class="split-pill split-pill--indirect">I {{ formatNumber(row.users_indirect) }}</span>
+                        </div>
+                      </div>
+                    </td>
                     <td class="table__col table__col--num">{{ formatNumber(row.users_registered) }}</td>
                     <td class="table__col table__col--num">{{ formatNumber(row.users_used_trial) }}</td>
                     <td class="table__col table__col--num">{{ formatNumber(row.users_key_activated) }}</td>
-                    <td class="table__col table__col--num">{{ formatNumber(row.users_active_subscription) }}</td>
-                    <td class="table__col table__col--num">{{ formatNumber(row.users_paid) }}</td>
-                    <td class="table__col table__col--num">{{ formatRub(row.revenue_rub) }}</td>
+                    <td class="table__col table__col--num">
+                      <div class="cell-stack">
+                        <div class="cell-stack__main">{{ formatNumber(row.users_active_subscription) }}</div>
+                        <div class="cell-stack__split">
+                          <span class="split-pill split-pill--direct">D {{ formatNumber(row.users_active_subscription_direct) }}</span>
+                          <span class="split-pill split-pill--indirect">I {{ formatNumber(row.users_active_subscription_indirect) }}</span>
+                        </div>
+                      </div>
+                    </td>
+                    <td class="table__col table__col--num">
+                      <div class="cell-stack">
+                        <div class="cell-stack__main">{{ formatNumber(row.users_paid) }}</div>
+                        <div class="cell-stack__split">
+                          <span class="split-pill split-pill--direct">D {{ formatNumber(row.users_paid_direct) }}</span>
+                          <span class="split-pill split-pill--indirect">I {{ formatNumber(row.users_paid_indirect) }}</span>
+                        </div>
+                      </div>
+                    </td>
+                    <td class="table__col table__col--num">
+                      <div class="cell-stack">
+                        <div class="cell-stack__main">{{ formatRub(row.revenue_rub) }}</div>
+                        <div class="cell-stack__split">
+                          <span class="split-pill split-pill--direct">D {{ formatRub(row.revenue_rub_direct) }}</span>
+                          <span class="split-pill split-pill--indirect">I {{ formatRub(row.revenue_rub_indirect) }}</span>
+                        </div>
+                      </div>
+                    </td>
                     <td class="table__col table__col--date">{{ formatDate(row.first_seen) }}</td>
                     <td class="table__col table__col--date">{{ formatDate(row.last_seen) }}</td>
                   </tr>
@@ -516,6 +552,49 @@ onMounted(() => {
 .table__col--date {
   white-space: nowrap;
   color: #8b949e;
+}
+
+.cell-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+}
+
+.cell-stack__main {
+  font-weight: 600;
+  color: #f0f6fc;
+}
+
+.cell-stack__split {
+  display: flex;
+  gap: 4px;
+  flex-wrap: nowrap;
+  white-space: nowrap;
+}
+
+.split-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.2;
+}
+
+.split-pill--direct {
+  background: rgba(59, 201, 219, 0.12);
+  color: #66d9e8;
+  border: 1px solid rgba(59, 201, 219, 0.22);
+}
+
+.split-pill--indirect {
+  background: rgba(151, 117, 250, 0.12);
+  color: #b692f6;
+  border: 1px solid rgba(151, 117, 250, 0.22);
 }
 
 .tag {

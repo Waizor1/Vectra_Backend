@@ -366,20 +366,28 @@ def test_admin_widgets_utm_stats_route_registered_and_returns_shape():
           {{
             utm: 'qr_rt_launch_2026_05',
             users_total: 142,
+            users_direct: 100,
+            users_indirect: 42,
             users_registered: 95,
             users_used_trial: 78,
             users_key_activated: 47,
             users_active_subscription: 22,
+            users_active_subscription_direct: 15,
+            users_active_subscription_indirect: 7,
             first_seen: '2026-05-10T00:00:00Z',
             last_seen: '2026-06-15T12:34:56Z',
           }},
           {{
             utm: null,
             users_total: 4500,
+            users_direct: 4500,
+            users_indirect: 0,
             users_registered: 3200,
             users_used_trial: 2100,
             users_key_activated: 1800,
             users_active_subscription: 950,
+            users_active_subscription_direct: 950,
+            users_active_subscription_indirect: 0,
             first_seen: '2024-01-01T00:00:00Z',
             last_seen: '2026-06-20T00:00:00Z',
           }},
@@ -411,7 +419,15 @@ def test_admin_widgets_utm_stats_route_registered_and_returns_shape():
         if (captured.sources[0].utm !== 'qr_rt_launch_2026_05') throw new Error('first source must be top-utm');
         if (captured.sources[1].utm !== null) throw new Error('second source utm must normalize to null');
         if (captured.sources[0].users_paid !== 0) throw new Error('users_paid must default to 0 without payments table');
+        if (captured.sources[0].users_paid_direct !== 0) throw new Error('users_paid_direct must default to 0 without payments table');
+        if (captured.sources[0].users_paid_indirect !== 0) throw new Error('users_paid_indirect must default to 0 without payments table');
         if (captured.sources[0].revenue_rub !== 0) throw new Error('revenue_rub must default to 0 without payments table');
+        if (captured.sources[0].revenue_rub_direct !== 0) throw new Error('revenue_rub_direct must default to 0 without payments table');
+        if (captured.sources[0].revenue_rub_indirect !== 0) throw new Error('revenue_rub_indirect must default to 0 without payments table');
+        if (captured.sources[0].users_direct !== 100) throw new Error('users_direct must be passed through');
+        if (captured.sources[0].users_indirect !== 42) throw new Error('users_indirect must be passed through');
+        if (captured.sources[0].users_active_subscription_direct !== 15) throw new Error('users_active_subscription_direct must be passed through');
+        if (captured.sources[0].users_active_subscription_indirect !== 7) throw new Error('users_active_subscription_indirect must be passed through');
         if (typeof captured.totals?.users_total !== 'number') throw new Error('totals.users_total must be a number');
         if (captured.filters_applied?.utm_prefix !== 'qr_') throw new Error('filters_applied.utm_prefix not echoed');
         if (captured.filters_applied?.limit !== 50) throw new Error('filters_applied.limit not coerced to number');
