@@ -2160,10 +2160,20 @@ export default function registerEndpoint(router, { database }) {
       const whereSql = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
 
       // Payments aggregate per utm (only when the table exists).
-      // The `direct`/`indirect` split mirrors the user-side split: direct =
-      // users with `referred_by IS NULL` (came in straight from the UTM link),
-      // indirect = users with `referred_by IS NOT NULL` (downstream invitees
-      // who inherited the campaign tag via PR feat/acquisition-source-attribution).
+      //
+      // The `direct`/`indirect` split mirrors the attribution semantics from
+      // `bloobcat/funcs/referral_attribution.py::pick_attribution_utm`:
+      //   - INDIRECT = user inherited the tag from their referrer
+      //     (`referred_by IS NOT NULL` AND `referrer.utm = user.utm`).
+      //   - DIRECT   = anything else — either no referrer at all, or the
+      //     referrer has a different/empty utm so this user is the first
+      //     node in the chain to carry the tag.
+      //
+      // The earlier "referred_by IS NULL = direct" heuristic was wrong for
+      // partner-attributed campaigns: every user arriving via a partner QR
+      // already gets `referred_by = partner.id` even when their UTM came
+      // straight from the campaign link. SELF JOIN with the referrer row
+      // is the correct way to detect inheritance.
       let paymentsCte = "";
       let paymentsJoin = "";
       let paymentsSelect =
@@ -2171,18 +2181,22 @@ export default function registerEndpoint(router, { database }) {
         "0::numeric AS revenue_rub, 0::numeric AS revenue_rub_direct, 0::numeric AS revenue_rub_indirect";
       if (hasPayments) {
         const statusFilter = hasPaymentStatus ? "AND p.status = 'succeeded'" : "";
+        // PostgreSQL FILTER expressions reused for direct/indirect split.
+        const indirectExpr = "(u2.referred_by IS NOT NULL AND r2.utm IS NOT NULL AND r2.utm = u2.utm)";
+        const directExpr = "NOT " + indirectExpr;
         paymentsCte = `,
         payments_per_utm AS (
           SELECT
             u2.utm AS utm,
             COUNT(DISTINCT p.user_id) AS users_paid,
-            COUNT(DISTINCT p.user_id) FILTER (WHERE u2.referred_by IS NULL) AS users_paid_direct,
-            COUNT(DISTINCT p.user_id) FILTER (WHERE u2.referred_by IS NOT NULL) AS users_paid_indirect,
+            COUNT(DISTINCT p.user_id) FILTER (WHERE ${directExpr}) AS users_paid_direct,
+            COUNT(DISTINCT p.user_id) FILTER (WHERE ${indirectExpr}) AS users_paid_indirect,
             COALESCE(SUM(p.amount), 0) AS revenue_rub,
-            COALESCE(SUM(p.amount) FILTER (WHERE u2.referred_by IS NULL), 0) AS revenue_rub_direct,
-            COALESCE(SUM(p.amount) FILTER (WHERE u2.referred_by IS NOT NULL), 0) AS revenue_rub_indirect
+            COALESCE(SUM(p.amount) FILTER (WHERE ${directExpr}), 0) AS revenue_rub_direct,
+            COALESCE(SUM(p.amount) FILTER (WHERE ${indirectExpr}), 0) AS revenue_rub_indirect
           FROM processed_payments p
           INNER JOIN users u2 ON u2.id = p.user_id
+          LEFT JOIN users r2 ON r2.id = u2.referred_by
           WHERE 1=1
             ${statusFilter}
           GROUP BY u2.utm
@@ -2197,22 +2211,26 @@ export default function registerEndpoint(router, { database }) {
           "COALESCE(ppu.revenue_rub_indirect, 0) AS revenue_rub_indirect";
       }
 
+      // Same direct/indirect logic for the user-side grouped CTE.
+      const userIndirectExpr = "(u.referred_by IS NOT NULL AND r.utm IS NOT NULL AND r.utm = u.utm)";
+      const userDirectExpr = "NOT " + userIndirectExpr;
       const sql = `
         WITH grouped AS (
           SELECT
             u.utm AS utm,
             COUNT(*) AS users_total,
-            COUNT(*) FILTER (WHERE u.referred_by IS NULL) AS users_direct,
-            COUNT(*) FILTER (WHERE u.referred_by IS NOT NULL) AS users_indirect,
+            COUNT(*) FILTER (WHERE ${userDirectExpr}) AS users_direct,
+            COUNT(*) FILTER (WHERE ${userIndirectExpr}) AS users_indirect,
             COUNT(*) FILTER (WHERE u.is_registered = true) AS users_registered,
             COUNT(*) FILTER (WHERE u.used_trial = true) AS users_used_trial,
             COUNT(*) FILTER (WHERE u.key_activated = true) AS users_key_activated,
             COUNT(*) FILTER (WHERE u.expired_at IS NOT NULL AND u.expired_at > CURRENT_DATE) AS users_active_subscription,
-            COUNT(*) FILTER (WHERE u.expired_at IS NOT NULL AND u.expired_at > CURRENT_DATE AND u.referred_by IS NULL) AS users_active_subscription_direct,
-            COUNT(*) FILTER (WHERE u.expired_at IS NOT NULL AND u.expired_at > CURRENT_DATE AND u.referred_by IS NOT NULL) AS users_active_subscription_indirect,
+            COUNT(*) FILTER (WHERE u.expired_at IS NOT NULL AND u.expired_at > CURRENT_DATE AND ${userDirectExpr}) AS users_active_subscription_direct,
+            COUNT(*) FILTER (WHERE u.expired_at IS NOT NULL AND u.expired_at > CURRENT_DATE AND ${userIndirectExpr}) AS users_active_subscription_indirect,
             MIN(u.created_at) AS first_seen,
             MAX(u.created_at) AS last_seen
           FROM users u
+          LEFT JOIN users r ON r.id = u.referred_by
           ${whereSql}
           GROUP BY u.utm
         )${paymentsCte}

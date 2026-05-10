@@ -331,6 +331,18 @@ def test_admin_widgets_utm_stats_route_registered_and_returns_shape():
     assert "/utm-stats" in dist_source, "utm-stats route missing from dist"
     assert "users_active_subscription" in src_source
     assert "Failed to build utm-stats payload" in src_source
+    # Direct/indirect must be derived from referrer-utm equality (SELF JOIN),
+    # NOT from `referred_by IS NULL` which is wrong for partner-attributed
+    # campaigns where every UTM visitor is also linked to a partner.
+    assert "LEFT JOIN users r ON r.id = u.referred_by" in src_source, (
+        "direct/indirect split must SELF JOIN with referrer to detect inherited tags"
+    )
+    assert "LEFT JOIN users r2 ON r2.id = u2.referred_by" in src_source, (
+        "payments CTE must also SELF JOIN with referrer for direct/indirect split"
+    )
+    assert "r.utm = u.utm" in src_source, (
+        "indirect = referrer.utm matches user.utm (inheritance from PR feat/acquisition-source-attribution)"
+    )
 
     _node(
         f"""
