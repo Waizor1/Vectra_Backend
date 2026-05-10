@@ -1956,4 +1956,167 @@ export default function registerEndpoint(router, { database }) {
         .json({ error: "Failed to build user-card payload", details: String(err?.message || err) });
     }
   });
+
+  // -------------------------------------------------------------------------
+  // GET /admin-widgets/utm-stats
+  //
+  // Returns aggregated conversion metrics grouped by `users.utm`, so the
+  // admin dashboard can see a single row per traffic source (qr_rt_launch_*,
+  // partner, organic null, custom campaigns) with: total users, registered,
+  // trial-used, key-activated, currently active subscriptions, paid count
+  // and total revenue.
+  //
+  // Combined with PR feat/acquisition-source-attribution (which propagates
+  // the campaign tag down referral chains), this query reflects the full
+  // funnel — direct visitors AND every downstream invitee — for each
+  // campaign.
+  //
+  // Query params (all optional):
+  //   - since        ISO date; only include users with created_at >= since
+  //   - utm_prefix   e.g. "qr_" to scope to a campaign family
+  //   - limit        max number of rows (default 200, capped at 1000)
+  // -------------------------------------------------------------------------
+  router.get("/utm-stats", async (req, res) => {
+    try {
+      const since = toUtcDate(req.query.since);
+      const utmPrefix = String(req.query.utm_prefix ?? "").trim();
+      const limit = toInt(req.query.limit, 200, 1, 1000);
+
+      const hasUsers = await hasTable("users");
+      if (!hasUsers) {
+        return res.json({
+          sources: [],
+          totals: { users_total: 0, users_with_utm: 0, users_no_utm: 0 },
+          filters_applied: { since: since ? since.toISOString() : null, utm_prefix: utmPrefix || null, limit },
+          generated_at: new Date().toISOString(),
+        });
+      }
+
+      const hasPayments = await hasTable("processed_payments");
+      const hasProcessedAt = hasPayments && (await hasColumn("processed_payments", "processed_at"));
+      const hasPaymentStatus = hasPayments && (await hasColumn("processed_payments", "status"));
+
+      // Build the aggregate query in plain SQL: COUNT FILTER lets us compute
+      // multiple cohorts in a single pass.
+      const filters = [];
+      const bindings = [];
+      if (since) {
+        filters.push("u.created_at >= ?");
+        bindings.push(since.toISOString());
+      }
+      if (utmPrefix) {
+        // prefix match; allow exact match too via the LIKE wildcard
+        filters.push("u.utm LIKE ?");
+        bindings.push(`${utmPrefix}%`);
+      }
+      const whereSql = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
+
+      // Payments aggregate per utm (only when the table exists).
+      let paymentsCte = "";
+      let paymentsJoin = "";
+      let paymentsSelect = "0::bigint AS users_paid, 0::numeric AS revenue_rub";
+      if (hasPayments) {
+        const statusFilter = hasPaymentStatus ? "AND p.status = 'succeeded'" : "";
+        paymentsCte = `,
+        payments_per_utm AS (
+          SELECT
+            u2.utm AS utm,
+            COUNT(DISTINCT p.user_id) AS users_paid,
+            COALESCE(SUM(p.amount), 0) AS revenue_rub
+          FROM processed_payments p
+          INNER JOIN users u2 ON u2.id = p.user_id
+          WHERE 1=1
+            ${statusFilter}
+          GROUP BY u2.utm
+        )`;
+        paymentsJoin = "LEFT JOIN payments_per_utm ppu ON ppu.utm IS NOT DISTINCT FROM g.utm";
+        paymentsSelect = "COALESCE(ppu.users_paid, 0) AS users_paid, COALESCE(ppu.revenue_rub, 0) AS revenue_rub";
+      }
+
+      const sql = `
+        WITH grouped AS (
+          SELECT
+            u.utm AS utm,
+            COUNT(*) AS users_total,
+            COUNT(*) FILTER (WHERE u.is_registered = true) AS users_registered,
+            COUNT(*) FILTER (WHERE u.used_trial = true) AS users_used_trial,
+            COUNT(*) FILTER (WHERE u.key_activated = true) AS users_key_activated,
+            COUNT(*) FILTER (WHERE u.expired_at IS NOT NULL AND u.expired_at > CURRENT_DATE) AS users_active_subscription,
+            MIN(u.created_at) AS first_seen,
+            MAX(u.created_at) AS last_seen
+          FROM users u
+          ${whereSql}
+          GROUP BY u.utm
+        )${paymentsCte}
+        SELECT
+          g.utm,
+          g.users_total,
+          g.users_registered,
+          g.users_used_trial,
+          g.users_key_activated,
+          g.users_active_subscription,
+          g.first_seen,
+          g.last_seen,
+          ${paymentsSelect}
+        FROM grouped g
+        ${paymentsJoin}
+        ORDER BY g.users_total DESC
+        LIMIT ${limit};
+      `;
+
+      const raw = await database.raw(sql, bindings);
+      const rows = raw?.rows ?? raw ?? [];
+
+      const sources = rows.map((row) => {
+        const utm = row.utm == null || row.utm === "" ? null : String(row.utm);
+        return {
+          utm,
+          users_total: Number(row.users_total ?? 0),
+          users_registered: Number(row.users_registered ?? 0),
+          users_used_trial: Number(row.users_used_trial ?? 0),
+          users_key_activated: Number(row.users_key_activated ?? 0),
+          users_active_subscription: Number(row.users_active_subscription ?? 0),
+          users_paid: Number(row.users_paid ?? 0),
+          revenue_rub: Number(row.revenue_rub ?? 0),
+          first_seen: row.first_seen ? new Date(row.first_seen).toISOString() : null,
+          last_seen: row.last_seen ? new Date(row.last_seen).toISOString() : null,
+        };
+      });
+
+      const totalsRowFilters = [...filters];
+      const totalsBindings = [...bindings];
+      const totalsWhere = totalsRowFilters.length ? `WHERE ${totalsRowFilters.join(" AND ")}` : "";
+      const totalsRaw = await database.raw(
+        `
+        SELECT
+          COUNT(*) AS users_total,
+          COUNT(*) FILTER (WHERE u.utm IS NOT NULL AND u.utm <> '') AS users_with_utm,
+          COUNT(*) FILTER (WHERE u.utm IS NULL OR u.utm = '') AS users_no_utm
+        FROM users u
+        ${totalsWhere}
+        `,
+        totalsBindings
+      );
+      const totalsRow = totalsRaw?.rows?.[0] ?? totalsRaw?.[0] ?? {};
+
+      res.json({
+        sources,
+        totals: {
+          users_total: Number(totalsRow.users_total ?? 0),
+          users_with_utm: Number(totalsRow.users_with_utm ?? 0),
+          users_no_utm: Number(totalsRow.users_no_utm ?? 0),
+        },
+        filters_applied: {
+          since: since ? since.toISOString() : null,
+          utm_prefix: utmPrefix || null,
+          limit,
+        },
+        generated_at: new Date().toISOString(),
+      });
+    } catch (err) {
+      res
+        .status(500)
+        .json({ error: "Failed to build utm-stats payload", details: String(err?.message || err) });
+    }
+  });
 }
