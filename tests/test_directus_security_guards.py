@@ -439,3 +439,257 @@ def test_tvpn_utm_stats_module_extension_loads():
         cwd=ROOT,
         check=True,
     )
+
+
+def test_admin_widgets_user_card_attribution_chain_payload():
+    """The /user-card/:user_id handler must walk referred_by upward, count downstream
+    descendants, and surface an `attribution` block — the display-side companion of
+    the inheritance logic in bloobcat/funcs/referral_attribution.py."""
+
+    source_url = (ROOT / "directus/extensions/admin-widgets/src/index.js").as_uri()
+    src_source = _read("directus/extensions/admin-widgets/src/index.js")
+    dist_source = _read("directus/extensions/admin-widgets/dist/index.js")
+
+    assert "WITH RECURSIVE chain" in src_source, "attribution chain CTE missing from src"
+    assert "WITH RECURSIVE descendants" in src_source, "downstream CTE missing from src"
+    assert "downstream_count" in src_source
+    assert "attribution" in src_source
+    assert "WITH RECURSIVE chain" in dist_source, "attribution chain CTE missing from dist (rebuild required)"
+    assert "WITH RECURSIVE descendants" in dist_source, "downstream CTE missing from dist (rebuild required)"
+
+    _node(
+        f"""
+        import registerEndpoint from {source_url!r};
+
+        const routes = new Map();
+        const router = {{
+          use() {{}},
+          get(path, fn) {{ routes.set(path, fn); }},
+          post() {{}},
+        }};
+
+        const userRow = {{
+          id: 200,
+          username: 'invited',
+          full_name: 'Invited User',
+          utm: 'qr_rt_launch_2026_05',
+          referred_by: 100,
+          referrals: 3,
+          referral_bonus_days_total: 0,
+          custom_referral_percent: 0,
+          is_partner: false,
+          is_admin: false,
+          is_registered: true,
+          is_subscribed: false,
+          is_blocked: false,
+          is_trial: false,
+          used_trial: false,
+          key_activated: false,
+          balance: 0,
+          partner_link_mode: null,
+          remnawave_uuid: null,
+          email: null,
+          language_code: 'ru',
+          registration_date: '2026-05-09T00:00:00Z',
+          created_at: '2026-05-09T00:00:00Z',
+          connected_at: null,
+          blocked_at: null,
+          trial_started_at: null,
+          last_hwid_reset: null,
+          last_failed_message_at: null,
+          failed_message_count: 0,
+          prize_wheel_attempts: 0,
+          device_per_user_enabled: null,
+          expired_at: null,
+          active_tariff_id: null,
+          lte_gb_total: 0,
+        }};
+        const referrerRow = {{
+          id: 100,
+          full_name: 'Campaign Source',
+          username: 'campaign',
+          is_partner: false,
+        }};
+        const tableAwareDatabase = (table) => {{
+          let matchedTable = table;
+          let whereConds = null;
+          const qb = {{
+            select() {{ return qb; }},
+            where(conds) {{ whereConds = conds; return qb; }},
+            orderBy() {{ return qb; }},
+            limit() {{ return qb; }},
+            count() {{ return qb; }},
+            sum() {{ return qb; }},
+            min() {{ return qb; }},
+            first: async () => {{
+              if (matchedTable === 'information_schema.tables') return {{ table_name: whereConds?.table_name }};
+              if (matchedTable === 'information_schema.columns') return {{ column_name: whereConds?.column_name }};
+              if (matchedTable === 'users') {{
+                if (whereConds?.id === '200' || whereConds?.id === 200) return userRow;
+                if (whereConds?.id === 100 || whereConds?.id === '100') return referrerRow;
+                return null;
+              }}
+              return null;
+            }},
+            // Thenable for awaited chains that don't end in .first() — knex builders
+            // are thenable and resolve to an array; we mirror that with [].
+            then(onFulfilled) {{ return Promise.resolve([]).then(onFulfilled); }},
+          }};
+          return qb;
+        }};
+        tableAwareDatabase.raw = async (sql) => {{
+          const text = String(sql);
+          if (text.includes('WITH RECURSIVE chain')) {{
+            return {{
+              rows: [
+                {{
+                  id: 100,
+                  referred_by: null,
+                  utm: 'qr_rt_launch_2026_05',
+                  full_name: 'Campaign Source',
+                  username: 'campaign',
+                  is_partner: false,
+                  depth: 1,
+                }},
+              ],
+            }};
+          }}
+          if (text.includes('WITH RECURSIVE descendants')) {{
+            return {{ rows: [{{ count: 7 }}] }};
+          }}
+          return {{ rows: [] }};
+        }};
+
+        registerEndpoint(router, {{ database: tableAwareDatabase }});
+        const handler = routes.get('/user-card/:user_id');
+        if (!handler) throw new Error('user-card route was not registered');
+
+        let captured = null;
+        let capturedStatus = 200;
+        await handler(
+          {{ params: {{ user_id: '200' }} }},
+          {{
+            status(code) {{ capturedStatus = code; return this; }},
+            json(payload) {{ captured = payload; return payload; }},
+          }},
+        );
+        if (capturedStatus !== 200) throw new Error(`expected 200, got ${{capturedStatus}}: ${{JSON.stringify(captured)}}`);
+        if (!captured) throw new Error('handler did not respond');
+        const attribution = captured.referrals?.attribution;
+        if (!attribution) throw new Error('referrals.attribution block missing');
+        if (attribution.source !== 'inherited') throw new Error(`expected source=inherited, got ${{attribution.source}}`);
+        if (!Array.isArray(attribution.chain) || attribution.chain.length !== 1) throw new Error('chain must contain exactly 1 ancestor');
+        const ancestor = attribution.chain[0];
+        if (ancestor.id !== '100') throw new Error('ancestor id must be stringified');
+        if (ancestor.utm !== 'qr_rt_launch_2026_05') throw new Error('ancestor utm not propagated');
+        if (ancestor.utm_is_campaign !== true) throw new Error('ancestor.utm_is_campaign must be true');
+        if (!attribution.inherited_from || attribution.inherited_from.id !== '100') throw new Error('inherited_from must point at the matching ancestor');
+        if (!attribution.campaign_root || attribution.campaign_root.id !== '100') throw new Error('campaign_root must be exposed');
+        if (attribution.own_is_campaign !== true) throw new Error('own_is_campaign must be true for the campaign tag');
+        if (captured.referrals.downstream_count !== 7) throw new Error(`downstream_count must be 7, got ${{captured.referrals.downstream_count}}`);
+        """
+    )
+
+
+def test_admin_widgets_user_card_attribution_handles_organic_user():
+    """Organic users (no referrer, no utm) must yield attribution.source='organic'
+    and an empty chain — and the referred_by-gated chain CTE must not be issued."""
+
+    source_url = (ROOT / "directus/extensions/admin-widgets/src/index.js").as_uri()
+
+    _node(
+        f"""
+        import registerEndpoint from {source_url!r};
+
+        const routes = new Map();
+        const router = {{
+          use() {{}},
+          get(path, fn) {{ routes.set(path, fn); }},
+          post() {{}},
+        }};
+
+        const userRow = {{
+          id: 9001,
+          username: 'organic',
+          full_name: 'Organic',
+          utm: null,
+          referred_by: null,
+          referrals: 0,
+          referral_bonus_days_total: 0,
+          custom_referral_percent: 0,
+          is_partner: false,
+          is_admin: false,
+          is_registered: true,
+          is_subscribed: false,
+          is_blocked: false,
+          is_trial: false,
+          used_trial: false,
+          key_activated: false,
+          balance: 0,
+          partner_link_mode: null,
+          remnawave_uuid: null,
+          email: null,
+          language_code: 'ru',
+          registration_date: null,
+          created_at: '2026-05-10T00:00:00Z',
+          connected_at: null,
+          blocked_at: null,
+          trial_started_at: null,
+          last_hwid_reset: null,
+          last_failed_message_at: null,
+          failed_message_count: 0,
+          prize_wheel_attempts: 0,
+          device_per_user_enabled: null,
+          expired_at: null,
+          active_tariff_id: null,
+          lte_gb_total: 0,
+        }};
+        const tableAwareDatabase = (table) => {{
+          let matchedTable = table;
+          let whereConds = null;
+          const qb = {{
+            select() {{ return qb; }},
+            where(conds) {{ whereConds = conds; return qb; }},
+            orderBy() {{ return qb; }},
+            limit() {{ return qb; }},
+            count() {{ return qb; }},
+            sum() {{ return qb; }},
+            min() {{ return qb; }},
+            first: async () => {{
+              if (matchedTable === 'information_schema.tables') return {{ table_name: whereConds?.table_name }};
+              if (matchedTable === 'information_schema.columns') return {{ column_name: whereConds?.column_name }};
+              if (matchedTable === 'users') return userRow;
+              return null;
+            }},
+            then(onFulfilled) {{ return Promise.resolve([]).then(onFulfilled); }},
+          }};
+          return qb;
+        }};
+        let chainCalled = false;
+        tableAwareDatabase.raw = async (sql) => {{
+          const text = String(sql);
+          if (text.includes('WITH RECURSIVE chain')) {{ chainCalled = true; return {{ rows: [] }}; }}
+          if (text.includes('WITH RECURSIVE descendants')) return {{ rows: [{{ count: 0 }}] }};
+          return {{ rows: [] }};
+        }};
+
+        registerEndpoint(router, {{ database: tableAwareDatabase }});
+        const handler = routes.get('/user-card/:user_id');
+        let captured = null;
+        let capturedStatus = 200;
+        await handler(
+          {{ params: {{ user_id: '9001' }} }},
+          {{
+            status(code) {{ capturedStatus = code; return this; }},
+            json(payload) {{ captured = payload; return payload; }},
+          }},
+        );
+        if (capturedStatus !== 200) throw new Error(`expected 200, got ${{capturedStatus}}: ${{JSON.stringify(captured)}}`);
+        if (chainCalled) throw new Error('chain CTE must be skipped when referred_by is null');
+        const attribution = captured.referrals?.attribution;
+        if (!attribution) throw new Error('attribution block missing');
+        if (attribution.source !== 'organic') throw new Error(`expected source=organic, got ${{attribution.source}}`);
+        if (attribution.chain.length !== 0) throw new Error('chain must be empty for organic users');
+        if (captured.referrals.downstream_count !== 0) throw new Error('downstream_count must be 0 for organic users with no descendants');
+        """
+    )
