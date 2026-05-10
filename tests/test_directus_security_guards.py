@@ -621,6 +621,82 @@ def test_admin_widgets_utm_stats_funnel_route_registered():
     )
 
 
+def test_admin_widgets_utm_stats_cohort_route_registered():
+    """The /utm-stats/cohort route must be present, require utm, and bucket by week."""
+
+    source_url = (ROOT / "directus/extensions/admin-widgets/src/index.js").as_uri()
+    src_source = _read("directus/extensions/admin-widgets/src/index.js")
+    dist_source = _read("directus/extensions/admin-widgets/dist/index.js")
+
+    assert '"/utm-stats/cohort"' in src_source, "cohort route missing from src"
+    assert "/utm-stats/cohort" in dist_source, "cohort route missing from dist"
+    assert "date_trunc('week'" in src_source, "cohort must bucket by week"
+    assert "ratio_paid" in src_source
+
+    _node(
+        f"""
+        import registerEndpoint from {source_url!r};
+
+        const routes = new Map();
+        const router = {{
+          use() {{}},
+          get(path, fn) {{ routes.set(path, fn); }},
+          post() {{}},
+          patch() {{}},
+          delete() {{}},
+        }};
+
+        const fakeDatabase = (table) => {{
+          const qb = {{
+            select() {{ return qb; }},
+            where(conds) {{
+              if (conds && typeof conds === 'object' && conds.table_name === 'users') {{
+                qb.first = async () => ({{ table_name: 'users' }});
+              }} else {{
+                qb.first = async () => null;
+              }}
+              return qb;
+            }},
+            count() {{ return qb; }},
+            sum() {{ return qb; }},
+            first: async () => null,
+          }};
+          return qb;
+        }};
+        fakeDatabase.raw = async (sql) => ({{
+          rows: [
+            {{ cohort_week: '2026-05-01T00:00:00Z', cohort_size: 120, registered: 80, trial: 60, activated: 30, active_now: 14, paid: 5 }},
+            {{ cohort_week: '2026-04-24T00:00:00Z', cohort_size: 95, registered: 70, trial: 50, activated: 22, active_now: 12, paid: 3 }},
+          ],
+        }});
+
+        registerEndpoint(router, {{ database: fakeDatabase }});
+        const handler = routes.get('/utm-stats/cohort');
+        if (!handler) throw new Error('cohort route not registered');
+
+        // Missing utm → 400.
+        let badStatus = 0;
+        await handler(
+          {{ query: {{}} }},
+          {{ status(code) {{ badStatus = code; return this; }}, json() {{ return {{}}; }} }},
+        );
+        if (badStatus !== 400) throw new Error('missing utm must 400');
+
+        let captured = null;
+        await handler(
+          {{ query: {{ utm: 'qr_rt_launch_2026_05', weeks: '8' }} }},
+          {{ json(p) {{ captured = p; return p; }}, status() {{ throw new Error('rejected'); }} }},
+        );
+        if (!captured) throw new Error('no payload');
+        if (!Array.isArray(captured.cohorts) || captured.cohorts.length !== 2) throw new Error('cohorts shape');
+        const first = captured.cohorts[0];
+        if (first.cohort_size !== 120) throw new Error('cohort_size missing');
+        if (Math.abs(first.ratio_paid - 5/120) > 0.0001) throw new Error('ratio_paid wrong');
+        if (Math.abs(first.ratio_registered - 80/120) > 0.0001) throw new Error('ratio_registered wrong');
+        """
+    )
+
+
 def test_admin_widgets_utm_campaigns_crud_routes_registered():
     """utm-campaigns CRUD routes must be present and reject invalid utm."""
 

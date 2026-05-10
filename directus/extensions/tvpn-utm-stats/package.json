@@ -19,6 +19,7 @@
     "host": "^11.17.3"
   },
   "dependencies": {
+    "jszip": "^3.10.1",
     "qrcode-generator": "^2.0.4"
   }
 }
