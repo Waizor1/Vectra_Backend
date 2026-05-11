@@ -2337,13 +2337,35 @@ export default function registerEndpoint(router, { database }) {
   //   - until      ISO date (default = now)
   //   - bucket     "day" | "week" (default "day")
   // -------------------------------------------------------------------------
+  // ===========================================================================
+  // Helper: build a SQL filter clause for utm matching with three modes:
+  //   - exact (utm="qr_rt_launch_2026_05_install")
+  //   - prefix (utm_prefix="qr_rt_launch_2026_05")   ← hierarchical group view
+  //   - null bucket (utm="__no_utm__")
+  //
+  // Returns { clause, binding | null, mode } so callers can compose WHERE
+  // clauses uniformly across timeseries/funnel/cohort.
+  // ===========================================================================
+  function buildUtmFilter(utm, utmPrefix, alias) {
+    const a = alias || "u";
+    const u = (utm || "").trim();
+    const pfx = (utmPrefix || "").trim();
+    if (pfx && !u) {
+      return { clause: `${a}.utm LIKE ?`, binding: `${pfx}%`, mode: "prefix" };
+    }
+    if (u === "__no_utm__") {
+      return { clause: `(${a}.utm IS NULL OR ${a}.utm = '')`, binding: null, mode: "null" };
+    }
+    return { clause: `${a}.utm = ?`, binding: u, mode: "exact" };
+  }
+
   router.get("/utm-stats/timeseries", async (req, res) => {
     try {
       const utm = String(req.query.utm ?? "").trim();
-      if (!utm) {
-        return res.status(400).json({ error: "utm is required" });
+      const utmPrefix = String(req.query.utm_prefix ?? "").trim();
+      if (!utm && !utmPrefix) {
+        return res.status(400).json({ error: "utm or utm_prefix is required" });
       }
-      const isNullBucket = utm === "__no_utm__";
       const since = toUtcDate(req.query.since);
       const until = toUtcDate(req.query.until);
       const bucketRaw = String(req.query.bucket ?? "day").toLowerCase();
@@ -2352,7 +2374,8 @@ export default function registerEndpoint(router, { database }) {
       const hasUsers = await hasTable("users");
       if (!hasUsers) {
         return res.json({
-          utm,
+          utm: utm || null,
+          utm_prefix: utmPrefix || null,
           bucket,
           buckets: [],
           filters_applied: {
@@ -2369,10 +2392,9 @@ export default function registerEndpoint(router, { database }) {
       // down to the day or ISO-week boundary; we cast back to date for clean
       // bucket keys in the response.
       const truncExpr = `date_trunc('${bucket}', u.created_at)`;
-      const filters = isNullBucket
-        ? ["(u.utm IS NULL OR u.utm = '')"]
-        : ["u.utm = ?"];
-      const bindings = isNullBucket ? [] : [utm];
+      const utmFilter = buildUtmFilter(utm, utmPrefix, "u");
+      const filters = [utmFilter.clause];
+      const bindings = utmFilter.binding != null ? [utmFilter.binding] : [];
       if (since) {
         filters.push("u.created_at >= ?");
         bindings.push(since.toISOString());
@@ -2390,10 +2412,9 @@ export default function registerEndpoint(router, { database }) {
       let paymentsSelect = "0::bigint AS paid_count, 0::numeric AS revenue_rub";
       if (hasPayments) {
         const statusFilter = hasPaymentStatus ? "AND p.status = 'succeeded'" : "";
-        const payFilters = isNullBucket
-          ? ["(u2.utm IS NULL OR u2.utm = '')"]
-          : ["u2.utm = ?"];
-        const payBindings = isNullBucket ? [] : [utm];
+        const payUtmFilter = buildUtmFilter(utm, utmPrefix, "u2");
+        const payFilters = [payUtmFilter.clause];
+        const payBindings = payUtmFilter.binding != null ? [payUtmFilter.binding] : [];
         if (since) { payFilters.push("u2.created_at >= ?"); payBindings.push(since.toISOString()); }
         if (until) { payFilters.push("u2.created_at < ?"); payBindings.push(until.toISOString()); }
         // Payments are bucketed by the PAYMENT date, not user creation, so we
@@ -2446,7 +2467,8 @@ export default function registerEndpoint(router, { database }) {
       }));
 
       res.json({
-        utm,
+        utm: utm || null,
+        utm_prefix: utmPrefix || null,
         bucket,
         buckets,
         filters_applied: {
@@ -2477,17 +2499,18 @@ export default function registerEndpoint(router, { database }) {
   router.get("/utm-stats/funnel", async (req, res) => {
     try {
       const utm = String(req.query.utm ?? "").trim();
-      if (!utm) {
-        return res.status(400).json({ error: "utm is required" });
+      const utmPrefix = String(req.query.utm_prefix ?? "").trim();
+      if (!utm && !utmPrefix) {
+        return res.status(400).json({ error: "utm or utm_prefix is required" });
       }
-      const isNullBucket = utm === "__no_utm__";
       const since = toUtcDate(req.query.since);
       const until = toUtcDate(req.query.until);
 
       const hasUsers = await hasTable("users");
       if (!hasUsers) {
         return res.json({
-          utm,
+          utm: utm || null,
+          utm_prefix: utmPrefix || null,
           steps: [],
           generated_at: new Date().toISOString(),
         });
@@ -2495,10 +2518,9 @@ export default function registerEndpoint(router, { database }) {
       const hasPayments = await hasTable("processed_payments");
       const hasPaymentStatus = hasPayments && (await hasColumn("processed_payments", "status"));
 
-      const filters = isNullBucket
-        ? ["(u.utm IS NULL OR u.utm = '')"]
-        : ["u.utm = ?"];
-      const bindings = isNullBucket ? [] : [utm];
+      const utmFilter = buildUtmFilter(utm, utmPrefix, "u");
+      const filters = [utmFilter.clause];
+      const bindings = utmFilter.binding != null ? [utmFilter.binding] : [];
       if (since) { filters.push("u.created_at >= ?"); bindings.push(since.toISOString()); }
       if (until) { filters.push("u.created_at < ?"); bindings.push(until.toISOString()); }
       const whereSql = `WHERE ${filters.join(" AND ")}`;
@@ -2551,7 +2573,8 @@ export default function registerEndpoint(router, { database }) {
       });
 
       res.json({
-        utm,
+        utm: utm || null,
+        utm_prefix: utmPrefix || null,
         steps,
         filters_applied: {
           since: since ? since.toISOString() : null,
@@ -2584,21 +2607,20 @@ export default function registerEndpoint(router, { database }) {
   router.get("/utm-stats/cohort", async (req, res) => {
     try {
       const utm = String(req.query.utm ?? "").trim();
-      if (!utm) return res.status(400).json({ error: "utm is required" });
-      const isNullBucket = utm === "__no_utm__";
+      const utmPrefix = String(req.query.utm_prefix ?? "").trim();
+      if (!utm && !utmPrefix) return res.status(400).json({ error: "utm or utm_prefix is required" });
       const since = toUtcDate(req.query.since);
       const until = toUtcDate(req.query.until);
       const weeksCap = toInt(req.query.weeks, 16, 1, 52);
 
       const hasUsers = await hasTable("users");
-      if (!hasUsers) return res.json({ utm, cohorts: [], generated_at: new Date().toISOString() });
+      if (!hasUsers) return res.json({ utm: utm || null, utm_prefix: utmPrefix || null, cohorts: [], generated_at: new Date().toISOString() });
       const hasPayments = await hasTable("processed_payments");
       const hasPaymentStatus = hasPayments && (await hasColumn("processed_payments", "status"));
 
-      const filters = isNullBucket
-        ? ["(u.utm IS NULL OR u.utm = '')"]
-        : ["u.utm = ?"];
-      const bindings = isNullBucket ? [] : [utm];
+      const utmFilter = buildUtmFilter(utm, utmPrefix, "u");
+      const filters = [utmFilter.clause];
+      const bindings = utmFilter.binding != null ? [utmFilter.binding] : [];
       if (since) { filters.push("u.created_at >= ?"); bindings.push(since.toISOString()); }
       if (until) { filters.push("u.created_at < ?"); bindings.push(until.toISOString()); }
       const whereSql = `WHERE ${filters.join(" AND ")}`;
@@ -2653,7 +2675,8 @@ export default function registerEndpoint(router, { database }) {
       });
 
       res.json({
-        utm,
+        utm: utm || null,
+        utm_prefix: utmPrefix || null,
         cohorts,
         filters_applied: {
           since: since ? since.toISOString() : null,

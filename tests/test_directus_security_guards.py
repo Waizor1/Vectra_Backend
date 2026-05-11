@@ -467,7 +467,7 @@ def test_admin_widgets_utm_stats_timeseries_route_registered():
     assert '"/utm-stats/timeseries"' in src_source, "timeseries route missing from src"
     assert "/utm-stats/timeseries" in dist_source, "timeseries route missing from dist"
     assert "date_trunc" in src_source, "timeseries must bucket via date_trunc"
-    assert "utm is required" in src_source
+    assert "utm or utm_prefix is required" in src_source
 
     _node(
         f"""
@@ -521,7 +521,7 @@ def test_admin_widgets_utm_stats_timeseries_route_registered():
           }},
         );
         if (badStatus !== 400) throw new Error(`expected 400 for missing utm, got ${{badStatus}}`);
-        if (!String(badPayload?.error).includes('utm is required')) throw new Error('unexpected missing-utm payload');
+        if (!String(badPayload?.error).includes('utm or utm_prefix is required')) throw new Error('unexpected missing-utm payload');
 
         // Valid utm + week bucket → buckets returned.
         let captured = null;
