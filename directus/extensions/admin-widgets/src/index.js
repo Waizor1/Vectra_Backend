@@ -2158,9 +2158,12 @@ export default function registerEndpoint(router, { database }) {
         bindings.push(until.toISOString());
       }
       if (utmPrefix) {
-        // prefix match; allow exact match too via the LIKE wildcard
-        filters.push("u.utm LIKE ?");
-        bindings.push(`${utmPrefix}%`);
+        // Prefix match. PostgreSQL LIKE treats `_` and `%` as wildcards, so
+        // escape them in the user-supplied prefix to ensure literal-char
+        // matching (our utm tags use `_` extensively as a delimiter).
+        const escaped = String(utmPrefix).replace(/[\\%_]/g, "\\$&");
+        filters.push("u.utm LIKE ? ESCAPE '\\'");
+        bindings.push(`${escaped}%`);
       }
       const whereSql = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
 
@@ -2345,13 +2348,28 @@ export default function registerEndpoint(router, { database }) {
   //
   // Returns { clause, binding | null, mode } so callers can compose WHERE
   // clauses uniformly across timeseries/funnel/cohort.
+  //
+  // Prefix mode SAFETY: PostgreSQL `LIKE` treats `_` as "any single char" and
+  // `%` as "any sequence". Our utm tags are FULL of underscores (e.g.
+  // `qr_rt_launch_2026_05`), so without escaping a prefix would silently match
+  // unrelated rows like `qrXrtXlaunchX2026X05X…`. We escape `_`, `%`, `\` with
+  // an explicit `ESCAPE '\\'` clause so the underscores in the prefix match
+  // their literal characters only.
   // ===========================================================================
+  function escapeLikePattern(s) {
+    return String(s).replace(/[\\%_]/g, "\\$&");
+  }
+
   function buildUtmFilter(utm, utmPrefix, alias) {
     const a = alias || "u";
     const u = (utm || "").trim();
     const pfx = (utmPrefix || "").trim();
     if (pfx && !u) {
-      return { clause: `${a}.utm LIKE ?`, binding: `${pfx}%`, mode: "prefix" };
+      return {
+        clause: `${a}.utm LIKE ? ESCAPE '\\'`,
+        binding: `${escapeLikePattern(pfx)}%`,
+        mode: "prefix",
+      };
     }
     if (u === "__no_utm__") {
       return { clause: `(${a}.utm IS NULL OR ${a}.utm = '')`, binding: null, mode: "null" };
