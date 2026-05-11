@@ -274,6 +274,65 @@ async def test_activate_account_preserves_existing_lte_total(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_activate_account_preserves_trial_lte_when_user_field_is_null(monkeypatch):
+    """Регрессия: триал-юзер с user.lte_gb_total=NULL получает реальный лимит
+    1 ГБ из tvpn_admin_settings.trial_lte_limit_gb. После активации этот лимит
+    должен переноситься в синтетический ActiveTariffs, иначе RUTRACKER-промо
+    обнуляет LTE у пользователя."""
+    from bloobcat.db.active_tariff import ActiveTariffs
+    from bloobcat.db.users import Users
+    from bloobcat.services import trial_lte as trial_lte_module
+
+    await _seed_base_1m_tariff()
+
+    async def _fake_trial_lte_limit() -> float:
+        return 1.0
+
+    monkeypatch.setattr(
+        trial_lte_module, "read_trial_lte_limit_gb", _fake_trial_lte_limit
+    )
+    # Helper импортирует read_trial_lte_limit_gb напрямую — патчим и там.
+    from bloobcat.services import promo_activation as promo_activation_module
+
+    monkeypatch.setattr(
+        promo_activation_module, "read_trial_lte_limit_gb", _fake_trial_lte_limit
+    )
+
+    user = await Users.create(
+        id=7006,
+        username="rutracker-trial-null-lte",
+        full_name="Trial Null LTE",
+        is_registered=True,
+        is_trial=True,
+        used_trial=True,
+        hwid_limit=1,
+        lte_gb_total=None,
+        expired_at=date.today() + timedelta(days=2),
+        active_tariff_id=None,
+    )
+
+    code = await _seed_promo(
+        code="RUTRACKERNULL",
+        effects={"extend_days": 10, "activate_account": True},
+        monkeypatch=monkeypatch,
+    )
+
+    app = await _build_promo_app(user.id)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://testserver"
+    ) as client:
+        response = await client.post("/promo/redeem", json={"code": code})
+
+    assert response.status_code == 200, response.text
+    refreshed = await Users.get(id=user.id)
+    active = await ActiveTariffs.get(id=refreshed.active_tariff_id)
+    # Триал-лимит 1 ГБ должен сохраниться, а не уйти в 0
+    assert refreshed.lte_gb_total == 1
+    assert active.lte_gb_total == 1
+
+
+@pytest.mark.asyncio
 async def test_activate_account_idempotent_when_user_already_has_active_tariff(monkeypatch):
     from bloobcat.db.active_tariff import ActiveTariffs
     from bloobcat.db.users import Users
