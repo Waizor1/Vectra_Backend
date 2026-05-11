@@ -1,15 +1,28 @@
-from typing import Any, Dict, Literal
+from typing import Any, Dict, Literal, Optional
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
+from bloobcat.bot.bot import get_bot_username
 from bloobcat.db.users import Users
 from bloobcat.funcs.validate import validate
 from bloobcat.logger import get_logger
+from bloobcat.services.home_screen_rewards import (
+    HOME_SCREEN_BALANCE_BONUS_RUB,
+    HOME_SCREEN_DISCOUNT_PERCENT,
+    HOME_SCREEN_DISCOUNT_TTL_DAYS,
+    claim_home_screen_reward,
+)
 from bloobcat.services.referral_gamification import (
     build_referral_status,
     open_referral_chest,
 )
+from bloobcat.services.story_referral import (
+    encode_story_code,
+    materialize_user_story_code,
+)
+from bloobcat.settings import telegram_settings
 
 logger = get_logger("routes.referrals")
 
@@ -102,3 +115,118 @@ async def open_chest(
 async def log_invite(user: Users = Depends(validate)) -> Dict[str, Any]:
     logger.info(f"Referral invite created by user {user.id}")
     return {"ok": True}
+
+
+# ── Home-screen install reward ──────────────────────────────────────────
+# Frontend (HomeScreenInstallCard) calls this after the Telegram
+# `homeScreenAdded` event fires. Idempotent: subsequent calls echo
+# {already_claimed: true} without re-granting. Spec: ai_docs/develop/
+# telegram-webapp-features-spec-2026-05-12.md (Variant A).
+
+
+class HomeScreenClaimRequest(BaseModel):
+    reward_kind: Literal["balance", "discount"] = Field(
+        ..., description="balance = +50 ₽ to user balance, discount = 10% off next purchase"
+    )
+    platform_hint: Optional[str] = Field(
+        default=None,
+        max_length=32,
+        description="Diagnostic only (ios / android / web / tdesktop); not persisted",
+    )
+
+
+class HomeScreenClaimResponse(BaseModel):
+    already_claimed: bool
+    reward_kind: Optional[Literal["balance", "discount"]] = None
+    amount: Optional[int] = None
+    expires_at: Optional[str] = None
+
+
+@router.post("/home-screen-claim", response_model=HomeScreenClaimResponse)
+async def home_screen_claim(
+    payload: HomeScreenClaimRequest,
+    user: Users = Depends(validate),
+) -> HomeScreenClaimResponse:
+    result = await claim_home_screen_reward(
+        user_id=int(user.id),
+        reward_kind=payload.reward_kind,
+        platform_hint=payload.platform_hint,
+    )
+    return HomeScreenClaimResponse(**result)
+
+
+# ── Story-share payload ────────────────────────────────────────────────
+# Returns the deterministic story code + deep-link + image URL the frontend
+# hands to `WebApp.shareToStory`. Idempotent: the code is a pure function of
+# the user_id + bot token, so repeated calls return the same code. The first
+# call also materializes `users.story_code` so the registration consumer can
+# resolve referrer in O(1).
+#
+# `image_url` points at the story-share image renderer (`/referrals/story-image`)
+# — that endpoint is implemented in a follow-up PR alongside the Pillow
+# overlay generator. Until then, the frontend can ship a static placeholder
+# image baked into the bundle and substitute the live URL once the renderer
+# ships. The `widget_link` and `code` are fully usable today.
+
+
+class StorySharePayloadResponse(BaseModel):
+    code: str = Field(..., description="Deterministic story-share code (STORY...)")
+    widget_link: str = Field(
+        ..., description="Telegram Mini App deep link with startapp=story_<code>"
+    )
+    image_url: str = Field(
+        ...,
+        description=(
+            "HTTPS URL of the share image. Currently a placeholder until the Pillow "
+            "renderer ships in the follow-up PR; frontend MUST treat this as opaque."
+        ),
+    )
+    bonus_summary: str = Field(
+        ...,
+        description="Human-readable copy ('20 дней / 1 устройство / 1 GB LTE') for UI",
+    )
+
+
+@router.get("/story-share-payload", response_model=StorySharePayloadResponse)
+async def story_share_payload(
+    user: Users = Depends(validate),
+) -> StorySharePayloadResponse:
+    code = encode_story_code(int(user.id))
+    # Persist for O(1) lookup at consume time. Safe to call repeatedly.
+    await materialize_user_story_code(int(user.id))
+
+    webapp_url = (getattr(telegram_settings, "webapp_url", None) or "").strip()
+    startapp = f"story_{code}"
+    if webapp_url and webapp_url.lower().startswith("https://"):
+        sep = "&" if "?" in webapp_url else "?"
+        widget_link = f"{webapp_url.rstrip('/')}{sep}startapp={quote(startapp, safe='')}"
+    else:
+        try:
+            bot_name = await get_bot_username()
+        except Exception:
+            bot_name = "VectraConnect_bot"
+        widget_link = f"https://t.me/{bot_name}/start?startapp={quote(startapp, safe='')}"
+
+    # Image URL is a placeholder until the Pillow renderer ships. We expose
+    # the canonical path so the frontend can already wire `shareToStory` —
+    # the route returns 404 in production today (caller falls back to the
+    # static bundled image), but the URL shape will not change.
+    # Same-origin so the Mini App can reach it without CORS.
+    image_url = f"/api/referrals/story-image?code={quote(code, safe='')}"
+
+    return StorySharePayloadResponse(
+        code=code,
+        widget_link=widget_link,
+        image_url=image_url,
+        bonus_summary="20 дней Vectra + 1 устройство + 1 GB LTE",
+    )
+
+
+# Public constants exposed for callers that need to render copy without
+# hitting the endpoint. Kept here (not on the service) so the API contract
+# stays in one place.
+__all__ = [
+    "HOME_SCREEN_BALANCE_BONUS_RUB",
+    "HOME_SCREEN_DISCOUNT_PERCENT",
+    "HOME_SCREEN_DISCOUNT_TTL_DAYS",
+]

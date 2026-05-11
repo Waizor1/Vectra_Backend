@@ -201,17 +201,28 @@ async def validate(init_data: str = Depends(oauth2_scheme), request: Request = N
             effective_start_param, user_id=user.user.id
         )
 
+        # `utm == 'story'` is a side-channel signal from
+        # `resolve_referral_from_start_param`: this is a story-share deep link,
+        # NOT a marketing utm campaign. We route it into `invite_source`
+        # instead of polluting the utm column (which feeds the campaign
+        # cohort CSV) and pass it down to `Users.get_user`.
+        invite_source: str | None = None
+        if utm == "story":
+            invite_source = "story"
+            utm = None
+
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Ошибка валидации: {str(e)}")
         raise HTTPException(status_code=403, detail=str(e))
-    
+
     # Явно передаем параметры по имени для большей ясности
     db_user, _ = await Users.get_user(
-        telegram_user=user.user, 
-        referred_by=referred_by, 
-        utm=utm
+        telegram_user=user.user,
+        referred_by=referred_by,
+        utm=utm,
+        invite_source=invite_source,
     )
     
     if not db_user:

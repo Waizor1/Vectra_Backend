@@ -183,6 +183,18 @@ async def resolve_referral_from_start_param(
     if param.startswith("family_"):
         return 0, None
 
+    if param.startswith("story_"):
+        # Story-share deep link (Bot API 7.8+). The trial-grant branch keys off
+        # `invite_source == 'story'`, so we deliberately return 'story' as the
+        # utm-like marker even when referrer lookup fails — the new user still
+        # gets the 20-day / 1-device / 1 GB trial. Referrer lookup failures
+        # only degrade analytics ("кто пригласил"), not trial eligibility.
+        from bloobcat.services.story_referral import find_referrer_by_story_code
+
+        code = param[len("story_"):]
+        referrer_id = await find_referrer_by_story_code(code) or 0
+        return referrer_id, "story"
+
     if param.startswith("qr_"):
         return await _resolve_partner_qr_start_param(
             param,
