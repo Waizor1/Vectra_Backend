@@ -980,7 +980,12 @@ async def test_telegram_oauth_link_returns_canonical_telegram_ticket(monkeypatch
 @pytest.mark.asyncio
 async def test_web_oauth_created_user_sends_admin_registration_log(monkeypatch):
     user = types.SimpleNamespace(id=web_auth.WEB_USER_ID_FLOOR + 42)
-    state_row = types.SimpleNamespace(mode="login", linking_user_id=None, return_to="/connect")
+    state_row = types.SimpleNamespace(
+        mode="login",
+        linking_user_id=None,
+        return_to="/connect",
+        start_param=None,
+    )
     profile = web_auth.ProviderProfile(
         provider="google",
         subject="google-subject",
@@ -1028,6 +1033,294 @@ async def test_web_oauth_created_user_sends_admin_registration_log(monkeypatch):
     assert return_to == "/connect"
     assert ("notify", (user.id, "google", "google")) in calls
     assert ("audit", "created") in calls
+
+
+@pytest.mark.asyncio
+async def test_oauth_start_persists_start_param_on_state_row(monkeypatch):
+    created_rows: list[dict[str, object]] = []
+
+    class _FakeOAuthState:
+        @classmethod
+        async def create(cls, **kwargs):
+            created_rows.append(kwargs)
+            return types.SimpleNamespace(**kwargs)
+
+    provider_config = web_auth.ProviderConfig(
+        provider="google",
+        client_id="google-client-id",
+        client_secret="google-secret",
+        auth_url="https://accounts.example/auth",
+        token_url="https://accounts.example/token",
+        jwks_url="https://accounts.example/jwks",
+        issuer="https://accounts.example",
+        userinfo_url="https://accounts.example/userinfo",
+        scope="openid email profile",
+    )
+
+    monkeypatch.setattr(web_auth, "AuthOAuthState", _FakeOAuthState)
+    monkeypatch.setattr(web_auth, "get_provider_config", lambda provider: provider_config)
+    monkeypatch.setattr(web_auth.web_auth_settings, "web_auth_enabled", True)
+    monkeypatch.setattr(web_auth.web_auth_settings, "oauth_google_enabled", True)
+    monkeypatch.setattr(web_auth.oauth_settings, "enabled_providers", ["google"])
+
+    await web_auth.create_oauth_authorization_url(
+        provider="google",
+        mode="login",
+        return_to="/welcome",
+        start_param="qr_rt_launch_2026_05_hero",
+    )
+
+    assert len(created_rows) == 1
+    assert created_rows[0]["start_param"] == "qr_rt_launch_2026_05_hero"
+
+    # Empty / whitespace-only start_param is normalized to None (the DB column
+    # is nullable, so we never write empty strings).
+    await web_auth.create_oauth_authorization_url(
+        provider="google",
+        mode="login",
+        return_to="/welcome",
+        start_param="   ",
+    )
+    assert created_rows[1]["start_param"] is None
+
+    # Overlong input is silently truncated to the DB column limit (256) so a
+    # crafted long ?start= cannot blow up the OAuth start endpoint.
+    await web_auth.create_oauth_authorization_url(
+        provider="google",
+        mode="login",
+        return_to="/welcome",
+        start_param="x" * 1000,
+    )
+    assert len(created_rows[2]["start_param"]) == 256
+
+
+@pytest.mark.asyncio
+async def test_web_oauth_callback_applies_attribution_before_notifying(monkeypatch):
+    user = types.SimpleNamespace(
+        id=web_auth.WEB_USER_ID_FLOOR + 99,
+        utm=None,
+        referred_by=0,
+    )
+
+    async def _refresh(self, fields=None):
+        # Simulate the post-attribution DB read: pretend apply_web_referral_attribution
+        # persisted utm=qr_rt_launch_2026_05_hero and referred_by=42.
+        self.utm = "qr_rt_launch_2026_05_hero"
+        self.referred_by = 42
+
+    user.refresh_from_db = types.MethodType(_refresh, user)
+
+    state_row = types.SimpleNamespace(
+        mode="login",
+        linking_user_id=None,
+        return_to="/connect",
+        start_param="qr_rt_launch_2026_05_hero",
+    )
+    profile = web_auth.ProviderProfile(
+        provider="google",
+        subject="google-subject",
+        email="zenaelsukov27@example.com",
+        email_verified=True,
+        display_name="Женя Елсуков",
+    )
+    timeline: list[str] = []
+    attribution_calls: list[tuple[object, str | None]] = []
+    notify_args: list[tuple[object, ...]] = []
+
+    async def _consume(provider, state):
+        return state_row
+
+    async def _profile(_config, _state_row, code):
+        return profile
+
+    async def _get_or_create(resolved_profile):
+        return user, True
+
+    async def _apply(target_user, raw_start_param):
+        attribution_calls.append((target_user.id, raw_start_param))
+        timeline.append("attribution")
+
+    async def _notify(created_user, resolved_profile, provider):
+        notify_args.append((created_user.id, created_user.utm, created_user.referred_by, provider))
+        timeline.append("notify")
+
+    async def _audit(**kwargs):
+        timeline.append(f"audit:{kwargs['reason']}")
+
+    async def _ticket(created_user):
+        return "ticket-web"
+
+    monkeypatch.setattr(web_auth, "provider_is_enabled", lambda provider: provider == "google")
+    monkeypatch.setattr(web_auth, "get_provider_config", lambda provider: types.SimpleNamespace(provider=provider))
+    monkeypatch.setattr(web_auth, "_consume_oauth_state", _consume)
+    monkeypatch.setattr(web_auth, "resolve_provider_profile", _profile)
+    monkeypatch.setattr(web_auth, "get_or_create_user_for_oauth_profile", _get_or_create)
+    monkeypatch.setattr(web_auth, "apply_web_referral_attribution", _apply)
+    monkeypatch.setattr(web_auth, "notify_web_oauth_registration", _notify)
+    monkeypatch.setattr(web_auth, "audit_auth_event", _audit)
+    monkeypatch.setattr(web_auth, "create_login_ticket", _ticket)
+
+    await web_auth.handle_oauth_callback("google", "code", "state")
+
+    assert attribution_calls == [(user.id, "qr_rt_launch_2026_05_hero")]
+    # Attribution must run before the admin notification — otherwise the
+    # notification still sees the pre-attribution state.
+    assert timeline.index("attribution") < timeline.index("notify")
+    # And the notification must observe the refreshed utm/referred_by values.
+    assert notify_args == [(user.id, "qr_rt_launch_2026_05_hero", 42, "google")]
+
+
+@pytest.mark.asyncio
+async def test_web_oauth_callback_notifies_even_when_attribution_raises(monkeypatch):
+    """Attribution errors must never block login or the admin notification.
+    The post-attribution refresh still runs so the notification cannot read
+    half-written in-memory fields left behind by a partial save."""
+    user = types.SimpleNamespace(
+        id=web_auth.WEB_USER_ID_FLOOR + 100,
+        utm=None,
+        referred_by=0,
+    )
+    refresh_calls: list[tuple[str, ...]] = []
+
+    async def _refresh(self, fields=None):
+        refresh_calls.append(tuple(fields or ()))
+
+    user.refresh_from_db = types.MethodType(_refresh, user)
+
+    state_row = types.SimpleNamespace(
+        mode="login",
+        linking_user_id=None,
+        return_to="/connect",
+        start_param="qr_rt_launch_2026_05_hero",
+    )
+    profile = web_auth.ProviderProfile(
+        provider="google",
+        subject="google-subject",
+        email="user@example.com",
+        email_verified=True,
+        display_name="User",
+    )
+    notify_args: list[tuple[object, ...]] = []
+
+    async def _consume(provider, state):
+        return state_row
+
+    async def _profile(_config, _state_row, code):
+        return profile
+
+    async def _get_or_create(resolved_profile):
+        return user, True
+
+    async def _apply(target_user, raw_start_param):
+        raise RuntimeError("simulated transient DB outage")
+
+    async def _notify(created_user, resolved_profile, provider):
+        notify_args.append((created_user.id, provider))
+
+    async def _audit(**kwargs):
+        return None
+
+    async def _ticket(created_user):
+        return "ticket-web"
+
+    monkeypatch.setattr(web_auth, "provider_is_enabled", lambda provider: provider == "google")
+    monkeypatch.setattr(web_auth, "get_provider_config", lambda provider: types.SimpleNamespace(provider=provider))
+    monkeypatch.setattr(web_auth, "_consume_oauth_state", _consume)
+    monkeypatch.setattr(web_auth, "resolve_provider_profile", _profile)
+    monkeypatch.setattr(web_auth, "get_or_create_user_for_oauth_profile", _get_or_create)
+    monkeypatch.setattr(web_auth, "apply_web_referral_attribution", _apply)
+    monkeypatch.setattr(web_auth, "notify_web_oauth_registration", _notify)
+    monkeypatch.setattr(web_auth, "audit_auth_event", _audit)
+    monkeypatch.setattr(web_auth, "create_login_ticket", _ticket)
+
+    ticket, _ = await web_auth.handle_oauth_callback("google", "code", "state")
+
+    assert ticket == "ticket-web"
+    assert notify_args == [(user.id, "google")]
+    # The refresh must run even when attribution raised, so the notification
+    # never sees in-memory mutations left behind by a partial save.
+    assert refresh_calls == [("utm", "referred_by")]
+
+
+@pytest.mark.asyncio
+async def test_notify_web_oauth_registration_includes_utm_and_referrer(monkeypatch):
+    sent: list[str] = []
+
+    async def _send(text):
+        sent.append(text)
+        return True
+
+    # Other test modules permanently replace `sys.modules["bloobcat.bot.notifications.admin"]`
+    # with a synthetic stub (see tests/_payment_test_stubs.py). Patch the live
+    # `sys.modules` entry — that is exactly what `notify_web_oauth_registration`'s
+    # in-function `from … import …` resolves through.
+    import sys as _sys
+    admin_mod = _sys.modules["bloobcat.bot.notifications.admin"]
+    monkeypatch.setattr(admin_mod, "send_admin_message", _send, raising=False)
+
+    user = types.SimpleNamespace(
+        id=web_auth.WEB_USER_ID_FLOOR + 1,
+        utm="qr_rt_launch_2026_05_hero",
+        referred_by=42,
+        full_name="Test User",
+    )
+    profile = web_auth.ProviderProfile(
+        provider="google",
+        subject="g",
+        email="user@example.com",
+        email_verified=True,
+        display_name="Test User",
+    )
+
+    await web_auth.notify_web_oauth_registration(user, profile, "google")
+
+    assert len(sent) == 1
+    body = sent[0]
+    assert "Новая web-регистрация" in body
+    assert "qr_rt_launch_2026_05_hero" in body
+    assert "📊 UTM" in body
+    assert "🤝 Реферер" in body
+    assert "<code>42</code>" in body
+
+
+@pytest.mark.asyncio
+async def test_notify_web_oauth_registration_shows_dash_when_utm_missing(monkeypatch):
+    """No UTM in user record → notification renders an explicit '—' so the
+    operator can distinguish 'arrived without UTM' from a stale missing field."""
+    sent: list[str] = []
+
+    async def _send(text):
+        sent.append(text)
+        return True
+
+    # Other test modules permanently replace `sys.modules["bloobcat.bot.notifications.admin"]`
+    # with a synthetic stub (see tests/_payment_test_stubs.py). Patch the live
+    # `sys.modules` entry — that is exactly what `notify_web_oauth_registration`'s
+    # in-function `from … import …` resolves through.
+    import sys as _sys
+    admin_mod = _sys.modules["bloobcat.bot.notifications.admin"]
+    monkeypatch.setattr(admin_mod, "send_admin_message", _send, raising=False)
+
+    user = types.SimpleNamespace(
+        id=web_auth.WEB_USER_ID_FLOOR + 2,
+        utm=None,
+        referred_by=0,
+        full_name="Test User",
+    )
+    profile = web_auth.ProviderProfile(
+        provider="google",
+        subject="g",
+        email="user@example.com",
+        email_verified=True,
+        display_name="Test User",
+    )
+
+    await web_auth.notify_web_oauth_registration(user, profile, "google")
+
+    body = sent[0]
+    assert "📊 UTM: —" in body
+    # No referrer line when referred_by is empty — keeps the message compact.
+    assert "🤝 Реферер" not in body
 
 
 @pytest.mark.asyncio

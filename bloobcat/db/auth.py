@@ -52,6 +52,12 @@ class AuthOAuthState(models.Model):
     pkce_verifier = fields.CharField(max_length=255)
     linking_user_id = fields.BigIntField(null=True)
     return_to = fields.CharField(max_length=512, null=True)
+    # Captured from the URL the user landed on (?start=...). Persisted on the
+    # state row so the OAuth callback can apply referral attribution at
+    # user-creation time — before `/auth/complete-registration` runs and
+    # before the admin notification fires. Bounded length matches the
+    # start_param length we accept from /auth/telegram and bot /start.
+    start_param = fields.CharField(max_length=256, null=True)
     expires_at = fields.DatetimeField()
     consumed_at = fields.DatetimeField(null=True)
     created_at = fields.DatetimeField(auto_now_add=True)

@@ -45,6 +45,11 @@ from bloobcat.db.remnawave_retry_jobs import RemnaWaveRetryJobs
 from bloobcat.db.subscription_freezes import SubscriptionFreezes
 from bloobcat.db.users import Users, get_family_url
 from bloobcat.funcs.auth_tokens import create_access_token, decode_access_token
+from bloobcat.funcs.referral_attribution import (
+    is_partner_source_utm,
+    pick_attribution_utm,
+    resolve_referral_from_start_param,
+)
 from bloobcat.logger import get_logger
 from bloobcat.middleware.rate_limit import RateLimiter
 from bloobcat.settings import (
@@ -417,11 +422,25 @@ async def resolve_optional_bearer_user(request: Request | None) -> Users | None:
     return user
 
 
+def _safe_start_param(raw: str | None) -> str | None:
+    """Trim and cap the captured start_param so it fits the DB column.
+
+    Returns None for empty input. Long inputs are silently truncated — the
+    start_param column is intentionally bounded (no user-controllable
+    open-ended growth into the OAuth state row).
+    """
+    value = (raw or "").strip()
+    if not value:
+        return None
+    return value[:256]
+
+
 async def create_oauth_authorization_url(
     *,
     provider: OAuthProvider,
     mode: OAuthMode,
     return_to: str | None,
+    start_param: str | None = None,
     request: Request | None = None,
 ) -> str:
     config = get_provider_config(provider)
@@ -448,6 +467,7 @@ async def create_oauth_authorization_url(
         pkce_verifier=verifier,
         linking_user_id=linking_user_id,
         return_to=_safe_return_to(return_to),
+        start_param=_safe_start_param(start_param),
         expires_at=now_utc() + timedelta(seconds=OAUTH_STATE_TTL_SECONDS),
     )
 
@@ -749,6 +769,74 @@ def _safe_html(value: Any) -> str:
     return escape(str(value), quote=False)
 
 
+async def apply_web_referral_attribution(user: Users, start_param_raw: str | None) -> None:
+    """Resolve start_param → referrer_id + utm and persist on the user row.
+
+    Idempotent: skips work when the user already has a referrer, when the
+    start_param is empty, or when the user already accumulated material
+    state (subscription, payments, balance, etc.) that would make late
+    attribution unsafe. Callable both from the OAuth callback (at
+    user-creation time, so the admin notification sees UTM) and from
+    `/auth/complete-registration` (legacy path, still used when an existing
+    user later sends a start_param).
+    """
+    start_param = (start_param_raw or "").strip()
+    if not start_param:
+        return
+
+    current_referred_by = int(getattr(user, "referred_by", 0) or 0)
+    if current_referred_by:
+        return
+
+    user_id = int(user.id)
+    if await user_has_material_data(user_id):
+        logger.debug(
+            "web_referral_attribution_skip_material_user user=%s start_param_present=%s",
+            user_id,
+            bool(start_param),
+        )
+        return
+
+    referred_by, utm = await resolve_referral_from_start_param(
+        start_param,
+        user_id=user_id,
+        track_partner_qr_view=False,
+    )
+    if not referred_by or int(referred_by) == user_id:
+        return
+
+    referrer = await Users.get_or_none(id=int(referred_by))
+    if not referrer:
+        logger.info(
+            "web_referral_attribution_skip_no_referrer user=%s referred_by=%s",
+            user_id,
+            referred_by,
+        )
+        return
+
+    update_fields = ["referred_by"]
+    user.referred_by = int(referred_by)
+
+    current_utm = (getattr(user, "utm", None) or "").strip()
+    next_utm = pick_attribution_utm(
+        current_utm,
+        utm,
+        force_partner_source=is_partner_source_utm(utm),
+        referrer_utm=getattr(referrer, "utm", None),
+    )
+    if next_utm != (current_utm or None):
+        user.utm = next_utm
+        update_fields.append("utm")
+
+    await user.save(update_fields=update_fields)
+    logger.info(
+        "web_referral_attribution_applied user=%s referred_by=%s utm=%s",
+        user_id,
+        int(referred_by),
+        next_utm,
+    )
+
+
 async def notify_web_oauth_registration(
     user: Users, profile: ProviderProfile, provider: OAuthProvider
 ) -> None:
@@ -764,12 +852,26 @@ async def notify_web_oauth_registration(
             if profile.email
             else "\nEmail: —"
         )
+        utm_value = (getattr(user, "utm", None) or "").strip()
+        utm_line = (
+            f"\n📊 UTM: <code>{_safe_html(utm_value)}</code>"
+            if utm_value
+            else "\n📊 UTM: —"
+        )
+        referrer_id = int(getattr(user, "referred_by", 0) or 0)
+        referrer_line = (
+            f"\n🤝 Реферер: <code>{referrer_id}</code>"
+            if referrer_id
+            else ""
+        )
         text = (
             "🆕 Новая web-регистрация!\n\n"
             f"👤 Пользователь: {_safe_html(profile.display_name or user.full_name or profile.email)}\n"
             f"🆔 ID пользователя: <code>{int(user.id)}</code>\n"
             f"🔐 Провайдер: {_safe_html(label)}"
-            f"{email_line}\n\n"
+            f"{email_line}"
+            f"{utm_line}"
+            f"{referrer_line}\n\n"
             "#новый_пользователь #web_auth"
         )
         delivered = await send_admin_message(text=text)
@@ -845,6 +947,37 @@ async def handle_oauth_callback(provider: OAuthProvider, code: str, state: str, 
         else:
             user, created = await get_or_create_user_for_oauth_profile(profile)
             if created:
+                # Apply attribution BEFORE notification so the admin alert
+                # carries the UTM and referrer. /auth/complete-registration
+                # remains the source-of-truth path for already-existing users
+                # who later forward a start_param; for first-time OAuth users
+                # the state row's start_param is the trusted entry point.
+                if state_row.start_param:
+                    try:
+                        await apply_web_referral_attribution(user, state_row.start_param)
+                    except Exception as exc:
+                        # Attribution must never block login. Log and move on
+                        # — /auth/complete-registration will retry on the same
+                        # start_param if the frontend still has it cached.
+                        logger.warning(
+                            "web_oauth_attribution_failed user=%s provider=%s error=%s",
+                            user.id,
+                            provider,
+                            exc,
+                        )
+                    # Refresh from DB regardless of attribution success so the
+                    # notification cannot leak in-memory mutations left behind
+                    # by a partial attribution run (e.g. user.referred_by set
+                    # before user.save raised). On the happy path this picks
+                    # up the freshly persisted utm/referred_by.
+                    try:
+                        await user.refresh_from_db(fields=["utm", "referred_by"])
+                    except Exception as refresh_exc:
+                        logger.warning(
+                            "web_oauth_user_refresh_failed user=%s error=%s",
+                            user.id,
+                            refresh_exc,
+                        )
                 await notify_web_oauth_registration(user, profile, provider)
         await audit_auth_event(
             action="oauth_login",

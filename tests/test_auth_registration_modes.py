@@ -9,6 +9,7 @@ from fastapi import FastAPI, Request
 
 from bloobcat.funcs import referral_attribution as referral_attr_module
 from bloobcat.routes import auth as auth_module
+from bloobcat.services import web_auth as web_auth_module
 from bloobcat.db import users as users_module
 from bloobcat.db.users import Users
 
@@ -1144,9 +1145,12 @@ async def test_complete_registration_applies_web_referral_start_param(monkeypatc
         return "token-web", 900
 
     user.save = _save
-    monkeypatch.setattr(auth_module, "user_has_material_data", _has_material_data)
-    monkeypatch.setattr(auth_module, "resolve_referral_from_start_param", _resolve)
-    monkeypatch.setattr(auth_module.Users, "get_or_none", _get_or_none)
+    # apply_web_referral_attribution now lives in the web_auth service module,
+    # so the inner helpers must be patched on that module — the route imports
+    # the public attribution helper by name and delegates the whole flow.
+    monkeypatch.setattr(web_auth_module, "user_has_material_data", _has_material_data)
+    monkeypatch.setattr(web_auth_module, "resolve_referral_from_start_param", _resolve)
+    monkeypatch.setattr(web_auth_module.Users, "get_or_none", _get_or_none)
     monkeypatch.setattr(auth_module, "complete_registration_for_user", _complete_registration)
 
     result = await auth_module.complete_registration(
@@ -1183,8 +1187,8 @@ async def test_complete_registration_does_not_rebind_material_web_user(monkeypat
         return "token-existing", 900
 
     user.save = _save
-    monkeypatch.setattr(auth_module, "user_has_material_data", _has_material_data)
-    monkeypatch.setattr(auth_module, "resolve_referral_from_start_param", _resolve)
+    monkeypatch.setattr(web_auth_module, "user_has_material_data", _has_material_data)
+    monkeypatch.setattr(web_auth_module, "resolve_referral_from_start_param", _resolve)
     monkeypatch.setattr(auth_module, "complete_registration_for_user", _complete_registration)
 
     result = await auth_module.complete_registration(
