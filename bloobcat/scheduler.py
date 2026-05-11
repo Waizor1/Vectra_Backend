@@ -13,6 +13,9 @@ from bloobcat.bot.notifications.trial.end import notify_trial_ended
 from bloobcat.bot.notifications.trial.expiring import notify_expiring_trial
 from bloobcat.bot.notifications.trial.pre_expiring_3d import notify_trial_three_days_left
 from bloobcat.tasks.referral_prompts import run_referral_prompts_scheduler
+from bloobcat.tasks.home_screen_install_promo import (
+    run_home_screen_install_promo_scheduler,
+)
 from bloobcat.logger import get_logger
 from bloobcat.settings import app_settings, payment_settings
 from bloobcat.tasks.remnawave_updater import run_remnawave_scheduler
@@ -804,6 +807,8 @@ async def schedule_all_tasks():
     asyncio.create_task(run_subscription_expiring_catchup_scheduler())
     # Start periodic referral prompts (7d, 14d, then every 30d)
     asyncio.create_task(run_referral_prompts_scheduler())
+    # Nudge users to add Vectra to home screen (24h → 7d → 30d decay; 3 attempts max).
+    asyncio.create_task(run_home_screen_install_promo_scheduler())
     # Start winback discounts scheduler
     asyncio.create_task(run_winback_discounts_scheduler())
     # Start trial/active_tariff fixer
