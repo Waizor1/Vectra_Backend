@@ -1,7 +1,8 @@
 from typing import Any, Dict, Literal, Optional
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from bloobcat.bot.bot import get_bot_username
@@ -18,8 +19,14 @@ from bloobcat.services.referral_gamification import (
     build_referral_status,
     open_referral_chest,
 )
+from bloobcat.services.story_image_renderer import (
+    STORY_IMAGE_HEIGHT,
+    STORY_IMAGE_WIDTH,
+    render_story_image,
+)
 from bloobcat.services.story_referral import (
     encode_story_code,
+    encoded_story_code_length,
     materialize_user_story_code,
 )
 from bloobcat.settings import telegram_settings
@@ -219,6 +226,40 @@ async def story_share_payload(
         widget_link=widget_link,
         image_url=image_url,
         bonus_summary="20 дней Vectra + 1 устройство + 1 GB LTE",
+    )
+
+
+# Pillow-rendered JPG (1080x1920) for `WebApp.shareToStory`. The route is
+# intentionally public — Telegram fetches the media from outside the user's
+# auth session — but a code arriving here without HMAC structure validation
+# returns 404 so the endpoint can never be turned into a generic image renderer.
+@router.get("/story-image")
+async def story_image(
+    code: str = Query(..., min_length=1, max_length=64),
+) -> Response:
+    if len(code) != encoded_story_code_length():
+        raise HTTPException(status_code=404, detail="not_found")
+    # Structural well-formedness check via re-encode round-trip: any code that
+    # isn't STORY+base32 will produce a different length / character set.
+    if not code.startswith("STORY"):
+        raise HTTPException(status_code=404, detail="not_found")
+
+    try:
+        payload = render_story_image(code)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("story-image render failed for code=%s: %s", code, exc)
+        raise HTTPException(status_code=500, detail="render_failed") from exc
+
+    return Response(
+        content=payload,
+        media_type="image/jpeg",
+        headers={
+            # Edge-cacheable for a day. The renderer is deterministic so a stale
+            # cache hit is harmless (same `code` always produces the same bytes).
+            "Cache-Control": "public, max-age=86400, immutable",
+            "Content-Disposition": 'inline; filename="vectra-story.jpg"',
+            "X-Image-Dimensions": f"{STORY_IMAGE_WIDTH}x{STORY_IMAGE_HEIGHT}",
+        },
     )
 
 

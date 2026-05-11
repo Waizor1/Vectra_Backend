@@ -5,7 +5,7 @@ src_folder = "./bloobcat"
 
 [tool.poetry]
 name = "bloobcat"
-version = "1.53.0"
+version = "1.54.0"
 description = ""
 authors = ["Your Name <you@example.com>"]
 readme = "README.md"
@@ -33,6 +33,9 @@ aiosqlite = "^0.22.1"
 # Pinned as a direct dep so `poetry update` / future regenerations of
 # requirements.txt never regress to the pre-CVE-2026-44431/44432 version.
 urllib3 = "^2.7.0"
+# Story-share image renderer — Pillow 12 has the latest wheels for Python 3.12
+# and aligns with the version baked into our requirements.txt lock.
+Pillow = "^12.0.0"
 
 
 
