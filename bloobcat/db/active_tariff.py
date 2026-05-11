@@ -35,6 +35,14 @@ class ActiveTariffs(models.Model):
     )
     progressive_multiplier = fields.FloatField(null=True, description="Снапшот множителя прогрессивной скидки")
     residual_day_fraction = fields.FloatField(null=True, description="Накопленная дробная часть дней при конвертациях")
+    is_promo_synthetic = fields.BooleanField(
+        default=False,
+        description=(
+            "True если строка синтезирована эффектом activate_account промокода. "
+            "Используется анти-твинком: такие пользователи не считаются 'paid' для целей "
+            "пропуска HWID-санкций — фактически это расширенный триал."
+        ),
+    )
 
     class Meta:
         table = "active_tariffs"

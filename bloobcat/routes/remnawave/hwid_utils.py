@@ -140,6 +140,31 @@ def has_duplicate_hwid(user_uuid: str, hwid_index: Dict[str, set]) -> bool:
     return False
 
 
+def is_paid_subscription_active(
+    *,
+    active_tariff_id,
+    expired_date,
+    is_trial: bool,
+    today,
+    is_promo_synthetic: bool,
+) -> bool:
+    """True если у юзера сейчас действует ОПЛАЧЕННАЯ подписка.
+
+    Promo-синтетические `ActiveTariffs` (флаг `is_promo_synthetic=True`)
+    создаются эффектом `activate_account` промокодов — это фактически
+    расширенный триал, не оплата. Анти-твинк должен пропускать санкцию ТОЛЬКО
+    для настоящих платников, иначе абьюз: trial-устройство → новый аккаунт
+    → промокод → +10 дней с иммунитетом к HWID-санкции.
+    """
+    return bool(
+        active_tariff_id
+        and expired_date is not None
+        and expired_date >= today
+        and not is_trial
+        and not is_promo_synthetic
+    )
+
+
 def is_user_already_antitwink_sanctioned(
     is_trial: bool,
     used_trial: bool,

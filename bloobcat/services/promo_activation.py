@@ -84,6 +84,7 @@ async def activate_trial_account(
         lte_price_per_gb=lte_price_per_gb,
         progressive_multiplier=progressive_multiplier,
         residual_day_fraction=0.0,
+        is_promo_synthetic=True,
     )
 
     user.active_tariff_id = active.id
