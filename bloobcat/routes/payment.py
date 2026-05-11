@@ -92,6 +92,7 @@ from bloobcat.services.discounts import (
 from bloobcat.utils.dates import add_months_safe
 from bloobcat.db.referral_rewards import ReferralRewards
 from bloobcat.services.tariff_quote import build_subscription_quote, validate_device_count_for_tariff, validate_lte_gb_for_tariff
+from bloobcat.services.segment_campaigns import select_active_campaign
 from bloobcat.services.referral_gamification import award_referral_cashback
 from bloobcat.services.platega import (
     PLATEGA_PROVIDER,
@@ -4638,12 +4639,14 @@ async def pay(
     one_month_reference_tariff = None
     if int(getattr(tariff, "months", 1) or 1) > 1:
         one_month_reference_tariff = await Tariffs.filter(months=1, is_active=True).order_by("order").first()
+    active_campaign = await select_active_campaign(user)
     quote = await build_subscription_quote(
         tariff=tariff,
         user_id=int(user.id),
         device_count=device_count,
         lte_gb=lte_gb,
         one_month_reference_tariff=one_month_reference_tariff,
+        campaign=active_campaign,
     )
     device_count = int(quote.device_count)
     lte_gb = int(quote.lte_gb)
