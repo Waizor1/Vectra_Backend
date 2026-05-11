@@ -42,49 +42,48 @@ const STATUS = Object.freeze({
   NONE: "none",
 });
 
-const FIELD_ROW = {
-  collection: COLLECTION,
+// Field body for Directus FieldsService.createField — uses real JS objects
+// for `meta.options` / `meta.display_options` (the service serialises them).
+// We send `special` as an array, not the CSV string from the raw-insert era.
+const FIELD_API_BODY = {
   field: FIELD,
-  // `special` in directus_fields is stored as a CSV string.
-  special: "alias,no-data",
-  interface: "select-dropdown",
-  options: JSON.stringify({
-    choices: [
-      { value: STATUS.PAID_ACTIVE, text: "Активен (платный)", icon: "check_circle", color: "#10B981" },
-      { value: STATUS.PROMO, text: "Промо (синтетический)", icon: "card_giftcard", color: "#F59E0B" },
-      { value: STATUS.TRIAL, text: "Триал", icon: "schedule", color: "#A855F7" },
-      { value: STATUS.PAID_EXPIRED, text: "Истёк (платный)", icon: "block", color: "#EF4444" },
-      { value: STATUS.BLOCKED, text: "Заблокирован", icon: "lock", color: "#6B7280" },
-      { value: STATUS.NONE, text: "—", icon: "remove", color: "#9CA3AF" },
-    ],
-    allowOther: false,
-    allowNone: false,
-  }),
-  display: "labels",
-  display_options: JSON.stringify({
-    choices: [
-      { value: STATUS.PAID_ACTIVE, text: "Активен", foreground: "#FFFFFF", background: "#10B981" },
-      { value: STATUS.PROMO, text: "Промо", foreground: "#FFFFFF", background: "#F59E0B" },
-      { value: STATUS.TRIAL, text: "Триал", foreground: "#FFFFFF", background: "#A855F7" },
-      { value: STATUS.PAID_EXPIRED, text: "Истёк", foreground: "#FFFFFF", background: "#EF4444" },
-      { value: STATUS.BLOCKED, text: "Заблокирован", foreground: "#FFFFFF", background: "#6B7280" },
-      { value: STATUS.NONE, text: "—", foreground: "#374151", background: "#E5E7EB" },
-    ],
-    showAsDot: false,
-  }),
-  readonly: true,
-  hidden: false,
-  sort: 2,
-  width: "half",
-  translations: JSON.stringify([
-    { language: "ru-RU", translation: "Статус подписки" },
-  ]),
-  note: "Вычисляется автоматически из expired_at, is_blocked, is_trial и is_promo_synthetic активного тарифа. У Платеги нет рекуррентов — это единый источник статуса.",
-  conditions: null,
-  required: false,
-  group: null,
-  validation: null,
-  validation_message: null,
+  type: "string",
+  meta: {
+    special: ["alias", "no-data"],
+    interface: "select-dropdown",
+    options: {
+      choices: [
+        { value: STATUS.PAID_ACTIVE, text: "Активен (платный)", icon: "check_circle", color: "#10B981" },
+        { value: STATUS.PROMO, text: "Промо (синтетический)", icon: "card_giftcard", color: "#F59E0B" },
+        { value: STATUS.TRIAL, text: "Триал", icon: "schedule", color: "#A855F7" },
+        { value: STATUS.PAID_EXPIRED, text: "Истёк (платный)", icon: "block", color: "#EF4444" },
+        { value: STATUS.BLOCKED, text: "Заблокирован", icon: "lock", color: "#6B7280" },
+        { value: STATUS.NONE, text: "—", icon: "remove", color: "#9CA3AF" },
+      ],
+      allowOther: false,
+      allowNone: false,
+    },
+    display: "labels",
+    display_options: {
+      choices: [
+        { value: STATUS.PAID_ACTIVE, text: "Активен", foreground: "#FFFFFF", background: "#10B981" },
+        { value: STATUS.PROMO, text: "Промо", foreground: "#FFFFFF", background: "#F59E0B" },
+        { value: STATUS.TRIAL, text: "Триал", foreground: "#FFFFFF", background: "#A855F7" },
+        { value: STATUS.PAID_EXPIRED, text: "Истёк", foreground: "#FFFFFF", background: "#EF4444" },
+        { value: STATUS.BLOCKED, text: "Заблокирован", foreground: "#FFFFFF", background: "#6B7280" },
+        { value: STATUS.NONE, text: "—", foreground: "#374151", background: "#E5E7EB" },
+      ],
+      showAsDot: false,
+    },
+    readonly: true,
+    hidden: false,
+    sort: 2,
+    width: "half",
+    translations: [{ language: "ru-RU", translation: "Статус подписки" }],
+    note: "Вычисляется автоматически из expired_at, is_blocked, is_trial и is_promo_synthetic активного тарифа. У Платеги нет рекуррентов — это единый источник статуса.",
+    required: false,
+  },
+  schema: null,
 };
 
 /**
@@ -146,35 +145,52 @@ async function fetchSourceRows(database, ids) {
   return byId;
 }
 
-async function ensureFieldExists(database, logger) {
-  if (!database) {
-    logger?.warn?.("[users-subscription-status] no database accessor — skipping bootstrap");
+async function ensureFieldExists({ services, getSchema, database, logger }) {
+  // Use Directus's own FieldsService so the new alias field is atomically
+  // registered in `directus_fields` AND in Directus's in-memory schema cache.
+  // Raw `database("directus_fields").insert(...)` would persist the row but
+  // leave the live API/GraphQL schema oblivious until the next process restart
+  // — which is exactly the 403 / "field does not exist" foot-gun we hit on
+  // first deploy.
+  if (!services?.FieldsService || typeof getSchema !== "function") {
+    logger?.warn?.("[users-subscription-status] FieldsService/getSchema unavailable — skipping bootstrap");
     return;
   }
-  let existing = null;
+
+  let schema;
   try {
-    existing = await database("directus_fields")
-      .where({ collection: COLLECTION, field: FIELD })
-      .first();
+    schema = await getSchema();
   } catch (err) {
-    logger?.error?.(`[users-subscription-status] lookup failed: ${err?.message || err}`);
+    logger?.error?.(`[users-subscription-status] getSchema failed: ${err?.message || err}`);
     return;
   }
-  if (existing) {
-    logger?.info?.(`[users-subscription-status] field ${COLLECTION}.${FIELD} already present — leaving as-is`);
-    return;
-  }
+
+  const fieldsService = new services.FieldsService({ schema, knex: database });
+
   try {
-    await database("directus_fields").insert(FIELD_ROW);
-    logger?.info?.(`[users-subscription-status] created field ${COLLECTION}.${FIELD}`);
+    const existing = await fieldsService.readOne(COLLECTION, FIELD).catch(() => null);
+    if (existing) {
+      logger?.info?.(`[users-subscription-status] field ${COLLECTION}.${FIELD} already present — leaving as-is`);
+      return;
+    }
   } catch (err) {
-    logger?.error?.(`[users-subscription-status] insert failed: ${err?.message || err}`);
+    logger?.warn?.(`[users-subscription-status] readOne probe failed: ${err?.message || err}`);
+  }
+
+  try {
+    await fieldsService.createField(COLLECTION, FIELD_API_BODY);
+    logger?.info?.(`[users-subscription-status] created field ${COLLECTION}.${FIELD} via FieldsService`);
+  } catch (err) {
+    // Most likely cause: a stale row from the previous raw-insert build is
+    // already there but Directus didn't pick it up. Surface clearly; admin
+    // can DELETE /fields/users/subscription_status and let next start retry.
+    logger?.error?.(`[users-subscription-status] createField failed: ${err?.message || err}`);
   }
 }
 
-export default function registerHook({ init, filter }, { database, logger }) {
+export default function registerHook({ init, filter }, { services, database, getSchema, logger }) {
   init("app.after", async () => {
-    await ensureFieldExists(database, logger);
+    await ensureFieldExists({ services, getSchema, database, logger });
   });
 
   filter("items.read", async (payload, meta, context) => {
