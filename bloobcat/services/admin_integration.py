@@ -232,6 +232,21 @@ async def sync_user_lte(user_id: int, lte_gb_total: Optional[int]) -> None:
         logger.warning("User not found for LTE sync: %s", user_id)
         return
 
+    # Stamp the admin-grant moment so the limiter can anchor the quota window
+    # to "now" rather than the user's `created_at` (months/years ago for
+    # legacy accounts). Only stamp on first grant — re-runs of the same
+    # sync must not slide the anchor forward.
+    if lte_gb_total_int > 0 and getattr(user, "admin_lte_granted_at", None) is None:
+        user.admin_lte_granted_at = datetime.now(timezone.utc)
+        try:
+            await user.save(update_fields=["admin_lte_granted_at"])
+        except Exception as exc:
+            logger.warning(
+                "Failed to stamp admin_lte_granted_at for user=%s: %s",
+                user_id,
+                exc,
+            )
+
     active_tariff = None
     if user.active_tariff_id:
         active_tariff = await ActiveTariffs.get_or_none(id=user.active_tariff_id)

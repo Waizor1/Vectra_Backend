@@ -86,8 +86,18 @@ def _format_lte_range_end(end_dt: datetime) -> str:
 
 
 def _trial_lte_start_date(user: Users) -> date:
+    # Anchor preference: trial_started_at → admin_lte_granted_at → created_at.
+    # The middle entry is only set when an admin actually grants a personal
+    # LTE quota (see services.admin_integration.sync_user_lte); using it
+    # prevents the limiter from counting a lifetime of pre-grant traffic
+    # against the quota window for admin-grant accounts.
     trial_started_at = getattr(user, "trial_started_at", None)
-    reference_at = trial_started_at or getattr(user, "created_at", None)
+    admin_lte_granted_at = getattr(user, "admin_lte_granted_at", None)
+    reference_at = (
+        trial_started_at
+        or admin_lte_granted_at
+        or getattr(user, "created_at", None)
+    )
     if not reference_at:
         return datetime.now(MSK_TZ).date()
     if getattr(reference_at, "tzinfo", None):

@@ -84,8 +84,28 @@ async def _run(apply: bool, max_passes: int, batch_size: int) -> int:
                 referrer_id = int(getattr(invitee, "referred_by", 0) or 0)
                 if not referrer_id:
                     continue
+                # Self-loop guard: an invitee that points back at itself is a
+                # data anomaly that the runtime _apply_* paths block but
+                # backfill never validated. Skip rather than copy own utm.
+                if referrer_id == int(invitee.id):
+                    logger.warning(
+                        "Backfill skipped self-referral user=%s", invitee.id
+                    )
+                    continue
                 referrer = await Users.get_or_none(id=referrer_id)
                 if not referrer:
+                    continue
+                # Two-node cycle guard: A referred_by B AND B referred_by A.
+                # Historically possible — migration `83_…fix_users_referred_by_nullable_fk`
+                # was added because of exactly this state. Without this guard
+                # the utm tag pings back and forth between A and B forever
+                # across max_passes iterations.
+                if int(getattr(referrer, "referred_by", 0) or 0) == int(invitee.id):
+                    logger.warning(
+                        "Backfill skipped two-node cycle user=%s referrer=%s",
+                        invitee.id,
+                        referrer.id,
+                    )
                     continue
                 referrer_utm = normalize_source_utm(getattr(referrer, "utm", None))
                 if not is_campaign_utm(referrer_utm):
