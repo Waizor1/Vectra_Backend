@@ -4,6 +4,7 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import re
 import secrets
 import smtplib
 import types
@@ -422,17 +423,25 @@ async def resolve_optional_bearer_user(request: Request | None) -> Users | None:
     return user
 
 
-def _safe_start_param(raw: str | None) -> str | None:
-    """Trim and cap the captured start_param so it fits the DB column.
+_START_PARAM_WHITESPACE_RE = re.compile(r"\s+")
 
-    Returns None for empty input. Long inputs are silently truncated — the
-    start_param column is intentionally bounded (no user-controllable
-    open-ended growth into the OAuth state row).
+
+def _safe_start_param(raw: str | None) -> str | None:
+    """Trim, collapse whitespace and cap the captured start_param.
+
+    Returns None for empty input. Internal whitespace (including embedded
+    newlines or tabs that could survive URL-decoding of `?start=…%0A…`)
+    is collapsed to a single space so it cannot fragment the Telegram
+    `<code>` rendering inside the admin notification. Long inputs are
+    silently truncated to 256 chars to fit the DB column and to prevent
+    user-controllable open-ended growth on the OAuth state row.
     """
-    value = (raw or "").strip()
-    if not value:
+    if raw is None:
         return None
-    return value[:256]
+    collapsed = _START_PARAM_WHITESPACE_RE.sub(" ", raw).strip()
+    if not collapsed:
+        return None
+    return collapsed[:256]
 
 
 async def create_oauth_authorization_url(
@@ -779,6 +788,11 @@ async def apply_web_referral_attribution(user: Users, start_param_raw: str | Non
     user-creation time, so the admin notification sees UTM) and from
     `/auth/complete-registration` (legacy path, still used when an existing
     user later sends a start_param).
+
+    UTM is persisted even when the referrer cannot be resolved (e.g. the
+    partner QR was deleted, the numeric referrer id no longer exists) — the
+    campaign tag is still load-bearing for marketing analytics, while the
+    referred_by link is only set when there is a real referrer behind it.
     """
     start_param = (start_param_raw or "").strip()
     if not start_param:
@@ -802,43 +816,59 @@ async def apply_web_referral_attribution(user: Users, start_param_raw: str | Non
         user_id=user_id,
         track_partner_qr_view=False,
     )
-    if not referred_by or int(referred_by) == user_id:
+
+    # Self-referral attempts (start_param == user_id, or qr_<owned_by_self>)
+    # must not bind utm either — they are gaming attempts, not campaign signal.
+    self_referral = bool(referred_by) and int(referred_by) == user_id
+    if self_referral:
         return
 
-    referrer = await Users.get_or_none(id=int(referred_by))
-    if not referrer:
-        logger.info(
-            "web_referral_attribution_skip_no_referrer user=%s referred_by=%s",
-            user_id,
-            referred_by,
-        )
-        return
-
-    update_fields = ["referred_by"]
-    user.referred_by = int(referred_by)
+    referrer: Users | None = None
+    if referred_by:
+        referrer = await Users.get_or_none(id=int(referred_by))
+        if not referrer:
+            logger.info(
+                "web_referral_attribution_referrer_not_found user=%s referred_by=%s utm=%s",
+                user_id,
+                referred_by,
+                utm,
+            )
 
     current_utm = (getattr(user, "utm", None) or "").strip()
     next_utm = pick_attribution_utm(
         current_utm,
         utm,
         force_partner_source=is_partner_source_utm(utm),
-        referrer_utm=getattr(referrer, "utm", None),
+        referrer_utm=getattr(referrer, "utm", None) if referrer else None,
     )
+
+    update_fields: list[str] = []
+    if referrer is not None:
+        user.referred_by = int(referred_by)
+        update_fields.append("referred_by")
     if next_utm != (current_utm or None):
         user.utm = next_utm
         update_fields.append("utm")
 
+    if not update_fields:
+        return
+
     await user.save(update_fields=update_fields)
     logger.info(
-        "web_referral_attribution_applied user=%s referred_by=%s utm=%s",
+        "web_referral_attribution_applied user=%s referred_by=%s utm=%s fields=%s",
         user_id,
-        int(referred_by),
+        int(referred_by) if referrer is not None else 0,
         next_utm,
+        update_fields,
     )
 
 
 async def notify_web_oauth_registration(
-    user: Users, profile: ProviderProfile, provider: OAuthProvider
+    user: Users,
+    profile: ProviderProfile,
+    provider: OAuthProvider,
+    *,
+    start_param: str | None = None,
 ) -> None:
     try:
         from bloobcat.bot.notifications.admin import send_admin_message
@@ -864,6 +894,23 @@ async def notify_web_oauth_registration(
             if referrer_id
             else ""
         )
+        # Show the raw captured start_param only when it adds operator-visible
+        # information that UTM alone doesn't already convey. Two useful cases:
+        #   1. UTM is empty (resolve_referral_from_start_param did not produce a
+        #      utm at all — e.g. `family_*`, raw numeric referrer) — the raw
+        #      start_param tells the operator "the user did come with a tag,
+        #      we just didn't bind it" so it isn't mis-read as organic.
+        #   2. UTM differs from start_param (referrer-propagation kicked in,
+        #      partner marker, etc.) — surface both for clarity.
+        # When utm == start_param (the common qr_<token> case) the line is
+        # omitted to avoid redundant duplication.
+        start_param_clean = (start_param or "").strip()
+        show_start_param = bool(start_param_clean) and start_param_clean != utm_value
+        start_param_line = (
+            f"\n🏷️ start_param: <code>{_safe_html(start_param_clean)}</code>"
+            if show_start_param
+            else ""
+        )
         text = (
             "🆕 Новая web-регистрация!\n\n"
             f"👤 Пользователь: {_safe_html(profile.display_name or user.full_name or profile.email)}\n"
@@ -871,7 +918,8 @@ async def notify_web_oauth_registration(
             f"🔐 Провайдер: {_safe_html(label)}"
             f"{email_line}"
             f"{utm_line}"
-            f"{referrer_line}\n\n"
+            f"{referrer_line}"
+            f"{start_param_line}\n\n"
             "#новый_пользователь #web_auth"
         )
         delivered = await send_admin_message(text=text)
@@ -978,7 +1026,12 @@ async def handle_oauth_callback(provider: OAuthProvider, code: str, state: str, 
                             user.id,
                             refresh_exc,
                         )
-                await notify_web_oauth_registration(user, profile, provider)
+                await notify_web_oauth_registration(
+                    user,
+                    profile,
+                    provider,
+                    start_param=state_row.start_param,
+                )
         await audit_auth_event(
             action="oauth_login",
             result="success",
