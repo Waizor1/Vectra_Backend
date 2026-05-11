@@ -1200,3 +1200,189 @@ def test_admin_widgets_user_card_attribution_handles_organic_user():
         if (captured.referrals.downstream_count !== 0) throw new Error('downstream_count must be 0 for organic users with no descendants');
         """
     )
+
+
+def test_admin_widgets_descendants_cte_has_depth_cap():
+    """The recursive descendants CTE must be depth-capped to prevent DoS on adversarial chains.
+
+    The ascendants CTE (chain) is already capped at ATTRIBUTION_CHAIN_MAX_DEPTH=10;
+    descendants now mirrors that protection via DOWNSTREAM_MAX_DEPTH so an attacker
+    cannot loop or fan out without bound.
+    """
+    src_source = _read("directus/extensions/admin-widgets/src/index.js")
+    dist_source = _read("directus/extensions/admin-widgets/dist/index.js")
+
+    # The constant must exist alongside the CTE so the cap can be tuned in one place.
+    assert "DOWNSTREAM_MAX_DEPTH" in src_source
+    # The CTE itself must reference depth in both WHERE clauses (descendants vs chain
+    # walk) — without it, an adversarial cycle would loop forever.
+    # Identifier names get minified in dist but the SQL literal survives the rollup.
+    assert "d.depth + 1" in src_source
+    assert "d.depth <" in src_source
+    assert "d.depth + 1" in dist_source
+    assert "d.depth <" in dist_source
+
+
+def test_admin_widgets_user_card_rejects_negative_ids():
+    """user-card/:user_id now accepts positive integers only.
+
+    Telegram user ids and Vectra web ids are always >= 1; the previous
+    /^-?\\d+$/ regex let through `-1` which would silently fail downstream
+    lookups but consume DB time.
+    """
+    src_source = _read("directus/extensions/admin-widgets/src/index.js")
+    assert r"/^\d+$/" in src_source
+    assert "/^-?\\d+$/" not in src_source
+
+    source_url = (ROOT / "directus/extensions/admin-widgets/src/index.js").as_uri()
+    _node(
+        f"""
+        import registerEndpoint from {source_url!r};
+
+        const routes = new Map();
+        const router = {{
+          use() {{}},
+          get(path, fn) {{ routes.set(path, fn); }},
+          post() {{}},
+          patch() {{}},
+          delete() {{}},
+        }};
+
+        const fakeBuilder = () => {{
+          const qb = {{
+            where() {{ return qb; }}, select() {{ return qb; }},
+            orderBy() {{ return qb; }}, limit() {{ return qb; }},
+            count() {{ return qb; }}, min() {{ return qb; }},
+            first: async () => null,
+          }};
+          return qb;
+        }};
+        const fakeDatabase = (table) => fakeBuilder();
+        fakeDatabase.raw = (sql) => sql;
+
+        registerEndpoint(router, {{ database: fakeDatabase }});
+        const handler = routes.get('/user-card/:user_id');
+
+        for (const bad of ['-1', '-9001', '-0']) {{
+          let status = 0;
+          let payload = null;
+          await handler(
+            {{ params: {{ user_id: bad }} }},
+            {{
+              status(code) {{ status = code; return this; }},
+              json(p) {{ payload = p; return p; }},
+            }},
+          );
+          if (status !== 400) throw new Error(`expected 400 for ${{bad}}, got ${{status}}`);
+          if (!String(payload?.error).includes('Invalid user id')) {{
+            throw new Error(`unexpected payload for ${{bad}}: ${{JSON.stringify(payload)}}`);
+          }}
+        }}
+        """
+    )
+
+
+def test_admin_widgets_utm_campaigns_validate_extended_payload():
+    """validateCampaignPayload rejects oversized/typed-wrong inputs added in 1.5.0.
+
+    Previously only utm + label + status were size-bounded; description, notes,
+    promo_code, partner_user_id and tags fell through to the DB layer with
+    raw 500s instead of 400s, and there was no upper bound on free-form text.
+    """
+    src_source = _read("directus/extensions/admin-widgets/src/index.js")
+    # Sanity: all new bounds are present in source AND in built dist.
+    for needle in (
+        "description must be <= 2000 chars",
+        "notes must be <= 5000 chars",
+        "promo_code must be <= 100 chars",
+        "partner_user_id must be a positive integer",
+        "tags must be an array",
+        "tags must have <= 50 items",
+        "tags items must be <= 50 chars",
+    ):
+        assert needle in src_source, f"missing validation message: {needle}"
+
+    dist_source = _read("directus/extensions/admin-widgets/dist/index.js")
+    assert "description must be <= 2000 chars" in dist_source
+    assert "tags must have <= 50 items" in dist_source
+
+    source_url = (ROOT / "directus/extensions/admin-widgets/src/index.js").as_uri()
+    _node(
+        f"""
+        import registerEndpoint from {source_url!r};
+
+        const routes = new Map();
+        const router = {{
+          use() {{}},
+          get() {{}},
+          post(path, fn) {{ routes.set(path, fn); }},
+          patch() {{}},
+          delete() {{}},
+        }};
+
+        const fakeBuilder = () => {{
+          const qb = {{
+            where() {{ return qb; }}, select() {{ return qb; }},
+            orderBy() {{ return qb; }}, limit() {{ return qb; }},
+            count() {{ return qb; }}, min() {{ return qb; }},
+            first: async () => null,
+            insert() {{ return {{ returning: async () => [] }}; }},
+          }};
+          return qb;
+        }};
+        const fakeDatabase = (table) => fakeBuilder();
+        fakeDatabase.raw = (sql) => sql;
+        // hasTable() returns true via information_schema lookup
+        fakeDatabase.__hasTable = true;
+
+        // The /utm-campaigns POST route does a hasTable check first; stub it to true.
+        const origDatabase = fakeDatabase;
+        const tableAwareDatabase = (table) => {{
+          const qb = origDatabase(table);
+          if (table === 'information_schema.tables') {{
+            qb.first = async () => ({{ table_name: 'utm_campaigns' }});
+          }}
+          return qb;
+        }};
+        tableAwareDatabase.raw = (sql) => sql;
+
+        registerEndpoint(router, {{ database: tableAwareDatabase }});
+        const handler = routes.get('/utm-campaigns');
+        if (!handler) throw new Error('POST /utm-campaigns not registered');
+
+        async function call(body) {{
+          let status = 200;
+          let payload = null;
+          await handler(
+            {{ body, accountability: {{ admin: true, user: 'admin' }} }},
+            {{
+              status(code) {{ status = code; return this; }},
+              json(p) {{ payload = p; return p; }},
+            }},
+          );
+          return {{ status, payload }};
+        }}
+
+        const cases = [
+          [{{ utm: 'ok', description: 'x'.repeat(2001) }}, 'description must be <= 2000 chars'],
+          [{{ utm: 'ok', notes: 'x'.repeat(5001) }}, 'notes must be <= 5000 chars'],
+          [{{ utm: 'ok', promo_code: 'BAD!!CHAR' }}, 'promo_code must match'],
+          [{{ utm: 'ok', promo_code: 'A'.repeat(101) }}, 'promo_code must be <= 100 chars'],
+          [{{ utm: 'ok', partner_user_id: -1 }}, 'partner_user_id must be a positive integer'],
+          [{{ utm: 'ok', partner_user_id: 1.5 }}, 'partner_user_id must be a positive integer'],
+          [{{ utm: 'ok', tags: 'not-array' }}, 'tags must be an array'],
+          [{{ utm: 'ok', tags: Array(51).fill('x') }}, 'tags must have <= 50 items'],
+          [{{ utm: 'ok', tags: ['x'.repeat(51)] }}, 'tags items must be <= 50 chars'],
+        ];
+
+        for (const [body, needle] of cases) {{
+          const {{ status, payload }} = await call(body);
+          if (status !== 400) {{
+            throw new Error(`expected 400 for ${{JSON.stringify(body).slice(0,80)}}, got ${{status}}: ${{JSON.stringify(payload)}}`);
+          }}
+          if (!String(payload?.error).includes(needle)) {{
+            throw new Error(`expected error containing "${{needle}}", got: ${{JSON.stringify(payload)}}`);
+          }}
+        }}
+        """
+    )
