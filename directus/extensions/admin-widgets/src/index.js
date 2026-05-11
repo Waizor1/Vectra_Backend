@@ -2187,11 +2187,33 @@ export default function registerEndpoint(router, { database }) {
       let paymentsSelect =
         "0::bigint AS users_paid, 0::bigint AS users_paid_direct, 0::bigint AS users_paid_indirect, " +
         "0::numeric AS revenue_rub, 0::numeric AS revenue_rub_direct, 0::numeric AS revenue_rub_indirect";
+      // Bindings, повторяющие cohort-window (since/until) и utmPrefix для CTE
+      // payments_per_utm. Без этих фильтров CTE отдаёт lifetime revenue по utm
+      // и подмешивает его в date-scoped grouped, ломая delta vs предыдущий
+      // период и cohort retention.
+      const paymentsCteBindings = [];
       if (hasPayments) {
         const statusFilter = hasPaymentStatus ? "AND p.status = 'succeeded'" : "";
         // PostgreSQL FILTER expressions reused for direct/indirect split.
         const indirectExpr = "(u2.referred_by IS NOT NULL AND r2.utm IS NOT NULL AND r2.utm = u2.utm)";
         const directExpr = "NOT " + indirectExpr;
+        const cohortFilters = [];
+        if (since) {
+          cohortFilters.push("u2.created_at >= ?");
+          paymentsCteBindings.push(since.toISOString());
+        }
+        if (until) {
+          cohortFilters.push("u2.created_at < ?");
+          paymentsCteBindings.push(until.toISOString());
+        }
+        if (utmPrefix) {
+          const escaped = String(utmPrefix).replace(/[\\%_]/g, "\\$&");
+          cohortFilters.push("u2.utm LIKE ? ESCAPE '\\'");
+          paymentsCteBindings.push(`${escaped}%`);
+        }
+        const cohortClause = cohortFilters.length
+          ? `AND ${cohortFilters.join(" AND ")}`
+          : "";
         paymentsCte = `,
         payments_per_utm AS (
           SELECT
@@ -2207,6 +2229,7 @@ export default function registerEndpoint(router, { database }) {
           LEFT JOIN users r2 ON r2.id = u2.referred_by
           WHERE 1=1
             ${statusFilter}
+            ${cohortClause}
           GROUP BY u2.utm
         )`;
         paymentsJoin = "LEFT JOIN payments_per_utm ppu ON ppu.utm IS NOT DISTINCT FROM g.utm";
@@ -2262,7 +2285,7 @@ export default function registerEndpoint(router, { database }) {
         LIMIT ${limit};
       `;
 
-      const raw = await database.raw(sql, bindings);
+      const raw = await database.raw(sql, [...bindings, ...paymentsCteBindings]);
       const rows = raw?.rows ?? raw ?? [];
 
       const sources = rows.map((row) => {
@@ -2547,13 +2570,18 @@ export default function registerEndpoint(router, { database }) {
       let paidJoin = "";
       if (hasPayments) {
         const statusFilter = hasPaymentStatus ? "AND p.status = 'succeeded'" : "";
+        // Внутри LATERAL alias `u` шейдит outer FROM users u — LATERAL по
+        // факту не коррелирован, а возвращает скаляр-агрегат. В outer SELECT
+        // есть COUNT(*) → строгий PG требует GROUP BY для non-aggregate
+        // paid_data.paid_inner. Оборачиваем MAX(): значение скаляра не
+        // меняется, а грамматика становится корректной.
         paidJoin = `LEFT JOIN LATERAL (
           SELECT COUNT(DISTINCT p.user_id) AS paid_inner
           FROM processed_payments p
           WHERE p.user_id IN (SELECT id FROM users u ${whereSql})
             ${statusFilter}
         ) paid_data ON true`;
-        paidSelect = "COALESCE(paid_data.paid_inner, 0) AS paid";
+        paidSelect = "COALESCE(MAX(paid_data.paid_inner), 0) AS paid";
       }
 
       const sql = `

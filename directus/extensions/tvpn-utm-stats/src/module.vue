@@ -2191,7 +2191,14 @@ function formatDate(iso) {
 
 function csvEscape(value) {
   if (value === null || value === undefined) return "";
-  const s = String(value);
+  let s = String(value);
+  // Защита от CSV formula injection: Excel / LibreOffice / Google Sheets
+  // выполняют формулу в ячейке, если значение начинается с =, +, -, @ или
+  // табуляции / возврата каретки. users.utm берётся из start_param, который
+  // приходит от анонимного клиента и может содержать такие префиксы.
+  if (/^[=+\-@\t\r]/.test(s)) {
+    s = `'${s}`;
+  }
   if (s.includes(",") || s.includes('"') || s.includes("\n")) {
     return `"${s.replace(/"/g, '""')}"`;
   }

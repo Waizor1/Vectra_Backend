@@ -9,6 +9,7 @@ from random import randint
 import asyncio
 import uuid  # For generating new familyurl
 
+from tortoise.expressions import F
 from yookassa import Payment
 
 from bloobcat.db.users import User_Pydantic, Users, normalize_date
@@ -1550,12 +1551,43 @@ async def devices_topup(
         }
 
     if user.balance >= extra_cost:
-        # Полностью с баланса
+        # Полностью с баланса. Списываем атомарно, чтобы параллельные запросы
+        # (например, двойной клик / повтор при ретрае) не приводили к двойному
+        # списанию: UPDATE ... WHERE balance >= extra_cost проходит только у
+        # одного победителя, остальные получают rowcount=0 и уходят во
+        # внешний платёж.
         old_hwid_limit = current_hwid_limit
         old_expired_at = user.expired_at
-        user.balance -= extra_cost
-        user.hwid_limit = new_device_count
-        await user.save(update_fields=["balance", "hwid_limit"])
+        updated = await Users.filter(
+            id=user.id, balance__gte=extra_cost
+        ).update(
+            balance=F("balance") - extra_cost,
+            hwid_limit=new_device_count,
+        )
+        if not updated:
+            # Баланс уже был списан конкурирующим запросом — переключаемся
+            # на ветку внешнего платежа на полную сумму.
+            user = await Users.get(id=user.id)
+            amount_to_pay = max(1, extra_cost - int(user.balance or 0))
+            amount_from_balance = max(0, extra_cost - amount_to_pay)
+            metadata = {
+                "user_id": user.id,
+                "devices_topup": True,
+                "new_device_count": new_device_count,
+                "previous_device_count": current_hwid_limit,
+                "new_active_tariff_price": int(new_full_price),
+                "previous_active_tariff_price": int(active_tariff.price),
+                "new_progressive_multiplier": float(multiplier),
+                "amount_from_balance": amount_from_balance,
+            }
+            return await _create_external_devices_topup_payment(
+                user=user,
+                active_tariff=active_tariff,
+                amount_to_pay=float(amount_to_pay),
+                amount_from_balance=float(amount_from_balance),
+                metadata=metadata,
+            )
+        await user.refresh_from_db(fields=["balance", "hwid_limit"])
 
         active_tariff.hwid_limit = new_device_count
         active_tariff.price = int(new_full_price)
