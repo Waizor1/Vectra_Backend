@@ -37,6 +37,10 @@
     </template>
 
     <template #actions>
+      <label class="group-toggle" :title="sortedSavedParents().length === 0 ? 'Сначала сохрани кампанию-родитель через «Создать кампанию»' : 'Группировать sub-tags под родительской кампанией'">
+        <input type="checkbox" v-model="groupByParent" :disabled="sortedSavedParents().length === 0" />
+        <span>Группировать по родителю</span>
+      </label>
       <div class="bucket-toggle" role="group" aria-label="Шаг графика">
         <button
           type="button"
@@ -310,10 +314,16 @@
                   </tr>
                 </thead>
                 <tbody>
-                  <template v-for="row in visibleSources" :key="row.utm ?? '__no_utm__'">
+                  <template v-for="row in displayedFlatRows" :key="(row._parentUtm || '') + '::' + (row.utm ?? '__no_utm__')">
                     <tr
-                      :class="['table__row--clickable', expanded.has(row.utm ?? '__no_utm__') ? 'table__row--expanded' : '']"
-                      @click="toggleExpand(row)"
+                      :class="[
+                        'table__row--clickable',
+                        row._kind === 'parent' ? 'table__row--parent' : '',
+                        row._kind === 'child' ? 'table__row--child' : '',
+                        row._kind !== 'parent' && expanded.has(row.utm ?? '__no_utm__') ? 'table__row--expanded' : '',
+                        row._kind === 'parent' && row._isExpanded ? 'table__row--parent-open' : '',
+                      ]"
+                      @click="row._kind === 'parent' ? toggleGroupExpand(row.utm) : toggleExpand(row)"
                     >
                       <td class="table__col table__col--check" @click.stop>
                         <input
@@ -321,24 +331,35 @@
                           class="compare-checkbox"
                           :checked="compareSet.has(row.utm ?? '__no_utm__')"
                           :disabled="!compareSet.has(row.utm ?? '__no_utm__') && compareSet.size >= 5"
-                          :title="compareSet.size >= 5 && !compareSet.has(row.utm ?? '__no_utm__') ? 'Максимум 5 кампаний для сравнения' : 'Добавить в сравнение'"
+                          :title="compareSet.size >= 5 && !compareSet.has(row.utm ?? '__no_utm__') ? 'Максимум 5 кампаний для сравнения' : (row._kind === 'parent' ? 'Сравнить как родительскую кампанию (все sub-tags)' : 'Добавить в сравнение')"
                           @change="toggleCompare(row)"
                         />
                       </td>
                       <td class="table__col table__col--utm">
+                        <span v-if="row._kind === 'parent'" class="group-chevron" :title="row._isExpanded ? 'Свернуть' : 'Раскрыть sub-tags'">{{ row._isExpanded ? '▾' : '▸' }}</span>
+                        <span v-if="row._kind === 'child'" class="group-indent">↳</span>
                         <button
                           v-if="row.utm"
                           type="button"
-                          class="tag tag--campaign tag--clickable"
+                          :class="['tag', 'tag--clickable', row._kind === 'parent' ? 'tag--parent' : 'tag--campaign']"
                           :title="'Подгрузить только ' + row.utm"
                           @click.stop="setExactFilter(row.utm)"
                         >{{ row.utm }}</button>
                         <span v-else class="tag tag--null">— без UTM —</span>
                         <span
-                          v-if="savedCampaignFor(row.utm)"
+                          v-if="row._kind === 'parent' && row._label && row._label !== row.utm"
+                          class="utm-label"
+                        >{{ row._label }}</span>
+                        <span
+                          v-else-if="savedCampaignFor(row.utm)"
                           class="utm-label"
                           :title="savedCampaignFor(row.utm).description || savedCampaignFor(row.utm).label || ''"
                         >{{ savedCampaignFor(row.utm).label || '(сохранена)' }}</span>
+                        <span
+                          v-if="row._kind === 'parent' && row._childrenCount"
+                          class="children-count"
+                          :title="`${row._childrenCount} sub-tag${row._childrenCount === 1 ? '' : 's'}`"
+                        >({{ row._childrenCount }})</span>
                       </td>
                       <td class="table__col table__col--num">
                         <div class="cell-stack">
@@ -1662,6 +1683,215 @@ function subTags(row) {
   });
 }
 
+// ===== Hierarchical grouping by saved campaigns ==========================
+//
+// Toggle that buckets every visible row under its parent saved campaign
+// (from `savedCampaigns`). A row is a child of `parent.utm` if its `utm`
+// starts with `parent.utm + ('_'|'.'|'/')`. Parent rows aggregate all child
+// stats. Standalone rows (not matching any saved campaign) render at top
+// level alongside parents.
+//
+// When `groupByParent` is true, the table renders `displayRows` (an array of
+// {kind: 'parent'|'leaf'|'child', ...}) instead of flat `visibleSources`.
+
+const groupByParent = ref(true);
+const expandedGroups = ref(new Set()); // Set<parentUtm>
+
+function sortedSavedParents() {
+  // Longest-first so that nested campaign roots (e.g. "qr_rt_2026" vs
+  // "qr_rt_2026_launch") prefer the more specific match.
+  return [...savedCampaigns.value]
+    .filter((c) => c.utm && c.status !== "archived")
+    .sort((a, b) => b.utm.length - a.utm.length);
+}
+
+function aggregateChildren(children) {
+  const sum = (key) => children.reduce((acc, c) => acc + (Number(c[key]) || 0), 0);
+  const minDate = (key) =>
+    children.reduce((m, c) => (c[key] && (!m || c[key] < m) ? c[key] : m), null);
+  const maxDate = (key) =>
+    children.reduce((m, c) => (c[key] && (!m || c[key] > m) ? c[key] : m), null);
+  return {
+    users_total: sum("users_total"),
+    users_direct: sum("users_direct"),
+    users_indirect: sum("users_indirect"),
+    users_registered: sum("users_registered"),
+    users_used_trial: sum("users_used_trial"),
+    users_key_activated: sum("users_key_activated"),
+    users_active_subscription: sum("users_active_subscription"),
+    users_active_subscription_direct: sum("users_active_subscription_direct"),
+    users_active_subscription_indirect: sum("users_active_subscription_indirect"),
+    users_paid: sum("users_paid"),
+    users_paid_direct: sum("users_paid_direct"),
+    users_paid_indirect: sum("users_paid_indirect"),
+    revenue_rub: sum("revenue_rub"),
+    revenue_rub_direct: sum("revenue_rub_direct"),
+    revenue_rub_indirect: sum("revenue_rub_indirect"),
+    first_seen: minDate("first_seen"),
+    last_seen: maxDate("last_seen"),
+  };
+}
+
+const groupingEnabled = computed(() => groupByParent.value && sortedSavedParents().length > 0);
+
+const displayRows = computed(() => {
+  if (!groupingEnabled.value) {
+    return visibleSources.value.map((row) => ({
+      kind: "leaf",
+      key: row.utm ?? "__no_utm__",
+      row,
+    }));
+  }
+  const parents = sortedSavedParents();
+  const groups = new Map(); // parentUtm -> { parent, children: [] }
+  const standalone = [];
+  const rowToParent = (utm) => {
+    for (const p of parents) {
+      if (!utm || !p.utm) continue;
+      if (utm === p.utm) return null; // Exact match — render as standalone parent.
+      if (
+        utm.startsWith(p.utm + "_") ||
+        utm.startsWith(p.utm + ".") ||
+        utm.startsWith(p.utm + "/")
+      ) return p;
+    }
+    return null;
+  };
+  for (const row of visibleSources.value) {
+    const p = rowToParent(row.utm || "");
+    if (p) {
+      if (!groups.has(p.utm)) groups.set(p.utm, { parent: p, children: [] });
+      groups.get(p.utm).children.push(row);
+    } else {
+      standalone.push(row);
+    }
+  }
+  // Build parent items with aggregated metrics. If a saved-campaign parent
+  // also appears as its own row in `sources` (exact-match), prefer that
+  // row's stats (they include the parent's own direct visitors), otherwise
+  // aggregate solely from children.
+  const sourceByUtm = new Map(visibleSources.value.map((r) => [r.utm, r]));
+  const parentItems = [];
+  for (const { parent, children } of groups.values()) {
+    const own = sourceByUtm.get(parent.utm);
+    const agg = aggregateChildren(children);
+    // If the parent has its own direct row, add its stats on top of children.
+    const rolledUp = own
+      ? {
+          users_total: (own.users_total || 0) + agg.users_total,
+          users_direct: (own.users_direct || 0) + agg.users_direct,
+          users_indirect: (own.users_indirect || 0) + agg.users_indirect,
+          users_registered: (own.users_registered || 0) + agg.users_registered,
+          users_used_trial: (own.users_used_trial || 0) + agg.users_used_trial,
+          users_key_activated: (own.users_key_activated || 0) + agg.users_key_activated,
+          users_active_subscription: (own.users_active_subscription || 0) + agg.users_active_subscription,
+          users_active_subscription_direct: (own.users_active_subscription_direct || 0) + agg.users_active_subscription_direct,
+          users_active_subscription_indirect: (own.users_active_subscription_indirect || 0) + agg.users_active_subscription_indirect,
+          users_paid: (own.users_paid || 0) + agg.users_paid,
+          users_paid_direct: (own.users_paid_direct || 0) + agg.users_paid_direct,
+          users_paid_indirect: (own.users_paid_indirect || 0) + agg.users_paid_indirect,
+          revenue_rub: (own.revenue_rub || 0) + agg.revenue_rub,
+          revenue_rub_direct: (own.revenue_rub_direct || 0) + agg.revenue_rub_direct,
+          revenue_rub_indirect: (own.revenue_rub_indirect || 0) + agg.revenue_rub_indirect,
+          first_seen: own.first_seen && (!agg.first_seen || own.first_seen < agg.first_seen) ? own.first_seen : agg.first_seen,
+          last_seen: own.last_seen && (!agg.last_seen || own.last_seen > agg.last_seen) ? own.last_seen : agg.last_seen,
+        }
+      : agg;
+    parentItems.push({
+      kind: "parent",
+      key: parent.utm,
+      utm: parent.utm,
+      label: parent.label || parent.utm,
+      row: { utm: parent.utm, ...rolledUp },
+      children,
+      childrenCount: children.length,
+    });
+  }
+  // Combine parents + standalone leaves, sort by current sort key, then
+  // interleave children right after their parent if expanded.
+  const standaloneItems = standalone
+    // Skip standalone if it was the parent itself (already in parentItems).
+    .filter((r) => !groups.has(r.utm))
+    .map((row) => ({ kind: "leaf", key: row.utm ?? "__no_utm__", row }));
+  const allTopLevel = [...parentItems, ...standaloneItems];
+  if (sort.key) {
+    const dir = sort.dir === "asc" ? 1 : -1;
+    allTopLevel.sort((a, b) => {
+      const av = a.row[sort.key];
+      const bv = b.row[sort.key];
+      if (av == null && bv == null) return 0;
+      if (av == null) return 1;
+      if (bv == null) return -1;
+      if (typeof av === "number" && typeof bv === "number") return (av - bv) * dir;
+      return String(av).localeCompare(String(bv), "ru") * dir;
+    });
+  }
+  const out = [];
+  for (const item of allTopLevel) {
+    out.push(item);
+    if (item.kind === "parent" && expandedGroups.value.has(item.utm)) {
+      const childItems = [...item.children];
+      if (sort.key) {
+        const dir = sort.dir === "asc" ? 1 : -1;
+        childItems.sort((a, b) => {
+          const av = a[sort.key];
+          const bv = b[sort.key];
+          if (av == null && bv == null) return 0;
+          if (av == null) return 1;
+          if (bv == null) return -1;
+          if (typeof av === "number" && typeof bv === "number") return (av - bv) * dir;
+          return String(av).localeCompare(String(bv), "ru") * dir;
+        });
+      }
+      for (const c of childItems) {
+        out.push({
+          kind: "child",
+          key: (item.utm + "::" + (c.utm ?? "__no_utm__")),
+          parent: item.utm,
+          row: c,
+        });
+      }
+    }
+  }
+  return out;
+});
+
+function toggleGroupExpand(parentUtm) {
+  const next = new Set(expandedGroups.value);
+  if (next.has(parentUtm)) next.delete(parentUtm);
+  else next.add(parentUtm);
+  expandedGroups.value = next;
+}
+
+function isGroupExpanded(parentUtm) {
+  return expandedGroups.value.has(parentUtm);
+}
+
+// Flat row list for the table — each item carries the underlying row's data
+// plus rendering hints (`_kind`, `_parentUtm`, `_label`, `_isExpanded`).
+// Lets the existing tbody template iterate uniformly while still rendering
+// parent rows with chevron / indented children, with no per-cell template
+// changes.
+const displayedFlatRows = computed(() => {
+  return displayRows.value.map((item) => {
+    if (item.kind === "parent") {
+      return {
+        ...item.row,
+        _kind: "parent",
+        _parentUtm: item.utm,
+        _label: item.label,
+        _childrenCount: item.childrenCount,
+        _isExpanded: expandedGroups.value.has(item.utm),
+      };
+    }
+    return {
+      ...item.row,
+      _kind: item.kind, // "leaf" | "child"
+      _parentUtm: item.parent || null,
+    };
+  });
+});
+
 function toggleSort(key) {
   if (sort.key !== key) {
     sort.key = key;
@@ -1762,6 +1992,23 @@ function clearCompare() {
   syncUrl();
 }
 
+// True if the given utm is a registered campaign root that has at least one
+// child row in the current visible sources. Used to decide whether compare /
+// detail-pane fetches should use `utm_prefix=<key>` (parent mode, sums sub-tags)
+// or `utm=<key>` (exact mode, single tag).
+function isParentKey(key) {
+  if (!groupingEnabled.value) return false;
+  if (!key || !savedCampaignsByUtm.value.has(key)) return false;
+  return sources.value.some((r) => {
+    if (!r.utm || r.utm === key) return false;
+    return (
+      r.utm.startsWith(key + "_") ||
+      r.utm.startsWith(key + ".") ||
+      r.utm.startsWith(key + "/")
+    );
+  });
+}
+
 async function refreshCompareSeries() {
   if (compareSet.value.size === 0) {
     compareSeries.value = [];
@@ -1771,7 +2018,13 @@ async function refreshCompareSeries() {
   try {
     const items = await Promise.all(
       Array.from(compareSet.value).map(async (key) => {
-        const params = { utm: key, bucket: bucket.value };
+        const params = { bucket: bucket.value };
+        // Parent mode: sum all sub-tag series under the campaign root.
+        if (isParentKey(key)) {
+          params.utm_prefix = key;
+        } else {
+          params.utm = key;
+        }
         if (filters.since) params.since = filters.since;
         if (filters.until) params.until = exclusiveUntil(filters.until);
         const resp = await api.get("/admin-widgets/utm-stats/timeseries", { params });
@@ -3871,6 +4124,101 @@ function savedCampaignFor(utm) {
   font-size: 11.5px;
   color: rgba(201, 209, 217, 0.55);
   line-height: 1.5;
+}
+
+/* ===== Hierarchical grouping ===== */
+.group-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  font-size: 12px;
+  color: #c9d1d9;
+  cursor: pointer;
+  user-select: none;
+  border: 1px solid rgba(110, 118, 129, 0.25);
+  border-radius: 8px;
+  height: 32px;
+  background: rgba(33, 38, 45, 0.55);
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.group-toggle:hover {
+  background: rgba(88, 166, 255, 0.08);
+  border-color: rgba(88, 166, 255, 0.45);
+}
+
+.group-toggle input[type="checkbox"] {
+  accent-color: #b692f6;
+}
+
+.group-toggle:has(input:disabled) {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.group-chevron {
+  display: inline-block;
+  width: 14px;
+  margin-right: 4px;
+  color: #79b8ff;
+  font-weight: 700;
+  text-align: center;
+  cursor: pointer;
+  user-select: none;
+  font-size: 13px;
+  line-height: 1;
+}
+
+.group-indent {
+  display: inline-block;
+  width: 14px;
+  margin-right: 6px;
+  margin-left: 10px;
+  color: rgba(201, 209, 217, 0.4);
+  font-size: 12px;
+}
+
+.children-count {
+  display: inline-block;
+  margin-left: 6px;
+  font-size: 11px;
+  color: rgba(201, 209, 217, 0.55);
+  font-variant-numeric: tabular-nums;
+}
+
+.table__row--parent {
+  background: rgba(88, 166, 255, 0.04);
+  font-weight: 600;
+}
+
+.table__row--parent:hover {
+  background: rgba(88, 166, 255, 0.10);
+}
+
+.table__row--parent-open {
+  background: rgba(88, 166, 255, 0.12);
+}
+
+.table__row--child {
+  background: rgba(13, 17, 23, 0.35);
+}
+
+.table__row--child td:first-child + td {
+  padding-left: 6px;
+}
+
+.tag--parent {
+  background: rgba(88, 166, 255, 0.20);
+  color: #c5d8ff;
+  border: 1px solid rgba(88, 166, 255, 0.45);
+  font-weight: 700;
+}
+
+.tag--parent:hover {
+  background: rgba(88, 166, 255, 0.32);
+  color: #eaf2ff;
+  border-color: rgba(88, 166, 255, 0.65);
 }
 
 /* ===== Main table cross-link label ===== */
