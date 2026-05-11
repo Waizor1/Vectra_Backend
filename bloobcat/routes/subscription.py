@@ -35,7 +35,10 @@ from bloobcat.services.subscription_overlay import (
     get_overlay_payload,
     resume_frozen_base_if_due,
 )
-from bloobcat.services.segment_campaigns import build_active_campaign_payload
+from bloobcat.services.segment_campaigns import (
+    build_active_campaign_payload,
+    select_active_campaign,
+)
 
 logger = get_logger("routes.subscription")
 
@@ -73,6 +76,9 @@ class SubscriptionPlanResponse(BaseModel):
     priceFromText: str | None = None
     originalPriceRub: int | None = None
     personalDiscountPercent: int | None = None
+    campaignDiscountRub: int | None = None
+    campaignDiscountPercent: int | None = None
+    campaignSlug: str | None = None
     perMonthText: str | None = None
     discountText: str | None = None
     discountPercent: int | None = None
@@ -212,6 +218,7 @@ async def _build_plans(user: Users) -> List[SubscriptionPlanResponse]:
         by_months[months] = tariff
 
     one_month_tariff = by_months.get(1)
+    active_campaign = await select_active_campaign(user)
     offers: List[SubscriptionPlanResponse] = []
     for months in (1, 3, 6, 12):
         tariff = by_months.get(months)
@@ -221,6 +228,7 @@ async def _build_plans(user: Users) -> List[SubscriptionPlanResponse]:
             tariff=tariff,
             user_id=int(user.id),
             one_month_reference_tariff=one_month_tariff if months > 1 else None,
+            campaign=active_campaign,
         )
         offers.append(SubscriptionPlanResponse(**offer))
     return offers
@@ -276,12 +284,14 @@ async def quote_subscription(
     if not tariff:
         raise HTTPException(status_code=404, detail="Tariff not found")
     one_month_tariff = await Tariffs.filter(months=1, is_active=True).order_by("order").first()
+    active_campaign = await select_active_campaign(user)
     quote = await build_subscription_quote(
         tariff=tariff,
         user_id=int(user.id),
         device_count=payload.device_count,
         lte_gb=payload.lte_gb,
         one_month_reference_tariff=one_month_tariff if int(tariff.months or 0) > 1 else None,
+        campaign=active_campaign,
     )
     data = quote_public_dict(quote, tariff)
     data["copy"] = "Стоимость обновлена и будет проверена перед оплатой"

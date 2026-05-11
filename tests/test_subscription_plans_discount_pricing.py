@@ -51,6 +51,7 @@ async def db(_install_stubs_once):
                         "bloobcat.db.subscription_freezes",
                         "bloobcat.db.promotions",
                         "bloobcat.db.admins",
+                        "bloobcat.db.segment_campaigns",
                     ],
                     "default_connection": "default",
                 }
