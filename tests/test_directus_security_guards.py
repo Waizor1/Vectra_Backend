@@ -1386,3 +1386,113 @@ def test_admin_widgets_utm_campaigns_validate_extended_payload():
         }}
         """
     )
+
+
+def test_users_lte_grant_stamp_hook_stamps_on_first_grant():
+    """Defense-in-depth: when an admin sets users.lte_gb_total via Directus UI
+    (bypassing the backend sync_user_lte service), the hook must stamp
+    admin_lte_granted_at on first grant so the LTE limiter anchors the quota
+    window to the grant moment rather than `created_at`.
+    """
+    src_source = _read("directus/extensions/users-lte-grant-stamp/src/index.js")
+    dist_source = _read("directus/extensions/users-lte-grant-stamp/dist/index.js")
+
+    # Static guards on the contract — strings survive minification.
+    assert 'collection !== "users"' in src_source
+    assert "admin_lte_granted_at" in src_source
+    assert "admin_lte_granted_at" in dist_source
+
+    source_url = (ROOT / "directus/extensions/users-lte-grant-stamp/src/index.js").as_uri()
+    _node(
+        f"""
+        import registerHook from {source_url!r};
+
+        const filters = [];
+        const filterApi = {{
+          filter(event, fn) {{ filters.push({{ event, fn }}); }},
+        }};
+        registerHook(filterApi);
+        const updateHook = filters.find((f) => f.event === 'items.update');
+        if (!updateHook) throw new Error('items.update filter not registered');
+
+        // Case 1: not the users collection — no-op.
+        const otherCollection = await updateHook.fn({{ lte_gb_total: 50 }}, {{ collection: 'promo_codes', keys: [1] }});
+        if (otherCollection.admin_lte_granted_at) {{
+          throw new Error('hook must not stamp for non-users collection');
+        }}
+
+        // Case 2: users update but lte_gb_total not in payload — no-op.
+        const noLte = await updateHook.fn({{ email: 'a@b.c' }}, {{ collection: 'users', keys: [1] }});
+        if (noLte.admin_lte_granted_at) {{
+          throw new Error('hook must not stamp when lte_gb_total absent');
+        }}
+
+        // Case 3: lte_gb_total = 0 — clearing a grant, not granting → no-op.
+        const zeroLte = await updateHook.fn({{ lte_gb_total: 0 }}, {{ collection: 'users', keys: [1] }});
+        if (zeroLte.admin_lte_granted_at) {{
+          throw new Error('hook must not stamp when lte_gb_total is 0');
+        }}
+
+        // Case 4: lte_gb_total > 0 AND target row has NULL stamp → STAMP.
+        const fakeDatabase = (table) => {{
+          if (table !== 'users') throw new Error('unexpected table: ' + table);
+          return {{
+            whereIn() {{ return this; }},
+            select: async () => [{{ id: 7, admin_lte_granted_at: null }}],
+          }};
+        }};
+        const ctx = {{ database: fakeDatabase }};
+        const stamped = await updateHook.fn(
+          {{ lte_gb_total: 50 }},
+          {{ collection: 'users', keys: [7] }},
+          ctx,
+        );
+        if (!stamped.admin_lte_granted_at) {{
+          throw new Error('hook MUST stamp admin_lte_granted_at when lte_gb_total>0 and existing stamp is NULL');
+        }}
+        if (Number.isNaN(Date.parse(stamped.admin_lte_granted_at))) {{
+          throw new Error('stamp must be a valid ISO timestamp');
+        }}
+
+        // Case 5: target row already has a stamp → do NOT re-stamp (preserve anchor).
+        const alreadyStampedDatabase = (table) => ({{
+          whereIn() {{ return this; }},
+          select: async () => [{{ id: 7, admin_lte_granted_at: '2026-01-01T00:00:00Z' }}],
+        }});
+        const preserved = await updateHook.fn(
+          {{ lte_gb_total: 100 }},
+          {{ collection: 'users', keys: [7] }},
+          {{ database: alreadyStampedDatabase }},
+        );
+        if (preserved.admin_lte_granted_at !== undefined) {{
+          throw new Error('hook must NOT overwrite an existing admin_lte_granted_at');
+        }}
+
+        // Case 6: explicit admin_lte_granted_at in payload — respect it.
+        const explicit = await updateHook.fn(
+          {{ lte_gb_total: 50, admin_lte_granted_at: '2026-05-12T00:00:00Z' }},
+          {{ collection: 'users', keys: [7] }},
+          ctx,
+        );
+        if (explicit.admin_lte_granted_at !== '2026-05-12T00:00:00Z') {{
+          throw new Error('hook must respect explicit admin_lte_granted_at in payload');
+        }}
+
+        // Case 7: mixed batch (one NULL + one stamped) → skip (avoid sliding existing anchor).
+        const mixedDatabase = (table) => ({{
+          whereIn() {{ return this; }},
+          select: async () => [
+            {{ id: 1, admin_lte_granted_at: null }},
+            {{ id: 2, admin_lte_granted_at: '2026-04-01T00:00:00Z' }},
+          ],
+        }});
+        const mixed = await updateHook.fn(
+          {{ lte_gb_total: 50 }},
+          {{ collection: 'users', keys: [1, 2] }},
+          {{ database: mixedDatabase }},
+        );
+        if (mixed.admin_lte_granted_at !== undefined) {{
+          throw new Error('hook must skip stamping for mixed batches');
+        }}
+        """
+    )
