@@ -1499,7 +1499,8 @@ export default function registerEndpoint(router, { database }) {
   // referrals and risk indicators for one user id. Postgres-only (uses NOW()/interval).
   router.get("/user-card/:user_id", async (req, res) => {
     const userIdRaw = String(req.params.user_id || "").trim();
-    if (!/^-?\d+$/.test(userIdRaw)) {
+    // Positive integers only — Telegram user ids and Vectra web ids are always >= 1.
+    if (!/^\d+$/.test(userIdRaw)) {
       return res.status(400).json({ error: "Invalid user id" });
     }
     const userId = userIdRaw;
@@ -1699,16 +1700,22 @@ export default function registerEndpoint(router, { database }) {
       // Downstream count — total descendants attributed to this user via referred_by.
       // Pairs with PR feat/acquisition-source-attribution: campaign roots see the full
       // funnel including multi-hop invitees that inherited their utm tag.
+      //
+      // Depth-capped at DOWNSTREAM_MAX_DEPTH so an adversarial chain (or future data
+      // anomaly that creates a cycle) cannot DoS Directus by walking forever.
+      const DOWNSTREAM_MAX_DEPTH = 12;
       let downstreamCount = 0;
       try {
         const raw = await database.raw(
           `WITH RECURSIVE descendants AS (
-              SELECT id FROM users WHERE referred_by = ?
+              SELECT id, 0 AS depth FROM users WHERE referred_by = ?
               UNION ALL
-              SELECT u.id FROM users u INNER JOIN descendants d ON u.referred_by = d.id
+              SELECT u.id, d.depth + 1 FROM users u
+              INNER JOIN descendants d ON u.referred_by = d.id
+              WHERE d.depth < ?
             )
             SELECT COUNT(*)::int AS count FROM descendants`,
-          [userId]
+          [userId, DOWNSTREAM_MAX_DEPTH]
         );
         const rows = raw?.rows ?? raw ?? [];
         downstreamCount = Number(rows[0]?.count ?? 0) || 0;
@@ -2777,6 +2784,8 @@ export default function registerEndpoint(router, { database }) {
     };
   }
 
+  const PROMO_CODE_RE = /^[A-Za-z0-9_-]+$/;
+
   function validateCampaignPayload(body, { requireUtm } = {}) {
     if (!body || typeof body !== "object") return "Empty body";
     if (requireUtm) {
@@ -2786,11 +2795,40 @@ export default function registerEndpoint(router, { database }) {
       if (!UTM_RE.test(utm)) return "utm must match [A-Za-z0-9_]+";
       if (utm === "partner") return "utm cannot be the reserved literal 'partner'";
     }
-    if (body.label !== undefined && body.label !== null && String(body.label).length > 200) {
-      return "label must be <= 200 chars";
+    if (body.label !== undefined && body.label !== null) {
+      if (typeof body.label !== "string") return "label must be a string";
+      if (body.label.length > 200) return "label must be <= 200 chars";
+    }
+    if (body.description !== undefined && body.description !== null) {
+      if (typeof body.description !== "string") return "description must be a string";
+      if (body.description.length > 2000) return "description must be <= 2000 chars";
+    }
+    if (body.notes !== undefined && body.notes !== null) {
+      if (typeof body.notes !== "string") return "notes must be a string";
+      if (body.notes.length > 5000) return "notes must be <= 5000 chars";
     }
     if (body.status !== undefined && body.status !== null && !["active","archived"].includes(String(body.status))) {
       return "status must be 'active' or 'archived'";
+    }
+    if (body.partner_user_id !== undefined && body.partner_user_id !== null) {
+      const n = Number(body.partner_user_id);
+      if (!Number.isInteger(n) || n < 1 || n > 1_000_000_000) {
+        return "partner_user_id must be a positive integer";
+      }
+    }
+    if (body.promo_code !== undefined && body.promo_code !== null) {
+      if (typeof body.promo_code !== "string") return "promo_code must be a string";
+      const code = body.promo_code.trim();
+      if (code.length > 100) return "promo_code must be <= 100 chars";
+      if (code && !PROMO_CODE_RE.test(code)) return "promo_code must match [A-Za-z0-9_-]+";
+    }
+    if (body.tags !== undefined && body.tags !== null) {
+      if (!Array.isArray(body.tags)) return "tags must be an array";
+      if (body.tags.length > 50) return "tags must have <= 50 items";
+      for (const tag of body.tags) {
+        if (typeof tag !== "string") return "tags items must be strings";
+        if (tag.length > 50) return "tags items must be <= 50 chars";
+      }
     }
     return null;
   }
