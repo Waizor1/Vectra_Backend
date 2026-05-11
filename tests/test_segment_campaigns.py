@@ -38,6 +38,7 @@ async def _segments_db():
                         "bloobcat.db.tariff",
                         "bloobcat.db.active_tariff",
                         "bloobcat.db.payments",
+                        "bloobcat.db.discounts",
                         "bloobcat.db.notifications",
                         "bloobcat.db.subscription_freezes",
                         "bloobcat.db.segment_campaigns",
@@ -155,6 +156,31 @@ async def _create_campaign(**overrides):
     )
     payload.update(overrides)
     return await SegmentCampaign.create(**payload)
+
+
+async def _create_tariff(**overrides):
+    from bloobcat.db.tariff import Tariffs
+
+    payload = dict(
+        id=1,
+        name="1 месяц",
+        months=1,
+        base_price=150,
+        progressive_multiplier=0.95,
+        order=1,
+        is_active=True,
+        devices_limit_default=1,
+        devices_limit_family=30,
+        final_price_default=150,
+        final_price_family=2700,
+        lte_enabled=True,
+        lte_price_per_gb=1.5,
+        lte_min_gb=0,
+        lte_max_gb=500,
+        lte_step_gb=1,
+    )
+    payload.update(overrides)
+    return await Tariffs.create(**payload)
 
 
 # ---------------------------------------------------------------- segments
@@ -369,3 +395,117 @@ async def test_campaigns_active_picks_highest_priority_when_multiple_match():
     payload = response.json()
     assert payload["campaign"]["slug"] == "newcomer"
     assert payload["campaign"]["discountPercent"] == 30
+
+
+@pytest.mark.asyncio
+async def test_segment_campaign_discount_affects_subscription_quote():
+    user = await _create_user(id=805, is_subscribed=False, is_trial=False)
+    tariff = await _create_tariff(base_price=150, final_price_default=150)
+    await _create_campaign(
+        slug="first-users-99",
+        title="Старт за 99 ₽",
+        segment="no_purchase_yet",
+        discount_percent=34,
+        applies_to_months=[],
+        priority=100,
+    )
+
+    app = await _build_app(user.id)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://testserver"
+    ) as client:
+        response = await client.post(
+            "/subscription/quote",
+            json={"tariffId": tariff.id, "deviceCount": 1, "lteGb": 0},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["subscriptionPriceRub"] == 150
+    assert payload["discountedSubscriptionPriceRub"] == 99
+    assert payload["totalPriceRub"] == 99
+    assert payload["discountRub"] == 51
+    assert payload["discountPercent"] == 34
+    assert payload["discountSource"] == "segment_campaign"
+    assert payload["discountCampaignSlug"] == "first-users-99"
+
+
+@pytest.mark.asyncio
+async def test_segment_campaign_discount_respects_tariff_month_filter():
+    user = await _create_user(id=806, is_subscribed=False, is_trial=False)
+    tariff = await _create_tariff(
+        id=3,
+        name="3 месяца",
+        months=3,
+        base_price=399,
+        final_price_default=399,
+    )
+    await _create_campaign(
+        slug="one-month-only",
+        title="Только 1 месяц",
+        segment="no_purchase_yet",
+        discount_percent=34,
+        applies_to_months=[1],
+        priority=100,
+    )
+
+    app = await _build_app(user.id)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://testserver"
+    ) as client:
+        response = await client.post(
+            "/subscription/quote",
+            json={"tariffId": tariff.id, "deviceCount": 1, "lteGb": 0},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["subscriptionPriceRub"] == 399
+    assert payload["discountedSubscriptionPriceRub"] == 399
+    assert payload["discountPercent"] == 0
+    assert payload["discountSource"] is None
+
+
+@pytest.mark.asyncio
+async def test_personal_discount_wins_when_better_than_segment_campaign():
+    from bloobcat.db.discounts import PersonalDiscount
+
+    user = await _create_user(id=807, is_subscribed=False, is_trial=False)
+    tariff = await _create_tariff(base_price=150, final_price_default=150)
+    await _create_campaign(
+        slug="first-users-10",
+        title="Новичкам −10%",
+        segment="no_purchase_yet",
+        discount_percent=10,
+        applies_to_months=[],
+        priority=100,
+    )
+    personal = await PersonalDiscount.create(
+        user_id=user.id,
+        percent=50,
+        is_permanent=False,
+        remaining_uses=1,
+        source="promo",
+    )
+
+    app = await _build_app(user.id)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://testserver"
+    ) as client:
+        response = await client.post(
+            "/subscription/quote",
+            json={"tariffId": tariff.id, "deviceCount": 1, "lteGb": 0},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["discountedSubscriptionPriceRub"] == 75
+    assert payload["discountPercent"] == 50
+    assert payload["discountSource"] == "personal_discount"
+    assert payload["discountCampaignSlug"] is None
+
+    await personal.refresh_from_db()
+    assert personal.remaining_uses == 1

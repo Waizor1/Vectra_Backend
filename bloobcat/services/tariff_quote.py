@@ -6,7 +6,9 @@ from typing import Any
 from fastapi import HTTPException
 
 from bloobcat.db.tariff import Tariffs
+from bloobcat.db.users import Users
 from bloobcat.services.discounts import apply_personal_discount
+from bloobcat.services.segment_campaigns import select_active_campaign
 from bloobcat.services.subscription_limits import (
     family_devices_threshold,
     lte_default_max_gb,
@@ -19,6 +21,13 @@ from bloobcat.services.subscription_limits import (
 
 def _round_rub(value: float) -> int:
     return int(round(float(value or 0)))
+
+
+def _apply_percent_to_price(base_price: int, percent: int) -> int:
+    if percent <= 0:
+        return max(0, int(base_price))
+    discount_value = int(round(int(base_price) * (int(percent) / 100.0)))
+    return max(0, int(base_price) - discount_value)
 
 
 def _safe_int(value: Any, default: int) -> int:
@@ -124,6 +133,8 @@ class SubscriptionQuote:
     per_month_text: str
     lte_price_per_gb: float
     discount_id: int | None
+    discount_source: str | None = None
+    discount_campaign_slug: str | None = None
 
     def public_dict(self) -> dict[str, Any]:
         return {
@@ -144,6 +155,8 @@ class SubscriptionQuote:
             "ltePriceRub": self.lte_price_rub,
             "totalPriceRub": self.total_price_rub,
             "perMonthText": self.per_month_text,
+            "discountSource": self.discount_source,
+            "discountCampaignSlug": self.discount_campaign_slug,
         }
 
     def metadata_dict(self) -> dict[str, Any]:
@@ -160,6 +173,8 @@ class SubscriptionQuote:
             "quote_lte_price": int(self.lte_price_rub),
             "quote_total_price": int(self.total_price_rub),
             "quote_per_month_text": self.per_month_text,
+            "quote_discount_source": self.discount_source,
+            "quote_discount_campaign_slug": self.discount_campaign_slug,
         }
 
 
@@ -206,12 +221,47 @@ async def build_subscription_quote(
         if full_device_price > 0 and device_discount_rub > 0
         else 0
     )
-    discounted_price_raw, discount_id, discount_percent_raw = await apply_personal_discount(
-        int(user_id), subscription_price, months
+    (
+        personal_discounted_price,
+        discount_id,
+        personal_discount_percent,
+    ) = await apply_personal_discount(
+        int(user_id),
+        subscription_price,
+        months,
     )
+    discounted_price_raw = int(personal_discounted_price)
+    discount_percent_raw = int(personal_discount_percent or 0)
+    discount_source = "personal_discount" if discount_id is not None else None
+    discount_campaign_slug: str | None = None
+
+    user = await Users.get_or_none(id=int(user_id))
+    campaign = await select_active_campaign(user, months=months) if user else None
+    campaign_discount_percent = (
+        max(0, min(90, int(getattr(campaign, "discount_percent", 0) or 0)))
+        if campaign
+        else 0
+    )
+    if campaign_discount_percent > 0:
+        campaign_discounted_price = _apply_percent_to_price(
+            subscription_price, campaign_discount_percent
+        )
+        # Segment campaigns should not consume an existing personal discount.
+        # If the campaign is at least as good as the personal discount, use the
+        # virtual campaign discount and keep the personal discount for later.
+        if int(campaign_discounted_price) <= int(discounted_price_raw):
+            discounted_price_raw = int(campaign_discounted_price)
+            discount_id = None
+            discount_percent_raw = int(campaign_discount_percent)
+            discount_source = "segment_campaign"
+            discount_campaign_slug = str(getattr(campaign, "slug", "") or "") or None
+
     discounted_price = max(0, int(discounted_price_raw))
     discount_rub = max(0, int(subscription_price) - int(discounted_price))
     discount_percent = max(0, int(discount_percent_raw or 0)) if discount_rub > 0 else 0
+    if discount_rub <= 0:
+        discount_source = None
+        discount_campaign_slug = None
 
     lte_price_per_gb = (
         float(getattr(tariff, "lte_price_per_gb", 0) or 0.0)
@@ -256,6 +306,8 @@ async def build_subscription_quote(
         per_month_text=f"≈ {per_month} ₽/мес",
         lte_price_per_gb=float(lte_price_per_gb),
         discount_id=int(discount_id) if discount_id is not None else None,
+        discount_source=discount_source,
+        discount_campaign_slug=discount_campaign_slug,
     )
 
 

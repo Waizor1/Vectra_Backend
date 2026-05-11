@@ -3667,14 +3667,23 @@ async def yookassa_webhook(request: Request, secret: str):
         # Достаём скидку, применённую при создании платежа (если была)
         discount_id = data.get("discount_id")
         discount_percent = int(data.get("discount_percent") or 0)
+        discount_source = str(
+            data.get("discount_source") or data.get("quote_discount_source") or ""
+        )
 
         # Read-only probe: do not decrement discount usage before entitlement commits
         discount_available = False
         consumed = False
+        if discount_source == "segment_campaign" and discount_percent > 0:
+            discount_available = True
         try:
-            discount_available = await is_discount_available_if_needed(discount_id)
+            discount_available = discount_available or await is_discount_available_if_needed(
+                discount_id
+            )
         except Exception:
-            discount_available = False
+            discount_available = bool(
+                discount_source == "segment_campaign" and discount_percent > 0
+            )
 
         # ????? ????? ?? webhook
         active_tariff_for_lte = None
@@ -4654,6 +4663,8 @@ async def pay(
     discounted_price = int(quote.discounted_subscription_price_rub)
     discount_id = quote.discount_id
     discount_percent = int(quote.discount_percent) if quote.discount_percent else None
+    discount_source = quote.discount_source
+    discount_campaign_slug = quote.discount_campaign_slug
     purchase_kind = quote.tariff_kind
     base_tariff_snapshot = _build_base_tariff_snapshot(
         tariff=tariff,
@@ -5192,6 +5203,8 @@ async def pay(
             "discounted_price": discounted_price,
             "discount_percent": discount_percent,
             "discount_id": discount_id,
+            "discount_source": discount_source,
+            "discount_campaign_slug": discount_campaign_slug,
             "lte_gb": lte_gb,
             "lte_price_per_gb": lte_price_per_gb,
             "lte_cost": lte_cost,
