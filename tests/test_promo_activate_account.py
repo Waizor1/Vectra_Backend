@@ -225,6 +225,9 @@ async def test_redeem_extend_days_plus_activate_account_promotes_trial_user(monk
     assert float(active.lte_price_per_gb) == pytest.approx(1.5)
     # multiplier copied from base tariff (effective)
     assert float(active.progressive_multiplier) == pytest.approx(0.961629, rel=1e-3)
+    # анти-твинк должен распознавать строку как synthetic, иначе RUTRACKER на
+    # триал-устройстве с дублирующим HWID получит иммунитет к санкции
+    assert active.is_promo_synthetic is True
 
 
 @pytest.mark.asyncio
@@ -324,6 +327,10 @@ async def test_activate_account_idempotent_when_user_already_has_active_tariff(m
     assert len(all_active) == 1
     # extend_days still applied
     assert refreshed.expired_at == today + timedelta(days=40)
+    # Существующий реальный тариф не должен быть помечен synthetic — иначе
+    # настоящего платника по ошибке начнут считать «расширенным триалом»
+    refreshed_active = await ActiveTariffs.get(id=existing.id)
+    assert refreshed_active.is_promo_synthetic is False
 
 
 @pytest.mark.asyncio

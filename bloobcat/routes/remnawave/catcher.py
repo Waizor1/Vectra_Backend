@@ -7,6 +7,7 @@ from typing import Dict, Any, Optional
 
 from bloobcat.bot.notifications.admin import on_activated_key, send_admin_message, write_to, _safe_html
 from bloobcat.db.users import Users, normalize_date
+from bloobcat.db.active_tariff import ActiveTariffs
 from bloobcat.db.connections import Connections
 from bloobcat.db.payments import ProcessedPayments
 from bloobcat.db.partner_qr import PartnerQr
@@ -17,6 +18,7 @@ from .client import RemnaWaveClient
 from .activation_logic import should_trigger_registration
 from .hwid_utils import (
     extract_hwid_from_device,
+    is_paid_subscription_active,
     is_user_already_antitwink_sanctioned,
     parse_remnawave_devices,
 )
@@ -431,6 +433,20 @@ async def remnawave_updater():
         fresh_data_map = {item['id']: item for item in fresh_users_data}
         logger.debug(f"Загружены актуальные данные для {len(fresh_data_map)} пользователей")
 
+        # Подгружаем флаг is_promo_synthetic у активных тарифов, чтобы анти-твинк
+        # не считал promo-активированные синтетические подписки за «оплаченные».
+        active_tariff_ids = [
+            item['active_tariff_id'] for item in fresh_users_data if item.get('active_tariff_id')
+        ]
+        active_tariff_synthetic_map: dict[str, bool] = {}
+        if active_tariff_ids:
+            rows = await ActiveTariffs.filter(id__in=active_tariff_ids).values(
+                'id', 'is_promo_synthetic'
+            )
+            active_tariff_synthetic_map = {
+                row['id']: bool(row.get('is_promo_synthetic')) for row in rows
+            }
+
         # Выполним проверку пользователей
         not_found_users = []
         online_at_available_count = 0
@@ -514,16 +530,21 @@ async def remnawave_updater():
 
                             # Флаги регистрации и санкций
                             block_registration = False
-                            has_paid_subscription = bool(
+                            is_promo_synthetic_active_tariff = bool(
                                 db_active_tariff_id
-                                and db_expired_at
-                                and normalize_date(db_expired_at) >= msk_today
-                                and not db_is_trial
+                                and active_tariff_synthetic_map.get(db_active_tariff_id)
                             )
 
                             # Уже санкционирован ранее за дубль HWID — сохраняем блок, чтобы не прошло повторно
                             persisted_expired_at = db_expired_at
                             persisted_expired_date = normalize_date(persisted_expired_at)
+                            has_paid_subscription = is_paid_subscription_active(
+                                active_tariff_id=db_active_tariff_id,
+                                expired_date=persisted_expired_date,
+                                is_trial=db_is_trial,
+                                today=msk_today,
+                                is_promo_synthetic=is_promo_synthetic_active_tariff,
+                            )
                             is_antitwink_sanction = is_user_already_antitwink_sanctioned(
                                 is_trial=db_is_trial,
                                 used_trial=db_used_trial,

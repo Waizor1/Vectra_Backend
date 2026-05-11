@@ -4,6 +4,7 @@ from datetime import date, timedelta
 
 from bloobcat.routes.remnawave.hwid_utils import (
     has_duplicate_hwid,
+    is_paid_subscription_active,
     is_user_already_antitwink_sanctioned,
 )
 
@@ -175,4 +176,101 @@ def test_used_trial_false_means_not_sanctioned():
             has_paid_subscription=False,
         )
         is False
+    )
+
+
+# --- is_paid_subscription_active -----------------------------------------
+
+
+def test_real_paid_user_counts_as_paid_for_antitwink():
+    """Настоящий платник: active_tariff_id есть, expired_at в будущем, не триал,
+    тариф НЕ синтетический -> считается оплаченным, анти-твинк пропускает."""
+    today = date(2026, 5, 11)
+    assert (
+        is_paid_subscription_active(
+            active_tariff_id="12345",
+            expired_date=today + timedelta(days=30),
+            is_trial=False,
+            today=today,
+            is_promo_synthetic=False,
+        )
+        is True
+    )
+
+
+def test_promo_synthetic_active_tariff_does_not_count_as_paid():
+    """RUTRACKER-кейс: activate_account создал синтетический ActiveTariffs.
+    Юзер выглядит как «платный» по полям Users (is_trial=False, expired_at в
+    будущем, active_tariff_id есть), но это расширенный триал — анти-твинк
+    должен видеть его как НЕплатного и применять HWID-санкцию."""
+    today = date(2026, 5, 11)
+    assert (
+        is_paid_subscription_active(
+            active_tariff_id="99999",
+            expired_date=today + timedelta(days=10),
+            is_trial=False,
+            today=today,
+            is_promo_synthetic=True,
+        )
+        is False
+    )
+
+
+def test_no_active_tariff_id_means_not_paid():
+    """Без active_tariff_id — не платник, даже если expired_at в будущем."""
+    today = date(2026, 5, 11)
+    assert (
+        is_paid_subscription_active(
+            active_tariff_id=None,
+            expired_date=today + timedelta(days=10),
+            is_trial=False,
+            today=today,
+            is_promo_synthetic=False,
+        )
+        is False
+    )
+
+
+def test_expired_subscription_not_paid():
+    """Подписка истекла -> не платник, санкция не пропускается."""
+    today = date(2026, 5, 11)
+    assert (
+        is_paid_subscription_active(
+            active_tariff_id="12345",
+            expired_date=today - timedelta(days=1),
+            is_trial=False,
+            today=today,
+            is_promo_synthetic=False,
+        )
+        is False
+    )
+
+
+def test_trial_user_not_paid_even_with_active_tariff_id():
+    """Триал-юзер не платник по определению."""
+    today = date(2026, 5, 11)
+    assert (
+        is_paid_subscription_active(
+            active_tariff_id="12345",
+            expired_date=today + timedelta(days=3),
+            is_trial=True,
+            today=today,
+            is_promo_synthetic=False,
+        )
+        is False
+    )
+
+
+def test_paid_user_with_expired_date_today_still_paid():
+    """expired_date == today — последний день подписки, юзер ещё платный."""
+    today = date(2026, 5, 11)
+    assert (
+        is_paid_subscription_active(
+            active_tariff_id="12345",
+            expired_date=today,
+            is_trial=False,
+            today=today,
+            is_promo_synthetic=False,
+        )
+        is True
     )
