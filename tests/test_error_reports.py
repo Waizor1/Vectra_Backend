@@ -510,3 +510,121 @@ async def test_report_error_redacts_breadcrumb_sensitive_keys(monkeypatch):
     # url-shaped values are not auto-sanitized inside breadcrumbs (string field)
     # but secret-like patterns (`secret-...`, `token-...`) are redacted by regex.
     assert "secret-abc" not in repr(bc)
+
+
+# ---------------------------------------------------------------------------
+# Authorization → user_id resolution (B-1 strict auth)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_resolve_user_id_optional_returns_none_without_header():
+    from bloobcat.routes import error_reports
+
+    assert await error_reports._resolve_user_id_optional(await _request()) is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_user_id_optional_rejects_numeric_authorization():
+    """Regression: numeric Authorization was previously accepted as raw user_id."""
+    from bloobcat.routes import error_reports
+
+    req = await _request([(b"authorization", b"12345")])
+    assert await error_reports._resolve_user_id_optional(req) is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_user_id_optional_rejects_garbage_authorization():
+    from bloobcat.routes import error_reports
+
+    req = await _request([(b"authorization", b"definitely-not-init-data")])
+    assert await error_reports._resolve_user_id_optional(req) is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_user_id_optional_accepts_valid_bearer_without_ver(monkeypatch):
+    from bloobcat.routes import error_reports
+
+    monkeypatch.setattr(
+        error_reports,
+        "decode_access_token",
+        lambda token: {"sub": "42"},
+    )
+    req = await _request([(b"authorization", b"Bearer valid-jwt")])
+    assert await error_reports._resolve_user_id_optional(req) == 42
+
+
+@pytest.mark.asyncio
+async def test_resolve_user_id_optional_rejects_expired_or_invalid_bearer(monkeypatch):
+    from bloobcat.routes import error_reports
+
+    def _raise(_token):
+        raise ValueError("invalid token")
+
+    monkeypatch.setattr(error_reports, "decode_access_token", _raise)
+    req = await _request([(b"authorization", b"Bearer broken-jwt")])
+    assert await error_reports._resolve_user_id_optional(req) is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_user_id_optional_rejects_empty_bearer():
+    from bloobcat.routes import error_reports
+
+    req = await _request([(b"authorization", b"Bearer ")])
+    assert await error_reports._resolve_user_id_optional(req) is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_user_id_optional_rejects_bearer_with_bad_subject(monkeypatch):
+    from bloobcat.routes import error_reports
+
+    monkeypatch.setattr(
+        error_reports,
+        "decode_access_token",
+        lambda token: {"sub": "not-an-int"},
+    )
+    req = await _request([(b"authorization", b"Bearer x")])
+    assert await error_reports._resolve_user_id_optional(req) is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_user_id_optional_checks_token_version(monkeypatch):
+    from bloobcat.routes import error_reports
+
+    monkeypatch.setattr(
+        error_reports,
+        "decode_access_token",
+        lambda token: {"sub": "7", "ver": 2},
+    )
+
+    class FakeUsers:
+        @classmethod
+        async def get_or_none(cls, id):
+            return types.SimpleNamespace(id=id, auth_token_version=5)
+
+    monkeypatch.setattr(error_reports, "Users", FakeUsers)
+    req = await _request([(b"authorization", b"Bearer stale-jwt")])
+    # ver mismatch → user_id is rejected
+    assert await error_reports._resolve_user_id_optional(req) is None
+
+
+@pytest.mark.asyncio
+async def test_report_error_persists_user_id_none_for_numeric_auth(monkeypatch):
+    """End-to-end: /errors/report no longer trusts numeric Authorization."""
+    from bloobcat.routes import error_reports
+
+    captured, _, _ = _install_fake_repo(monkeypatch)
+
+    payload = error_reports.ErrorReportPayload(
+        eventId="ev-numeric-auth",
+        code="c",
+        type="FE_RUNTIME",
+        createdAtMs=1_777_423_000_000,
+        message="boom",
+    )
+
+    result = await error_reports.report_error(
+        payload, await _request([(b"authorization", b"99999999")])
+    )
+    assert result["ok"] is True
+    assert captured["user_id"] is None

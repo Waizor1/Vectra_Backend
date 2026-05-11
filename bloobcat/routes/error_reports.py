@@ -12,7 +12,10 @@ from tortoise.exceptions import IntegrityError
 from tortoise.expressions import F
 
 from bloobcat.db.error_reports import ErrorReports
+from bloobcat.db.users import Users
+from bloobcat.funcs.auth_tokens import decode_access_token
 from bloobcat.logger import get_logger
+from bloobcat.settings import telegram_settings
 
 logger = get_logger("routes.error_reports")
 
@@ -496,6 +499,73 @@ async def _upsert_error_report(*, fingerprint: str, fields: Dict[str, Any]) -> b
         return False
 
 
+# --- Auth resolution -------------------------------------------------------
+
+
+async def _resolve_user_id_optional(request: Request) -> Optional[int]:
+    """Resolve user_id from the Authorization header, never raising.
+
+    Mirrors the contract in ``bloobcat.funcs.validate``:
+      - ``Bearer <jwt>`` → decode_access_token; on success return ``sub`` /
+        ``user_id`` validated against the persisted ``auth_token_version``.
+      - Otherwise the value is treated as raw Telegram WebApp ``init_data`` and
+        parsed via ``safe_parse_webapp_init_data``.
+
+    Anything else (numeric tokens, empty strings, malformed init_data,
+    expired/invalid JWTs) yields ``None`` so that ``/errors/report`` remains
+    accepting anonymous client reports without spoofing the ``user_id`` field.
+    """
+    auth_header = request.headers.get("Authorization")
+    if not auth_header:
+        return None
+
+    if auth_header.lower().startswith("bearer "):
+        token = auth_header.split(" ", 1)[1].strip()
+        if not token:
+            return None
+        try:
+            payload = decode_access_token(token)
+        except Exception:
+            return None
+        sub = payload.get("sub") or payload.get("user_id")
+        if not sub:
+            return None
+        try:
+            user_id_int = int(sub)
+        except (TypeError, ValueError):
+            return None
+        token_version = payload.get("ver")
+        if token_version is None:
+            return user_id_int
+        try:
+            db_user = await Users.get_or_none(id=user_id_int)
+        except Exception:
+            return None
+        if not db_user:
+            return None
+        try:
+            if int(token_version) != int(db_user.auth_token_version or 0):
+                return None
+        except (TypeError, ValueError):
+            return None
+        return user_id_int
+
+    try:
+        from aiogram.utils.web_app import safe_parse_webapp_init_data
+
+        parsed = safe_parse_webapp_init_data(
+            telegram_settings.token.get_secret_value(), auth_header
+        )
+    except Exception:
+        return None
+    if not parsed or not getattr(parsed, "user", None):
+        return None
+    try:
+        return int(parsed.user.id)
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
 # --- Route -----------------------------------------------------------------
 
 
@@ -511,14 +581,7 @@ async def report_error(payload: ErrorReportPayload, request: Request) -> Dict[st
         )
         return {"ok": True, "dropped": "noise"}
 
-    user_id = None
-    auth_header = request.headers.get("Authorization")
-    if auth_header:
-        try:
-            if auth_header.isdigit():
-                user_id = int(auth_header)
-        except Exception:
-            user_id = None
+    user_id = await _resolve_user_id_optional(request)
 
     # Pick up X-Request-Id from upstream / request middleware if present.
     request_id = (
