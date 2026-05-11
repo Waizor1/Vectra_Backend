@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any, Dict, Optional
 
 from bloobcat.db.active_tariff import ActiveTariffs
 from bloobcat.db.tariff import Tariffs
 from bloobcat.db.users import Users
+from bloobcat.services.trial_lte import read_trial_lte_limit_gb
 
 logger = logging.getLogger(__name__)
 
@@ -54,10 +56,18 @@ async def activate_trial_account(
         hwid_limit = 1
 
     lte_gb_total_raw = spec.get("lte_gb_total")
-    if lte_gb_total_raw is None:
-        lte_gb_total = int(user.lte_gb_total or 0)
-    else:
+    if lte_gb_total_raw is not None:
         lte_gb_total = int(lte_gb_total_raw)
+    elif user.lte_gb_total is not None:
+        lte_gb_total = int(user.lte_gb_total)
+    elif user.is_trial:
+        # У триал-юзера user.lte_gb_total = NULL, реальный лимит берётся из
+        # tvpn_admin_settings.trial_lte_limit_gb. После активации триал-источник
+        # больше не применяется, поэтому переносим текущий эффективный лимит
+        # в синтетический ActiveTariffs, чтобы не отбирать LTE у пользователя.
+        lte_gb_total = math.ceil(await read_trial_lte_limit_gb())
+    else:
+        lte_gb_total = 0
     if lte_gb_total < 0:
         lte_gb_total = 0
 
