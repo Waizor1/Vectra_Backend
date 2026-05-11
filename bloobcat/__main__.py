@@ -178,8 +178,78 @@ async def _apply_generate_schema_compat_patches(conn) -> None:
             ON "users" ("temp_setup_token");
         ALTER TABLE IF EXISTS "users"
             ADD COLUMN IF NOT EXISTS "admin_lte_granted_at" TIMESTAMPTZ;
+
+        -- Migration 114: home-screen install reward + story-invite trial.
+        ALTER TABLE IF EXISTS "users"
+            ADD COLUMN IF NOT EXISTS "home_screen_added_at" TIMESTAMPTZ;
+        ALTER TABLE IF EXISTS "users"
+            ADD COLUMN IF NOT EXISTS "home_screen_reward_granted_at" TIMESTAMPTZ;
+        ALTER TABLE IF EXISTS "users"
+            ADD COLUMN IF NOT EXISTS "home_screen_promo_sent_at" TIMESTAMPTZ;
+        ALTER TABLE IF EXISTS "users"
+            ADD COLUMN IF NOT EXISTS "home_screen_promo_sent_count"
+            INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE IF EXISTS "users"
+            ADD COLUMN IF NOT EXISTS "invite_source" VARCHAR(32);
+        ALTER TABLE IF EXISTS "users"
+            ADD COLUMN IF NOT EXISTS "invited_by_referrer_id" BIGINT;
+        ALTER TABLE IF EXISTS "users"
+            ADD COLUMN IF NOT EXISTS "story_trial_used_at" TIMESTAMPTZ;
+        ALTER TABLE IF EXISTS "users"
+            ADD COLUMN IF NOT EXISTS "story_code" VARCHAR(32);
         """
     )
+    # Index creation is deliberately split out so it can run with
+    # CREATE INDEX CONCURRENTLY (lint requirement for hot tables — see
+    # scripts/check_migration_safety.py). CONCURRENTLY must execute outside
+    # a transaction, so we use raw single-statement execution instead of
+    # bundling it into the execute_script block above.
+    await _apply_concurrent_index_patches(conn)
+
+
+async def _apply_concurrent_index_patches(conn) -> None:
+    """Create indexes that target hot tables, one at a time, with CONCURRENTLY.
+
+    Each statement runs outside the surrounding transaction so a long index
+    build cannot block writes for more than the per-statement lock_timeout.
+    Idempotent: every index uses IF NOT EXISTS, and a partial failure leaves
+    the database in a consistent state because each CREATE INDEX is its own
+    transaction-less DDL operation.
+
+    `SET lock_timeout` keeps a backlog of WAL or autovacuum from holding the
+    catalog lock long enough to stall the readiness probe — the index build
+    is aborted instead.
+    """
+    concurrent_index_statements = [
+        # Drives the cron worker that pings the user to install the icon on
+        # their home screen — see ai_docs/develop/telegram-webapp-features-spec-2026-05-12.md.
+        # Partial index keeps it cheap (only rows that haven't installed yet).
+        'CREATE INDEX CONCURRENTLY IF NOT EXISTS "idx_users_home_screen_promo_pending"\n'
+        '    ON "users" ("home_screen_promo_sent_count")\n'
+        '    WHERE "home_screen_added_at" IS NULL',
+        # Used by analytics + the trial-grant branch that opts into the
+        # 20-day / 1-device / 1-GB story-invite bundle.
+        'CREATE INDEX CONCURRENTLY IF NOT EXISTS "idx_users_invite_source"\n'
+        '    ON "users" ("invite_source")\n'
+        '    WHERE "invite_source" IS NOT NULL',
+        # O(1) consume-time lookup for story-share codes. See the long-form
+        # rationale at the top of services/story_referral.py.
+        'CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS "idx_users_story_code_unique"\n'
+        '    ON "users" ("story_code")\n'
+        '    WHERE "story_code" IS NOT NULL',
+    ]
+    for stmt in concurrent_index_statements:
+        try:
+            # CONCURRENTLY can't run inside a transaction. Use raw execute
+            # so we don't accidentally wrap it in BEGIN..COMMIT through any
+            # higher-level helper that batches statements together.
+            await conn.execute_query("SET lock_timeout = '5s'")
+            await conn.execute_query(stmt)
+        except Exception as exc:  # pragma: no cover - operational tail
+            logger.warning(
+                "Concurrent index patch failed (will retry on next boot): %s",
+                exc,
+            )
 
 
 def _migration_sort_key(migration_file: Path) -> tuple[int, str]:

@@ -209,6 +209,43 @@ class Users(models.Model):
     prize_wheel_attempts = fields.IntField(
         default=0, description="Доступные попытки на колесе призов"
     )
+    # ── Home-screen install reward (migration 114) ─────────────────────────
+    home_screen_added_at = fields.DatetimeField(
+        null=True,
+        description="Когда пользователь добавил Mini App на главный экран Telegram",
+    )
+    home_screen_reward_granted_at = fields.DatetimeField(
+        null=True,
+        description="Когда был выдан одноразовый бонус за установку на главный экран",
+    )
+    home_screen_promo_sent_at = fields.DatetimeField(
+        null=True,
+        description="Последняя отправка бот-промо «установи на главный экран»",
+    )
+    home_screen_promo_sent_count = fields.IntField(
+        default=0,
+        description="Сколько раз отправлен бот-промо (стоп после 3 попыток)",
+    )
+    # ── Story-invite trial provenance (migration 114) ──────────────────────
+    invite_source = fields.CharField(
+        max_length=32,
+        null=True,
+        description="Источник инвайта: manual | story | partner_qr (null = неизвестно)",
+    )
+    invited_by_referrer_id = fields.BigIntField(
+        null=True,
+        description="Реферер по story-инвайту (отдельно от общего referred_by для аналитики)",
+    )
+    story_trial_used_at = fields.DatetimeField(
+        null=True,
+        description="Когда юзер уже использовал story-trial — anti-abuse гард",
+    )
+    story_code = fields.CharField(
+        max_length=32,
+        null=True,
+        unique=True,
+        description="Денормализованный story-share код (HMAC от user_id); O(1) lookup на consume",
+    )
 
     def is_device_per_user_enabled(self) -> bool:
         if self.device_per_user_enabled is not None:
@@ -497,6 +534,46 @@ class Users(models.Model):
         )
         return bool(rows_updated)
 
+    # Story-invite trial: 20 days / 1 device / 1 GB LTE (spec 2026-05-12).
+    #
+    # Differs from the regular trial in three knobs:
+    #   1. Duration is 20 days instead of `app_settings.trial_days` (10).
+    #   2. `hwid_limit` is forced to 1 (the regular trial inherits from the
+    #      global setting, typically 3).
+    #   3. `lte_gb_total` is forced to 1 (the regular trial reads from
+    #      `trial_lte_limit_gb` admin setting, currently 1 GB on prod but
+    #      varies). Pinning the number protects the cohort from admin
+    #      drift retroactively widening the bundle.
+    #
+    # Anti-abuse: `story_trial_used_at IS NOT NULL` blocks a second grant.
+    # The caller is responsible for additionally checking hwid-fingerprint
+    # before invoking this method — the hwid layer lives in the RemnaWave
+    # boundary, not here.
+    STORY_TRIAL_DAYS = 20
+    STORY_TRIAL_HWID_LIMIT = 1
+    STORY_TRIAL_LTE_GB = 1
+
+    @classmethod
+    async def _grant_story_trial_if_unclaimed(
+        cls, user_id: int, trial_until: date
+    ) -> bool:
+        rows_updated = await cls.filter(
+            id=user_id,
+            expired_at__isnull=True,
+            used_trial=False,
+            invite_source="story",
+            story_trial_used_at__isnull=True,
+        ).update(
+            is_trial=True,
+            used_trial=True,
+            expired_at=trial_until,
+            trial_started_at=datetime.now(timezone.utc),
+            story_trial_used_at=datetime.now(timezone.utc),
+            hwid_limit=cls.STORY_TRIAL_HWID_LIMIT,
+            lte_gb_total=cls.STORY_TRIAL_LTE_GB,
+        )
+        return bool(rows_updated)
+
     async def _ensure_remnawave_user(self) -> bool:
         """
         Создает пользователя в RemnaWave, если он еще не создан.
@@ -532,13 +609,34 @@ class Users(models.Model):
                     today = date.today()
                     if expire_at_date is None:
                         if not current_user.used_trial:
-                            trial_until = today + timedelta(
-                                days=app_settings.trial_days
+                            # Story-invite trial gets a richer bundle (20d / 1 dev / 1 GB).
+                            # See `_grant_story_trial_if_unclaimed` for the full reasoning.
+                            is_story_invite = (
+                                getattr(current_user, "invite_source", None) == "story"
+                                and getattr(current_user, "story_trial_used_at", None) is None
                             )
-                            trial_granted = await Users._grant_trial_if_unclaimed(
-                                int(current_user.id),
-                                trial_until,
-                            )
+                            if is_story_invite:
+                                trial_until = today + timedelta(
+                                    days=Users.STORY_TRIAL_DAYS
+                                )
+                                trial_granted = await Users._grant_story_trial_if_unclaimed(
+                                    int(current_user.id),
+                                    trial_until,
+                                )
+                                if trial_granted:
+                                    current_user.hwid_limit = Users.STORY_TRIAL_HWID_LIMIT
+                                    current_user.lte_gb_total = Users.STORY_TRIAL_LTE_GB
+                                    current_user.story_trial_used_at = datetime.now(
+                                        timezone.utc
+                                    )
+                            else:
+                                trial_until = today + timedelta(
+                                    days=app_settings.trial_days
+                                )
+                                trial_granted = await Users._grant_trial_if_unclaimed(
+                                    int(current_user.id),
+                                    trial_until,
+                                )
                             if trial_granted:
                                 expire_at_date = trial_until
                                 current_user.trial_started_at = datetime.now(timezone.utc)
@@ -546,7 +644,10 @@ class Users(models.Model):
                                 current_user.used_trial = True
                                 current_user.expired_at = expire_at_date
                                 logger.info(
-                                    f"Назначен триал для {self.id} до {expire_at_date}"
+                                    "Назначен триал для %s до %s (story=%s)",
+                                    self.id,
+                                    expire_at_date,
+                                    is_story_invite,
                                 )
                                 try:
                                     await notify_trial_granted(current_user)
@@ -1050,6 +1151,7 @@ class Users(models.Model):
         referred_by: Optional[int] = None,
         utm: Optional[str] = None,
         ensure_remnawave: bool = True,
+        invite_source: Optional[str] = None,
     ):
         from bloobcat.funcs.referral_attribution import (
             is_partner_source_utm,
@@ -1173,6 +1275,36 @@ class Users(models.Model):
                     bool(getattr(user, "is_registered", False)),
                     is_new,
                 )
+
+            # Story-invite attribution: tag the new user so the trial-grant
+            # branch in `_ensure_remnawave_user` will pick the 20d/1dev/1GB
+            # bundle. Atomic guard: we only stamp when the user has never
+            # consumed a story-trial before AND has not yet been registered,
+            # so a re-entry through a fresh story link cannot re-arm the
+            # bonus for an already-active account.
+            if (
+                invite_source == "story"
+                and not getattr(user, "is_registered", False)
+                and getattr(user, "story_trial_used_at", None) is None
+            ):
+                rows_updated = await cls.filter(
+                    id=user.id,
+                    invite_source__isnull=True,
+                    story_trial_used_at__isnull=True,
+                    is_registered=False,
+                ).update(
+                    invite_source="story",
+                    invited_by_referrer_id=int(referred_by) if referred_by else None,
+                )
+                if rows_updated:
+                    user.invite_source = "story"
+                    if referred_by:
+                        user.invited_by_referrer_id = int(referred_by)
+                    logger.info(
+                        "Story invite tagged: user=%s referrer=%s",
+                        user.id,
+                        referred_by,
+                    )
 
             if is_new:
                 await cls._scrub_stale_subscription_freezes(
