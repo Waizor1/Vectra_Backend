@@ -44,12 +44,21 @@ const STATUS = Object.freeze({
 
 // Field body for Directus FieldsService.createField — uses real JS objects
 // for `meta.options` / `meta.display_options` (the service serialises them).
-// We send `special` as an array, not the CSV string from the raw-insert era.
+//
+// `special` is intentionally NULL (not `["alias","no-data"]`):
+// Directus 11's tabular layout filters out alias / no-data fields from the
+// column renderer because it treats them as detail-only presentation. We
+// rely on this field showing up as a sortable, filterable, render-as-chip
+// column in /admin/content/users, so we let Directus create a regular
+// nullable VARCHAR column on `users` and inject the computed value through
+// the `items.read` filter below. The underlying column stays NULL in the
+// database — only API reads carry the computed status — and the field is
+// `readonly: true` so admins can't accidentally write to it.
 const FIELD_API_BODY = {
   field: FIELD,
   type: "string",
   meta: {
-    special: ["alias", "no-data"],
+    special: null,
     interface: "select-dropdown",
     options: {
       choices: [
