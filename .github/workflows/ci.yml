@@ -38,6 +38,12 @@ jobs:
       - name: Compile Python modules
         run: python -m compileall bloobcat
 
+      - name: Check migration prefixes
+        run: python scripts/check_migration_prefixes.py
+
+      - name: Check migration safety (CREATE INDEX CONCURRENTLY)
+        run: python scripts/check_migration_safety.py
+
       - name: Run tests
         run: python -m pytest tests -q
 

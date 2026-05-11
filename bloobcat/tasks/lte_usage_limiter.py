@@ -336,13 +336,19 @@ async def lte_usage_limiter_once() -> int:
                 if user.expired_at and user.expired_at < msk_today:
                     continue
                 user_uuid = str(user.remnawave_uuid)
-                if user.created_at:
-                    created_at = user.created_at
-                    if getattr(created_at, "tzinfo", None):
-                        start_date = created_at.astimezone(MSK_TZ).date()
+                # Anchor preference: admin_lte_granted_at → created_at.
+                # Without the admin-grant stamp, the limiter sees lifetime LTE
+                # traffic against the quota window for legacy accounts whose
+                # `created_at` predates the grant by months or years.
+                anchor_at = (
+                    getattr(user, "admin_lte_granted_at", None) or user.created_at
+                )
+                if anchor_at:
+                    if getattr(anchor_at, "tzinfo", None):
+                        start_date = anchor_at.astimezone(MSK_TZ).date()
                     else:
-                        created_at_utc = created_at.replace(tzinfo=timezone.utc)
-                        start_date = created_at_utc.astimezone(MSK_TZ).date()
+                        anchor_at_utc = anchor_at.replace(tzinfo=timezone.utc)
+                        start_date = anchor_at_utc.astimezone(MSK_TZ).date()
                 else:
                     start_date = msk_today
                 start_str = _format_range_start(start_date)

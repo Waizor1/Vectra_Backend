@@ -174,6 +174,13 @@ class Users(models.Model):
     lte_gb_total = fields.IntField(
         null=True, description="Личный LTE лимит (GB), переопределяет тариф"
     )
+    admin_lte_granted_at = fields.DatetimeField(
+        null=True,
+        description=(
+            "Момент, когда админ выдал персональную LTE-квоту. Используется "
+            "как anchor для окна квоты в LTE-лимитере (вместо created_at)."
+        ),
+    )
     is_blocked = fields.BooleanField(
         default=False, description="Пользователь заблокировал бота"
     )

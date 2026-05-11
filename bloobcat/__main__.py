@@ -176,6 +176,8 @@ async def _apply_generate_schema_compat_patches(conn) -> None:
             ADD COLUMN IF NOT EXISTS "temp_setup_device_id" INT;
         CREATE UNIQUE INDEX IF NOT EXISTS "uid_users_temp_setup_token"
             ON "users" ("temp_setup_token");
+        ALTER TABLE IF EXISTS "users"
+            ADD COLUMN IF NOT EXISTS "admin_lte_granted_at" TIMESTAMPTZ;
         """
     )
 
