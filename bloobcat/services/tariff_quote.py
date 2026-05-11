@@ -5,6 +5,7 @@ from typing import Any
 
 from fastapi import HTTPException
 
+from bloobcat.db.segment_campaigns import SegmentCampaign
 from bloobcat.db.tariff import Tariffs
 from bloobcat.services.discounts import apply_personal_discount
 from bloobcat.services.subscription_limits import (
@@ -124,6 +125,10 @@ class SubscriptionQuote:
     per_month_text: str
     lte_price_per_gb: float
     discount_id: int | None
+    campaign_discount_rub: int = 0
+    campaign_discount_percent: int = 0
+    campaign_slug: str | None = None
+    campaign_id: int | None = None
 
     def public_dict(self) -> dict[str, Any]:
         return {
@@ -144,6 +149,9 @@ class SubscriptionQuote:
             "ltePriceRub": self.lte_price_rub,
             "totalPriceRub": self.total_price_rub,
             "perMonthText": self.per_month_text,
+            "campaignDiscountRub": self.campaign_discount_rub,
+            "campaignDiscountPercent": self.campaign_discount_percent,
+            "campaignSlug": self.campaign_slug,
         }
 
     def metadata_dict(self) -> dict[str, Any]:
@@ -160,6 +168,9 @@ class SubscriptionQuote:
             "quote_lte_price": int(self.lte_price_rub),
             "quote_total_price": int(self.total_price_rub),
             "quote_per_month_text": self.per_month_text,
+            "quote_campaign_discount_rub": int(self.campaign_discount_rub),
+            "quote_campaign_discount_percent": int(self.campaign_discount_percent),
+            "quote_campaign_slug": self.campaign_slug,
         }
 
 
@@ -184,6 +195,21 @@ def quote_public_dict(quote: SubscriptionQuote, tariff: Tariffs) -> dict[str, An
     return data
 
 
+def _campaign_applies_to_months(
+    campaign: SegmentCampaign | None, months: int
+) -> bool:
+    """Признак того, что кампания распространяется на тариф этой длительности."""
+    if campaign is None:
+        return False
+    applies = list(getattr(campaign, "applies_to_months", None) or [])
+    if not applies:
+        return True
+    try:
+        return int(months) in {int(value) for value in applies}
+    except (TypeError, ValueError):
+        return False
+
+
 async def build_subscription_quote(
     *,
     tariff: Tariffs,
@@ -191,6 +217,7 @@ async def build_subscription_quote(
     device_count: Any = 1,
     lte_gb: Any = 0,
     one_month_reference_tariff: Tariffs | None = None,
+    campaign: SegmentCampaign | None = None,
 ) -> SubscriptionQuote:
     await tariff.sync_effective_pricing_fields()
     normalized_device_count = validate_device_count_for_tariff(tariff, device_count)
@@ -206,12 +233,57 @@ async def build_subscription_quote(
         if full_device_price > 0 and device_discount_rub > 0
         else 0
     )
-    discounted_price_raw, discount_id, discount_percent_raw = await apply_personal_discount(
-        int(user_id), subscription_price, months
+    personal_price_raw, personal_discount_id, personal_percent_raw = (
+        await apply_personal_discount(int(user_id), subscription_price, months)
     )
-    discounted_price = max(0, int(discounted_price_raw))
-    discount_rub = max(0, int(subscription_price) - int(discounted_price))
-    discount_percent = max(0, int(discount_percent_raw or 0)) if discount_rub > 0 else 0
+    personal_price = max(0, int(personal_price_raw))
+    personal_rub = max(0, int(subscription_price) - int(personal_price))
+    personal_percent = (
+        max(0, int(personal_percent_raw or 0)) if personal_rub > 0 else 0
+    )
+
+    candidate_campaign_percent = 0
+    candidate_campaign_rub = 0
+    candidate_campaign_slug: str | None = None
+    candidate_campaign_id: int | None = None
+    if _campaign_applies_to_months(campaign, months) and subscription_price > 0:
+        raw_percent = int(getattr(campaign, "discount_percent", 0) or 0)
+        if raw_percent > 0:
+            candidate_campaign_percent = max(0, min(99, raw_percent))
+            candidate_campaign_rub = int(
+                round(subscription_price * (candidate_campaign_percent / 100.0))
+            )
+            candidate_campaign_slug = getattr(campaign, "slug", None)
+            candidate_campaign_id = getattr(campaign, "id", None)
+
+    # Пользователь получает лучшую из применимых скидок: персональную или
+    # сегментную кампанию. Складывать их нельзя — это может уйти в минус
+    # маржу и обнулить цену. Кампания не «сжигает» персональную скидку,
+    # поэтому при выигрыше кампании discount_id обнуляем; при проигрыше
+    # обнуляем поля campaign_*, чтобы фронт не показывал бейдж "Акция"
+    # рядом с уже применённой персональной скидкой.
+    if candidate_campaign_rub > personal_rub:
+        discounted_price = max(
+            0, int(subscription_price) - int(candidate_campaign_rub)
+        )
+        discount_rub = int(candidate_campaign_rub)
+        discount_percent = int(candidate_campaign_percent)
+        discount_id_value: int | None = None
+        campaign_rub = int(candidate_campaign_rub)
+        campaign_percent = int(candidate_campaign_percent)
+        campaign_slug = candidate_campaign_slug
+        campaign_id = candidate_campaign_id
+    else:
+        discounted_price = personal_price
+        discount_rub = personal_rub
+        discount_percent = personal_percent
+        discount_id_value = (
+            int(personal_discount_id) if personal_discount_id is not None else None
+        )
+        campaign_rub = 0
+        campaign_percent = 0
+        campaign_slug = None
+        campaign_id = None
 
     lte_price_per_gb = (
         float(getattr(tariff, "lte_price_per_gb", 0) or 0.0)
@@ -255,7 +327,11 @@ async def build_subscription_quote(
         total_price_rub=int(total_price),
         per_month_text=f"≈ {per_month} ₽/мес",
         lte_price_per_gb=float(lte_price_per_gb),
-        discount_id=int(discount_id) if discount_id is not None else None,
+        discount_id=discount_id_value,
+        campaign_discount_rub=int(campaign_rub),
+        campaign_discount_percent=int(campaign_percent),
+        campaign_slug=campaign_slug,
+        campaign_id=campaign_id,
     )
 
 
@@ -264,6 +340,7 @@ async def build_duration_offer(
     tariff: Tariffs,
     user_id: int,
     one_month_reference_tariff: Tariffs | None = None,
+    campaign: SegmentCampaign | None = None,
 ) -> dict[str, Any]:
     quote = await build_subscription_quote(
         tariff=tariff,
@@ -271,11 +348,15 @@ async def build_duration_offer(
         device_count=tariff_default_devices(tariff),
         lte_gb=0,
         one_month_reference_tariff=one_month_reference_tariff,
+        campaign=campaign,
     )
     months = int(quote.months)
     title = f"{months} месяц" if months == 1 else f"{months} месяцев"
     validation = quote_validation(tariff)
     badge = getattr(tariff, "storefront_badge", None) or ("выгодно" if months == 12 else None)
+    has_personal_discount = (
+        quote.discount_rub > 0 and quote.campaign_discount_rub == 0
+    )
     return {
         "id": "1month" if months == 1 else f"{months}months",
         "tariffId": int(tariff.id),
@@ -288,7 +369,10 @@ async def build_duration_offer(
         "priceFromRub": int(quote.total_price_rub),
         "priceFromText": f"от {int(quote.total_price_rub)} ₽",
         "originalPriceRub": int(quote.subscription_price_rub) if quote.discount_rub > 0 else None,
-        "personalDiscountPercent": quote.discount_percent if quote.discount_rub > 0 else None,
+        "personalDiscountPercent": quote.discount_percent if has_personal_discount else None,
+        "campaignDiscountRub": int(quote.campaign_discount_rub) if quote.campaign_discount_rub > 0 else None,
+        "campaignDiscountPercent": int(quote.campaign_discount_percent) if quote.campaign_discount_rub > 0 else None,
+        "campaignSlug": quote.campaign_slug,
         "perMonthText": quote.per_month_text,
         "discountText": f"−{quote.duration_discount_percent}%" if quote.duration_discount_percent > 0 else None,
         "discountPercent": quote.duration_discount_percent,
