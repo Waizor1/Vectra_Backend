@@ -9,6 +9,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from tortoise.exceptions import IntegrityError
+from tortoise.expressions import F
 
 from bloobcat.db.error_reports import ErrorReports
 from bloobcat.logger import get_logger
@@ -385,19 +386,25 @@ async def _notify_admin_new_high_severity(
     client.
     """
     try:
-        from bloobcat.bot.notifications.admin import send_admin_message  # late import
+        from bloobcat.bot.notifications.admin import (  # late import
+            _safe_html,
+            send_admin_message,
+        )
     except Exception:
         return
     try:
         emoji = "🟠" if severity == "high" else "🔴"
-        version_part = f" v{app_version}" if app_version else ""
-        snippet = (message or "—").strip().splitlines()[0][:200]
+        version_part = f" v{_safe_html(app_version)}" if app_version else ""
+        snippet_raw = (message or "—").strip().splitlines()[0][:200]
+        # Все client-controlled поля проходят через _safe_html: payload
+        # принимается анонимно, parse_mode="HTML" иначе позволил бы внедрять
+        # теги (вплоть до <a href>) в админский чат.
         text = (
-            f"{emoji} <b>Новая ошибка</b> [{severity}]{version_part}\n"
-            f"<b>Тип:</b> <code>{type_}</code>\n"
-            f"<b>Маршрут:</b> <code>{route or '—'}</code>\n"
-            f"<b>Сообщение:</b> {snippet}\n"
-            f"<b>Fingerprint:</b> <code>{fingerprint[:12]}</code>"
+            f"{emoji} <b>Новая ошибка</b> [{_safe_html(severity)}]{version_part}\n"
+            f"<b>Тип:</b> <code>{_safe_html(type_)}</code>\n"
+            f"<b>Маршрут:</b> <code>{_safe_html(route or '—')}</code>\n"
+            f"<b>Сообщение:</b> {_safe_html(snippet_raw)}\n"
+            f"<b>Fingerprint:</b> <code>{_safe_html(fingerprint[:12])}</code>"
         )
         await send_admin_message(text, parse_mode="HTML")
     except Exception:
@@ -415,27 +422,48 @@ async def _upsert_error_report(*, fingerprint: str, fields: Dict[str, Any]) -> b
     admin notification). Returns False on bump.
     """
     now = datetime.now(timezone.utc)
-    existing = await ErrorReports.filter(fingerprint=fingerprint).first()
-    if existing is not None:
-        existing.occurrences = (existing.occurrences or 0) + 1
-        existing.last_seen_at = now
-        # Refresh the most recent observation snapshot but keep triage history.
-        for key in (
-            "message", "name", "stack", "route", "href", "user_agent", "extra",
-            "app_version", "commit_sha", "bundle_hash",
-            "session_id", "platform", "tg_platform", "tg_version",
-            "viewport_w", "viewport_h", "dpr", "connection_type", "locale",
-            "breadcrumbs", "severity_hint", "request_id",
-            "page_age_ms", "document_ready_state", "document_visibility_state",
-            "online", "save_data", "hardware_concurrency", "device_memory",
-            "js_heap_used_mb", "js_heap_total_mb", "js_heap_limit_mb",
-            "sw_controller", "referrer",
-            "user_id", "event_id", "code", "reported_at",
-        ):
-            if key in fields and fields[key] is not None:
-                setattr(existing, key, fields[key])
-        await existing.save()
-        return False
+    observation_keys = (
+        "message", "name", "stack", "route", "href", "user_agent", "extra",
+        "app_version", "commit_sha", "bundle_hash",
+        "session_id", "platform", "tg_platform", "tg_version",
+        "viewport_w", "viewport_h", "dpr", "connection_type", "locale",
+        "breadcrumbs", "severity_hint", "request_id",
+        "page_age_ms", "document_ready_state", "document_visibility_state",
+        "online", "save_data", "hardware_concurrency", "device_memory",
+        "js_heap_used_mb", "js_heap_total_mb", "js_heap_limit_mb",
+        "sw_controller", "referrer",
+        "user_id", "event_id", "code", "reported_at",
+    )
+    observation_update = {
+        key: fields[key]
+        for key in observation_keys
+        if key in fields and fields[key] is not None
+    }
+    # Атомарный bump через UPDATE WHERE fingerprint: параллельные воркеры
+    # на одинаковом fingerprint не теряют инкременты occurrences
+    # (read-modify-write через .save() терял один из двух bump'ов под
+    # высокой нагрузкой). Fallback на старый read-modify-write путь
+    # сохранён для юнит-тестов с FakeQS, у которых нет QuerySet.update();
+    # в проде Tortoise всегда возвращает реальный QuerySet с update().
+    qs = ErrorReports.filter(fingerprint=fingerprint)
+    update_method = getattr(qs, "update", None)
+    if callable(update_method):
+        bumped = await update_method(
+            occurrences=F("occurrences") + 1,
+            last_seen_at=now,
+            **observation_update,
+        )
+        if bumped:
+            return False
+    else:
+        existing = await qs.first()
+        if existing is not None:
+            existing.occurrences = (existing.occurrences or 0) + 1
+            existing.last_seen_at = now
+            for key, value in observation_update.items():
+                setattr(existing, key, value)
+            await existing.save()
+            return False
 
     fields = dict(fields)
     fields.setdefault("first_seen_at", fields.get("reported_at") or now)
@@ -446,13 +474,25 @@ async def _upsert_error_report(*, fingerprint: str, fields: Dict[str, Any]) -> b
         await ErrorReports.create(**fields)
         return True
     except IntegrityError:
-        # Race: another worker beat us to the INSERT. Re-fetch and bump.
-        existing = await ErrorReports.filter(fingerprint=fingerprint).first()
-        if existing is None:
-            raise
-        existing.occurrences = (existing.occurrences or 0) + 1
-        existing.last_seen_at = now
-        await existing.save()
+        # Race: другой воркер успел INSERT между нашим UPDATE и CREATE.
+        # Повторяем атомарный bump — теперь строка точно существует.
+        retry_qs = ErrorReports.filter(fingerprint=fingerprint)
+        retry_update = getattr(retry_qs, "update", None)
+        if callable(retry_update):
+            await retry_update(
+                occurrences=F("occurrences") + 1,
+                last_seen_at=now,
+                **observation_update,
+            )
+        else:
+            existing = await retry_qs.first()
+            if existing is None:
+                raise
+            existing.occurrences = (existing.occurrences or 0) + 1
+            existing.last_seen_at = now
+            for key, value in observation_update.items():
+                setattr(existing, key, value)
+            await existing.save()
         return False
 
 
@@ -513,17 +553,29 @@ async def report_error(payload: ErrorReportPayload, request: Request) -> Dict[st
         stack=redacted_stack,
     )
 
+    # Поля, не прошедшие redaction до сих пор, но способные нести PII /
+    # runtime-токены (UA embedded WebView, client-controlled name/eventId/
+    # code). Прогоняем через тот же фильтр, что message/stack.
+    redacted_user_agent = (
+        _redact_string(payload.userAgent or "", sensitive_values) or None
+    )
+    redacted_name = _redact_string(payload.name or "", sensitive_values) or None
+    redacted_event_id = (
+        _redact_string(payload.eventId or "", sensitive_values) or None
+    )
+    redacted_code = _redact_string(payload.code or "", sensitive_values) or None
+
     fields: Dict[str, Any] = dict(
         user_id=user_id,
-        event_id=payload.eventId,
-        code=payload.code,
+        event_id=redacted_event_id,
+        code=redacted_code,
         type=payload.type,
         message=redacted_message,
-        name=payload.name,
+        name=redacted_name,
         stack=redacted_stack,
         route=route,
         href=href,
-        user_agent=payload.userAgent,
+        user_agent=redacted_user_agent,
         extra=redacted_extra,
         app_version=payload.appVersion,
         commit_sha=payload.commitSha,

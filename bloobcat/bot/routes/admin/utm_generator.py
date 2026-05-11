@@ -6,7 +6,11 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message
 
+from bloobcat.logger import get_logger
+
 from .functions import IsPartnerOrAdmin
+
+logger = get_logger("bot.admin.utm_generator")
 from bloobcat.bot.bot import get_bot_username
 
 router = Router()
@@ -61,7 +65,7 @@ async def process_utm_source(message: Message, state: FSMContext, bot: Bot):
             parse_mode="HTML",
         )
     except Exception as e:
-        print(f"Error generating UTM link: {e}")
+        logger.exception("Error generating UTM link: %s", e)
         await message.answer("Произошла ошибка при генерации ссылки.")
 
     await state.clear()

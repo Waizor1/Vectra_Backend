@@ -199,7 +199,10 @@ async def resolve_referral_from_start_param(
     if param.startswith(f"{PARTNER_SOURCE_UTM}-"):
         ref_part = param[len(PARTNER_SOURCE_UTM) + 1 :]
         if not ref_part.isdigit():
-            return 0, param
+            # «partner-<не_число>» — невалидный suffix; не сохраняем мусор как utm,
+            # т.к. это значение протекает в campaign-inheritance и попадает в
+            # админский CSV (admin-widgets UTM-stats), что портит когорты.
+            return 0, None
         referrer_id, partner_marker = await _resolve_numeric_referrer(int(ref_part))
         if not referrer_id or not partner_marker:
             return 0, None

@@ -203,10 +203,15 @@ async def lte_usage_limiter_once() -> int:
             if update_fields:
                 await tariff.save(update_fields=update_fields)
 
+            # user.lte_gb_total — это admin-override. Используем его только
+            # когда он действительно положительный, иначе fallback на тариф:
+            # historically для большинства legacy-юзеров поле выставлено в 0
+            # (а не NULL), и трактовать «0» как override означало бы обнулить
+            # квот-лимит тарифа и отключить гейтинг для целой когорты.
+            override_gb = user.lte_gb_total
+            tariff_gb = tariff.lte_gb_total or 0
             total_limit = float(
-                user.lte_gb_total
-                if user.lte_gb_total is not None
-                else (tariff.lte_gb_total or 0)
+                override_gb if (override_gb or 0) > 0 else tariff_gb
             )
             if total_limit > 0:
                 if user.lte_gb_total is None and new_used >= total_limit:
@@ -482,10 +487,15 @@ async def lte_usage_limiter_quick_once(recent_minutes: int = 30) -> int:
             if update_fields:
                 await tariff.save(update_fields=update_fields)
 
+            # user.lte_gb_total — это admin-override. Используем его только
+            # когда он действительно положительный, иначе fallback на тариф:
+            # historically для большинства legacy-юзеров поле выставлено в 0
+            # (а не NULL), и трактовать «0» как override означало бы обнулить
+            # квот-лимит тарифа и отключить гейтинг для целой когорты.
+            override_gb = user.lte_gb_total
+            tariff_gb = tariff.lte_gb_total or 0
             total_limit = float(
-                user.lte_gb_total
-                if user.lte_gb_total is not None
-                else (tariff.lte_gb_total or 0)
+                override_gb if (override_gb or 0) > 0 else tariff_gb
             )
             if total_limit > 0:
                 await _notify_lte_thresholds(
