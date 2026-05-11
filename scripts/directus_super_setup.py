@@ -3571,7 +3571,20 @@ def cleanup_disabled_feature_permissions(client: DirectusClient) -> None:
 
 
 def ensure_insights_dashboard(client: DirectusClient) -> None:
-    # Reuse the existing logic from scripts/directus_insights_setup.py, but inline to keep this script standalone.
+    """Ensure the Insights dashboard container exists; do not manage panels.
+
+    Historically this function also seeded a fixed set of 5 legacy panels
+    (`Всего пользователей`, `Активных тарифов`, `Промокодов использовано`,
+    `Регистрации пользователей (90 дней)`, `Подключения (90 дней)`).
+    The richer, sectioned dashboard is now curated through the Directus
+    admin UI (or one-shot ops scripts), and the legacy `name`-keyed
+    upsert kept resurrecting those tiny tiles on every deploy — they
+    overlapped the current KPI row and visually broke the dashboard.
+
+    Keep the dashboard create idempotent so a fresh environment still
+    gets a working «Главный дашборд» landing, but no longer recreate
+    individual panels here.
+    """
     dashboards = client.get("/dashboards", params={"limit": 200})
     dashboards.raise_for_status()
     existing = next(
@@ -3583,125 +3596,15 @@ def ensure_insights_dashboard(client: DirectusClient) -> None:
         None,
     )
     if existing:
-        dashboard_id = existing["id"]
-    else:
-        created = client.post(
-            "/dashboards",
-            json={
-                "name": "Главный дашборд",
-                "icon": "dashboard",
-                "note": "Ключевые метрики проекта",
-            },
-        )
-        created.raise_for_status()
-        dashboard_id = created.json()["data"]["id"]
-
-    panels = client.get(
-        "/panels", params={"filter[dashboard][_eq]": dashboard_id, "limit": 200}
-    )
-    panels.raise_for_status()
-    existing_panels = {p["name"]: p for p in panels.json().get("data", [])}
-
-    # Only panels based on core collections to avoid brittleness.
-    panel_defs = [
-        {
-            "name": "Всего пользователей",
-            "type": "metric",
-            "icon": "people",
-            "position_x": 1,
-            "position_y": 1,
-            "width": 4,
-            "height": 4,
-            "options": {"collection": "users", "field": "id", "function": "count"},
+        return
+    client.post(
+        "/dashboards",
+        json={
+            "name": "Главный дашборд",
+            "icon": "dashboard",
+            "note": "Ключевые метрики проекта",
         },
-        {
-            "name": "Активных тарифов",
-            "type": "metric",
-            "icon": "subscriptions",
-            "position_x": 5,
-            "position_y": 1,
-            "width": 4,
-            "height": 4,
-            "options": {
-                "collection": "active_tariffs",
-                "field": "id",
-                "function": "count",
-            },
-        },
-        {
-            "name": "Промокодов использовано",
-            "type": "metric",
-            "icon": "confirmation_number",
-            "position_x": 9,
-            "position_y": 1,
-            "width": 4,
-            "height": 4,
-            "options": {
-                "collection": "promo_usages",
-                "field": "id",
-                "function": "count",
-            },
-        },
-        {
-            "name": "Регистрации пользователей (90 дней)",
-            "type": "time-series",
-            "icon": "timeline",
-            "position_x": 1,
-            "position_y": 5,
-            "width": 6,
-            "height": 8,
-            "options": {
-                "collection": "users",
-                "dateField": "registration_date",
-                "valueField": "id",
-                "function": "count",
-                "precision": "day",
-                "range": "90 days",
-                "color": "#3B82F6",
-            },
-        },
-        {
-            "name": "Подключения (90 дней)",
-            "type": "time-series",
-            "icon": "wifi",
-            "position_x": 7,
-            "position_y": 5,
-            "width": 6,
-            "height": 8,
-            "options": {
-                "collection": "connections",
-                "dateField": "at",
-                "valueField": "id",
-                "function": "count",
-                "precision": "day",
-                "range": "90 days",
-                "color": "#10B981",
-            },
-        },
-    ]
-
-    for panel in panel_defs:
-        if panel["name"] in existing_panels:
-            continue
-        payload = {
-            "dashboard": dashboard_id,
-            "name": panel["name"],
-            "icon": panel["icon"],
-            "show_header": True,
-            "type": panel["type"],
-            "position_x": panel["position_x"],
-            "position_y": panel["position_y"],
-            "width": panel["width"],
-            "height": panel["height"],
-            "options": panel["options"],
-        }
-        # Skip panels if referenced collections don't exist yet.
-        collection = panel["options"].get("collection")
-        if collection:
-            exists = client.get(f"/collections/{collection}").status_code == 200
-            if not exists:
-                continue
-        client.post("/panels", json=payload).raise_for_status()
+    ).raise_for_status()
 
 
 def ensure_nav_group_permissions(client: DirectusClient) -> None:
