@@ -303,12 +303,38 @@ async def test_resolve_referral_routes_story_param_to_story_utm_marker():
 
 
 @pytest.mark.asyncio
-async def test_resolve_referral_returns_story_marker_even_when_referrer_unknown():
-    """Unknown / unmaterialized code still tags invite_source='story' on the
-    consumer side — the trial-grant eligibility lives downstream and must not
-    depend on referrer lookup succeeding."""
+async def test_resolve_referral_returns_story_marker_for_well_formed_unknown_code():
+    """A structurally-well-formed code whose referrer we cannot resolve
+    (e.g. user is not yet in the cache) still tags invite_source='story'
+    so the trial-grant branch fires. Real referrer attribution is a
+    "nice to have" for analytics, not a gate on the bonus."""
     from bloobcat.funcs.referral_attribution import resolve_referral_from_start_param
+    from bloobcat.services.story_referral import encoded_story_code_length
 
-    referred_by, utm = await resolve_referral_from_start_param("story_STORYUNKNOWN999XX")
+    # Construct a structurally valid but unknown code: 'STORY' + uppercase
+    # base32 of the right length, but for a user that never materialized.
+    valid_unknown_code = "STORY" + "A" * (encoded_story_code_length() - len("STORY"))
+    referred_by, utm = await resolve_referral_from_start_param(f"story_{valid_unknown_code}")
     assert referred_by == 0
     assert utm == "story"
+
+
+@pytest.mark.asyncio
+async def test_resolve_referral_rejects_malformed_story_code():
+    """P1 guard (daily bug scan 2026-05-12): an attacker fabricating
+    `startapp=story_BADCODE` MUST NOT receive the 20-day story trial.
+    Malformed codes return (0, None) so the registration flow falls
+    through to the regular 10-day trial path."""
+    from bloobcat.funcs.referral_attribution import resolve_referral_from_start_param
+
+    for malformed in (
+        "story_",                                  # empty payload
+        "story_TOOSHORT",                          # below minimum length
+        "story_STORYWITHTRAILINGJUNK_TOOLONG",     # wrong length
+        "story_storylowercaseinstead",             # lowercase fails base32 regex
+        "story_STORY1!@#$%^&*",                    # non-base32 chars
+        "story_NOTSTORYPREFIX12",                  # missing STORY prefix
+    ):
+        referred_by, utm = await resolve_referral_from_start_param(malformed)
+        assert referred_by == 0, f"{malformed!r} returned non-zero referrer"
+        assert utm is None, f"{malformed!r} returned story marker — would grant 20d trial"

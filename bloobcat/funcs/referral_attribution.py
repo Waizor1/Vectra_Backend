@@ -185,13 +185,21 @@ async def resolve_referral_from_start_param(
 
     if param.startswith("story_"):
         # Story-share deep link (Bot API 7.8+). The trial-grant branch keys off
-        # `invite_source == 'story'`, so we deliberately return 'story' as the
-        # utm-like marker even when referrer lookup fails — the new user still
-        # gets the 20-day / 1-device / 1 GB trial. Referrer lookup failures
-        # only degrade analytics ("кто пригласил"), not trial eligibility.
-        from bloobcat.services.story_referral import find_referrer_by_story_code
+        # `invite_source == 'story'`, so we MUST validate the code's HMAC
+        # structure before returning the story marker — otherwise any
+        # attacker can register through `startapp=story_BADCODE` and farm an
+        # unbounded number of 20-day / 1-device / 1 GB trials. Structural
+        # validation is O(1) and does not require a DB hit.
+        from bloobcat.services.story_referral import (
+            find_referrer_by_story_code,
+            is_well_formed_story_code,
+        )
 
         code = param[len("story_"):]
+        if not is_well_formed_story_code(code):
+            # Malformed payload. Treat as no-referral so the new user falls
+            # through to the regular 10-day trial path.
+            return 0, None
         referrer_id = await find_referrer_by_story_code(code) or 0
         return referrer_id, "story"
 
