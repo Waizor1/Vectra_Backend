@@ -35,8 +35,7 @@ class ReferralLevel:
 
 
 REFERRAL_LEVELS: tuple[ReferralLevel, ...] = (
-    ReferralLevel("start", "Старт", 0, 0, "Первый сундук на Бронзе"),
-    ReferralLevel("bronze", "Бронза", 1, 10, "50 ₽ или скидка 10%"),
+    ReferralLevel("bronze", "Бронза", 0, 10, "50 ₽ или скидка 10%"),
     ReferralLevel("silver", "Серебро", 3, 15, "100 ₽ или скидка 15%"),
     ReferralLevel("gold", "Золото", 7, 20, "200 ₽ или скидка 20%"),
     ReferralLevel("platinum", "Платина", 15, 30, "300 ₽ или скидка 25%"),
@@ -129,7 +128,10 @@ async def ensure_referral_level_rewards(
     created: list[ReferralLevelRewards] = []
     count = max(0, int(paid_friends_count or 0))
     for level in REFERRAL_LEVELS:
-        if level.key == "start" or count < level.threshold:
+        # Bronze level is now the baseline (everyone joins at bronze with 10% cashback),
+        # but the bronze chest is still earned: it requires at least one paid friend.
+        # Skip chest creation for users who have not yet earned any paid friend.
+        if count < max(1, level.threshold):
             continue
         try:
             chest = await ReferralLevelRewards.create(

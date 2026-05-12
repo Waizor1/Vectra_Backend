@@ -77,7 +77,7 @@ async def db(_install_stubs_once):
 @pytest.mark.parametrize(
     ("paid_count", "key", "percent"),
     [
-        (0, "start", 0),
+        (0, "bronze", 10),
         (1, "bronze", 10),
         (2, "bronze", 10),
         (3, "silver", 15),
@@ -96,6 +96,25 @@ def test_referral_level_thresholds(paid_count, key, percent):
 
     assert level.key == key
     assert level.cashback_percent == percent
+
+
+def test_referral_levels_baseline_is_bronze_with_ten_percent():
+    """Spec 2026-05-12: 'start' level removed. Bronze is now the baseline
+    (Level 1) with 10% cashback at zero paid friends. Next level is silver."""
+    from bloobcat.services.referral_gamification import (
+        REFERRAL_LEVELS,
+        get_next_referral_level,
+        get_referral_level,
+    )
+
+    assert len(REFERRAL_LEVELS) == 5
+    assert REFERRAL_LEVELS[0].key == "bronze"
+    assert get_referral_level(0).key == "bronze"
+    assert get_referral_level(0).cashback_percent == 10
+
+    next_level = get_next_referral_level(0)
+    assert next_level is not None
+    assert next_level.key == "silver"
 
 
 async def _make_first_payment_pair(*, referrer_id: int = 2001, referred_id: int = 2002, utm=None, partner=False):

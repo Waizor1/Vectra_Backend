@@ -8,6 +8,7 @@ from aiogram.utils.web_app import WebAppUser
 from fastapi import Request
 from tortoise import fields, models
 from tortoise.contrib.pydantic import pydantic_model_creator
+from tortoise.expressions import Q
 
 from bloobcat.bot.notifications.admin import on_activated_bot
 from bloobcat.config import referral_percent
@@ -539,45 +540,74 @@ class Users(models.Model):
         )
         return bool(rows_updated)
 
-    # Story-invite trial: 20 days / 1 device / 1 GB LTE (spec 2026-05-12).
+    # Referral invitee trial bundle (20 days / 1 device / 1 GB LTE).
+    #
+    # Applied to ANY user who arrived via a non-partner referral (story_*, ref_*,
+    # numeric, or any non-partner deep link). Partner / QR flows are excluded —
+    # they have their own economic flow (PartnerEarnings).
     #
     # Differs from the regular trial in three knobs:
     #   1. Duration is 20 days instead of `app_settings.trial_days` (10).
     #   2. `hwid_limit` is forced to 1 (the regular trial inherits from the
     #      global setting, typically 3).
     #   3. `lte_gb_total` is forced to 1 (the regular trial reads from
-    #      `trial_lte_limit_gb` admin setting, currently 1 GB on prod but
-    #      varies). Pinning the number protects the cohort from admin
-    #      drift retroactively widening the bundle.
+    #      `trial_lte_limit_gb` admin setting; pinning the number protects the
+    #      cohort from admin drift retroactively widening the bundle).
     #
     # Anti-abuse: `story_trial_used_at IS NOT NULL` blocks a second grant.
+    # The field is reused as a universal referral-trial sentinel to avoid a
+    # schema migration; semantically it now means "referral-invitee trial used at".
     # The caller is responsible for additionally checking hwid-fingerprint
     # before invoking this method — the hwid layer lives in the RemnaWave
     # boundary, not here.
-    STORY_TRIAL_DAYS = 20
-    STORY_TRIAL_HWID_LIMIT = 1
-    STORY_TRIAL_LTE_GB = 1
+    REFERRAL_INVITE_TRIAL_DAYS = 20
+    REFERRAL_INVITE_HWID_LIMIT = 1
+    REFERRAL_INVITE_LTE_GB = 1
+
+    # Backward-compatible aliases — kept so external imports continue to work.
+    STORY_TRIAL_DAYS = REFERRAL_INVITE_TRIAL_DAYS
+    STORY_TRIAL_HWID_LIMIT = REFERRAL_INVITE_HWID_LIMIT
+    STORY_TRIAL_LTE_GB = REFERRAL_INVITE_LTE_GB
 
     @classmethod
-    async def _grant_story_trial_if_unclaimed(
+    async def _grant_referral_trial_if_unclaimed(
         cls, user_id: int, trial_until: date
     ) -> bool:
+        # Non-partner referral trial: applies to story_*, ref_*, and any
+        # non-partner deep link. Excludes `partner` / `qr_*` flows via utm filter.
+        # NULL utm (typical for plain `ref_<id>` and numeric deep links) must
+        # qualify, hence the explicit `Q(utm__isnull=True) | ...` clause —
+        # a plain `.exclude(utm="partner")` would drop NULL rows under SQL
+        # three-valued logic.
         rows_updated = await cls.filter(
-            id=user_id,
-            expired_at__isnull=True,
-            used_trial=False,
-            invite_source="story",
-            story_trial_used_at__isnull=True,
+            Q(id=user_id)
+            & Q(expired_at__isnull=True)
+            & Q(used_trial=False)
+            & Q(referred_by__isnull=False)
+            & Q(story_trial_used_at__isnull=True)
+            & (
+                # WARNING: the partner / QR exclusion here MUST stay in lockstep with
+                # `is_partner_source_utm()` (bloobcat/funcs/referral_attribution.py). The
+                # call-site in `_ensure_remnawave_user` uses the Python helper; this SQL guard
+                # is a second line of defense. If you broaden `is_partner_source_utm` (e.g.
+                # add `b2b_*`), update this filter too — `test_referral_invitee_bonus.py`
+                # pins the contract.
+                Q(utm__isnull=True)
+                | (~Q(utm="partner") & ~Q(utm__startswith="qr_"))
+            )
         ).update(
             is_trial=True,
             used_trial=True,
             expired_at=trial_until,
             trial_started_at=datetime.now(timezone.utc),
             story_trial_used_at=datetime.now(timezone.utc),
-            hwid_limit=cls.STORY_TRIAL_HWID_LIMIT,
-            lte_gb_total=cls.STORY_TRIAL_LTE_GB,
+            hwid_limit=cls.REFERRAL_INVITE_HWID_LIMIT,
+            lte_gb_total=cls.REFERRAL_INVITE_LTE_GB,
         )
         return bool(rows_updated)
+
+    # Backward-compat alias — kept so external callers do not break.
+    _grant_story_trial_if_unclaimed = _grant_referral_trial_if_unclaimed
 
     async def _ensure_remnawave_user(self) -> bool:
         """
@@ -614,23 +644,42 @@ class Users(models.Model):
                     today = date.today()
                     if expire_at_date is None:
                         if not current_user.used_trial:
-                            # Story-invite trial gets a richer bundle (20d / 1 dev / 1 GB).
-                            # See `_grant_story_trial_if_unclaimed` for the full reasoning.
-                            is_story_invite = (
-                                getattr(current_user, "invite_source", None) == "story"
+                            # Referral-invitee trial gets a richer bundle (20d / 1 dev / 1 GB).
+                            # Applies to any non-partner referral (story_*, ref_*, etc.).
+                            # See `_grant_referral_trial_if_unclaimed` for the full reasoning.
+                            from bloobcat.funcs.referral_attribution import is_partner_source_utm
+                            referred_by_id = int(getattr(current_user, "referred_by", 0) or 0)
+                            # NOTE: pull from `utm` column (campaign tag), not `invite_source`. Partner /
+                            # QR exclusion is driven by the campaign tag, which is what `is_partner_source_utm`
+                            # inspects. The Users model also has an `invite_source` column with different
+                            # semantics ("story"/"manual"); don't conflate them.
+                            utm_value = getattr(current_user, "utm", None)
+
+                            # Defense-in-depth: only grant the rich invitee bundle when the referrer is
+                            # a fully-registered real user. An unregistered referrer is a strong farming
+                            # signal (chains of empty accounts referring each other).
+                            referrer_is_registered = False
+                            if referred_by_id > 0:
+                                referrer_row = await Users.filter(id=referred_by_id).only("id", "is_registered").first()
+                                referrer_is_registered = bool(getattr(referrer_row, "is_registered", False)) if referrer_row else False
+
+                            is_referral_invite = (
+                                referred_by_id > 0
+                                and referrer_is_registered
+                                and not is_partner_source_utm(utm_value)
                                 and getattr(current_user, "story_trial_used_at", None) is None
                             )
-                            if is_story_invite:
+                            if is_referral_invite:
                                 trial_until = today + timedelta(
-                                    days=Users.STORY_TRIAL_DAYS
+                                    days=Users.REFERRAL_INVITE_TRIAL_DAYS
                                 )
-                                trial_granted = await Users._grant_story_trial_if_unclaimed(
+                                trial_granted = await Users._grant_referral_trial_if_unclaimed(
                                     int(current_user.id),
                                     trial_until,
                                 )
                                 if trial_granted:
-                                    current_user.hwid_limit = Users.STORY_TRIAL_HWID_LIMIT
-                                    current_user.lte_gb_total = Users.STORY_TRIAL_LTE_GB
+                                    current_user.hwid_limit = Users.REFERRAL_INVITE_HWID_LIMIT
+                                    current_user.lte_gb_total = Users.REFERRAL_INVITE_LTE_GB
                                     current_user.story_trial_used_at = datetime.now(
                                         timezone.utc
                                     )
@@ -649,10 +698,10 @@ class Users(models.Model):
                                 current_user.used_trial = True
                                 current_user.expired_at = expire_at_date
                                 logger.info(
-                                    "Назначен триал для %s до %s (story=%s)",
+                                    "Назначен триал для %s до %s (referral=%s)",
                                     self.id,
                                     expire_at_date,
-                                    is_story_invite,
+                                    is_referral_invite,
                                 )
                                 try:
                                     await notify_trial_granted(current_user)
