@@ -10,7 +10,9 @@ explicitly.
 
 from __future__ import annotations
 
+import inspect
 import types
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -328,6 +330,69 @@ async def test_start_link_or_merge_raises_for_support_required(monkeypatch):
         await web_auth.start_link_or_merge(current, other, provider="google")
     assert exc_info.value.code == "merge_requires_support"
     assert exc_info.value.status_code == 409
+
+
+# ---------------------------------------------------------------------------
+# Regression coverage for the merge **executor** path. The pre-existing tests
+# only exercised the planner against stubbed summaries; the executor's DB
+# operations (`_move_housekeeping_rows`, `_drop_loser_dependent_rows`) were
+# never invoked from the suite, which is why a broken filter shipped to
+# production and crashed every `/auth/link/merge/confirm` with 500. These
+# tests close that gap with two layers: a model-touch contract test and a
+# static guard against re-importing the offending global model.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_move_housekeeping_rows_only_touches_user_scoped_models(monkeypatch):
+    """`_move_housekeeping_rows` must only operate on models that actually
+    have a `user_id` column. The historical regression was
+    `InAppNotification.filter(user_id=...)` against the global banner
+    template (no such field) — Tortoise raises and the whole transaction
+    aborts. Pin the executor's surface here so any future addition has
+    to be explicit.
+    """
+    remna_delete = AsyncMock(return_value=None)
+    remna_filter_qs = MagicMock()
+    remna_filter_qs.using_db.return_value.delete = remna_delete
+
+    with patch.object(
+        auth_merge.RemnaWaveRetryJobs,
+        "filter",
+        return_value=remna_filter_qs,
+    ) as remna_filter:
+        await auth_merge._move_housekeeping_rows(
+            loser_id=222, winner_id=111, conn=object()
+        )
+
+    remna_filter.assert_called_once_with(user_id=222)
+    remna_filter_qs.using_db.assert_called_once()
+    remna_delete.assert_awaited_once()
+
+
+def test_auth_merge_module_does_not_use_global_banner_model():
+    """`InAppNotification` is the schema for admin-managed in-app banners
+    (no `user_id` column). It must never be imported or invoked inside the
+    merge executor — that exact mistake crashed every merge confirm in
+    production (status 500, stack at `_move_housekeeping_rows`). The
+    docstring intentionally still names the symbol as a warning, so we
+    only flag genuine import or call sites.
+    """
+    src = inspect.getsource(auth_merge)
+    forbidden = (
+        "from bloobcat.db.in_app_notifications",
+        "import InAppNotification",
+        "InAppNotification.filter",
+        "InAppNotification.get",
+        "InAppNotification(",
+    )
+    offenders = [token for token in forbidden if token in src]
+    assert not offenders, (
+        f"auth_merge.py must not reference InAppNotification as code "
+        f"(found: {offenders}). It is a global banner template without a "
+        f"user_id column; per-user notification rows (NotificationView, "
+        f"NotificationMarks) are CASCADE-deleted on Users.delete()."
+    )
 
 
 @pytest.mark.asyncio
