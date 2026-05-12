@@ -77,12 +77,22 @@ def encoded_story_code_length() -> int:
     return len(_STORY_PREFIX) + len(_b32_clean(b"\x00" * _STORY_HMAC_TRUNC_BYTES))
 
 
-def _is_well_formed_story_code(code: str) -> bool:
+def is_well_formed_story_code(code: str) -> bool:
+    """Cheap structural validity check for a story-share code. Public so the
+    start_param resolver can reject malformed codes (e.g. `story_BADCODE`)
+    without touching the DB and without granting the 20d/1dev/1GB story
+    trial to attackers who fabricate arbitrary `story_*` deep links.
+    """
     if not isinstance(code, str):
         return False
     if len(code) != encoded_story_code_length():
         return False
     return bool(_STORY_CODE_REGEX.match(code))
+
+
+# Backwards-compatible private alias for in-module callers that still
+# reference the underscore name.
+_is_well_formed_story_code = is_well_formed_story_code
 
 
 def decode_story_code(code: str, *, candidate_user_ids: Optional[list[int]] = None) -> Optional[int]:
