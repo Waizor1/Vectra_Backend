@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from urllib.parse import parse_qs
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, EmailStr
 from aiogram.utils.web_app import safe_parse_webapp_init_data
@@ -14,6 +14,10 @@ from bloobcat.funcs.referral_attribution import resolve_referral_from_start_para
 from bloobcat.funcs.start_params import is_registration_exception_start_param
 from bloobcat.settings import local_dev_auth_settings, telegram_settings
 from bloobcat.logger import get_logger
+from bloobcat.services.auth_merge import (
+    consume_and_execute_merge,
+    plan_merge,
+)
 from bloobcat.services.web_auth import (
     WebAuthError,
     apply_web_referral_attribution,
@@ -125,6 +129,34 @@ class TelegramLinkCompleteRequest(BaseModel):
 
 class TelegramLinkCompleteResponse(AuthTokenResponse):
     merged: bool = False
+    # When the merge needs the user's explicit confirmation, the response
+    # carries a one-shot token + plan summary instead of an access token.
+    # The frontend then shows the merge dialog and posts to
+    # `/auth/link/merge/confirm` with the token.
+    outcome: str = "no_conflict"
+    requiresConfirmation: bool = False
+    mergeToken: str | None = None
+    mergeTokenExpiresIn: int | None = None
+    plan: dict | None = None
+
+
+class MergeConfirmRequest(BaseModel):
+    mergeToken: str
+
+
+class MergeConfirmResponse(AuthTokenResponse):
+    merged: bool = True
+    plan: dict | None = None
+
+
+class MergePreviewRequest(BaseModel):
+    mergeToken: str
+
+
+class MergePreviewResponse(BaseModel):
+    mergeToken: str
+    expiresIn: int
+    plan: dict
 
 
 class IdentityListResponse(BaseModel):
@@ -376,10 +408,14 @@ async def oauth_callback(provider: str, request: Request):
     if not code or not state:
         return RedirectResponse(frontend_callback_url(error="missing_oauth_payload"))
     try:
-        ticket, return_to = await handle_oauth_callback(
+        ticket, return_to, merge_token = await handle_oauth_callback(
             oauth_provider, code, state, request=request
         )
-        return RedirectResponse(frontend_callback_url(ticket=ticket, return_to=return_to))
+        return RedirectResponse(
+            frontend_callback_url(
+                ticket=ticket, return_to=return_to, merge_token=merge_token
+            )
+        )
     except WebAuthError as exc:
         await audit_auth_event(
             action="oauth_callback",
@@ -493,18 +529,169 @@ async def telegram_link_complete(
         raise HTTPException(status_code=400, detail="Missing initData")
     user_data = await _parse_telegram_init_data(init_data, request)
     try:
-        target_user, merged = await complete_telegram_link(
+        outcome = await complete_telegram_link(
             user, payload.linkToken.strip(), user_data.user
-        )
-        token, ttl = issue_access_token_for_user(target_user)
-        return TelegramLinkCompleteResponse(
-            accessToken=token,
-            expiresIn=ttl,
-            was_just_created=False,
-            merged=merged,
         )
     except WebAuthError as exc:
         raise_http_from_web_auth(exc)
+    if outcome["outcome"] == "confirm_required":
+        return TelegramLinkCompleteResponse(
+            accessToken="",
+            expiresIn=0,
+            was_just_created=False,
+            merged=False,
+            outcome="confirm_required",
+            requiresConfirmation=True,
+            mergeToken=outcome["mergeToken"],
+            mergeTokenExpiresIn=outcome.get("expiresIn"),
+            plan=outcome.get("plan"),
+        )
+    target_user_id = int(outcome.get("userId") or user.id)
+    target_user = await Users.get(id=target_user_id)
+    token, ttl = issue_access_token_for_user(target_user)
+    merged = outcome["outcome"] == "auto_merge"
+    return TelegramLinkCompleteResponse(
+        accessToken=token,
+        expiresIn=ttl,
+        was_just_created=False,
+        merged=merged,
+        outcome=outcome["outcome"],
+        requiresConfirmation=False,
+        mergeToken=None,
+        mergeTokenExpiresIn=None,
+        plan=outcome.get("plan"),
+    )
+
+
+@router.post("/link/merge/preview", response_model=MergePreviewResponse)
+async def merge_preview(
+    payload: MergePreviewRequest,
+    request: Request,
+    response: Response,
+    user: Users = Depends(validate),
+) -> MergePreviewResponse:
+    """Resolve a previously issued merge token to its plan summary.
+
+    Read-only: does NOT consume the token. The frontend calls this after
+    landing on `/account/security?confirmMerge=<token>` so it can show the
+    comparison dialog before the user commits. POST is used (not GET) so
+    the token never appears in browser history, server access logs, or
+    Referer headers; the same response sets `Cache-Control: no-store` and
+    `Referrer-Policy: no-referrer` for defense in depth.
+
+    On a stale or out-of-band token we audit a failure event so support
+    has a trail of "user tried to confirm but the token was invalid".
+    """
+    from bloobcat.services.web_auth import hash_secret, now_utc
+    from bloobcat.db.auth import AuthMergePreviewToken
+
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Referrer-Policy"] = "no-referrer"
+
+    raw_token = (payload.mergeToken or "").strip()
+    if not raw_token:
+        raise HTTPException(status_code=400, detail="Missing token")
+    row = await AuthMergePreviewToken.get_or_none(token_hash=hash_secret(raw_token))
+    if (
+        row is None
+        or row.consumed_at is not None
+        or row.expires_at <= now_utc()
+        or int(row.initiated_by_user_id) != int(user.id)
+    ):
+        await audit_auth_event(
+            action="merge_preview",
+            result="invalid_token",
+            user_id=int(user.id),
+            request=request,
+        )
+        raise HTTPException(status_code=400, detail="invalid_merge_token")
+    winner_user = await Users.get_or_none(id=int(row.winner_user_id))
+    loser_user = await Users.get_or_none(id=int(row.loser_user_id))
+    if winner_user is None or loser_user is None:
+        await audit_auth_event(
+            action="merge_preview",
+            result="user_missing",
+            user_id=int(user.id),
+            request=request,
+        )
+        raise HTTPException(status_code=400, detail="invalid_merge_token")
+    plan = await plan_merge(
+        winner_user, loser_user, provider=str(row.provider)
+    )
+    # If the re-plan would no longer offer a confirmable merge (loser
+    # gained value, role flipped, or somebody bought a sub between
+    # preview-issue and now), refuse with a stable code so the dialog can
+    # show the support copy or kick off the link flow again.
+    if plan.outcome != "confirm_required":
+        await audit_auth_event(
+            action="merge_preview",
+            result="state_changed",
+            user_id=int(user.id),
+            reason=plan.outcome,
+            request=request,
+        )
+        raise HTTPException(status_code=409, detail="merge_state_changed")
+    await audit_auth_event(
+        action="merge_preview",
+        result="success",
+        provider=str(row.provider),
+        user_id=int(user.id),
+        request=request,
+    )
+    expires_in = max(
+        0, int((row.expires_at - now_utc()).total_seconds())
+    )
+    return MergePreviewResponse(
+        mergeToken=raw_token,
+        expiresIn=expires_in,
+        plan=plan.to_dict(),
+    )
+
+
+@router.post("/link/merge/confirm", response_model=MergeConfirmResponse)
+async def merge_confirm(
+    payload: MergeConfirmRequest,
+    request: Request,
+    user: Users = Depends(validate),
+) -> MergeConfirmResponse:
+    """Consume a merge token and execute the merge transaction.
+
+    `consume_and_execute_merge` keeps token consumption and identity
+    moves in the same DB transaction, so a merge that fails inside the
+    SELECT FOR UPDATE re-plan (loser raced to gain value, role flipped,
+    user row vanished) leaves the token usable until it expires — the
+    user can retry with the same dialog instead of being stuck on a
+    burned token.
+    """
+    raw_token = (payload.mergeToken or "").strip()
+    try:
+        winner_user = await consume_and_execute_merge(
+            raw_token, expected_initiator_id=int(user.id)
+        )
+    except WebAuthError as exc:
+        await audit_auth_event(
+            action="merge_confirm",
+            result="failed",
+            user_id=int(user.id),
+            reason=exc.code,
+            request=request,
+        )
+        raise_http_from_web_auth(exc)
+    await audit_auth_event(
+        action="merge_confirm",
+        result="success",
+        user_id=int(winner_user.id),
+        reason=f"winner={int(winner_user.id)}",
+        request=request,
+    )
+    access_token, ttl = issue_access_token_for_user(winner_user)
+    return MergeConfirmResponse(
+        accessToken=access_token,
+        expiresIn=ttl,
+        was_just_created=False,
+        merged=True,
+        plan=None,
+    )
 
 
 @router.post("/complete-registration", response_model=AuthTokenResponse)
