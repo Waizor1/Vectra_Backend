@@ -197,6 +197,18 @@ async def _apply_generate_schema_compat_patches(conn) -> None:
             ADD COLUMN IF NOT EXISTS "story_trial_used_at" TIMESTAMPTZ;
         ALTER TABLE IF EXISTS "users"
             ADD COLUMN IF NOT EXISTS "story_code" VARCHAR(32);
+        ALTER TABLE IF EXISTS "users"
+            ADD COLUMN IF NOT EXISTS "happ_cryptolink_v5" TEXT;
+        ALTER TABLE IF EXISTS "users"
+            ADD COLUMN IF NOT EXISTS "happ_cryptolink_v5_at" TIMESTAMPTZ;
+        ALTER TABLE IF EXISTS "user_devices"
+            ADD COLUMN IF NOT EXISTS "happ_cryptolink_v5" TEXT;
+        ALTER TABLE IF EXISTS "user_devices"
+            ADD COLUMN IF NOT EXISTS "happ_cryptolink_v5_at" TIMESTAMPTZ;
+        ALTER TABLE IF EXISTS "family_members"
+            ADD COLUMN IF NOT EXISTS "happ_cryptolink_v5" TEXT;
+        ALTER TABLE IF EXISTS "family_members"
+            ADD COLUMN IF NOT EXISTS "happ_cryptolink_v5_at" TIMESTAMPTZ;
         """
     )
     # Index creation is deliberately split out so it can run with

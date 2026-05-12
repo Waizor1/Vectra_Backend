@@ -10,6 +10,10 @@ class FamilyMembers(models.Model):
     status = fields.CharField(max_length=24, default="active")
     created_at = fields.DatetimeField(auto_now_add=True)
     updated_at = fields.DatetimeField(auto_now=True)
+    # Кэш crypt5 happ://-линка для участника семьи (если ему отдаётся отдельная
+    # подписочная ссылка). Refresh не чаще чем раз в TTL.
+    happ_cryptolink_v5 = fields.TextField(null=True)
+    happ_cryptolink_v5_at = fields.DatetimeField(null=True)
 
     class Meta:
         table = "family_members"

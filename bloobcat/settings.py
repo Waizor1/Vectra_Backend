@@ -184,6 +184,13 @@ class RemnaWaveSettings(BaseSettings):
     lte_internal_squad_uuid: str | None = None
     # Маркер LTE-нод в названии (например, CHTF)
     lte_node_marker: str = "CHTF"
+    # Публичный API Happ для шифрования raw subscriptionUrl в happ:// (crypt5).
+    # Fallback на панельный /api/system/tools/happ/encrypt (crypt4) выполняется
+    # внутри ToolsAPI.encrypt_happ_crypto_link при ошибке этого endpoint.
+    happ_crypto_api_url: str = "https://crypto.happ.su/api-v2.php"
+    happ_crypto_api_timeout_seconds: float = 10.0
+    # TTL DB-кэша зашифрованного crypt5-линка (на Users/UserDevice).
+    happ_crypto_cache_ttl_hours: int = 24
 
     @field_validator("url")
     @classmethod
