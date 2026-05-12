@@ -235,27 +235,29 @@ async def test_grant_story_trial_sets_20_days_1_device_1gb():
         full_name="story-invitee",
         invite_source="story",
         invited_by_referrer_id=200001,
+        referred_by=200001,
+        utm="story",
     )
-    trial_until = date.today() + timedelta(days=Users.STORY_TRIAL_DAYS)
-    granted = await Users._grant_story_trial_if_unclaimed(user.id, trial_until)
+    trial_until = date.today() + timedelta(days=Users.REFERRAL_INVITE_TRIAL_DAYS)
+    granted = await Users._grant_referral_trial_if_unclaimed(user.id, trial_until)
     assert granted is True
 
     refreshed = await Users.get(id=user.id)
     assert refreshed.is_trial is True
     assert refreshed.used_trial is True
     assert refreshed.expired_at == trial_until
-    assert refreshed.hwid_limit == Users.STORY_TRIAL_HWID_LIMIT == 1
-    assert refreshed.lte_gb_total == Users.STORY_TRIAL_LTE_GB == 1
+    assert refreshed.hwid_limit == Users.REFERRAL_INVITE_HWID_LIMIT == 1
+    assert refreshed.lte_gb_total == Users.REFERRAL_INVITE_LTE_GB == 1
     assert refreshed.story_trial_used_at is not None
 
 
 @pytest.mark.asyncio
-async def test_grant_story_trial_skipped_when_invite_source_missing():
+async def test_grant_story_trial_skipped_when_referred_by_missing():
     from bloobcat.db.users import Users
 
-    # invite_source NULL — must not match.
+    # No referred_by — organic / direct signup must not match the referral-invitee bundle.
     user = await Users.create(id=300002, full_name="no-source")
-    granted = await Users._grant_story_trial_if_unclaimed(
+    granted = await Users._grant_referral_trial_if_unclaimed(
         user.id, date.today() + timedelta(days=20)
     )
     assert granted is False
@@ -277,9 +279,11 @@ async def test_grant_story_trial_blocked_once_used_at_is_set():
         id=300003,
         full_name="repeat-attempt",
         invite_source="story",
+        referred_by=200001,
+        utm="story",
         story_trial_used_at=datetime.now(timezone.utc),
     )
-    granted = await Users._grant_story_trial_if_unclaimed(
+    granted = await Users._grant_referral_trial_if_unclaimed(
         user.id, date.today() + timedelta(days=20)
     )
     assert granted is False
