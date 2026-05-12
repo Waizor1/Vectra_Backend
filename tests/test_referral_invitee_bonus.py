@@ -294,3 +294,97 @@ async def test_used_trial_blocks_invitee_bundle_for_legacy_user():
     refreshed = await Users.get(id=invitee.id)
     assert refreshed.story_trial_used_at is None  # still unclaimed
     assert refreshed.lte_gb_total != 1  # bundle NOT applied
+
+
+async def _seed_recent_rich_grants(
+    referrer_id: int,
+    count: int,
+    *,
+    base_invitee_id: int,
+    granted_at: datetime,
+) -> None:
+    """Helper: seed `count` invitees already credited with the rich bundle
+    (story_trial_used_at = granted_at) for the given referrer."""
+    from bloobcat.db.users import Users
+
+    for offset in range(count):
+        await Users.create(
+            id=base_invitee_id + offset,
+            full_name=f"recent-invitee-{offset}",
+            is_registered=True,
+            referred_by=referrer_id,
+            utm=None,
+            story_trial_used_at=granted_at,
+        )
+
+
+@pytest.mark.asyncio
+async def test_velocity_cap_returns_true_below_threshold():
+    """Cap helper returns True when the referrer has < cap recent grants."""
+    from bloobcat.db.users import Users
+
+    await _create_referrer(user_id=10701)
+    await _seed_recent_rich_grants(
+        referrer_id=10701,
+        count=Users.REFERRAL_RICH_BUNDLE_CAP_PER_WINDOW - 1,
+        base_invitee_id=10710,
+        granted_at=datetime.now(timezone.utc) - timedelta(hours=1),
+    )
+
+    assert await Users._referrer_within_velocity_cap(10701) is True
+
+
+@pytest.mark.asyncio
+async def test_velocity_cap_returns_false_at_threshold():
+    """Cap helper returns False once the referrer reaches the cap in-window."""
+    from bloobcat.db.users import Users
+
+    await _create_referrer(user_id=10801)
+    await _seed_recent_rich_grants(
+        referrer_id=10801,
+        count=Users.REFERRAL_RICH_BUNDLE_CAP_PER_WINDOW,
+        base_invitee_id=10810,
+        granted_at=datetime.now(timezone.utc) - timedelta(hours=1),
+    )
+
+    assert await Users._referrer_within_velocity_cap(10801) is False
+
+
+@pytest.mark.asyncio
+async def test_velocity_cap_excludes_grants_outside_window():
+    """Grants older than the window do not count — viral referrers that
+    legitimately invite over weeks stay under the cap."""
+    from bloobcat.db.users import Users
+
+    await _create_referrer(user_id=10901)
+    # Seed cap + 5 old grants well outside the 24h window.
+    await _seed_recent_rich_grants(
+        referrer_id=10901,
+        count=Users.REFERRAL_RICH_BUNDLE_CAP_PER_WINDOW + 5,
+        base_invitee_id=10910,
+        granted_at=datetime.now(timezone.utc) - timedelta(
+            hours=Users.REFERRAL_RICH_BUNDLE_WINDOW_HOURS + 2
+        ),
+    )
+
+    assert await Users._referrer_within_velocity_cap(10901) is True
+
+
+@pytest.mark.asyncio
+async def test_velocity_cap_scoped_to_specific_referrer():
+    """Other referrers' grants do not consume this referrer's quota."""
+    from bloobcat.db.users import Users
+
+    await _create_referrer(user_id=11001)
+    await _create_referrer(user_id=11002)
+
+    # Saturate referrer 11002 — should not affect 11001.
+    await _seed_recent_rich_grants(
+        referrer_id=11002,
+        count=Users.REFERRAL_RICH_BUNDLE_CAP_PER_WINDOW,
+        base_invitee_id=11010,
+        granted_at=datetime.now(timezone.utc) - timedelta(hours=1),
+    )
+
+    assert await Users._referrer_within_velocity_cap(11001) is True
+    assert await Users._referrer_within_velocity_cap(11002) is False

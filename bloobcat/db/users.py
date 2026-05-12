@@ -564,6 +564,16 @@ class Users(models.Model):
     REFERRAL_INVITE_HWID_LIMIT = 1
     REFERRAL_INVITE_LTE_GB = 1
 
+    # Velocity cap (spec 2026-05-12 follow-up): limit rich-bundle grants per
+    # referrer per rolling window to deter bulk trial-farming where one
+    # referrer attracts dozens of fresh Telegram accounts in a short period.
+    # Legitimate viral referrals stay comfortably under the cap (most real
+    # users invite ≤5 friends per day). When the cap is tripped, the invitee
+    # still gets *a* trial — just the regular 10-day one without the LTE
+    # upgrade. The grant is denied, not the user.
+    REFERRAL_RICH_BUNDLE_CAP_PER_WINDOW = 20
+    REFERRAL_RICH_BUNDLE_WINDOW_HOURS = 24
+
     # Backward-compatible aliases — kept so external imports continue to work.
     STORY_TRIAL_DAYS = REFERRAL_INVITE_TRIAL_DAYS
     STORY_TRIAL_HWID_LIMIT = REFERRAL_INVITE_HWID_LIMIT
@@ -608,6 +618,29 @@ class Users(models.Model):
 
     # Backward-compat alias — kept so external callers do not break.
     _grant_story_trial_if_unclaimed = _grant_referral_trial_if_unclaimed
+
+    @classmethod
+    async def _referrer_within_velocity_cap(cls, referrer_id: int) -> bool:
+        """Returns True if the referrer has issued fewer than the cap of rich
+        invitee bundles in the last `REFERRAL_RICH_BUNDLE_WINDOW_HOURS`. False
+        means the cap is tripped and the caller should fall back to the
+        regular trial path.
+
+        Approximate by design: a small race window between count and grant
+        can leak a few extra grants under bursty parallel signups. Cap is
+        generous (20 / 24h) so the leakage cost is negligible compared to
+        the cost of strict locking.
+        """
+        if referrer_id <= 0:
+            return True
+        cutoff = datetime.now(timezone.utc) - timedelta(
+            hours=cls.REFERRAL_RICH_BUNDLE_WINDOW_HOURS
+        )
+        recent_grants = await cls.filter(
+            referred_by=referrer_id,
+            story_trial_used_at__gte=cutoff,
+        ).count()
+        return recent_grants < cls.REFERRAL_RICH_BUNDLE_CAP_PER_WINDOW
 
     async def _ensure_remnawave_user(self) -> bool:
         """
@@ -669,7 +702,25 @@ class Users(models.Model):
                                 and not is_partner_source_utm(utm_value)
                                 and getattr(current_user, "story_trial_used_at", None) is None
                             )
+
+                            # Velocity cap: only relevant when we would otherwise grant the
+                            # rich bundle. Falling back to the regular trial preserves UX —
+                            # the new user still receives *a* trial, just without the 20d/1GB
+                            # upgrade. Cap-tripped events are warning-level for ops visibility.
+                            referrer_within_cap = True
                             if is_referral_invite:
+                                referrer_within_cap = await Users._referrer_within_velocity_cap(
+                                    referred_by_id
+                                )
+                                if not referrer_within_cap:
+                                    logger.warning(
+                                        "Referral velocity cap tripped for referrer=%s; "
+                                        "invitee %s falls back to regular trial",
+                                        referred_by_id,
+                                        current_user.id,
+                                    )
+
+                            if is_referral_invite and referrer_within_cap:
                                 trial_until = today + timedelta(
                                     days=Users.REFERRAL_INVITE_TRIAL_DAYS
                                 )
@@ -698,10 +749,11 @@ class Users(models.Model):
                                 current_user.used_trial = True
                                 current_user.expired_at = expire_at_date
                                 logger.info(
-                                    "Назначен триал для %s до %s (referral=%s)",
+                                    "Назначен триал для %s до %s (referral=%s, velocity_capped=%s)",
                                     self.id,
                                     expire_at_date,
                                     is_referral_invite,
+                                    is_referral_invite and not referrer_within_cap,
                                 )
                                 try:
                                     await notify_trial_granted(current_user)
