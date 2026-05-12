@@ -931,6 +931,16 @@ async def test_telegram_oauth_link_uses_planner_and_redirects_with_merge_token(m
     async def _audit(**_kwargs):
         return None
 
+    async def _ticket(_user):
+        # Hotfix 1.58.1: when the OAuth callback in link mode needs a
+        # confirm step, the backend must also issue a login ticket so the
+        # external browser tab (where the OAuth callback lands) can
+        # hydrate its bearer before calling `mergePreview` — otherwise
+        # the request goes out unauthenticated, the backend returns 403
+        # "Invalid token" and the frontend's stale-token handler logs
+        # the user out in a loop.
+        return "browser-hydration-ticket"
+
     monkeypatch.setattr(web_auth, "provider_is_enabled", lambda provider: provider == "telegram")
     monkeypatch.setattr(
         web_auth,
@@ -943,12 +953,13 @@ async def test_telegram_oauth_link_uses_planner_and_redirects_with_merge_token(m
     monkeypatch.setattr(web_auth, "ensure_telegram_identity", _ensure_telegram)
     monkeypatch.setattr(web_auth, "start_link_or_merge", _planner)
     monkeypatch.setattr(web_auth, "audit_auth_event", _audit)
+    monkeypatch.setattr(web_auth, "create_login_ticket", _ticket)
 
     ticket, return_to, merge_token = await web_auth.handle_oauth_callback(
         "telegram", "code", "state"
     )
 
-    assert ticket is None
+    assert ticket == "browser-hydration-ticket"
     assert merge_token == "preview-tok-42"
     assert return_to == "/account/security"
 

@@ -1041,7 +1041,20 @@ async def handle_oauth_callback(
                 request=request,
             )
             if outcome["outcome"] == "confirm_required":
-                return None, state_row.return_to, outcome["mergeToken"]
+                # The OAuth callback redirect lands the user in their
+                # **default browser**, not in the Telegram Mini App that
+                # initiated the link. Without a ticket the browser tab
+                # has no bearer for the initiator, so the merge dialog's
+                # `mergePreview` POST is rejected with `403 "Invalid
+                # token"` — which the frontend's `isStaleTokenError`
+                # treats as a stale-token signal, clears `AUTH_TOKEN_KEY`
+                # and bounces the user to the login screen, looping.
+                # Issue a fresh login ticket alongside the merge token so
+                # `AuthCallbackScreen` can hydrate the browser session
+                # *first*, then transition to the confirm dialog with a
+                # valid bearer.
+                ticket = await create_login_ticket(user)
+                return ticket, state_row.return_to, outcome["mergeToken"]
             # no_conflict — provider already on the same user. Issue a
             # fresh login ticket on the unchanged account.
             winner_user = await Users.get(id=audit_winner)
