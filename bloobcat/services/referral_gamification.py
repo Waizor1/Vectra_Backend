@@ -36,10 +36,10 @@ class ReferralLevel:
 
 REFERRAL_LEVELS: tuple[ReferralLevel, ...] = (
     ReferralLevel("bronze", "Бронза", 0, 10, "50 ₽ или скидка 10%"),
-    ReferralLevel("silver", "Серебро", 3, 15, "100 ₽ или скидка 15%"),
-    ReferralLevel("gold", "Золото", 7, 20, "200 ₽ или скидка 20%"),
-    ReferralLevel("platinum", "Платина", 15, 30, "300 ₽ или скидка 25%"),
-    ReferralLevel("diamond", "Алмаз", 30, 40, "500 ₽ или скидка 30%"),
+    ReferralLevel("silver", "Серебро", 1, 15, "100 ₽ или скидка 15%"),
+    ReferralLevel("gold", "Золото", 3, 20, "200 ₽ или скидка 20%"),
+    ReferralLevel("platinum", "Платина", 6, 30, "300 ₽ или скидка 25%"),
+    ReferralLevel("diamond", "Алмаз", 9, 40, "500 ₽ или скидка 30%"),
 )
 
 CHEST_REWARD_BY_LEVEL: dict[str, dict[str, int]] = {
