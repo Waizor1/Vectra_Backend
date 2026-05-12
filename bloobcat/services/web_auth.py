@@ -135,6 +135,9 @@ PUBLIC_WEB_AUTH_ERROR_MESSAGES: dict[str, str] = {
     "identity_not_found": "Этот способ входа уже не подключён.",
     "cannot_unlink_primary_telegram": "Основной Telegram-вход нельзя отключить.",
     "merge_requires_support": "Автоматически объединить эти аккаунты нельзя. Напишите в поддержку.",
+    "merge_confirmation_required": "Нужно подтвердить объединение аккаунтов.",
+    "invalid_merge_token": "Срок подтверждения истёк, повторите шаг.",
+    "merge_state_changed": "Состояние аккаунтов изменилось. Откройте подключение заново.",
 }
 
 
@@ -280,11 +283,18 @@ def oauth_callback_url(provider: OAuthProvider) -> str:
     return f"{_public_base_url()}/auth/oauth/{provider}/callback"
 
 
-def frontend_callback_url(ticket: str | None = None, error: str | None = None, return_to: str | None = None) -> str:
+def frontend_callback_url(
+    ticket: str | None = None,
+    error: str | None = None,
+    return_to: str | None = None,
+    merge_token: str | None = None,
+) -> str:
     base = (oauth_settings.frontend_app_url or "").rstrip("/") or "/"
     query: dict[str, str] = {}
     if ticket:
         query["ticket"] = ticket
+    if merge_token:
+        query["mergeToken"] = merge_token
     if error:
         query["error"] = error
     if return_to:
@@ -959,7 +969,22 @@ async def exchange_login_ticket(ticket: str) -> tuple[Users, str, int]:
     return user, token, ttl
 
 
-async def handle_oauth_callback(provider: OAuthProvider, code: str, state: str, request: Request | None = None) -> tuple[str, str | None]:
+async def handle_oauth_callback(
+    provider: OAuthProvider,
+    code: str,
+    state: str,
+    request: Request | None = None,
+) -> tuple[str | None, str | None, str | None]:
+    """Process the OAuth callback.
+
+    Returns ``(ticket, return_to, merge_token)``:
+    * In normal flows ``ticket`` is a one-shot login ticket and
+      ``merge_token`` is ``None``.
+    * When the link flow detects another account on the same provider that
+      can be merged with confirmation, ``ticket`` is ``None`` and
+      ``merge_token`` carries the preview-token that the frontend exchanges
+      for a confirm dialog.
+    """
     config = get_provider_config(provider)
     if not provider_is_enabled(provider) or config is None:
         raise WebAuthError("provider_disabled", status_code=404)
@@ -972,23 +997,67 @@ async def handle_oauth_callback(provider: OAuthProvider, code: str, state: str, 
         user = await Users.get_or_none(id=state_row.linking_user_id)
         if not user:
             raise WebAuthError("user_not_found", status_code=403)
+        other_user: Users | None = None
         if provider == "telegram":
-            user, merged = await merge_source_user_into_telegram_user(
-                user,
-                _telegram_user_from_profile(profile),
-            )
-            audit_reason = "merged" if merged else "linked"
+            other_user = await Users.get_or_none(id=int(profile.subject))
+            if other_user is None:
+                # No collision: first-time Telegram link onto a web account.
+                # Just attach the identity and exit early via the ticket path.
+                telegram_user = _telegram_user_from_profile(profile)
+                await ensure_telegram_identity(user, telegram_user)
+                audit_reason = "linked"
+                await audit_auth_event(
+                    action="oauth_link",
+                    result="success",
+                    provider=provider,
+                    user_id=int(user.id),
+                    reason=audit_reason,
+                    request=request,
+                )
+                ticket = await create_login_ticket(user)
+                return ticket, state_row.return_to, None
         else:
-            await ensure_identity_for_user(user, profile)
-            audit_reason = "linked"
+            existing_identity = await AuthIdentity.get_or_none(
+                provider=profile.provider, provider_subject=profile.subject
+            )
+            if existing_identity is not None and int(existing_identity.user_id) != int(user.id):
+                other_user = await Users.get_or_none(id=int(existing_identity.user_id))
+        if other_user is not None and int(other_user.id) != int(user.id):
+            outcome = await start_link_or_merge(
+                user, other_user, provider=str(provider)
+            )
+            # Capture both sides of the merge in the audit row before the
+            # confirm step potentially deletes the loser. Reason format:
+            # `<outcome>|winner=<id>|loser=<id>` so post-mortem queries can
+            # reconstruct who absorbed whom even after the row is gone.
+            audit_winner = int(outcome.get("userId") or user.id)
+            audit_loser = int(other_user.id)
+            await audit_auth_event(
+                action="oauth_link",
+                result="success",
+                provider=provider,
+                user_id=int(user.id),
+                reason=f"{outcome['outcome']}|winner={audit_winner}|loser={audit_loser}",
+                request=request,
+            )
+            if outcome["outcome"] == "confirm_required":
+                return None, state_row.return_to, outcome["mergeToken"]
+            # no_conflict — provider already on the same user. Issue a
+            # fresh login ticket on the unchanged account.
+            winner_user = await Users.get(id=audit_winner)
+            ticket = await create_login_ticket(winner_user)
+            return ticket, state_row.return_to, None
+        await ensure_identity_for_user(user, profile)
         await audit_auth_event(
             action="oauth_link",
             result="success",
             provider=provider,
             user_id=int(user.id),
-            reason=audit_reason,
+            reason="linked",
             request=request,
         )
+        ticket = await create_login_ticket(user)
+        return ticket, state_row.return_to, None
     else:
         if provider == "telegram":
             user, created = await get_or_create_telegram_user_for_profile(profile)
@@ -1041,7 +1110,7 @@ async def handle_oauth_callback(provider: OAuthProvider, code: str, state: str, 
             request=request,
         )
     ticket = await create_login_ticket(user)
-    return ticket, state_row.return_to
+    return ticket, state_row.return_to, None
 
 
 async def ensure_telegram_identity(user: Users, telegram_user: Any) -> None:
@@ -1086,45 +1155,61 @@ async def _ensure_telegram_user_for_identity(telegram_user: Any) -> Users:
     return created_user
 
 
-async def merge_source_user_into_telegram_user(source_user: Users, telegram_user: Any) -> tuple[Users, bool]:
-    telegram_id = int(telegram_user.id)
-    target_user = await Users.get_or_none(id=telegram_id)
+async def start_link_or_merge(
+    current_user: Users,
+    other_user: Users,
+    *,
+    provider: str,
+) -> dict[str, Any]:
+    """Single entry point for "link this provider to my account, merging the
+    second account if it's empty or trial-only".
 
-    if target_user is not None and int(target_user.id) == int(source_user.id):
-        await ensure_telegram_identity(target_user, telegram_user)
-        return target_user, False
+    Returns a serialisable payload that routes can hand straight to the
+    frontend. Possible shapes:
 
-    if not is_web_user_id(source_user.id):
+    * `{"outcome": "no_conflict", "userId": <current>, "plan": {...}}` — both
+      sides are the same user; nothing to do.
+    * `{"outcome": "confirm_required", "mergeToken": "...",
+      "expiresIn": 300, "plan": {...}}` — show the comparison dialog, then
+      POST `/auth/link/merge/confirm` with the token. This branch covers
+      both the "loser is empty" and the "loser has trial state" cases — the
+      planner's auto-merge tier is still tracked in `plan.outcome` so the
+      UI can dim the forfeit list, but the dialog confirmation gate is
+      uniform across both cases. Symmetrical to the `unlink` biometric
+      gate (`AccountSecurityPage.handleUnlink`): every destructive identity
+      operation requires an explicit user-driven confirmation.
+    * Raises `WebAuthError("merge_requires_support")` when both sides have
+      real value or one side is blocked.
+    """
+    from bloobcat.services.auth_merge import (
+        PREVIEW_TOKEN_TTL_SECONDS,
+        issue_preview_token,
+        plan_merge,
+    )
+
+    plan = await plan_merge(current_user, other_user, provider=provider)
+    if plan.outcome == "no_conflict":
+        return {
+            "outcome": "no_conflict",
+            "userId": int(current_user.id),
+            "plan": plan.to_dict(),
+        }
+    if plan.outcome == "support_required":
         raise WebAuthError("merge_requires_support", status_code=409)
-
-    if await user_has_material_data(int(source_user.id)):
-        raise WebAuthError("merge_requires_support", status_code=409)
-
-    target_user = target_user or await _ensure_telegram_user_for_identity(telegram_user)
-    if int(target_user.id) == int(source_user.id):
-        await ensure_telegram_identity(target_user, telegram_user)
-        return target_user, False
-
-    async with in_transaction() as conn:
-        source_locked = await Users.select_for_update().using_db(conn).get(id=source_user.id)
-        await Users.select_for_update().using_db(conn).get(id=target_user.id)
-        if await user_has_material_data(int(source_locked.id), conn=conn):
-            raise WebAuthError("merge_requires_support", status_code=409)
-        await (
-            AuthIdentity.filter(user_id=source_user.id)
-            .exclude(provider="telegram")
-            .using_db(conn)
-            .update(user_id=target_user.id)
-        )
-        await (
-            AuthPasswordCredential.filter(user_id=source_user.id)
-            .using_db(conn)
-            .update(user_id=target_user.id)
-        )
-        await ensure_telegram_identity(target_user, telegram_user)
-        source_locked.auth_token_version = int(source_locked.auth_token_version or 0) + 1
-        await source_locked.save(update_fields=["auth_token_version"], using_db=conn)
-    return target_user, True
+    # Both `auto_merge` (loser fully empty) and `confirm_required` (loser
+    # has forfeitable trial state) require the user to see the dialog and
+    # commit explicitly. The persisted plan keeps its outcome so the UI can
+    # vary copy ("второй аккаунт пустой, переносим способ входа" vs the
+    # explicit forfeit list); only the token-confirm step actually mutates.
+    merge_token = await issue_preview_token(
+        plan, initiated_by_user_id=int(current_user.id)
+    )
+    return {
+        "outcome": "confirm_required",
+        "mergeToken": merge_token,
+        "expiresIn": PREVIEW_TOKEN_TTL_SECONDS,
+        "plan": plan.to_dict(),
+    }
 
 
 async def get_or_create_telegram_user_for_profile(profile: ProviderProfile) -> tuple[Users, bool]:
@@ -1228,9 +1313,43 @@ async def user_has_material_data(user_id: int, conn: Any | None = None) -> bool:
     return False
 
 
-async def complete_telegram_link(source_user: Users, link_token: str, telegram_user: Any) -> tuple[Users, bool]:
+async def complete_telegram_link(
+    source_user: Users, link_token: str, telegram_user: Any
+) -> dict[str, Any]:
+    """Process the Telegram link request and return a structured outcome.
+
+    Returns the same shape as ``start_link_or_merge`` so the route handler
+    can serialise it directly. Possible outcomes:
+
+    * ``no_conflict`` — the Telegram identity already pointed at the
+      current user.
+    * ``auto_merge`` — the Telegram-side account was completely empty and
+      got absorbed silently.
+    * ``confirm_required`` — the Telegram account has trial-grade state;
+      the response carries a ``mergeToken`` the UI must confirm.
+
+    Raises ``WebAuthError`` for ``support_required`` outcomes.
+    """
     await _consume_link_request(source_user, link_token)
-    return await merge_source_user_into_telegram_user(source_user, telegram_user)
+    target_user = await Users.get_or_none(id=int(telegram_user.id))
+    if target_user is None:
+        target_user = await _ensure_telegram_user_for_identity(telegram_user)
+    await ensure_telegram_identity(target_user, telegram_user)
+    if int(target_user.id) == int(source_user.id):
+        return {
+            "outcome": "no_conflict",
+            "userId": int(source_user.id),
+            "plan": {
+                "outcome": "no_conflict",
+                "provider": "telegram",
+                "winner": None,
+                "loser": None,
+                "forfeit": [],
+                "reasonCode": "same_user",
+                "reasonText": "Этот Telegram уже привязан к вашему аккаунту.",
+            },
+        }
+    return await start_link_or_merge(source_user, target_user, provider="telegram")
 
 
 async def grant_trial_if_eligible(user: Users) -> bool:

@@ -87,137 +87,93 @@ async def test_oauth_start_uses_pkce_nonce_and_hashed_state(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_complete_telegram_link_moves_empty_web_identities_to_existing_telegram_user(monkeypatch):
+async def test_complete_telegram_link_routes_through_start_link_or_merge(monkeypatch):
+    """`complete_telegram_link` must consume the link request and delegate
+    the actual planning/merge to `start_link_or_merge`.
+
+    Trial-grade target → outcome `confirm_required` with a merge token. The
+    response must include the plan so the UI can render the comparison view.
+    """
     calls: list[tuple[str, object]] = []
 
-    class _User(types.SimpleNamespace):
-        async def save(self, update_fields=None, using_db=None):
-            calls.append(("source_save", update_fields))
-
-    source_user = _User(id=web_auth.WEB_USER_ID_FLOOR + 10, auth_token_version=0)
-    target_user = _User(id=123456, auth_token_version=2)
+    source_user = types.SimpleNamespace(id=web_auth.WEB_USER_ID_FLOOR + 10)
+    target_user = types.SimpleNamespace(id=123456)
     telegram_user = types.SimpleNamespace(id=123456, first_name="Tg", last_name="User")
-
-    class _UpdateQuery:
-        def __init__(self, name: str):
-            self.name = name
-
-        def exclude(self, **kwargs):
-            calls.append((f"{self.name}_exclude", kwargs))
-            return self
-
-        def using_db(self, _conn):
-            calls.append((f"{self.name}_using_db", True))
-            return self
-
-        async def update(self, **kwargs):
-            calls.append((f"{self.name}_update", kwargs))
-            return 1
-
-    class _FakeIdentity:
-        @classmethod
-        def filter(cls, **kwargs):
-            calls.append(("identity_filter", kwargs))
-            return _UpdateQuery("identity")
-
-    class _FakePasswordCredential:
-        @classmethod
-        def filter(cls, **kwargs):
-            calls.append(("password_filter", kwargs))
-            return _UpdateQuery("password")
 
     async def _consume_link_request(user, token):
         calls.append(("consume", (user.id, token)))
         return types.SimpleNamespace(id=1)
 
     async def _get_or_none(**kwargs):
-        assert kwargs == {"id": 123456}
-        return target_user
-
-    class _UserLockQuery:
-        def using_db(self, _conn):
-            return self
-
-        async def get(self, **kwargs):
-            if kwargs == {"id": source_user.id}:
-                return source_user
-            if kwargs == {"id": target_user.id}:
-                return target_user
-            raise AssertionError(kwargs)
-
-    class _FakeUsers:
-        @classmethod
-        async def get_or_none(cls, **kwargs):
-            return await _get_or_none(**kwargs)
-
-        @classmethod
-        def select_for_update(cls):
-            return _UserLockQuery()
-
-    class _FakeTransaction:
-        async def __aenter__(self):
-            return object()
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
-
-    async def _has_material_data(user_id: int, conn=None) -> bool:
-        assert user_id == source_user.id
-        return False
+        if kwargs == {"id": int(telegram_user.id)}:
+            return target_user
+        return None
 
     async def _ensure_telegram_identity(user, tg_user):
         calls.append(("ensure_telegram", (user.id, tg_user.id)))
 
-    monkeypatch.setattr(web_auth, "_consume_link_request", _consume_link_request)
-    monkeypatch.setattr(web_auth, "Users", _FakeUsers)
-    monkeypatch.setattr(web_auth, "in_transaction", lambda: _FakeTransaction())
-    monkeypatch.setattr(web_auth, "user_has_material_data", _has_material_data)
-    monkeypatch.setattr(web_auth, "AuthIdentity", _FakeIdentity)
-    monkeypatch.setattr(web_auth, "AuthPasswordCredential", _FakePasswordCredential)
-    monkeypatch.setattr(web_auth, "ensure_telegram_identity", _ensure_telegram_identity)
+    async def _start_link_or_merge(current, other, *, provider):
+        calls.append(("planner", (current.id, other.id, provider)))
+        return {
+            "outcome": "confirm_required",
+            "mergeToken": "preview-tok-1",
+            "expiresIn": 300,
+            "plan": {"outcome": "confirm_required", "provider": "telegram"},
+        }
 
-    result_user, merged = await web_auth.complete_telegram_link(
-        source_user,
-        "link-token",
-        telegram_user,
+    monkeypatch.setattr(web_auth, "_consume_link_request", _consume_link_request)
+    monkeypatch.setattr(web_auth.Users, "get_or_none", _get_or_none)
+    monkeypatch.setattr(web_auth, "ensure_telegram_identity", _ensure_telegram_identity)
+    monkeypatch.setattr(web_auth, "start_link_or_merge", _start_link_or_merge)
+
+    result = await web_auth.complete_telegram_link(
+        source_user, "link-token", telegram_user
     )
 
-    assert result_user is target_user
-    assert merged is True
-    assert source_user.auth_token_version == 1
+    assert result["outcome"] == "confirm_required"
+    assert result["mergeToken"] == "preview-tok-1"
+    assert result["expiresIn"] == 300
+    assert result["plan"]["provider"] == "telegram"
     assert ("consume", (source_user.id, "link-token")) in calls
-    assert ("identity_update", {"user_id": target_user.id}) in calls
-    assert ("password_update", {"user_id": target_user.id}) in calls
     assert ("ensure_telegram", (target_user.id, telegram_user.id)) in calls
-    assert ("source_save", ["auth_token_version"]) in calls
+    assert (
+        "planner",
+        (source_user.id, target_user.id, "telegram"),
+    ) in calls
 
 
 @pytest.mark.asyncio
-async def test_complete_telegram_link_blocks_auto_merge_when_source_has_material_data(monkeypatch):
-    source_user = types.SimpleNamespace(id=web_auth.WEB_USER_ID_FLOOR + 11)
-    target_user = types.SimpleNamespace(id=555)
-    telegram_user = types.SimpleNamespace(id=555, first_name="Tg", last_name=None)
+async def test_complete_telegram_link_returns_no_conflict_when_target_is_same_user(monkeypatch):
+    same_id = 999
+    source_user = types.SimpleNamespace(id=same_id)
+    target_user = source_user
+    telegram_user = types.SimpleNamespace(id=same_id, first_name="Tg", last_name=None)
 
     async def _consume_link_request(_user, _token):
         return types.SimpleNamespace(id=1)
 
     async def _get_or_none(**kwargs):
-        assert kwargs == {"id": 555}
+        assert kwargs == {"id": same_id}
         return target_user
 
-    async def _has_material_data(user_id: int) -> bool:
-        assert user_id == source_user.id
-        return True
+    async def _ensure_telegram_identity(_user, _tg_user):
+        return None
+
+    def _fail_planner(*_args, **_kwargs):
+        raise AssertionError("planner must not be called for same-user case")
 
     monkeypatch.setattr(web_auth, "_consume_link_request", _consume_link_request)
     monkeypatch.setattr(web_auth.Users, "get_or_none", _get_or_none)
-    monkeypatch.setattr(web_auth, "user_has_material_data", _has_material_data)
+    monkeypatch.setattr(web_auth, "ensure_telegram_identity", _ensure_telegram_identity)
+    monkeypatch.setattr(web_auth, "start_link_or_merge", _fail_planner)
 
-    with pytest.raises(web_auth.WebAuthError) as exc_info:
-        await web_auth.complete_telegram_link(source_user, "link-token", telegram_user)
+    result = await web_auth.complete_telegram_link(
+        source_user, "link-token", telegram_user
+    )
 
-    assert exc_info.value.code == "merge_requires_support"
-    assert exc_info.value.status_code == 409
+    assert result["outcome"] == "no_conflict"
+    assert result["userId"] == same_id
+    assert result["plan"]["outcome"] == "no_conflict"
 
 
 @pytest.mark.asyncio
@@ -931,49 +887,69 @@ async def test_telegram_oauth_profile_does_not_treat_sub_as_telegram_id(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_telegram_oauth_link_returns_canonical_telegram_ticket(monkeypatch):
+async def test_telegram_oauth_link_uses_planner_and_redirects_with_merge_token(monkeypatch):
+    """When OAuth callback in link mode discovers a collision, the planner
+    drives the decision. A `confirm_required` outcome must surface as a
+    merge token in the redirect tuple — no ticket on this path."""
     source_user = types.SimpleNamespace(id=web_auth.WEB_USER_ID_FLOOR + 20)
     target_user = types.SimpleNamespace(id=123456, auth_token_version=0)
-    state_row = types.SimpleNamespace(mode="link", linking_user_id=source_user.id, return_to="/account/security")
-    profile = web_auth.ProviderProfile(provider="telegram", subject="123456", display_name="Telegram User")
+    state_row = types.SimpleNamespace(
+        mode="link",
+        linking_user_id=source_user.id,
+        return_to="/account/security",
+    )
+    profile = web_auth.ProviderProfile(
+        provider="telegram", subject="123456", display_name="Telegram User"
+    )
 
     async def _consume(provider, state):
-        assert provider == "telegram"
-        assert state == "state"
         return state_row
 
     async def _profile(_config, _state_row, code):
-        assert code == "code"
         return profile
 
     async def _get_or_none(**kwargs):
-        assert kwargs == {"id": source_user.id}
-        return source_user
+        if kwargs == {"id": source_user.id}:
+            return source_user
+        if kwargs == {"id": target_user.id}:
+            return target_user
+        return None
 
-    async def _merge(user, telegram_user):
-        assert user is source_user
-        assert telegram_user.id == 123456
-        return target_user, True
+    async def _ensure_telegram(_user, _tg_user):
+        return None
+
+    async def _planner(current, other, *, provider):
+        assert current is source_user and other is target_user
+        assert provider == "telegram"
+        return {
+            "outcome": "confirm_required",
+            "mergeToken": "preview-tok-42",
+            "expiresIn": 300,
+            "plan": {"outcome": "confirm_required"},
+        }
 
     async def _audit(**_kwargs):
         return None
 
-    async def _ticket(user):
-        assert user is target_user
-        return "ticket-telegram"
-
     monkeypatch.setattr(web_auth, "provider_is_enabled", lambda provider: provider == "telegram")
-    monkeypatch.setattr(web_auth, "get_provider_config", lambda provider: types.SimpleNamespace(provider=provider))
+    monkeypatch.setattr(
+        web_auth,
+        "get_provider_config",
+        lambda provider: types.SimpleNamespace(provider=provider),
+    )
     monkeypatch.setattr(web_auth, "_consume_oauth_state", _consume)
     monkeypatch.setattr(web_auth, "resolve_provider_profile", _profile)
     monkeypatch.setattr(web_auth.Users, "get_or_none", _get_or_none)
-    monkeypatch.setattr(web_auth, "merge_source_user_into_telegram_user", _merge)
+    monkeypatch.setattr(web_auth, "ensure_telegram_identity", _ensure_telegram)
+    monkeypatch.setattr(web_auth, "start_link_or_merge", _planner)
     monkeypatch.setattr(web_auth, "audit_auth_event", _audit)
-    monkeypatch.setattr(web_auth, "create_login_ticket", _ticket)
 
-    ticket, return_to = await web_auth.handle_oauth_callback("telegram", "code", "state")
+    ticket, return_to, merge_token = await web_auth.handle_oauth_callback(
+        "telegram", "code", "state"
+    )
 
-    assert ticket == "ticket-telegram"
+    assert ticket is None
+    assert merge_token == "preview-tok-42"
     assert return_to == "/account/security"
 
 
@@ -1027,10 +1003,13 @@ async def test_web_oauth_created_user_sends_admin_registration_log(monkeypatch):
     monkeypatch.setattr(web_auth, "audit_auth_event", _audit)
     monkeypatch.setattr(web_auth, "create_login_ticket", _ticket)
 
-    ticket, return_to = await web_auth.handle_oauth_callback("google", "code", "state")
+    ticket, return_to, merge_token = await web_auth.handle_oauth_callback(
+        "google", "code", "state"
+    )
 
     assert ticket == "ticket-web"
     assert return_to == "/connect"
+    assert merge_token is None
     assert ("notify", (user.id, "google", "google", None)) in calls
     assert ("audit", "created") in calls
 
@@ -1318,9 +1297,12 @@ async def test_web_oauth_callback_notifies_even_when_attribution_raises(monkeypa
     monkeypatch.setattr(web_auth, "audit_auth_event", _audit)
     monkeypatch.setattr(web_auth, "create_login_ticket", _ticket)
 
-    ticket, _ = await web_auth.handle_oauth_callback("google", "code", "state")
+    ticket, _, merge_token = await web_auth.handle_oauth_callback(
+        "google", "code", "state"
+    )
 
     assert ticket == "ticket-web"
+    assert merge_token is None
     assert notify_args == [(user.id, "google", "qr_rt_launch_2026_05_hero")]
     # The refresh must run even when attribution raised, so the notification
     # never sees in-memory mutations left behind by a partial save.

@@ -111,3 +111,30 @@ class AuthAuditEvent(models.Model):
     class Meta:
         table = "auth_audit_events"
         indexes = (("user_id",), ("provider", "action"), ("created_at",))
+
+
+class AuthMergePreviewToken(models.Model):
+    """One-shot preview ticket issued by `/auth/link/*/preview*` flows.
+
+    The frontend shows the merge plan to the user; the same token then
+    authenticates the explicit confirm step. Tokens are single-use,
+    short-lived, and bound to a specific (winner_id, loser_id, provider).
+    """
+
+    id = fields.IntField(primary_key=True)
+    token_hash = fields.CharField(max_length=128, unique=True)
+    winner_user_id = fields.BigIntField()
+    loser_user_id = fields.BigIntField()
+    provider = fields.CharField(max_length=32)
+    initiated_by_user_id = fields.BigIntField()
+    expires_at = fields.DatetimeField()
+    consumed_at = fields.DatetimeField(null=True)
+    created_at = fields.DatetimeField(auto_now_add=True)
+
+    class Meta:
+        table = "auth_merge_preview_tokens"
+        indexes = (
+            ("winner_user_id",),
+            ("loser_user_id",),
+            ("expires_at",),
+        )
