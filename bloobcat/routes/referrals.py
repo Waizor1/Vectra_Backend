@@ -1,3 +1,4 @@
+from datetime import date
 from typing import Any, Dict, Literal, Optional
 from urllib.parse import quote
 
@@ -29,7 +30,7 @@ from bloobcat.services.story_referral import (
     encoded_story_code_length,
     materialize_user_story_code,
 )
-from bloobcat.settings import telegram_settings
+from bloobcat.settings import script_settings, telegram_settings
 
 logger = get_logger("routes.referrals")
 
@@ -214,12 +215,21 @@ async def story_share_payload(
             bot_name = "VectraConnect_bot"
         widget_link = f"https://t.me/{bot_name}/start?startapp={quote(startapp, safe='')}"
 
-    # Image URL is a placeholder until the Pillow renderer ships. We expose
-    # the canonical path so the frontend can already wire `shareToStory` —
-    # the route returns 404 in production today (caller falls back to the
-    # static bundled image), but the URL shape will not change.
-    # Same-origin so the Mini App can reach it without CORS.
-    image_url = f"/api/referrals/story-image?code={quote(code, safe='')}"
+    # Telegram's `shareToStory` fetches the image server-side. The frontend
+    # `app.vectra-pro.net/api/...` proxy route adds duplicate response headers
+    # and drops Content-Length on the binary stream, which makes Telegram
+    # wait until its own fetch timeout — observable as an "infinite spinner"
+    # on the share button. Issuing an absolute URL straight to the backend
+    # API origin (api-app.vectra-pro.net) skips the proxy entirely so the
+    # full JPG lands at the validator in <1s.
+    api_base = (script_settings.api_url or "").rstrip("/")
+    if api_base:
+        image_url = f"{api_base}/referrals/story-image?code={quote(code, safe='')}"
+    else:
+        # Fallback for unconfigured envs (tests, local dev). The frontend's
+        # `new URL(payload.image_url, window.location.origin)` resolves this
+        # against the Mini App origin.
+        image_url = f"/referrals/story-image?code={quote(code, safe='')}"
 
     return StorySharePayloadResponse(
         code=code,
@@ -260,6 +270,126 @@ async def story_image(
             "Content-Disposition": 'inline; filename="vectra-story.jpg"',
             "X-Image-Dimensions": f"{STORY_IMAGE_WIDTH}x{STORY_IMAGE_HEIGHT}",
         },
+    )
+
+
+# ── My rewards: aggregate dashboard ─────────────────────────────────────
+# Frontend renders /account/rewards from this single payload. Combines:
+#   - Internal balance (RUB)
+#   - Active PersonalDiscount rows (10% от home-screen install, promo codes,
+#     prize wheel, admin grants, winback)
+#   - Home-screen install reward state (claimed / pending / not eligible)
+# Referral chests + cashback stay on /referrals to preserve the existing
+# gamification surface — we just link to that page from /account/rewards.
+
+
+class PersonalDiscountRow(BaseModel):
+    id: int
+    percent: int
+    source: Optional[str] = None
+    is_permanent: bool
+    remaining_uses: int
+    expires_at: Optional[str] = None
+    min_months: Optional[int] = None
+    max_months: Optional[int] = None
+    label: str = Field(..., description="Human-readable summary for UI chip")
+
+
+class HomeScreenRewardStatus(BaseModel):
+    eligible: bool = Field(..., description="True if the install reward path is unlocked on this device")
+    granted_at: Optional[str] = None
+    reward_summary: Optional[str] = None
+
+
+class MyRewardsResponse(BaseModel):
+    balance_rub: int
+    personal_discounts: list[PersonalDiscountRow]
+    home_screen: HomeScreenRewardStatus
+    referrals_link: str = Field(..., description="In-app path to the cashback gamification surface")
+
+
+def _discount_source_label(source: Optional[str]) -> str:
+    src = (source or "").lower()
+    if src == "home_screen_install":
+        return "Бонус за установку на главный экран"
+    if src == "promo":
+        return "Промокод"
+    if src == "prize_wheel":
+        return "Колесо призов"
+    if src == "winback":
+        return "Возврат подписки"
+    if src == "admin":
+        return "Подарок от админа"
+    return "Скидка"
+
+
+def _discount_label(row) -> str:
+    base = _discount_source_label(getattr(row, "source", None))
+    pct = int(getattr(row, "percent", 0) or 0)
+    if pct <= 0:
+        return base
+    if getattr(row, "is_permanent", False):
+        return f"{base}: −{pct}% (бессрочно)"
+    uses = int(getattr(row, "remaining_uses", 0) or 0)
+    if uses > 1:
+        return f"{base}: −{pct}% (осталось {uses})"
+    return f"{base}: −{pct}%"
+
+
+@router.get("/my-rewards", response_model=MyRewardsResponse)
+async def my_rewards(user: Users = Depends(validate)) -> MyRewardsResponse:
+    from bloobcat.db.discounts import PersonalDiscount
+
+    rows = await PersonalDiscount.filter(user_id=int(user.id)).order_by("-created_at").all()
+    today = date.today()
+    active: list[PersonalDiscountRow] = []
+    for row in rows:
+        expires = getattr(row, "expires_at", None)
+        if expires and expires < today:
+            continue
+        remaining = int(getattr(row, "remaining_uses", 0) or 0)
+        if not getattr(row, "is_permanent", False) and remaining <= 0:
+            continue
+        active.append(
+            PersonalDiscountRow(
+                id=int(row.id),
+                percent=int(row.percent or 0),
+                source=getattr(row, "source", None),
+                is_permanent=bool(getattr(row, "is_permanent", False)),
+                remaining_uses=remaining,
+                expires_at=expires.isoformat() if expires else None,
+                min_months=getattr(row, "min_months", None),
+                max_months=getattr(row, "max_months", None),
+                label=_discount_label(row),
+            )
+        )
+
+    home_screen_added = getattr(user, "home_screen_added_at", None)
+    home_screen_granted = getattr(user, "home_screen_reward_granted_at", None)
+    if home_screen_granted is not None:
+        hs = HomeScreenRewardStatus(
+            eligible=False,
+            granted_at=home_screen_granted.isoformat() if home_screen_granted else None,
+            reward_summary="Бонус за установку на главный экран получен",
+        )
+    elif home_screen_added is not None:
+        hs = HomeScreenRewardStatus(
+            eligible=True,
+            granted_at=None,
+            reward_summary="Иконка добавлена — выбери бонус",
+        )
+    else:
+        hs = HomeScreenRewardStatus(
+            eligible=True,
+            granted_at=None,
+            reward_summary=None,
+        )
+
+    return MyRewardsResponse(
+        balance_rub=int(getattr(user, "balance", 0) or 0),
+        personal_discounts=active,
+        home_screen=hs,
+        referrals_link="/referrals",
     )
 
 
