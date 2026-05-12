@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-from datetime import date
+from datetime import date, timedelta
 
 import httpx
 import pytest
@@ -340,6 +340,18 @@ async def test_subscription_plans_reflect_promo_redeem_result_without_consuming_
     from bloobcat.settings import promo_settings
 
     await _seed_standard_tariffs()
+
+    # Isolation guard: this test was previously order-dependent in the full
+    # pytest suite — solo + topic-grouped runs always passed, but the full
+    # suite failed at the /promo/redeem step. The root cause is state leak
+    # from sibling tests touching the same module-scoped tortoise objects.
+    # Defensive cleanup of the well-known fixture keys here breaks the
+    # cross-test contamination chain without requiring an audit of every
+    # peer file.
+    await PromoCode.filter(name__startswith="save 15").delete()
+    await Users.filter(id=9204).delete()
+    await PersonalDiscount.filter(user_id=9204).delete()
+
     user = await Users.create(
         id=9204,
         username="plans-after-redeem",
@@ -359,7 +371,12 @@ async def test_subscription_plans_reflect_promo_redeem_result_without_consuming_
         effects={"discount_percent": 15, "uses": 1, "min_months": 3, "max_months": 12},
         max_activations=5,
         per_user_limit=1,
-        expires_at=date.today(),
+        # Tomorrow, not today — promo redemption logic on some code paths
+        # treats `expires_at == today` as already-expired (strict <), which
+        # is the most likely flake trigger when full-suite ordering pushes
+        # the test past the local midnight boundary against the captured
+        # `date.today()` snapshot.
+        expires_at=date.today() + timedelta(days=1),
     )
 
     app = await _build_app_for_user(user.id, include_promo_router=True)
@@ -380,7 +397,12 @@ async def test_subscription_plans_reflect_promo_redeem_result_without_consuming_
     assert before_plans["3months"]["originalPriceRub"] is None
 
     redeem_payload = redeem_response.json()
-    assert redeem_payload["success"] is True
+    # Surface the backend's actual error message if redemption fails — without
+    # this the assertion just reads `assert False is True` and tells reviewers
+    # nothing about why the suite started failing.
+    assert redeem_payload["success"] is True, (
+        f"promo redeem unexpectedly returned success=false: {redeem_payload!r}"
+    )
     assert redeem_payload["effects"]["discount_percent"] == 15
 
     after_plans = _plans_by_id(after_response.json())
