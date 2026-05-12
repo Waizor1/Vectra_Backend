@@ -153,6 +153,11 @@ class Users(models.Model):
         description="Когда пользователю был выдан пробный период",
     )
     remnawave_uuid = fields.UUIDField(null=True)  # UUID пользователя в RemnaWave
+    # Кэш crypt5 happ://-линка, вычисленного из raw subscriptionUrl через
+    # crypto.happ.su (TTL ≈ 24h). NULL означает "ещё не считали или
+    # инвалидировали при смене remnawave_uuid".
+    happ_cryptolink_v5 = fields.TextField(null=True)
+    happ_cryptolink_v5_at = fields.DatetimeField(null=True)
     last_hwid_reset = fields.DatetimeField(
         null=True,
         description="Дата и время последнего ручного отключения HWID устройств",
@@ -919,7 +924,16 @@ class Users(models.Model):
                             remnawave,
                             current_user.remnawave_uuid,
                         )
-                        update_fields = ["remnawave_uuid", "hwid_limit"]
+                        # Перепривязка к существующему RemnaWave-юзеру —
+                        # старый crypt5-кэш указывает на другой shortUuid.
+                        current_user.happ_cryptolink_v5 = None
+                        current_user.happ_cryptolink_v5_at = None
+                        update_fields = [
+                            "remnawave_uuid",
+                            "hwid_limit",
+                            "happ_cryptolink_v5",
+                            "happ_cryptolink_v5_at",
+                        ]
                         update_fields.extend(
                             self._apply_existing_remnawave_connection_state(
                                 current_user,
@@ -932,6 +946,8 @@ class Users(models.Model):
                         )
                         self.remnawave_uuid = current_user.remnawave_uuid
                         self.hwid_limit = normalized_hwid_limit
+                        self.happ_cryptolink_v5 = None
+                        self.happ_cryptolink_v5_at = None
                         try:
                             await remnawave.users.update_user(
                                 current_user.remnawave_uuid,
@@ -1017,11 +1033,23 @@ class Users(models.Model):
                                 current_user.remnawave_uuid = existing_remote_user[
                                     "uuid"
                                 ]
+                                # Та же причина, что и в основной ветке
+                                # recreate: shortUuid в subscriptionUrl
+                                # сменился → старый crypt5-линк стух.
+                                current_user.happ_cryptolink_v5 = None
+                                current_user.happ_cryptolink_v5_at = None
                                 await current_user.save(
-                                    update_fields=["remnawave_uuid", "hwid_limit"]
+                                    update_fields=[
+                                        "remnawave_uuid",
+                                        "hwid_limit",
+                                        "happ_cryptolink_v5",
+                                        "happ_cryptolink_v5_at",
+                                    ]
                                 )
                                 self.remnawave_uuid = current_user.remnawave_uuid
                                 self.hwid_limit = normalized_hwid_limit
+                                self.happ_cryptolink_v5 = None
+                                self.happ_cryptolink_v5_at = None
                                 try:
                                     await remnawave.users.update_user(
                                         current_user.remnawave_uuid,
@@ -1051,11 +1079,23 @@ class Users(models.Model):
                             f"create_user не вернул uuid для пользователя {self.id}"
                         )
 
+                    # При пересоздании юзера меняется shortUuid в
+                    # subscriptionUrl — закэшированный crypt5-линк ведёт на
+                    # удалённого юзера, инвалидируем.
+                    current_user.happ_cryptolink_v5 = None
+                    current_user.happ_cryptolink_v5_at = None
                     await current_user.save(
-                        update_fields=["remnawave_uuid", "hwid_limit"]
+                        update_fields=[
+                            "remnawave_uuid",
+                            "hwid_limit",
+                            "happ_cryptolink_v5",
+                            "happ_cryptolink_v5_at",
+                        ]
                     )
                     self.remnawave_uuid = current_user.remnawave_uuid
                     self.hwid_limit = normalized_hwid_limit
+                    self.happ_cryptolink_v5 = None
+                    self.happ_cryptolink_v5_at = None
                     logger.info(
                         f"Пользователь {self.id} пересоздан в RemnaWave с UUID: {self.remnawave_uuid}"
                     )

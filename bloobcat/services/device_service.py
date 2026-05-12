@@ -569,7 +569,14 @@ async def get_device_subscription_url(device: UserDevice) -> str:
         resp = user_data.get("response") or {}
         raw_sub_url = resp.get("subscriptionUrl") or ""
         if raw_sub_url:
-            return await rw.tools.encrypt_happ_crypto_link(raw_sub_url)
+            # crypt5 через crypto.happ.su с DB-кэшем на UserDevice.
+            from bloobcat.services.happ_cryptolink_cache import (
+                get_or_refresh_cryptolink,
+            )
+
+            return await get_or_refresh_cryptolink(
+                device, raw_sub_url, rw.tools.encrypt_happ_crypto_link
+            )
         crypto_link = (resp.get("happ") or {}).get("cryptoLink") or ""
         if crypto_link:
             from bloobcat.routes.remnawave.happ_crypto import normalize_happ_crypto_link

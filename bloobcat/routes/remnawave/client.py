@@ -379,19 +379,32 @@ class UsersAPI:
             user_data = await self.get_user_by_uuid(user_db.remnawave_uuid)
             resp = user_data.get("response") or {}
 
-            # В новой панели happ.cryptoLink может отсутствовать (в OpenAPI он больше не required).
-            # Fallback: берём subscriptionUrl и шифруем через /api/system/tools/happ/encrypt.
-            subscription_url = (resp.get("happ") or {}).get("cryptoLink") or ""
-            if not subscription_url:
-                raw_sub_url = resp.get("subscriptionUrl") or ""
-                if raw_sub_url:
-                    subscription_url = await self.client.tools.encrypt_happ_crypto_link(raw_sub_url)
-            
-            if not subscription_url:
-                logger.error(f"В данных пользователя {user_db.id} (UUID: {user_db.remnawave_uuid}) отсутствует ссылка. Данные: {user_data}")
-                raise ValueError("Subscription URL not found in user data")
-            
-            return normalize_happ_crypto_link(subscription_url)
+            # Всегда шифруем raw subscriptionUrl сами через crypto.happ.su (crypt5)
+            # с 24h DB-кэшем. Панельный happ.cryptoLink (crypt4) используется
+            # только если raw subscriptionUrl полностью отсутствует.
+            raw_sub_url = resp.get("subscriptionUrl") or ""
+            if raw_sub_url:
+                from bloobcat.services.happ_cryptolink_cache import (
+                    get_or_refresh_cryptolink,
+                )
+
+                return await get_or_refresh_cryptolink(
+                    user_db,
+                    raw_sub_url,
+                    self.client.tools.encrypt_happ_crypto_link,
+                )
+
+            legacy_link = (resp.get("happ") or {}).get("cryptoLink") or ""
+            if legacy_link:
+                logger.warning(
+                    f"User {user_db.id}: raw subscriptionUrl отсутствует, отдаём панельный cryptoLink (crypt4)"
+                )
+                return normalize_happ_crypto_link(legacy_link)
+
+            logger.error(
+                f"В данных пользователя {user_db.id} (UUID: {user_db.remnawave_uuid}) отсутствует ссылка. Данные: {user_data}"
+            )
+            raise ValueError("Subscription URL not found in user data")
         except Exception as e:
             if "User not found" in str(e) or "404" in str(e):
                 # UUID есть, но пользователь не найден в RemnaWave - это ошибка синхронизации
@@ -484,7 +497,55 @@ class ToolsAPI:
         self.client = client
 
     async def encrypt_happ_crypto_link(self, link_to_encrypt: str) -> str:
-        """Шифрует subscriptionUrl в encryptedLink через RemnaWave tool /api/system/tools/happ/encrypt."""
+        """Шифрует raw subscriptionUrl в happ:// deeplink (crypt5).
+
+        Основной путь — публичный API ``crypto.happ.su/api-v2.php``
+        (POST JSON ``{"url": "..."}`` → ``{"encrypted_link": "happ://crypt5/..."}``).
+        На любую ошибку (HTTP != 200, пустой ``encrypted_link``, network/timeout)
+        падаем на панельный ``/api/system/tools/happ/encrypt`` (crypt4 через
+        ``@kastov/cryptohapp``). Если и панель не сможет — пробрасываем
+        исключение наверх.
+        """
+        from bloobcat.settings import remnawave_settings
+
+        api_url = getattr(
+            remnawave_settings,
+            "happ_crypto_api_url",
+            "https://crypto.happ.su/api-v2.php",
+        )
+        timeout_seconds = float(
+            getattr(remnawave_settings, "happ_crypto_api_timeout_seconds", 10) or 10
+        )
+
+        # Публичный API; без Authorization-заголовка панели — отдельная
+        # aiohttp-сессия с таймаутом, не переиспользуем self.client.session.
+        timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(
+                    api_url,
+                    json={"url": link_to_encrypt},
+                    headers={"Content-Type": "application/json"},
+                ) as response:
+                    if response.status != 200:
+                        body_preview = (await response.text())[:200]
+                        raise ValueError(
+                            f"crypto.happ.su returned HTTP {response.status}: {body_preview}"
+                        )
+                    payload = await response.json()
+                    encrypted = (payload or {}).get("encrypted_link") or ""
+                    if not encrypted:
+                        raise ValueError(
+                            f"crypto.happ.su returned malformed response: {payload}"
+                        )
+                    return normalize_happ_crypto_link(encrypted)
+        except Exception as exc:
+            logger.warning(
+                f"crypto.happ.su crypt5 encrypt failed, falling back to panel crypt4: {exc}"
+            )
+
+        # Fallback: панельный endpoint (crypt4). Если и он упадёт — пробросим
+        # ValueError наверх, как было до изменений.
         raw_resp = await self.client._request(
             "POST",
             "/api/system/tools/happ/encrypt",
