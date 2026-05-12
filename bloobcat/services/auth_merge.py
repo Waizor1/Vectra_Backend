@@ -52,7 +52,6 @@ from bloobcat.db.discounts import PersonalDiscount
 from bloobcat.db.family_devices import FamilyDevices
 from bloobcat.db.family_invites import FamilyInvites
 from bloobcat.db.family_members import FamilyMembers
-from bloobcat.db.in_app_notifications import InAppNotification
 from bloobcat.db.partner_earnings import PartnerEarnings
 from bloobcat.db.partner_qr import PartnerQr
 from bloobcat.db.partner_withdrawals import PartnerWithdrawals
@@ -525,22 +524,29 @@ async def _move_identities(
 
 
 async def _move_housekeeping_rows(*, loser_id: int, winner_id: int, conn: Any) -> None:
-    """Move rows that are safe to transfer.
+    """Move or drop rows that are safe to transfer alongside the auth identity.
 
-    Only in-app notifications move: they're addressed to the human, not to
-    a specific provider identity, so the merged user wants to keep them.
+    Nothing currently needs an explicit move:
 
-    `RemnaWaveRetryJobs` is deliberately **not** moved — every row carries
-    the loser's `remnawave_uuid`, and `Users.delete()` (run after this
-    transaction) queues a fresh delete-retry for that uuid via
-    `enqueue_remnawave_delete_retry`. Moving the rows would point them at
-    the winner with stale loser-side UUIDs and cause indefinite no-op
-    retries. Drop them instead; the fresh delete-retry covers the only
-    job that still has meaning.
+    * Per-user notification view counters (`NotificationView`) and dedup
+      marks (`NotificationMarks`) both declare `ForeignKeyField(on_delete=CASCADE)`
+      on `Users`, so the loser's rows are removed automatically when
+      `Users.delete()` runs after this transaction commits. The merged user
+      may re-see a small number of dynamic banners they'd already viewed
+      under the loser identity; that is acceptable UX. The model imported
+      as `InAppNotification` is the **global banner template** (no
+      `user_id` column) — filtering it by `user_id` is a model mix-up that
+      crashes the whole merge transaction (see auth_merge regression
+      test).
+
+    * `RemnaWaveRetryJobs` is deliberately **dropped** — every row carries
+      the loser's `remnawave_uuid`, and `Users.delete()` (run after this
+      transaction) queues a fresh delete-retry for that uuid via
+      `enqueue_remnawave_delete_retry`. Moving the rows would point them at
+      the winner with stale loser-side UUIDs and cause indefinite no-op
+      retries. Drop them instead; the fresh delete-retry covers the only
+      job that still has meaning.
     """
-    await InAppNotification.filter(user_id=loser_id).using_db(conn).update(
-        user_id=winner_id
-    )
     await RemnaWaveRetryJobs.filter(user_id=loser_id).using_db(conn).delete()
 
 
