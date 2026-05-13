@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from datetime import date
 import hmac
-from typing import Optional
+from typing import Literal, Optional
 
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from fastapi import APIRouter, Depends, Header, HTTPException, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from bloobcat.services.admin_integration import (
     sync_user_lte,
@@ -152,3 +153,23 @@ async def unblock_family_invites(owner_id: int):
         details={"reason": "admin_unblock"},
     )
     return {"ok": True}
+
+
+class SendUserMessagePayload(BaseModel):
+    text: str = Field(..., min_length=1, max_length=4000)
+    parse_mode: Literal["HTML", "Markdown", "MarkdownV2"] | None = None
+
+
+@router.post("/users/{user_id}/send-message", dependencies=[Depends(require_admin_integration_token)])
+async def send_user_message(user_id: int, payload: SendUserMessagePayload):
+    user = await Users.get_or_none(id=user_id)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    from bloobcat.bot.bot import bot
+    try:
+        msg = await bot.send_message(user_id, payload.text, parse_mode=payload.parse_mode)
+        return {"status": "sent", "message_id": msg.message_id}
+    except TelegramForbiddenError:
+        return {"status": "blocked"}
+    except TelegramBadRequest as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e

@@ -107,3 +107,67 @@ async def notify_lte_full_limit(
         is_trial=is_trial,
         is_full=True,
     )
+
+
+async def notify_lte_topup_user(
+    *,
+    user,
+    lte_gb_delta: int,
+    lte_gb_after: int | None,
+    method: str,
+) -> bool:
+    """Send a user-facing payment confirmation after a successful LTE top-up.
+
+    Covers both Platega and YooKassa webhook paths via the shared
+    _apply_lte_topup_effect helper, plus the balance-only path in user.py.
+    Returns True on success, False on delivery failure.
+    """
+    user_id = getattr(user, "id", None)
+    if not isinstance(user_id, int) or user_id is None or user_id <= 0:
+        logger.warning(
+            "notify_lte_topup_user: skipping invalid user_id=%s method=%s", user_id, method
+        )
+        return False
+
+    lang = get_user_locale(user)
+    delta_str = _format_gb(lte_gb_delta)
+    after_str = _format_gb(lte_gb_after) if lte_gb_after is not None else "?"
+
+    if lang == "ru":
+        text = (
+            f"✅ LTE пополнен на {delta_str} ГБ. "
+            f"Доступно: {after_str} ГБ.\n\n"
+            "Спасибо за оплату — "
+            "приятного использования!"
+        )
+    else:
+        text = (
+            f"✅ LTE topped up by {delta_str} GB. "
+            f"Available: {after_str} GB.\n\n"
+            "Thanks for the payment — enjoy!"
+        )
+
+    try:
+        await bot.send_message(user_id, text)
+        await reset_user_failed_count(user_id)
+        logger.info(
+            "notify_lte_topup_user: delivered user=%s delta=%s after=%s method=%s",
+            user_id,
+            lte_gb_delta,
+            lte_gb_after,
+            method,
+        )
+        return True
+    except TelegramForbiddenError as exc:
+        logger.warning("notify_lte_topup_user: user %s blocked the bot: %s", user_id, exc)
+        await handle_telegram_forbidden_error(user_id, exc)
+    except TelegramBadRequest as exc:
+        logger.error(
+            "notify_lte_topup_user: bad request for user %s: %s", user_id, exc
+        )
+        await handle_telegram_bad_request(user_id, exc)
+    except Exception as exc:
+        logger.error(
+            "notify_lte_topup_user: unexpected error for user %s: %s", user_id, exc
+        )
+    return False
