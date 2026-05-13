@@ -1,8 +1,9 @@
-"""Regression tests for the referral-invitee trial bundle (spec 2026-05-12).
+"""Regression tests for the referral-invitee trial bundle (spec 2026-05-13).
 
 Pins the contract that:
-  * Any user with a non-partner `referred_by` gets the 20d / 1 GB LTE / hwid=1 bundle.
-  * Partner / QR referrals are excluded — they have their own economy.
+  * Any user with a non-QR `referred_by` gets the 20d / 1 GB LTE / hwid=1 bundle,
+    including plain `partner-<id>` referrals from partner referrers.
+  * QR referrals are excluded — printed/scanned codes carry no social-trust signal.
   * The grant is idempotent: a second call returns False.
   * Story referrals (legacy path) continue to receive the bundle (regression guard).
 """
@@ -140,9 +141,11 @@ async def test_ref_link_invitee_gets_20day_trial_and_1gb_lte():
 
 
 @pytest.mark.asyncio
-async def test_partner_referral_invitee_does_not_get_invitee_bonus():
-    """A partner-attributed signup (utm='partner') must NOT receive the
-    invitee bundle — partner economics live in PartnerEarnings."""
+async def test_partner_referral_invitee_now_gets_invitee_bonus():
+    """Spec 2026-05-13 reversal: a partner-attributed signup (utm='partner')
+    now receives the same 20d / 1 GB LTE / hwid=1 bundle as any other
+    non-QR referral. Partner referrers still earn cashback through
+    PartnerEarnings — the two flows are layered, not exclusive."""
     from bloobcat.db.users import Users
 
     await _create_referrer(user_id=10101)
@@ -153,22 +156,28 @@ async def test_partner_referral_invitee_does_not_get_invitee_bonus():
         referred_by=10101,
         utm="partner",
     )
+    trial_until = date.today() + timedelta(days=Users.REFERRAL_INVITE_TRIAL_DAYS)
 
     granted = await Users._grant_referral_trial_if_unclaimed(
-        partner_invitee.id, date.today() + timedelta(days=20)
+        partner_invitee.id, trial_until
     )
-    assert granted is False
+    assert granted is True
 
     refreshed = await Users.get(id=partner_invitee.id)
-    assert refreshed.is_trial is False
-    assert refreshed.used_trial is False
-    assert refreshed.story_trial_used_at is None
+    assert refreshed.is_trial is True
+    assert refreshed.used_trial is True
+    assert refreshed.expired_at == trial_until
+    assert refreshed.hwid_limit == 1
+    assert refreshed.lte_gb_total == 1
+    assert refreshed.story_trial_used_at is not None
 
 
 @pytest.mark.asyncio
 async def test_qr_referral_invitee_does_not_get_invitee_bonus():
     """A QR-attributed signup (utm starts with 'qr_') must NOT receive the
-    invitee bundle — same exclusion as partner."""
+    invitee bundle — printed/scanned codes carry no social-trust signal
+    and stay on the regular 10-day trial. This is the only remaining
+    exclusion after the 2026-05-13 partner-referee reversal."""
     from bloobcat.db.users import Users
 
     await _create_referrer(user_id=10201)
