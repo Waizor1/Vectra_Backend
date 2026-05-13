@@ -121,12 +121,25 @@ async def build_start_link_for_mode(payload: str, mode: PartnerLinkMode) -> str:
 
 
 async def _build_start_link(payload: str) -> str:
-    """Legacy default link form for warm in-Telegram referrals (Mini App direct)."""
-    return await _build_app_start_link(payload)
+    """Default link form for user-to-user referrals.
+
+    Routes invitees through the bot chat (`t.me/<bot>?start=<payload>`) instead
+    of a direct Mini App handoff. The extra Start tap is worth it because the
+    invitee must explicitly press Start in the bot chat to receive any
+    bot-delivered notifications — without that, the very first
+    `notify_trial_granted` message triggers a Telegram `Forbidden` response and
+    `handle_telegram_forbidden_error` flips `is_blocked=true` on a freshly
+    created user (Directus also archives them out of the admin list because of
+    `archive_field=is_blocked`). This false-positive cycle was hitting *every*
+    web-first referral signup, so the +1 tap is the cheap fix.
+    """
+    return await _build_chat_start_link(payload)
 
 
 async def build_referral_link(user_id: int) -> str:
-    # User referrals stay on direct Mini App: warm in-Telegram traffic, +1 tap is too costly.
+    # User referrals go through the bot chat (/start) so the invitee subscribes
+    # to the bot BEFORE any trial-granted notification fires. See
+    # `_build_start_link` for the full reasoning.
     return await _build_start_link(str(user_id))
 
 
