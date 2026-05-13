@@ -32,6 +32,11 @@ from bloobcat.bot.notifications.admin import (
     notify_active_tariff_change,
     notify_lte_topup,
 )
+try:
+    from bloobcat.bot.notifications.lte import notify_lte_topup_user
+except ImportError:  # pragma: no cover
+    async def notify_lte_topup_user(*args, **kwargs):  # type: ignore[misc]
+        return False
 from bloobcat.utils.dates import add_months_safe
 from bloobcat.routes.family_quota import build_family_quota_snapshot
 from bloobcat.services.subscription_limits import family_devices_threshold
@@ -1169,6 +1174,18 @@ async def change_active_tariff_devices(
                 except Exception as notify_exc:
                     logger.error(
                         f"Не удалось отправить админ-уведомление о LTE пополнении (баланс) для {user.id}: {notify_exc}"
+                    )
+                try:
+                    await notify_lte_topup_user(
+                        user=user,
+                        lte_gb_delta=int(additional_gb),
+                        lte_gb_after=int(new_lte_gb_total),
+                    )
+                except Exception as user_notify_exc:
+                    logger.error(
+                        "Не удалось отправить пользовательское уведомление о LTE пополнении (баланс) для %s: %s",
+                        user.id,
+                        user_notify_exc,
                     )
             active_tariff.lte_gb_total = new_lte_gb_total
             await active_tariff.save(update_fields=["lte_gb_total"])

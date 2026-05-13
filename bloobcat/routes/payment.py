@@ -38,6 +38,14 @@ from bloobcat.bot.notifications.admin import (
     notify_manual_payment_canceled,
 )
 
+# User-facing LTE top-up confirmation notification.
+# Imported lazily-compatible: stub in tests that don't load the bot stack.
+try:
+    from bloobcat.bot.notifications.lte import notify_lte_topup_user
+except ImportError:  # pragma: no cover
+    async def notify_lte_topup_user(*args, **kwargs):  # type: ignore[misc]
+        return False
+
 # Notifications module can be stubbed in tests. Keep imports resilient.
 try:
     from bloobcat.bot.notifications.general.referral import (
@@ -2409,6 +2417,57 @@ async def _apply_confirmed_platega_payment(
         metadata=metadata,
         provider_status=PLATEGA_STATUS_CONFIRMED,
     )
+
+    # Route LTE / devices top-ups to shared provider-agnostic helpers BEFORE
+    # _apply_succeeded_payment_fallback, which crashes on missing "month" field.
+    if _meta_bool(metadata.get("lte_topup"), False):
+        claimed = await _claim_payment_effect_once(
+            payment_id=payment_id,
+            user_id=int(user.id),
+            source="platega_lte_topup",
+            provider=PAYMENT_PROVIDER_PLATEGA,
+        )
+        if not claimed:
+            return True  # already processed, idempotent
+        await _refresh_payment_processing_lease(
+            payment_id=payment_id,
+            user_id=int(user.id),
+            source="platega_lte_topup",
+        )
+        ok, _reason = await _apply_lte_topup_effect(
+            payment_id=payment_id,
+            user=user,
+            meta=metadata,
+            amount_external=float(amount_external),
+            amount_from_balance=float(amount_from_balance),
+            provider=PAYMENT_PROVIDER_PLATEGA,
+        )
+        return ok
+
+    if _meta_bool(metadata.get("devices_topup"), False):
+        claimed = await _claim_payment_effect_once(
+            payment_id=payment_id,
+            user_id=int(user.id),
+            source="platega_devices_topup",
+            provider=PAYMENT_PROVIDER_PLATEGA,
+        )
+        if not claimed:
+            return True  # already processed, idempotent
+        await _refresh_payment_processing_lease(
+            payment_id=payment_id,
+            user_id=int(user.id),
+            source="platega_devices_topup",
+        )
+        ok, _reason = await _apply_devices_topup_effect(
+            payment_id=payment_id,
+            user=user,
+            meta=metadata,
+            amount_external=float(amount_external),
+            amount_from_balance=float(amount_from_balance),
+            provider=PAYMENT_PROVIDER_PLATEGA,
+        )
+        return ok
+
     return await _apply_succeeded_payment_fallback(
         _platega_payment_stub(
             payment_id=payment_id,
@@ -2892,6 +2951,539 @@ async def platega_webhook(request: Request):
     return {"status": "ok"}
 
 
+async def _apply_lte_topup_effect(
+    *,
+    payment_id: str,
+    user: Users,
+    meta: dict,
+    amount_external: float,
+    amount_from_balance: float,
+    provider: str,
+) -> tuple[bool, str | None]:
+    """Provider-agnostic LTE top-up effect: credits GB, marks payment succeeded,
+    fires admin + user notifications, awards cashbacks.
+
+    Preserves _claim_payment_effect_once / _mark_payment_effect_success idempotency.
+    Called from both yookassa_webhook and _apply_confirmed_platega_payment.
+
+    Returns (True, None) on success or (False, reason) on failure.
+    """
+    lte_gb_delta = int(meta.get("lte_gb_delta") or 0)
+    lte_price_per_gb = float(meta.get("lte_price_per_gb") or 0)
+    preserve_active_tariff_state = False
+
+    if lte_gb_delta <= 0 and amount_external > 0:
+        await _mark_payment_effect_failed(
+            payment_id=payment_id,
+            error="lte_gb_delta must be positive when amount_external > 0",
+        )
+        logger.error(
+            "LTE пополнение: некорректная metadata — lte_gb_delta=%s при amount_external=%s (provider=%s, payment=%s)",
+            lte_gb_delta,
+            amount_external,
+            provider,
+            payment_id,
+        )
+        return False, "lte_gb_delta must be positive"
+
+    active_tariff = (
+        await ActiveTariffs.get_or_none(id=user.active_tariff_id)
+        if user.active_tariff_id
+        else None
+    )
+    if not active_tariff:
+        logger.error(
+            "LTE пополнение: активный тариф не найден для пользователя %s (payment %s, provider=%s)",
+            user.id,
+            payment_id,
+            provider,
+        )
+        await _mark_payment_effect_failed(
+            payment_id=payment_id,
+            error="Active tariff not found for LTE topup",
+        )
+        return False, "Active tariff not found"
+
+    lte_before = int(active_tariff.lte_gb_total or 0)
+    old_hwid_limit = (
+        int(active_tariff.hwid_limit or 0)
+        if getattr(active_tariff, "hwid_limit", None) is not None
+        else None
+    )
+    old_expired_at_for_log = user.expired_at
+
+    if amount_from_balance > 0:
+        initial_balance = user.balance
+        user.balance = max(0, user.balance - amount_from_balance)
+        await user.save(update_fields=["balance"])
+        logger.info(
+            "LTE пополнение: списано %.2f с бонусного баланса пользователя %s. "
+            "Баланс до: %s, после: %s (provider=%s)",
+            amount_from_balance,
+            user.id,
+            initial_balance,
+            user.balance,
+            provider,
+        )
+
+    update_fields = []
+    if lte_gb_delta > 0:
+        active_tariff.lte_gb_total = int(active_tariff.lte_gb_total or 0) + lte_gb_delta
+        update_fields.append("lte_gb_total")
+        user.lte_gb_total = int(active_tariff.lte_gb_total or 0)
+        await user.save(update_fields=["lte_gb_total"])
+
+    msk_today = datetime.now(MSK_TZ).date()
+    usage_snapshot = None
+    if user.remnawave_uuid and not preserve_active_tariff_state:
+        await _refresh_payment_processing_lease(
+            payment_id=payment_id,
+            user_id=int(user.id),
+            source="lte_topup_usage_pre",
+        )
+        try:
+            usage_snapshot = await _await_payment_external_call(
+                _fetch_today_lte_usage_gb(str(user.remnawave_uuid)),
+                operation="lte_topup_fetch_today_lte_usage_gb",
+            )
+        except asyncio.TimeoutError:
+            usage_snapshot = None
+        finally:
+            await _refresh_payment_processing_lease(
+                payment_id=payment_id,
+                user_id=int(user.id),
+                source="lte_topup_usage_post",
+            )
+    if usage_snapshot is not None:
+        active_tariff.lte_usage_last_date = msk_today
+        active_tariff.lte_usage_last_total_gb = usage_snapshot
+        update_fields.extend(["lte_usage_last_date", "lte_usage_last_total_gb"])
+    elif active_tariff.lte_usage_last_date != msk_today:
+        active_tariff.lte_usage_last_date = msk_today
+        active_tariff.lte_usage_last_total_gb = 0.0
+        update_fields.extend(["lte_usage_last_date", "lte_usage_last_total_gb"])
+
+    if update_fields:
+        await active_tariff.save(update_fields=update_fields)
+
+    await NotificationMarks.filter(user_id=user.id, type="lte_usage").delete()
+
+    pending_device_count = meta.get("pending_device_count")
+    if pending_device_count is not None:
+        try:
+            pending_device_count = int(pending_device_count)
+        except (TypeError, ValueError):
+            pending_device_count = None
+    if pending_device_count and pending_device_count > 0:
+        pending_expired_at = None
+        pending_expired_at_raw = meta.get("pending_expired_at")
+        if pending_expired_at_raw:
+            try:
+                pending_expired_at = date.fromisoformat(str(pending_expired_at_raw))
+            except Exception:
+                pending_expired_at = None
+
+        pending_active_tariff_price = meta.get("pending_active_tariff_price")
+        try:
+            pending_active_tariff_price = (
+                int(pending_active_tariff_price)
+                if pending_active_tariff_price is not None
+                else None
+            )
+        except (TypeError, ValueError):
+            pending_active_tariff_price = None
+
+        pending_progressive_multiplier = meta.get("pending_progressive_multiplier")
+        try:
+            pending_progressive_multiplier = (
+                float(pending_progressive_multiplier)
+                if pending_progressive_multiplier is not None
+                else None
+            )
+        except (TypeError, ValueError):
+            pending_progressive_multiplier = None
+
+        pending_residual_day_fraction = meta.get("pending_residual_day_fraction")
+        try:
+            pending_residual_day_fraction = (
+                float(pending_residual_day_fraction)
+                if pending_residual_day_fraction is not None
+                else None
+            )
+        except (TypeError, ValueError):
+            pending_residual_day_fraction = None
+
+        pending_devices_decrease_count = meta.get("pending_devices_decrease_count")
+        try:
+            pending_devices_decrease_count = (
+                int(pending_devices_decrease_count)
+                if pending_devices_decrease_count is not None
+                else None
+            )
+        except (TypeError, ValueError):
+            pending_devices_decrease_count = None
+
+        user.expired_at = pending_expired_at or user.expired_at
+        user.hwid_limit = pending_device_count
+        await user.save()
+
+        active_tariff.hwid_limit = pending_device_count
+        if pending_active_tariff_price is not None:
+            active_tariff.price = pending_active_tariff_price
+        if pending_progressive_multiplier is not None:
+            active_tariff.progressive_multiplier = pending_progressive_multiplier
+        if pending_residual_day_fraction is not None:
+            active_tariff.residual_day_fraction = pending_residual_day_fraction
+        if pending_devices_decrease_count is not None:
+            active_tariff.devices_decrease_count = pending_devices_decrease_count
+        await active_tariff.save()
+
+        if user.remnawave_uuid and user.is_device_per_user_enabled():
+            await _sync_device_per_user_after_payment(user, source="lte_topup_devices")
+        if user.remnawave_uuid and not user.is_device_per_user_enabled():
+            remnawave_client = None
+            try:
+                await _refresh_payment_processing_lease(
+                    payment_id=payment_id,
+                    user_id=int(user.id),
+                    source="lte_topup_remna_pre",
+                )
+                remnawave_client = RemnaWaveClient(
+                    remnawave_settings.url,
+                    remnawave_settings.token.get_secret_value(),
+                )
+                await _await_payment_external_call(
+                    remnawave_client.users.update_user(
+                        uuid=user.remnawave_uuid,
+                        expireAt=user.expired_at,
+                        hwidDeviceLimit=pending_device_count,
+                    ),
+                    operation="lte_topup_remnawave_update_user",
+                )
+                await _refresh_payment_processing_lease(
+                    payment_id=payment_id,
+                    user_id=int(user.id),
+                    source="lte_topup_remna_post",
+                )
+            except Exception as e:
+                logger.error(
+                    "LTE пополнение: ошибка обновления RemnaWave при изменении устройств для %s: %s (provider=%s)",
+                    user.id,
+                    e,
+                    provider,
+                )
+            finally:
+                if remnawave_client:
+                    try:
+                        await remnawave_client.close()
+                    except Exception:
+                        pass
+
+    total_amount = amount_external + amount_from_balance
+    await _mark_payment_effect_success(
+        payment_id=payment_id,
+        user_id=user.id,
+        amount=total_amount,
+        amount_external=amount_external,
+        amount_from_balance=amount_from_balance,
+        status="succeeded",
+        provider=provider,
+    )
+
+    if user.remnawave_uuid and not preserve_active_tariff_state:
+        try:
+            effective_lte_total = (
+                user.lte_gb_total
+                if user.lte_gb_total is not None
+                else (active_tariff.lte_gb_total or 0)
+            )
+            should_enable_lte = effective_lte_total > (active_tariff.lte_gb_used or 0)
+            await _await_payment_external_call(
+                set_lte_squad_status(str(user.remnawave_uuid), enable=should_enable_lte),
+                operation="lte_topup_set_lte_squad_status",
+            )
+        except Exception as e:
+            logger.error(
+                "LTE пополнение: ошибка обновления LTE-сквада для %s: %s (provider=%s)",
+                user.id,
+                e,
+                provider,
+            )
+
+    logger.info(
+        "LTE пополнение успешно: user=%s, delta=%s, price=%s, provider=%s",
+        user.id,
+        lte_gb_delta,
+        lte_price_per_gb,
+        provider,
+    )
+    lte_after = int(active_tariff.lte_gb_total or 0)
+    try:
+        await notify_lte_topup(
+            user_id=user.id,
+            payment_id=payment_id,
+            method=f"{provider}_lte_topup",
+            lte_gb_delta=lte_gb_delta,
+            lte_gb_before=lte_before,
+            lte_gb_after=lte_after,
+            price_per_gb=lte_price_per_gb,
+            amount_total=_round_rub(total_amount),
+            amount_external=_round_rub(amount_external),
+            amount_from_balance=int(amount_from_balance),
+            old_hwid_limit=old_hwid_limit,
+            new_hwid_limit=(
+                int(active_tariff.hwid_limit)
+                if getattr(active_tariff, "hwid_limit", None) is not None
+                else None
+            ),
+            old_expired_at=old_expired_at_for_log,
+            new_expired_at=user.expired_at,
+        )
+    except Exception as notify_exc:
+        logger.error(
+            "LTE пополнение: не удалось отправить админ-уведомление для %s: %s (provider=%s)",
+            user.id,
+            notify_exc,
+            provider,
+        )
+    try:
+        await notify_lte_topup_user(
+            user=user,
+            lte_gb_delta=lte_gb_delta,
+            lte_gb_after=lte_after,
+        )
+    except Exception as user_notify_exc:
+        logger.error(
+            "LTE пополнение: не удалось отправить пользовательское уведомление для %s: %s (provider=%s)",
+            user.id,
+            user_notify_exc,
+            provider,
+        )
+    try:
+        await _award_partner_cashback(
+            payment_id=payment_id,
+            referral_user=user,
+            amount_rub_total=int(_round_rub(total_amount)),
+        )
+    except Exception as e_partner:
+        logger.warning(
+            "LTE пополнение: не удалось начислить партнёрский кэшбек для payment %s: %s (provider=%s)",
+            payment_id,
+            e_partner,
+            provider,
+        )
+    try:
+        await _award_standard_referral_cashback(
+            payment_id=payment_id,
+            referral_user=user,
+            amount_external_rub=int(_round_rub(amount_external)),
+        )
+    except Exception as e_ref_cashback:
+        logger.warning(
+            "LTE пополнение: не удалось начислить обычный реферальный кэшбек для payment %s: %s (provider=%s)",
+            payment_id,
+            e_ref_cashback,
+            provider,
+        )
+    return True, None
+
+
+async def _apply_devices_topup_effect(
+    *,
+    payment_id: str,
+    user: Users,
+    meta: dict,
+    amount_external: float,
+    amount_from_balance: float,
+    provider: str,
+) -> tuple[bool, str | None]:
+    """Provider-agnostic devices top-up effect: updates hwid_limit, marks payment
+    succeeded, fires admin notification, awards cashbacks.
+
+    Preserves _claim_payment_effect_once / _mark_payment_effect_success idempotency.
+    Called from both yookassa_webhook and _apply_confirmed_platega_payment.
+
+    Returns (True, None) on success or (False, reason) on failure.
+    """
+    new_device_count = int(meta.get("new_device_count") or 0)
+    new_active_tariff_price = meta.get("new_active_tariff_price")
+    new_progressive_multiplier = meta.get("new_progressive_multiplier")
+
+    active_tariff = (
+        await ActiveTariffs.get_or_none(id=user.active_tariff_id)
+        if user.active_tariff_id
+        else None
+    )
+    if not active_tariff or new_device_count <= 0:
+        logger.error(
+            "Пополнение устройств: активный тариф или количество устройств "
+            "не найдено для пользователя %s (payment %s, provider=%s)",
+            user.id,
+            payment_id,
+            provider,
+        )
+        await _mark_payment_effect_failed(
+            payment_id=payment_id,
+            error="Active tariff or device count missing for devices topup",
+        )
+        return False, "Active tariff not found"
+
+    old_hwid_limit = int(active_tariff.hwid_limit or 0)
+    old_expired_at = user.expired_at
+
+    if amount_from_balance > 0:
+        initial_balance = user.balance
+        user.balance = max(0, user.balance - amount_from_balance)
+        await user.save(update_fields=["balance"])
+        logger.info(
+            "Пополнение устройств: списано %.2f с бонусного баланса "
+            "пользователя %s. Баланс до: %s, после: %s (provider=%s)",
+            amount_from_balance,
+            user.id,
+            initial_balance,
+            user.balance,
+            provider,
+        )
+
+    user.hwid_limit = new_device_count
+    await user.save(update_fields=["hwid_limit"])
+
+    active_tariff.hwid_limit = new_device_count
+    update_fields = ["hwid_limit"]
+    try:
+        if new_active_tariff_price is not None:
+            active_tariff.price = int(new_active_tariff_price)
+            update_fields.append("price")
+    except (TypeError, ValueError):
+        pass
+    try:
+        if new_progressive_multiplier is not None:
+            active_tariff.progressive_multiplier = float(new_progressive_multiplier)
+            update_fields.append("progressive_multiplier")
+    except (TypeError, ValueError):
+        pass
+    await active_tariff.save(update_fields=update_fields)
+
+    if user.remnawave_uuid:
+        if user.is_device_per_user_enabled():
+            await _sync_device_per_user_after_payment(
+                user, source="devices_topup"
+            )
+        else:
+            remnawave_client = None
+            try:
+                await _refresh_payment_processing_lease(
+                    payment_id=payment_id,
+                    user_id=int(user.id),
+                    source="devices_topup_remna_pre",
+                )
+                remnawave_client = RemnaWaveClient(
+                    remnawave_settings.url,
+                    remnawave_settings.token.get_secret_value(),
+                )
+                await _await_payment_external_call(
+                    remnawave_client.users.update_user(
+                        uuid=user.remnawave_uuid,
+                        expireAt=user.expired_at,
+                        hwidDeviceLimit=new_device_count,
+                    ),
+                    operation="devices_topup_remnawave_update_user",
+                )
+                await _refresh_payment_processing_lease(
+                    payment_id=payment_id,
+                    user_id=int(user.id),
+                    source="devices_topup_remna_post",
+                )
+            except Exception as e:
+                logger.error(
+                    "Пополнение устройств: ошибка обновления RemnaWave для %s: %s (provider=%s)",
+                    user.id,
+                    e,
+                    provider,
+                )
+            finally:
+                if remnawave_client:
+                    try:
+                        await remnawave_client.close()
+                    except Exception:
+                        pass
+
+    total_amount = amount_external + amount_from_balance
+    await _mark_payment_effect_success(
+        payment_id=payment_id,
+        user_id=user.id,
+        amount=total_amount,
+        amount_external=amount_external,
+        amount_from_balance=amount_from_balance,
+        status="succeeded",
+        provider=provider,
+    )
+
+    try:
+        await notify_active_tariff_change(
+            user=user,
+            tariff_name=active_tariff.name,
+            months=int(active_tariff.months),
+            old_limit=old_hwid_limit,
+            new_limit=new_device_count,
+            old_lte_gb=int(active_tariff.lte_gb_total or 0),
+            new_lte_gb=int(active_tariff.lte_gb_total or 0),
+            old_price=int(
+                meta.get("previous_active_tariff_price") or active_tariff.price
+            ),
+            new_price=int(active_tariff.price),
+            old_expired_at=old_expired_at,
+            new_expired_at=user.expired_at,
+            auto_renew_enabled=(
+                bool(user.renew_id)
+                and payment_settings.auto_renewal_mode == "yookassa"
+            ),
+        )
+    except Exception as e:
+        logger.error(
+            "Пополнение устройств: не удалось отправить уведомление пользователю %s: %s (provider=%s)",
+            user.id,
+            e,
+            provider,
+        )
+
+    try:
+        await _award_partner_cashback(
+            payment_id=payment_id,
+            referral_user=user,
+            amount_rub_total=int(_round_rub(total_amount)),
+        )
+    except Exception as e_partner:
+        logger.warning(
+            "Пополнение устройств: не удалось начислить партнёрский кэшбек для payment %s: %s (provider=%s)",
+            payment_id,
+            e_partner,
+            provider,
+        )
+    try:
+        await _award_standard_referral_cashback(
+            payment_id=payment_id,
+            referral_user=user,
+            amount_external_rub=int(_round_rub(amount_external)),
+        )
+    except Exception as e_ref_cashback:
+        logger.warning(
+            "Пополнение устройств: не удалось начислить обычный реферальный кэшбек для payment %s: %s (provider=%s)",
+            payment_id,
+            e_ref_cashback,
+            provider,
+        )
+    logger.info(
+        "Пополнение устройств успешно: user=%s, %s -> %s, price=%s, provider=%s",
+        user.id,
+        old_hwid_limit,
+        new_device_count,
+        int(active_tariff.price),
+        provider,
+    )
+    return True, None
+
+
 @router.post("/webhook/yookassa/{secret}")
 @webhook_router.post("/webhook/yookassa/{secret}")
 async def yookassa_webhook(request: Request, secret: str):
@@ -3174,475 +3766,31 @@ async def yookassa_webhook(request: Request, secret: str):
             source="webhook",
         )
 
-        if data.get("lte_topup"):
-            # TODO(lte-launch): this webhook branch is a future LTE top-up scaffold.
-            # Keep it independent from Standard/Family overlay preservation logic for now.
-            preserve_active_tariff_state = False
-            lte_gb_delta = int(data.get("lte_gb_delta") or 0)
-            lte_price_per_gb = float(data.get("lte_price_per_gb") or 0)
-            amount_from_balance = _round_rub(data.get("amount_from_balance", 0))
-            active_tariff = (
-                await ActiveTariffs.get_or_none(id=user.active_tariff_id)
-                if user.active_tariff_id
-                else None
-            )
-            if not active_tariff:
-                logger.error(
-                    f"LTE пополнение: активный тариф не найден для пользователя {user.id}"
-                )
-                await _mark_payment_effect_failed(
-                    payment_id=str(payment.id),
-                    error="Active tariff not found for LTE topup",
-                )
-                return {"status": "error", "message": "Active tariff not found"}
-
-            lte_before = int(active_tariff.lte_gb_total or 0)
-            old_hwid_limit = (
-                int(active_tariff.hwid_limit or 0)
-                if getattr(active_tariff, "hwid_limit", None) is not None
-                else None
-            )
-            old_expired_at_for_log = user.expired_at
-
-            if amount_from_balance > 0:
-                initial_balance = user.balance
-                user.balance = max(0, user.balance - amount_from_balance)
-                await user.save(update_fields=["balance"])
-                logger.info(
-                    f"LTE пополнение: списано {amount_from_balance:.2f} с бонусного баланса пользователя {user.id}. "
-                    f"Баланс до: {initial_balance}, после: {user.balance}"
-                )
-
-            update_fields = []
-            if lte_gb_delta > 0:
-                active_tariff.lte_gb_total = (
-                    int(active_tariff.lte_gb_total or 0) + lte_gb_delta
-                )
-                update_fields.append("lte_gb_total")
-                user.lte_gb_total = int(active_tariff.lte_gb_total or 0)
-                await user.save(update_fields=["lte_gb_total"])
-
-            msk_today = datetime.now(MSK_TZ).date()
-            usage_snapshot = None
-            if user.remnawave_uuid and not preserve_active_tariff_state:
-                await _refresh_payment_processing_lease(
-                    payment_id=str(payment.id),
-                    user_id=int(user.id),
-                    source="webhook_lte_usage_pre",
-                )
-                try:
-                    usage_snapshot = await _await_payment_external_call(
-                        _fetch_today_lte_usage_gb(str(user.remnawave_uuid)),
-                        operation="webhook_lte_fetch_today_lte_usage_gb",
-                    )
-                except asyncio.TimeoutError:
-                    usage_snapshot = None
-                finally:
-                    await _refresh_payment_processing_lease(
-                        payment_id=str(payment.id),
-                        user_id=int(user.id),
-                        source="webhook_lte_usage_post",
-                    )
-            if usage_snapshot is not None:
-                active_tariff.lte_usage_last_date = msk_today
-                active_tariff.lte_usage_last_total_gb = usage_snapshot
-                update_fields.extend(["lte_usage_last_date", "lte_usage_last_total_gb"])
-            elif active_tariff.lte_usage_last_date != msk_today:
-                active_tariff.lte_usage_last_date = msk_today
-                active_tariff.lte_usage_last_total_gb = 0.0
-                update_fields.extend(["lte_usage_last_date", "lte_usage_last_total_gb"])
-
-            if update_fields:
-                await active_tariff.save(update_fields=update_fields)
-
-            await NotificationMarks.filter(user_id=user.id, type="lte_usage").delete()
-
-            pending_device_count = data.get("pending_device_count")
-            if pending_device_count is not None:
-                try:
-                    pending_device_count = int(pending_device_count)
-                except (TypeError, ValueError):
-                    pending_device_count = None
-            if pending_device_count and pending_device_count > 0:
-                pending_expired_at = None
-                pending_expired_at_raw = data.get("pending_expired_at")
-                if pending_expired_at_raw:
-                    try:
-                        pending_expired_at = date.fromisoformat(
-                            str(pending_expired_at_raw)
-                        )
-                    except Exception:
-                        pending_expired_at = None
-
-                pending_active_tariff_price = data.get("pending_active_tariff_price")
-                try:
-                    pending_active_tariff_price = (
-                        int(pending_active_tariff_price)
-                        if pending_active_tariff_price is not None
-                        else None
-                    )
-                except (TypeError, ValueError):
-                    pending_active_tariff_price = None
-
-                pending_progressive_multiplier = data.get(
-                    "pending_progressive_multiplier"
-                )
-                try:
-                    pending_progressive_multiplier = (
-                        float(pending_progressive_multiplier)
-                        if pending_progressive_multiplier is not None
-                        else None
-                    )
-                except (TypeError, ValueError):
-                    pending_progressive_multiplier = None
-
-                pending_residual_day_fraction = data.get(
-                    "pending_residual_day_fraction"
-                )
-                try:
-                    pending_residual_day_fraction = (
-                        float(pending_residual_day_fraction)
-                        if pending_residual_day_fraction is not None
-                        else None
-                    )
-                except (TypeError, ValueError):
-                    pending_residual_day_fraction = None
-
-                pending_devices_decrease_count = data.get(
-                    "pending_devices_decrease_count"
-                )
-                try:
-                    pending_devices_decrease_count = (
-                        int(pending_devices_decrease_count)
-                        if pending_devices_decrease_count is not None
-                        else None
-                    )
-                except (TypeError, ValueError):
-                    pending_devices_decrease_count = None
-
-                user.expired_at = pending_expired_at or user.expired_at
-                user.hwid_limit = pending_device_count
-                await user.save()
-
-                active_tariff.hwid_limit = pending_device_count
-                if pending_active_tariff_price is not None:
-                    active_tariff.price = pending_active_tariff_price
-                if pending_progressive_multiplier is not None:
-                    active_tariff.progressive_multiplier = (
-                        pending_progressive_multiplier
-                    )
-                if pending_residual_day_fraction is not None:
-                    active_tariff.residual_day_fraction = pending_residual_day_fraction
-                if pending_devices_decrease_count is not None:
-                    active_tariff.devices_decrease_count = (
-                        pending_devices_decrease_count
-                    )
-                await active_tariff.save()
-
-                if user.remnawave_uuid and user.is_device_per_user_enabled():
-                    await _sync_device_per_user_after_payment(
-                        user, source="webhook_lte"
-                    )
-                if user.remnawave_uuid and not user.is_device_per_user_enabled():
-                    remnawave_client = None
-                    try:
-                        await _refresh_payment_processing_lease(
-                            payment_id=str(payment.id),
-                            user_id=int(user.id),
-                            source="webhook_lte_remna_pre",
-                        )
-                        remnawave_client = RemnaWaveClient(
-                            remnawave_settings.url,
-                            remnawave_settings.token.get_secret_value(),
-                        )
-                        await _await_payment_external_call(
-                            remnawave_client.users.update_user(
-                                uuid=user.remnawave_uuid,
-                                expireAt=user.expired_at,
-                                hwidDeviceLimit=pending_device_count,
-                            ),
-                            operation="webhook_lte_remnawave_update_user",
-                        )
-                        await _refresh_payment_processing_lease(
-                            payment_id=str(payment.id),
-                            user_id=int(user.id),
-                            source="webhook_lte_remna_post",
-                        )
-                    except Exception as e:
-                        logger.error(
-                            f"LTE пополнение: ошибка обновления RemnaWave при изменении устройств для {user.id}: {e}"
-                        )
-                    finally:
-                        if remnawave_client:
-                            try:
-                                await remnawave_client.close()
-                            except Exception:
-                                pass
-
-            amount_external = float(payment.amount.value)
-            total_amount = amount_external + amount_from_balance
-            await _mark_payment_effect_success(
+        if _meta_bool(data.get("lte_topup"), False):
+            ok, reason = await _apply_lte_topup_effect(
                 payment_id=str(payment.id),
-                user_id=user.id,
-                amount=total_amount,
-                amount_external=amount_external,
-                amount_from_balance=amount_from_balance,
-                status="succeeded",
+                user=user,
+                meta=data,
+                amount_external=float(payment.amount.value),
+                amount_from_balance=_round_rub(data.get("amount_from_balance", 0)),
                 provider=provider,
             )
+            if ok:
+                return {"status": "ok"}
+            return {"status": "error", "message": reason or "LTE topup effect failed"}
 
-            if user.remnawave_uuid and not preserve_active_tariff_state:
-                try:
-                    effective_lte_total = (
-                        user.lte_gb_total
-                        if user.lte_gb_total is not None
-                        else (active_tariff.lte_gb_total or 0)
-                    )
-                    should_enable_lte = effective_lte_total > (
-                        active_tariff.lte_gb_used or 0
-                    )
-                    await _await_payment_external_call(
-                        set_lte_squad_status(
-                            str(user.remnawave_uuid), enable=should_enable_lte
-                        ),
-                        operation="webhook_lte_set_lte_squad_status",
-                    )
-                except Exception as e:
-                    logger.error(
-                        f"LTE пополнение: ошибка обновления LTE-сквада для {user.id}: {e}"
-                    )
-
-            logger.info(
-                f"LTE пополнение успешно: user={user.id}, delta={lte_gb_delta}, price={lte_price_per_gb}"
-            )
-            try:
-                lte_after = int(active_tariff.lte_gb_total or 0)
-                await notify_lte_topup(
-                    user_id=user.id,
-                    payment_id=payment.id,
-                    method=f"{provider}_lte_topup",
-                    lte_gb_delta=lte_gb_delta,
-                    lte_gb_before=lte_before,
-                    lte_gb_after=lte_after,
-                    price_per_gb=lte_price_per_gb,
-                    amount_total=_round_rub(total_amount),
-                    amount_external=_round_rub(amount_external),
-                    amount_from_balance=int(amount_from_balance),
-                    old_hwid_limit=old_hwid_limit,
-                    new_hwid_limit=(
-                        int(active_tariff.hwid_limit)
-                        if getattr(active_tariff, "hwid_limit", None) is not None
-                        else None
-                    ),
-                    old_expired_at=old_expired_at_for_log,
-                    new_expired_at=user.expired_at,
-                )
-            except Exception as notify_exc:
-                logger.error(
-                    f"LTE пополнение: не удалось отправить админ-уведомление: {notify_exc}"
-                )
-            try:
-                await _award_partner_cashback(
-                    payment_id=str(payment.id),
-                    referral_user=user,
-                    amount_rub_total=int(_round_rub(total_amount)),
-                )
-            except Exception as e_partner:
-                logger.warning(
-                    "LTE пополнение: не удалось начислить партнёрский кэшбек для payment %s: %s",
-                    payment.id,
-                    e_partner,
-                )
-            try:
-                await _award_standard_referral_cashback(
-                    payment_id=str(payment.id),
-                    referral_user=user,
-                    amount_external_rub=int(_round_rub(amount_external)),
-                )
-            except Exception as e_ref_cashback:
-                logger.warning(
-                    "LTE пополнение: не удалось начислить обычный реферальный кэшбек для payment %s: %s",
-                    payment.id,
-                    e_ref_cashback,
-                )
-            return {"status": "ok"}
-
-        if data.get("devices_topup"):
-            new_device_count = int(data.get("new_device_count") or 0)
-            new_active_tariff_price = data.get("new_active_tariff_price")
-            new_progressive_multiplier = data.get("new_progressive_multiplier")
-            amount_from_balance = _round_rub(data.get("amount_from_balance", 0))
-            active_tariff = (
-                await ActiveTariffs.get_or_none(id=user.active_tariff_id)
-                if user.active_tariff_id
-                else None
-            )
-            if not active_tariff or new_device_count <= 0:
-                logger.error(
-                    "Пополнение устройств: активный тариф или количество устройств "
-                    f"не найдено для пользователя {user.id}",
-                )
-                await _mark_payment_effect_failed(
-                    payment_id=str(payment.id),
-                    error="Active tariff or device count missing for devices topup",
-                )
-                return {
-                    "status": "error",
-                    "message": "Active tariff or device count missing",
-                }
-
-            old_hwid_limit = int(active_tariff.hwid_limit or 0)
-            old_expired_at = user.expired_at
-
-            if amount_from_balance > 0:
-                initial_balance = user.balance
-                user.balance = max(0, user.balance - amount_from_balance)
-                await user.save(update_fields=["balance"])
-                logger.info(
-                    "Пополнение устройств: списано %.2f с бонусного баланса "
-                    "пользователя %s. Баланс до: %s, после: %s",
-                    amount_from_balance,
-                    user.id,
-                    initial_balance,
-                    user.balance,
-                )
-
-            user.hwid_limit = new_device_count
-            await user.save(update_fields=["hwid_limit"])
-
-            active_tariff.hwid_limit = new_device_count
-            update_fields = ["hwid_limit"]
-            try:
-                if new_active_tariff_price is not None:
-                    active_tariff.price = int(new_active_tariff_price)
-                    update_fields.append("price")
-            except (TypeError, ValueError):
-                pass
-            try:
-                if new_progressive_multiplier is not None:
-                    active_tariff.progressive_multiplier = float(
-                        new_progressive_multiplier
-                    )
-                    update_fields.append("progressive_multiplier")
-            except (TypeError, ValueError):
-                pass
-            await active_tariff.save(update_fields=update_fields)
-
-            if user.remnawave_uuid:
-                if user.is_device_per_user_enabled():
-                    await _sync_device_per_user_after_payment(
-                        user, source="webhook_devices_topup"
-                    )
-                else:
-                    remnawave_client = None
-                    try:
-                        await _refresh_payment_processing_lease(
-                            payment_id=str(payment.id),
-                            user_id=int(user.id),
-                            source="webhook_devices_topup_remna_pre",
-                        )
-                        remnawave_client = RemnaWaveClient(
-                            remnawave_settings.url,
-                            remnawave_settings.token.get_secret_value(),
-                        )
-                        await _await_payment_external_call(
-                            remnawave_client.users.update_user(
-                                uuid=user.remnawave_uuid,
-                                expireAt=user.expired_at,
-                                hwidDeviceLimit=new_device_count,
-                            ),
-                            operation="webhook_devices_topup_remnawave_update_user",
-                        )
-                        await _refresh_payment_processing_lease(
-                            payment_id=str(payment.id),
-                            user_id=int(user.id),
-                            source="webhook_devices_topup_remna_post",
-                        )
-                    except Exception as e:
-                        logger.error(
-                            "Пополнение устройств: ошибка обновления RemnaWave "
-                            f"для {user.id}: {e}"
-                        )
-                    finally:
-                        if remnawave_client:
-                            try:
-                                await remnawave_client.close()
-                            except Exception:
-                                pass
-
-            amount_external = float(payment.amount.value)
-            total_amount = amount_external + amount_from_balance
-            await _mark_payment_effect_success(
+        if _meta_bool(data.get("devices_topup"), False):
+            ok, reason = await _apply_devices_topup_effect(
                 payment_id=str(payment.id),
-                user_id=user.id,
-                amount=total_amount,
-                amount_external=amount_external,
-                amount_from_balance=amount_from_balance,
-                status="succeeded",
+                user=user,
+                meta=data,
+                amount_external=float(payment.amount.value),
+                amount_from_balance=_round_rub(data.get("amount_from_balance", 0)),
                 provider=provider,
             )
-
-            try:
-                await notify_active_tariff_change(
-                    user=user,
-                    tariff_name=active_tariff.name,
-                    months=int(active_tariff.months),
-                    old_limit=old_hwid_limit,
-                    new_limit=new_device_count,
-                    old_lte_gb=int(active_tariff.lte_gb_total or 0),
-                    new_lte_gb=int(active_tariff.lte_gb_total or 0),
-                    old_price=int(
-                        data.get("previous_active_tariff_price")
-                        or active_tariff.price
-                    ),
-                    new_price=int(active_tariff.price),
-                    old_expired_at=old_expired_at,
-                    new_expired_at=user.expired_at,
-                    auto_renew_enabled=(
-                        bool(user.renew_id)
-                        and payment_settings.auto_renewal_mode == "yookassa"
-                    ),
-                )
-            except Exception as e:
-                logger.error(
-                    "Пополнение устройств: не удалось отправить уведомление "
-                    f"пользователю {user.id}: {e}"
-                )
-
-            try:
-                await _award_partner_cashback(
-                    payment_id=str(payment.id),
-                    referral_user=user,
-                    amount_rub_total=int(_round_rub(total_amount)),
-                )
-            except Exception as e_partner:
-                logger.warning(
-                    "Пополнение устройств: не удалось начислить партнёрский "
-                    "кэшбек для payment %s: %s",
-                    payment.id,
-                    e_partner,
-                )
-            try:
-                await _award_standard_referral_cashback(
-                    payment_id=str(payment.id),
-                    referral_user=user,
-                    amount_external_rub=int(_round_rub(amount_external)),
-                )
-            except Exception as e_ref_cashback:
-                logger.warning(
-                    "Пополнение устройств: не удалось начислить обычный "
-                    "реферальный кэшбек для payment %s: %s",
-                    payment.id,
-                    e_ref_cashback,
-                )
-            logger.info(
-                "Пополнение устройств успешно: user=%s, %s -> %s, price=%s",
-                user.id,
-                old_hwid_limit,
-                new_device_count,
-                int(active_tariff.price),
-            )
-            return {"status": "ok"}
+            if ok:
+                return {"status": "ok"}
+            return {"status": "error", "message": reason or "Devices topup effect failed"}
 
         try:
             months = int(data["month"])
