@@ -2434,7 +2434,7 @@ async def _apply_confirmed_platega_payment(
             user_id=int(user.id),
             source="platega_lte_topup",
         )
-        return await _apply_lte_topup_effect(
+        ok, _reason = await _apply_lte_topup_effect(
             payment_id=payment_id,
             user=user,
             meta=metadata,
@@ -2442,6 +2442,7 @@ async def _apply_confirmed_platega_payment(
             amount_from_balance=float(amount_from_balance),
             provider=PAYMENT_PROVIDER_PLATEGA,
         )
+        return ok
 
     if _meta_bool(metadata.get("devices_topup"), False):
         claimed = await _claim_payment_effect_once(
@@ -2457,7 +2458,7 @@ async def _apply_confirmed_platega_payment(
             user_id=int(user.id),
             source="platega_devices_topup",
         )
-        return await _apply_devices_topup_effect(
+        ok, _reason = await _apply_devices_topup_effect(
             payment_id=payment_id,
             user=user,
             meta=metadata,
@@ -2465,6 +2466,7 @@ async def _apply_confirmed_platega_payment(
             amount_from_balance=float(amount_from_balance),
             provider=PAYMENT_PROVIDER_PLATEGA,
         )
+        return ok
 
     return await _apply_succeeded_payment_fallback(
         _platega_payment_stub(
@@ -2957,16 +2959,32 @@ async def _apply_lte_topup_effect(
     amount_external: float,
     amount_from_balance: float,
     provider: str,
-) -> bool:
+) -> tuple[bool, str | None]:
     """Provider-agnostic LTE top-up effect: credits GB, marks payment succeeded,
     fires admin + user notifications, awards cashbacks.
 
     Preserves _claim_payment_effect_once / _mark_payment_effect_success idempotency.
     Called from both yookassa_webhook and _apply_confirmed_platega_payment.
+
+    Returns (True, None) on success or (False, reason) on failure.
     """
     lte_gb_delta = int(meta.get("lte_gb_delta") or 0)
     lte_price_per_gb = float(meta.get("lte_price_per_gb") or 0)
     preserve_active_tariff_state = False
+
+    if lte_gb_delta <= 0 and amount_external > 0:
+        await _mark_payment_effect_failed(
+            payment_id=payment_id,
+            error="lte_gb_delta must be positive when amount_external > 0",
+        )
+        logger.error(
+            "LTE пополнение: некорректная metadata — lte_gb_delta=%s при amount_external=%s (provider=%s, payment=%s)",
+            lte_gb_delta,
+            amount_external,
+            provider,
+            payment_id,
+        )
+        return False, "lte_gb_delta must be positive"
 
     active_tariff = (
         await ActiveTariffs.get_or_none(id=user.active_tariff_id)
@@ -2975,15 +2993,16 @@ async def _apply_lte_topup_effect(
     )
     if not active_tariff:
         logger.error(
-            "LTE пополнение: активный тариф не найден для пользователя %s (payment %s)",
+            "LTE пополнение: активный тариф не найден для пользователя %s (payment %s, provider=%s)",
             user.id,
             payment_id,
+            provider,
         )
         await _mark_payment_effect_failed(
             payment_id=payment_id,
             error="Active tariff not found for LTE topup",
         )
-        return False
+        return False, "Active tariff not found"
 
     lte_before = int(active_tariff.lte_gb_total or 0)
     old_hwid_limit = (
@@ -2999,11 +3018,12 @@ async def _apply_lte_topup_effect(
         await user.save(update_fields=["balance"])
         logger.info(
             "LTE пополнение: списано %.2f с бонусного баланса пользователя %s. "
-            "Баланс до: %s, после: %s",
+            "Баланс до: %s, после: %s (provider=%s)",
             amount_from_balance,
             user.id,
             initial_balance,
             user.balance,
+            provider,
         )
 
     update_fields = []
@@ -3147,9 +3167,10 @@ async def _apply_lte_topup_effect(
                 )
             except Exception as e:
                 logger.error(
-                    "LTE пополнение: ошибка обновления RemnaWave при изменении устройств для %s: %s",
+                    "LTE пополнение: ошибка обновления RemnaWave при изменении устройств для %s: %s (provider=%s)",
                     user.id,
                     e,
+                    provider,
                 )
             finally:
                 if remnawave_client:
@@ -3183,7 +3204,10 @@ async def _apply_lte_topup_effect(
             )
         except Exception as e:
             logger.error(
-                "LTE пополнение: ошибка обновления LTE-сквада для %s: %s", user.id, e
+                "LTE пополнение: ошибка обновления LTE-сквада для %s: %s (provider=%s)",
+                user.id,
+                e,
+                provider,
             )
 
     logger.info(
@@ -3217,22 +3241,23 @@ async def _apply_lte_topup_effect(
         )
     except Exception as notify_exc:
         logger.error(
-            "LTE пополнение: не удалось отправить админ-уведомление для %s: %s",
+            "LTE пополнение: не удалось отправить админ-уведомление для %s: %s (provider=%s)",
             user.id,
             notify_exc,
+            provider,
         )
     try:
         await notify_lte_topup_user(
             user=user,
             lte_gb_delta=lte_gb_delta,
             lte_gb_after=lte_after,
-            method=f"{provider}_lte_topup",
         )
     except Exception as user_notify_exc:
         logger.error(
-            "LTE пополнение: не удалось отправить пользовательское уведомление для %s: %s",
+            "LTE пополнение: не удалось отправить пользовательское уведомление для %s: %s (provider=%s)",
             user.id,
             user_notify_exc,
+            provider,
         )
     try:
         await _award_partner_cashback(
@@ -3242,9 +3267,10 @@ async def _apply_lte_topup_effect(
         )
     except Exception as e_partner:
         logger.warning(
-            "LTE пополнение: не удалось начислить партнёрский кэшбек для payment %s: %s",
+            "LTE пополнение: не удалось начислить партнёрский кэшбек для payment %s: %s (provider=%s)",
             payment_id,
             e_partner,
+            provider,
         )
     try:
         await _award_standard_referral_cashback(
@@ -3254,11 +3280,12 @@ async def _apply_lte_topup_effect(
         )
     except Exception as e_ref_cashback:
         logger.warning(
-            "LTE пополнение: не удалось начислить обычный реферальный кэшбек для payment %s: %s",
+            "LTE пополнение: не удалось начислить обычный реферальный кэшбек для payment %s: %s (provider=%s)",
             payment_id,
             e_ref_cashback,
+            provider,
         )
-    return True
+    return True, None
 
 
 async def _apply_devices_topup_effect(
@@ -3269,12 +3296,14 @@ async def _apply_devices_topup_effect(
     amount_external: float,
     amount_from_balance: float,
     provider: str,
-) -> bool:
+) -> tuple[bool, str | None]:
     """Provider-agnostic devices top-up effect: updates hwid_limit, marks payment
     succeeded, fires admin notification, awards cashbacks.
 
     Preserves _claim_payment_effect_once / _mark_payment_effect_success idempotency.
     Called from both yookassa_webhook and _apply_confirmed_platega_payment.
+
+    Returns (True, None) on success or (False, reason) on failure.
     """
     new_device_count = int(meta.get("new_device_count") or 0)
     new_active_tariff_price = meta.get("new_active_tariff_price")
@@ -3288,15 +3317,16 @@ async def _apply_devices_topup_effect(
     if not active_tariff or new_device_count <= 0:
         logger.error(
             "Пополнение устройств: активный тариф или количество устройств "
-            "не найдено для пользователя %s (payment %s)",
+            "не найдено для пользователя %s (payment %s, provider=%s)",
             user.id,
             payment_id,
+            provider,
         )
         await _mark_payment_effect_failed(
             payment_id=payment_id,
             error="Active tariff or device count missing for devices topup",
         )
-        return False
+        return False, "Active tariff not found"
 
     old_hwid_limit = int(active_tariff.hwid_limit or 0)
     old_expired_at = user.expired_at
@@ -3307,11 +3337,12 @@ async def _apply_devices_topup_effect(
         await user.save(update_fields=["balance"])
         logger.info(
             "Пополнение устройств: списано %.2f с бонусного баланса "
-            "пользователя %s. Баланс до: %s, после: %s",
+            "пользователя %s. Баланс до: %s, после: %s (provider=%s)",
             amount_from_balance,
             user.id,
             initial_balance,
             user.balance,
+            provider,
         )
 
     user.hwid_limit = new_device_count
@@ -3365,9 +3396,10 @@ async def _apply_devices_topup_effect(
                 )
             except Exception as e:
                 logger.error(
-                    "Пополнение устройств: ошибка обновления RemnaWave для %s: %s",
+                    "Пополнение устройств: ошибка обновления RemnaWave для %s: %s (provider=%s)",
                     user.id,
                     e,
+                    provider,
                 )
             finally:
                 if remnawave_client:
@@ -3409,9 +3441,10 @@ async def _apply_devices_topup_effect(
         )
     except Exception as e:
         logger.error(
-            "Пополнение устройств: не удалось отправить уведомление пользователю %s: %s",
+            "Пополнение устройств: не удалось отправить уведомление пользователю %s: %s (provider=%s)",
             user.id,
             e,
+            provider,
         )
 
     try:
@@ -3422,9 +3455,10 @@ async def _apply_devices_topup_effect(
         )
     except Exception as e_partner:
         logger.warning(
-            "Пополнение устройств: не удалось начислить партнёрский кэшбек для payment %s: %s",
+            "Пополнение устройств: не удалось начислить партнёрский кэшбек для payment %s: %s (provider=%s)",
             payment_id,
             e_partner,
+            provider,
         )
     try:
         await _award_standard_referral_cashback(
@@ -3434,9 +3468,10 @@ async def _apply_devices_topup_effect(
         )
     except Exception as e_ref_cashback:
         logger.warning(
-            "Пополнение устройств: не удалось начислить обычный реферальный кэшбек для payment %s: %s",
+            "Пополнение устройств: не удалось начислить обычный реферальный кэшбек для payment %s: %s (provider=%s)",
             payment_id,
             e_ref_cashback,
+            provider,
         )
     logger.info(
         "Пополнение устройств успешно: user=%s, %s -> %s, price=%s, provider=%s",
@@ -3446,7 +3481,7 @@ async def _apply_devices_topup_effect(
         int(active_tariff.price),
         provider,
     )
-    return True
+    return True, None
 
 
 @router.post("/webhook/yookassa/{secret}")
@@ -3732,7 +3767,7 @@ async def yookassa_webhook(request: Request, secret: str):
         )
 
         if _meta_bool(data.get("lte_topup"), False):
-            ok = await _apply_lte_topup_effect(
+            ok, reason = await _apply_lte_topup_effect(
                 payment_id=str(payment.id),
                 user=user,
                 meta=data,
@@ -3742,10 +3777,10 @@ async def yookassa_webhook(request: Request, secret: str):
             )
             if ok:
                 return {"status": "ok"}
-            return {"status": "error", "message": "LTE topup effect failed"}
+            return {"status": "error", "message": reason or "LTE topup effect failed"}
 
         if _meta_bool(data.get("devices_topup"), False):
-            ok = await _apply_devices_topup_effect(
+            ok, reason = await _apply_devices_topup_effect(
                 payment_id=str(payment.id),
                 user=user,
                 meta=data,
@@ -3755,7 +3790,7 @@ async def yookassa_webhook(request: Request, secret: str):
             )
             if ok:
                 return {"status": "ok"}
-            return {"status": "error", "message": "Devices topup effect failed"}
+            return {"status": "error", "message": reason or "Devices topup effect failed"}
 
         try:
             months = int(data["month"])

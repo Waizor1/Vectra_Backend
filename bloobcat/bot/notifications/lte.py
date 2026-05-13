@@ -114,7 +114,6 @@ async def notify_lte_topup_user(
     user,
     lte_gb_delta: int,
     lte_gb_after: int | None,
-    method: str,
 ) -> bool:
     """Send a user-facing payment confirmation after a successful LTE top-up.
 
@@ -125,7 +124,7 @@ async def notify_lte_topup_user(
     user_id = getattr(user, "id", None)
     if not isinstance(user_id, int) or user_id is None or user_id <= 0:
         logger.warning(
-            "notify_lte_topup_user: skipping invalid user_id=%s method=%s", user_id, method
+            "notify_lte_topup_user: skipping invalid user_id=%s", user_id
         )
         return False
 
@@ -151,11 +150,10 @@ async def notify_lte_topup_user(
         await bot.send_message(user_id, text)
         await reset_user_failed_count(user_id)
         logger.info(
-            "notify_lte_topup_user: delivered user=%s delta=%s after=%s method=%s",
+            "notify_lte_topup_user: delivered user=%s delta=%s after=%s",
             user_id,
             lte_gb_delta,
             lte_gb_after,
-            method,
         )
         return True
     except TelegramForbiddenError as exc:

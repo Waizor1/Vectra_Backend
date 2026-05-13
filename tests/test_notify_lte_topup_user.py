@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import types
 import sys
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -20,12 +20,35 @@ def _make_user(user_id: int, lang: str = "ru"):
     return types.SimpleNamespace(id=user_id, language_code=lang)
 
 
-def _install_lte_module_stubs():
-    """Minimal stubs for lte.py dependencies."""
+_LTE_STUB_KEYS = [
+    "aiogram",
+    "aiogram.exceptions",
+    "bloobcat.bot.bot",
+    "bloobcat.bot.error_handler",
+    "bloobcat.bot.keyboard",
+    "bloobcat.bot.notifications",
+    "bloobcat.bot.notifications.localization",
+    "bloobcat.logger",
+    "bloobcat.bot.notifications.lte",
+]
+
+_MODULE_MISSING = object()  # sentinel: key was absent from sys.modules before install
+
+
+def _install_lte_module_stubs() -> dict:
+    """Install minimal stubs for lte.py dependencies.
+
+    Returns a snapshot dict mapping each stub key to either the original
+    module that was there (a ModuleType) or _MODULE_MISSING if the key was
+    absent.  Pass this snapshot to _restore_lte_module_stubs() to undo.
+    """
     from pathlib import Path
     project_root = Path(__file__).resolve().parents[1]
     if str(project_root) not in sys.path:
         sys.path.insert(0, str(project_root))
+
+    # Snapshot before any mutation — uses _MODULE_MISSING sentinel for absent keys
+    snapshot = {k: sys.modules.get(k, _MODULE_MISSING) for k in _LTE_STUB_KEYS}
 
     # aiogram exceptions stub
     aiogram_exc = types.ModuleType("aiogram.exceptions")
@@ -86,8 +109,30 @@ def _install_lte_module_stubs():
     # Reset cached lte module to pick up fresh stubs
     sys.modules.pop("bloobcat.bot.notifications.lte", None)
 
+    return snapshot
 
-_install_lte_module_stubs()
+
+def _restore_lte_module_stubs(snapshot: dict) -> None:
+    """Restore sys.modules to the state captured before _install_lte_module_stubs ran."""
+    for key, saved in snapshot.items():
+        if saved is _MODULE_MISSING:
+            sys.modules.pop(key, None)
+        else:
+            sys.modules[key] = saved  # type: ignore[assignment]
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _lte_module_stubs():
+    """Install lte.py stubs for the entire module, restore on teardown.
+
+    Using scope="module" + autouse=True means stubs are installed once before
+    any test in this file runs and torn down after all tests finish — preventing
+    sys.modules pollution that would affect other test files collected in the
+    same pytest session.
+    """
+    snapshot = _install_lte_module_stubs()
+    yield
+    _restore_lte_module_stubs(snapshot)
 
 
 def _get_lte_module():
@@ -103,7 +148,7 @@ async def test_notify_lte_topup_user_ru_copy():
 
     user = _make_user(999, lang="ru")
     result = await lte.notify_lte_topup_user(
-        user=user, lte_gb_delta=5, lte_gb_after=15, method="platega_lte_topup"
+        user=user, lte_gb_delta=5, lte_gb_after=15
     )
 
     assert result is True
@@ -122,7 +167,7 @@ async def test_notify_lte_topup_user_en_copy():
 
     user = _make_user(888, lang="en")
     result = await lte.notify_lte_topup_user(
-        user=user, lte_gb_delta=10, lte_gb_after=20, method="yookassa_lte_topup"
+        user=user, lte_gb_delta=10, lte_gb_after=20
     )
 
     assert result is True
@@ -142,7 +187,7 @@ async def test_notify_lte_topup_user_forbidden_returns_false():
 
     user = _make_user(777, lang="ru")
     result = await lte.notify_lte_topup_user(
-        user=user, lte_gb_delta=3, lte_gb_after=8, method="balance_lte_topup"
+        user=user, lte_gb_delta=3, lte_gb_after=8
     )
 
     assert result is False
@@ -156,7 +201,7 @@ async def test_notify_lte_topup_user_skips_invalid_user_id():
 
     user_neg = types.SimpleNamespace(id=-1, language_code="ru")
     result = await lte.notify_lte_topup_user(
-        user=user_neg, lte_gb_delta=5, lte_gb_after=10, method="test"
+        user=user_neg, lte_gb_delta=5, lte_gb_after=10
     )
     assert result is False
     bot_stub.send_message.assert_not_called()
@@ -170,7 +215,7 @@ async def test_notify_lte_topup_user_formats_gb_integer():
 
     user = _make_user(555, lang="en")
     await lte.notify_lte_topup_user(
-        user=user, lte_gb_delta=1, lte_gb_after=6, method="test"
+        user=user, lte_gb_delta=1, lte_gb_after=6
     )
     text = bot_stub.send_message.call_args[0][1]
     # _format_gb should produce "1" not "1.0"

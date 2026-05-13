@@ -1180,7 +1180,6 @@ async def change_active_tariff_devices(
                         user=user,
                         lte_gb_delta=int(additional_gb),
                         lte_gb_after=int(new_lte_gb_total),
-                        method="balance_lte_topup",
                     )
                 except Exception as user_notify_exc:
                     logger.error(
