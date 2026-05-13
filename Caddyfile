@@ -1,5 +1,11 @@
 {
-  # Global options block (kept minimal on purpose).
+  # Disable HTTP/3 advertisement: UDP/443 is unreliable on several RU mobile
+  # uplinks, which caused Chrome to keep retrying QUIC and time out instead of
+  # falling back to TCP. Keeping h1+h2 only stops Caddy from emitting the
+  # auto-injected `Alt-Svc: h3=":443"` header.
+  servers {
+    protocols h1 h2
+  }
 }
 
 # API domain (backend)
@@ -12,6 +18,10 @@ api-app.vectra-pro.net {
     Referrer-Policy "strict-origin-when-cross-origin"
     Permissions-Policy "camera=(), microphone=(), geolocation=()"
     Content-Security-Policy "default-src 'none'; frame-ancestors 'none'; base-uri 'none'"
+    # Actively invalidate any previously-cached Alt-Svc entries in clients so
+    # browsers stop trying the (now-disabled) QUIC endpoint before the
+    # original 30-day ma= expires.
+    Alt-Svc "clear"
   }
 
   reverse_proxy bloobcat:33083 {
