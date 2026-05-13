@@ -37,10 +37,34 @@ except ImportError:
     TelegramBadRequest = type("TelegramBadRequest", (Exception,), {})  # type: ignore[misc]
 
 
+# Module-scope sentinel: a key that was NOT present in sys.modules before our mutations.
+_MODULE_MISSING = object()
+
+# Keys this test mutates via install_stubs() and _build_app(). Snapshotted before
+# any install and restored on teardown so subsequent test modules (family_*, discount_*)
+# see the real bloobcat.* modules, not our test stubs.
+_POLLUTED_SYS_MODULES_KEYS = (
+    "bloobcat.services.admin_integration",
+    "bloobcat.db.family_audit_logs",
+    "bloobcat.settings",
+    "bloobcat.routes.admin_integration",
+)
+
+
 @pytest.fixture(scope="module", autouse=True)
 def _install_stubs_once():
+    saved = {
+        k: sys.modules.get(k, _MODULE_MISSING) for k in _POLLUTED_SYS_MODULES_KEYS
+    }
     install_stubs()
-    return None
+    try:
+        yield None
+    finally:
+        for k, original in saved.items():
+            if original is _MODULE_MISSING:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = original
 
 
 @pytest_asyncio.fixture(autouse=True)
