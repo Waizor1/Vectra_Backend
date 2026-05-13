@@ -25,6 +25,15 @@ def is_partner_source_utm(raw: str | None) -> bool:
     return normalized == PARTNER_SOURCE_UTM or normalized.startswith("qr_")
 
 
+def is_qr_source_utm(raw: str | None) -> bool:
+    # QR campaigns are partner-attributed signups arriving through an
+    # out-of-app printed/scanned code. They keep their own anti-farming
+    # gate (no rich invitee bundle) even after partner-referees were
+    # opted back into the bundle, because QR pamphlets can be scanned
+    # by unrelated traffic with no social-trust signal.
+    return normalize_source_utm(raw).startswith("qr_")
+
+
 def is_campaign_utm(raw: str | None) -> bool:
     """Return True if `raw` is a specific campaign tag worth propagating downstream.
 

@@ -542,9 +542,12 @@ class Users(models.Model):
 
     # Referral invitee trial bundle (20 days / 1 device / 1 GB LTE).
     #
-    # Applied to ANY user who arrived via a non-partner referral (story_*, ref_*,
-    # numeric, or any non-partner deep link). Partner / QR flows are excluded —
-    # they have their own economic flow (PartnerEarnings).
+    # Applied to ANY user who arrived via a referral deep link (story_*, ref_*,
+    # numeric, or a plain `partner-<id>` link from a partner referrer).
+    # QR campaigns are excluded — printed/scanned codes carry no social-trust
+    # signal and have their own economic flow (PartnerEarnings + QR ledger).
+    # Partner referrers earn cashback AND their invitees get the rich bundle:
+    # the two economic flows are layered, not exclusive.
     #
     # Differs from the regular trial in three knobs:
     #   1. Duration is 20 days instead of `app_settings.trial_days` (10).
@@ -583,12 +586,13 @@ class Users(models.Model):
     async def _grant_referral_trial_if_unclaimed(
         cls, user_id: int, trial_until: date
     ) -> bool:
-        # Non-partner referral trial: applies to story_*, ref_*, and any
-        # non-partner deep link. Excludes `partner` / `qr_*` flows via utm filter.
+        # Referral trial: applies to story_*, ref_*, plain `partner-<id>` links,
+        # and any non-QR deep link. Only `qr_*` campaigns are excluded — they
+        # carry no social-trust signal and stay on the regular 10-day trial.
         # NULL utm (typical for plain `ref_<id>` and numeric deep links) must
         # qualify, hence the explicit `Q(utm__isnull=True) | ...` clause —
-        # a plain `.exclude(utm="partner")` would drop NULL rows under SQL
-        # three-valued logic.
+        # a plain `.exclude(utm__startswith="qr_")` would drop NULL rows under
+        # SQL three-valued logic.
         rows_updated = await cls.filter(
             Q(id=user_id)
             & Q(expired_at__isnull=True)
@@ -596,14 +600,13 @@ class Users(models.Model):
             & Q(referred_by__isnull=False)
             & Q(story_trial_used_at__isnull=True)
             & (
-                # WARNING: the partner / QR exclusion here MUST stay in lockstep with
-                # `is_partner_source_utm()` (bloobcat/funcs/referral_attribution.py). The
-                # call-site in `_ensure_remnawave_user` uses the Python helper; this SQL guard
-                # is a second line of defense. If you broaden `is_partner_source_utm` (e.g.
-                # add `b2b_*`), update this filter too — `test_referral_invitee_bonus.py`
-                # pins the contract.
+                # WARNING: the QR exclusion here MUST stay in lockstep with
+                # `is_qr_source_utm()` (bloobcat/funcs/referral_attribution.py). The
+                # call-site in `_ensure_remnawave_user` uses the Python helper; this SQL
+                # guard is a second line of defense. If QR namespacing ever changes (e.g.
+                # `qrc_*`), update both — `test_referral_invitee_bonus.py` pins the contract.
                 Q(utm__isnull=True)
-                | (~Q(utm="partner") & ~Q(utm__startswith="qr_"))
+                | ~Q(utm__startswith="qr_")
             )
         ).update(
             is_trial=True,
@@ -678,12 +681,12 @@ class Users(models.Model):
                     if expire_at_date is None:
                         if not current_user.used_trial:
                             # Referral-invitee trial gets a richer bundle (20d / 1 dev / 1 GB).
-                            # Applies to any non-partner referral (story_*, ref_*, etc.).
+                            # Applies to any non-QR referral (story_*, ref_*, plain partner-<id>, etc.).
                             # See `_grant_referral_trial_if_unclaimed` for the full reasoning.
-                            from bloobcat.funcs.referral_attribution import is_partner_source_utm
+                            from bloobcat.funcs.referral_attribution import is_qr_source_utm
                             referred_by_id = int(getattr(current_user, "referred_by", 0) or 0)
-                            # NOTE: pull from `utm` column (campaign tag), not `invite_source`. Partner /
-                            # QR exclusion is driven by the campaign tag, which is what `is_partner_source_utm`
+                            # NOTE: pull from `utm` column (campaign tag), not `invite_source`. The QR
+                            # exclusion is driven by the campaign tag, which is what `is_qr_source_utm`
                             # inspects. The Users model also has an `invite_source` column with different
                             # semantics ("story"/"manual"); don't conflate them.
                             utm_value = getattr(current_user, "utm", None)
@@ -699,7 +702,7 @@ class Users(models.Model):
                             is_referral_invite = (
                                 referred_by_id > 0
                                 and referrer_is_registered
-                                and not is_partner_source_utm(utm_value)
+                                and not is_qr_source_utm(utm_value)
                                 and getattr(current_user, "story_trial_used_at", None) is None
                             )
 
