@@ -29,7 +29,7 @@ from bloobcat.bot.notifications.web_push import (
     is_configured as web_push_is_configured,
     send_push_to_users,
 )
-from bloobcat.db.payments import Payments
+from bloobcat.db.payments import ProcessedPayments
 from bloobcat.db.push_subscriptions import PushSubscription
 from bloobcat.db.users import Users
 from bloobcat.logger import get_logger
@@ -111,18 +111,29 @@ async def resolve_segment(segment_key: str, value: str | None = None) -> list[Us
         )
 
     if segment_key == "paid_ever":
-        # Distinct user_ids from payments table.
-        payments_qs = await Payments.all().values_list("user_id", flat=True)
+        # Distinct user_ids from successful subscription payments. NULL
+        # payment_purpose is treated as subscription (legacy rows before
+        # migration 116).
+        payments_qs = await ProcessedPayments.filter(
+            status="succeeded",
+        ).filter(
+            Q(payment_purpose="subscription") | Q(payment_purpose__isnull=True),
+        ).values_list("user_id", flat=True)
         user_ids = list({int(uid) for uid in payments_qs if uid is not None})
         if not user_ids:
             return []
         return await Users.filter(id__in=user_ids)
 
     if segment_key == "never_paid":
-        payments_qs = await Payments.all().values_list("user_id", flat=True)
+        payments_qs = await ProcessedPayments.filter(
+            status="succeeded",
+        ).filter(
+            Q(payment_purpose="subscription") | Q(payment_purpose__isnull=True),
+        ).values_list("user_id", flat=True)
         paid_ids = {int(uid) for uid in payments_qs if uid is not None}
-        all_users = await Users.all()
-        return [u for u in all_users if u.id not in paid_ids]
+        if not paid_ids:
+            return await Users.all()
+        return await Users.exclude(id__in=paid_ids)
 
     if segment_key == "with_referrals":
         return await Users.filter(referrals__gt=0)
