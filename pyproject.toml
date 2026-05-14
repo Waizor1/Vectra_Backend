@@ -5,7 +5,7 @@ src_folder = "./bloobcat"
 
 [tool.poetry]
 name = "bloobcat"
-version = "1.66.0"
+version = "1.67.0"
 description = ""
 authors = ["Your Name <you@example.com>"]
 readme = "README.md"
