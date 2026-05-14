@@ -1132,6 +1132,7 @@ async def change_active_tariff_devices(
                     amount_external=0,
                     amount_from_balance=extra_cost,
                     status="succeeded",
+                    payment_purpose="lte_topup",
                 )
                 # Keep partner cashback flow consistent for all successful payments.
                 try:
@@ -1634,6 +1635,7 @@ async def devices_topup(
             amount_external=0,
             amount_from_balance=extra_cost,
             status="succeeded",
+            payment_purpose="devices_topup",
         )
 
         try:

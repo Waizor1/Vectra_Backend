@@ -245,6 +245,120 @@ async def test_resolver_treats_balance_only_payments_as_unpaid():
     assert "no_purchase_yet" in segments
 
 
+@pytest.mark.asyncio
+async def test_resolver_treats_lte_topup_as_non_subscription_purchase():
+    """Покупка LTE-трафика не «съедает» сегмент trial_active.
+
+    Регресс на баг: пользователь в триале покупал LTE-топап, и
+    `_count_successful_paid_payments` засчитывал его как первую покупку
+    подписки. Сегмент `trial_active` пропадал, сегментная акция
+    исчезала с экрана подписки.
+    """
+    from bloobcat.services.segment_campaigns import resolve_user_segments
+    from bloobcat.db.payments import ProcessedPayments
+
+    user = await _create_user(id=706, is_subscribed=True, is_trial=True)
+    await ProcessedPayments.create(
+        payment_id=f"lte_topup_{user.id}",
+        provider="platega",
+        user_id=user.id,
+        amount=Decimal(150),
+        amount_external=Decimal(150),
+        amount_from_balance=Decimal(0),
+        status="succeeded",
+        processing_state="completed",
+        effect_applied=True,
+        payment_purpose="lte_topup",
+    )
+    segments = await resolve_user_segments(user)
+
+    assert "trial_active" in segments
+    assert "loyal_renewer" not in segments
+    assert "lapsed" not in segments
+
+
+@pytest.mark.asyncio
+async def test_resolver_treats_devices_topup_as_non_subscription_purchase():
+    """Покупка дополнительных устройств не «съедает» сегмент no_purchase_yet."""
+    from bloobcat.services.segment_campaigns import resolve_user_segments
+    from bloobcat.db.payments import ProcessedPayments
+
+    user = await _create_user(id=707, is_subscribed=False, is_trial=False)
+    await ProcessedPayments.create(
+        payment_id=f"devices_topup_{user.id}",
+        provider="platega",
+        user_id=user.id,
+        amount=Decimal(99),
+        amount_external=Decimal(99),
+        amount_from_balance=Decimal(0),
+        status="succeeded",
+        processing_state="completed",
+        effect_applied=True,
+        payment_purpose="devices_topup",
+    )
+    segments = await resolve_user_segments(user)
+
+    assert "no_purchase_yet" in segments
+
+
+@pytest.mark.asyncio
+async def test_resolver_legacy_null_purpose_still_counts_as_subscription():
+    """Legacy-записи без payment_purpose (до миграции 116) трактуются как подписка.
+
+    Иначе старые платившие пользователи внезапно «перестали платить»
+    после деплоя миграции, что выкатило бы им акции для новичков.
+    """
+    from bloobcat.services.segment_campaigns import resolve_user_segments
+    from bloobcat.db.payments import ProcessedPayments
+
+    user = await _create_user(id=708, is_subscribed=True, is_trial=False)
+    await ProcessedPayments.create(
+        payment_id=f"legacy_{user.id}",
+        provider="yookassa",
+        user_id=user.id,
+        amount=Decimal(290),
+        amount_external=Decimal(290),
+        amount_from_balance=Decimal(0),
+        status="succeeded",
+        processing_state="completed",
+        effect_applied=True,
+        # payment_purpose НЕ выставлен — имитируем legacy-запись
+    )
+    segments = await resolve_user_segments(user)
+
+    assert "no_purchase_yet" not in segments
+    assert "trial_active" not in segments
+
+
+@pytest.mark.asyncio
+async def test_derive_payment_purpose_from_metadata():
+    """Helper определяет назначение по metadata-флагам в provider_payload."""
+    from bloobcat.routes.payment import (
+        _derive_payment_purpose,
+        PAYMENT_PURPOSE_LTE_TOPUP,
+        PAYMENT_PURPOSE_DEVICES_TOPUP,
+    )
+    import json
+
+    lte_payload = json.dumps({"metadata": {"lte_topup": True, "lte_gb_delta": 5}})
+    assert _derive_payment_purpose(lte_payload) == PAYMENT_PURPOSE_LTE_TOPUP
+
+    dev_payload = json.dumps({"metadata": {"devices_topup": True}})
+    assert _derive_payment_purpose(dev_payload) == PAYMENT_PURPOSE_DEVICES_TOPUP
+
+    sub_payload = json.dumps({"metadata": {"month": 1, "tariff_id": 7}})
+    assert _derive_payment_purpose(sub_payload) is None
+
+    assert _derive_payment_purpose(None) is None
+    assert _derive_payment_purpose("") is None
+    assert _derive_payment_purpose("not-json") is None
+
+    # Строковые формы флагов от внешних провайдеров (Platega иногда
+    # стрингифицирует bool в metadata).
+    string_flag = json.dumps({"metadata": {"lte_topup": "true"}})
+    assert _derive_payment_purpose(string_flag) == PAYMENT_PURPOSE_LTE_TOPUP
+
+
 # ---------------------------------------------------------------- endpoint
 
 

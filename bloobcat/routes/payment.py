@@ -212,6 +212,52 @@ def _provider_payload_json(payload: dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
+# Допустимые значения колонки ProcessedPayments.payment_purpose.
+# NULL означает «subscription» (legacy-default до миграции 116).
+PAYMENT_PURPOSE_SUBSCRIPTION = "subscription"
+PAYMENT_PURPOSE_LTE_TOPUP = "lte_topup"
+PAYMENT_PURPOSE_DEVICES_TOPUP = "devices_topup"
+
+
+def _derive_payment_purpose(
+    provider_payload: str | None,
+    metadata: dict[str, Any] | None = None,
+) -> str | None:
+    """Определяет назначение платежа по metadata-флагам.
+
+    Используется маркетинговой логикой сегментов (resolve_user_segments),
+    чтобы топапы трафика и устройств не считались «первой покупкой
+    подписки». Возвращает None, если флаги не выставлены — резолвер
+    интерпретирует None как `subscription`.
+    """
+
+    if metadata is None:
+        if not provider_payload:
+            return None
+        try:
+            parsed = json.loads(str(provider_payload))
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        raw_meta = parsed.get("metadata")
+        metadata = raw_meta if isinstance(raw_meta, dict) else {}
+    def _is_truthy_flag(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            return value.strip().lower() in {"true", "1", "yes"}
+        return False
+
+    if _is_truthy_flag(metadata.get("lte_topup")):
+        return PAYMENT_PURPOSE_LTE_TOPUP
+    if _is_truthy_flag(metadata.get("devices_topup")):
+        return PAYMENT_PURPOSE_DEVICES_TOPUP
+    return None
+
+
 def _load_provider_payload(raw: Any) -> dict[str, Any]:
     if isinstance(raw, dict):
         return dict(raw)
@@ -1025,6 +1071,8 @@ async def _upsert_processed_payment(
     Webhooks can be retried and we also have a fallback processor, so this must be safe to call multiple times.
     """
 
+    derived_purpose = _derive_payment_purpose(provider_payload)
+
     async def _update_existing(existing: ProcessedPayments) -> ProcessedPayments:
         update_fields = [
             "user_id",
@@ -1050,6 +1098,12 @@ async def _upsert_processed_payment(
         if provider_payload is not None:
             existing.provider_payload = str(provider_payload)
             update_fields.append("provider_payload")
+        # Только повышаем разрешение purpose: NULL → topup. Не перетираем
+        # уже выставленное значение из колонки (например, если апсерт
+        # пришёл с пустым payload, а row уже размечена явно).
+        if derived_purpose is not None and getattr(existing, "payment_purpose", None) is None:
+            existing.payment_purpose = derived_purpose
+            update_fields.append("payment_purpose")
         if str(status).lower() == "pending" and not existing.effect_applied:
             existing.processing_state = "pending"
         elif str(status).lower() in {"canceled", "refunded"}:
@@ -1077,6 +1131,7 @@ async def _upsert_processed_payment(
             amount_from_balance=float(amount_from_balance),
             status=str(status),
             processing_state=initial_state,
+            payment_purpose=derived_purpose,
         )
     except IntegrityError:
         # Concurrent create race on unique(payment_id): fallback to read+update.
