@@ -44,7 +44,7 @@ from bloobcat.bot.notifications.web_push import is_configured as web_push_is_con
 from bloobcat.bot.routes.admin.functions import IsAdmin
 from bloobcat.logger import get_logger
 
-from .keyboards import get_back_to_main_menu
+from .keyboards import get_back_to_main_menu, get_broadcast_channel_keyboard
 from .states import SendFSM
 
 logger = get_logger("bot_admin_send")
@@ -61,24 +61,6 @@ _in_flight_lock = asyncio.Lock()
 # ---------------------------------------------------------------------------
 # Step 0: /send → channel picker
 # ---------------------------------------------------------------------------
-
-def _channel_keyboard() -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = [
-        [InlineKeyboardButton(text="📨 Только Telegram", callback_data="send_channel:tg")],
-    ]
-    if web_push_is_configured():
-        rows.append([InlineKeyboardButton(text="📱 Только PWA Push", callback_data="send_channel:push")])
-        rows.append([InlineKeyboardButton(text="🚀 Telegram + PWA Push", callback_data="send_channel:both")])
-    else:
-        rows.append([
-            InlineKeyboardButton(
-                text="📱 PWA Push (не настроен) ⛔️",
-                callback_data="send_channel:disabled",
-            )
-        ])
-    rows.append([InlineKeyboardButton(text="❌ Отменить", callback_data="send_cancel")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
 
 def _segment_keyboard() -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
@@ -103,7 +85,7 @@ async def send(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer(
         "📣 <b>Новая рассылка</b>\n\nВыберите каналы доставки:",
-        reply_markup=_channel_keyboard(),
+        reply_markup=get_broadcast_channel_keyboard(),
         parse_mode="HTML",
     )
     await state.set_state(SendFSM.waiting_for_channel)
