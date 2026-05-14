@@ -173,3 +173,31 @@ async def send_user_message(user_id: int, payload: SendUserMessagePayload):
         return {"status": "blocked"}
     except TelegramBadRequest as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+
+
+class PushBroadcastPayload(BaseModel):
+    title: str = Field(..., min_length=1, max_length=200)
+    body: str = Field(..., min_length=1, max_length=1000)
+    url: Optional[str] = Field(default=None, max_length=2048)
+    tag: Optional[str] = Field(default=None, max_length=100)
+    icon: Optional[str] = Field(default=None, max_length=2048)
+
+
+@router.post("/push/broadcast", dependencies=[Depends(require_admin_integration_token)])
+async def push_broadcast(payload: PushBroadcastPayload):
+    from bloobcat.bot.notifications.web_push import send_push_to_users, is_configured
+    from bloobcat.db.push_subscriptions import PushSubscription
+
+    if not is_configured():
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Web push not configured")
+
+    user_ids = await PushSubscription.filter(is_active=True).distinct().values_list("user_id", flat=True)
+    result = await send_push_to_users(
+        user_ids,
+        title=payload.title,
+        body=payload.body,
+        url=payload.url,
+        tag=payload.tag,
+        icon=payload.icon,
+    )
+    return {"ok": True, "result": result}

@@ -2964,4 +2964,104 @@ export default function registerEndpoint(router, { database }) {
       res.status(500).json({ error: "Failed to archive utm-campaign", details: String(err?.message || err) });
     }
   });
+
+  // ─── PWA Stats ────────────────────────────────────────────────────────────
+
+  // GET /pwa-stats — aggregate push_subscriptions for PWA dashboard
+  router.get("/pwa-stats", async (req, res) => {
+    try {
+      const hasSubs = await hasTable("push_subscriptions");
+      if (!hasSubs) {
+        return res.json({
+          active_users: 0, total_users: 0, active_subs: 0,
+          new_today: 0, new_week: 0, timeseries: [],
+        });
+      }
+
+      const todayStart = new Date();
+      todayStart.setUTCHours(0, 0, 0, 0);
+      const weekStart = new Date();
+      weekStart.setUTCDate(weekStart.getUTCDate() - 7);
+      weekStart.setUTCHours(0, 0, 0, 0);
+      const thirtyDaysAgo = new Date();
+      thirtyDaysAgo.setUTCDate(thirtyDaysAgo.getUTCDate() - 30);
+      thirtyDaysAgo.setUTCHours(0, 0, 0, 0);
+
+      const [activeUsersRow, totalUsersRow, activeSubsRow, newTodayRow, newWeekRow, timeseries] =
+        await Promise.all([
+          database("push_subscriptions").where("is_active", true).countDistinct("user_id as count").first(),
+          database("push_subscriptions").countDistinct("user_id as count").first(),
+          database("push_subscriptions").where("is_active", true).count("id as count").first(),
+          database("push_subscriptions")
+            .where("created_at", ">=", todayStart.toISOString())
+            .countDistinct("user_id as count").first(),
+          database("push_subscriptions")
+            .where("created_at", ">=", weekStart.toISOString())
+            .countDistinct("user_id as count").first(),
+          database("push_subscriptions")
+            .select(database.raw("DATE(created_at) as date"))
+            .count("id as new_subs")
+            .countDistinct("user_id as new_users")
+            .where("created_at", ">=", thirtyDaysAgo.toISOString())
+            .groupBy(database.raw("DATE(created_at)"))
+            .orderBy("date", "asc"),
+        ]);
+
+      res.json({
+        active_users: parseInt(activeUsersRow?.count ?? 0),
+        total_users: parseInt(totalUsersRow?.count ?? 0),
+        active_subs: parseInt(activeSubsRow?.count ?? 0),
+        new_today: parseInt(newTodayRow?.count ?? 0),
+        new_week: parseInt(newWeekRow?.count ?? 0),
+        timeseries: timeseries.map((r) => ({
+          date: r.date,
+          new_subs: parseInt(r.new_subs),
+          new_users: parseInt(r.new_users),
+        })),
+      });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to load PWA stats", details: String(err?.message || err) });
+    }
+  });
+
+  // POST /push-broadcast — proxy to bloobcat admin integration push/broadcast
+  router.post("/push-broadcast", async (req, res) => {
+    const { title, body, url, tag, icon } = req.body ?? {};
+    if (!title || typeof title !== "string" || title.trim().length === 0) {
+      return res.status(400).json({ error: "title is required" });
+    }
+    if (!body || typeof body !== "string" || body.trim().length === 0) {
+      return res.status(400).json({ error: "body is required" });
+    }
+    if (title.length > 200) return res.status(400).json({ error: "title too long (max 200)" });
+    if (body.length > 1000) return res.status(400).json({ error: "body too long (max 1000)" });
+
+    const baseUrl = process.env.ADMIN_INTEGRATION_URL;
+    const token = process.env.ADMIN_INTEGRATION_TOKEN;
+    if (!baseUrl || !token) {
+      return res.status(503).json({ error: "Admin integration not configured" });
+    }
+
+    try {
+      const upstream = await fetch(`${baseUrl}/admin/integration/push/broadcast`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Admin-Integration-Token": token,
+        },
+        body: JSON.stringify({
+          title: title.trim(),
+          body: body.trim(),
+          url: url || null,
+          tag: tag || null,
+          icon: icon || null,
+        }),
+      });
+      const data = await upstream.json().catch(() => ({}));
+      if (!upstream.ok) return res.status(upstream.status).json(data);
+      res.json(data);
+    } catch (err) {
+      res.status(500).json({ error: "Failed to send push broadcast", details: String(err?.message || err) });
+    }
+  });
 }
