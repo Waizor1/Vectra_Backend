@@ -38,6 +38,7 @@ jobs:
       }}
     permissions:
       contents: read
+      packages: read   # required for `docker login ghcr.io` + `docker pull` when USE_GHCR_PREBUILT_IMAGE=true
     environment: production
     concurrency:
       group: tvpn-backend-deploy-prod
@@ -325,23 +326,31 @@ jobs:
           fi
         }
 
-        echo "рџ›°пёЏ  Pre-pulling python:3.12-slim (best-effort)..."
-        PULL_OK=0
-        for attempt in 1 2 3; do
-          echo "docker pull attempt \$attempt/3"
-          if docker pull python:3.12-slim; then
-            PULL_OK=1
-            break
+        # Pre-pull base image only when we will actually rebuild locally. In GHCR
+        # mode the bloobcat image is fetched whole from the registry; python:3.12-slim
+        # is never referenced by `docker compose pull`, so spending ~15-45s pulling it
+        # is pure waste. The else branch keeps a log marker so deploys remain auditable.
+        if [ "\$GHCR_DEPLOY_ACTIVE" -ne 1 ]; then
+          echo "рџ›°пёЏ  Pre-pulling python:3.12-slim (best-effort)..."
+          PULL_OK=0
+          for attempt in 1 2 3; do
+            echo "docker pull attempt \$attempt/3"
+            if docker pull python:3.12-slim; then
+              PULL_OK=1
+              break
+            fi
+            rc=\$?
+            echo "вљ пёЏ  docker pull failed (exit=\$rc)"
+            if [ "\$attempt" -lt 3 ]; then
+              echo "вљ пёЏ  retry in 15s..."
+              sleep 15
+            fi
+          done
+          if [ "\$PULL_OK" -ne 1 ]; then
+            echo "вљ пёЏ  python:3.12-slim pre-pull failed after retries; continuing with compose build"
           fi
-          rc=\$?
-          echo "вљ пёЏ  docker pull failed (exit=\$rc)"
-          if [ "\$attempt" -lt 3 ]; then
-            echo "вљ пёЏ  retry in 15s..."
-            sleep 15
-          fi
-        done
-        if [ "\$PULL_OK" -ne 1 ]; then
-          echo "вљ пёЏ  python:3.12-slim pre-pull failed after retries; continuing with compose build"
+        else
+          echo "вљЎ  Skipping python:3.12-slim pre-pull (GHCR deploy mode active; bloobcat pulled whole)"
         fi
 
         if [ "$FULL_REINSTALL_ACTIVE" -eq 1 ]; then
