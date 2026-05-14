@@ -226,11 +226,33 @@ async def test_webhook_applies_all_three_effects(monkeypatch):
 
     payment_route = _silence_payment_side_effects(monkeypatch)
 
+    # Track scheduler invocations — BLOCKER 2 requires the webhook to re-arm
+    # subscription-lifecycle tasks once extra_days have shifted expired_at.
+    scheduler_calls = []
+
+    async def _scheduler_recorder(user):
+        scheduler_calls.append(getattr(user, "id", None))
+
+    # Patch through sys.modules so production code's function-local
+    # `from bloobcat.scheduler import schedule_user_tasks` resolves to our
+    # recorder regardless of what previous tests rebound.
+    import sys as _sys
+    import types as _types
+
+    scheduler_module = _sys.modules.get("bloobcat.scheduler")
+    if scheduler_module is None:
+        scheduler_module = _types.ModuleType("bloobcat.scheduler")
+        monkeypatch.setitem(_sys.modules, "bloobcat.scheduler", scheduler_module)
+    monkeypatch.setattr(
+        scheduler_module, "schedule_user_tasks", _scheduler_recorder, raising=False
+    )
+
     user_id = 7_001_001
     user, active = await _seed_user_with_active_tariff(
         user_id=user_id, hwid_limit=2, lte_gb_total=10, days_remaining=30, price=600
     )
     old_expired_at = user.expired_at
+    active_before_price = int(active.price)
 
     metadata = _build_upgrade_bundle_metadata(
         user_id=user_id,
@@ -245,6 +267,11 @@ async def test_webhook_applies_all_three_effects(monkeypatch):
         current_lte_gb=10,
         previous_price=600,
     )
+    # The new metadata contract (BLOCKER 1) carries explicit price + multiplier
+    # snapshots; webhook is free to recompute, but absence of these keys is
+    # how the bug used to silently leave price stale.
+    metadata["new_active_tariff_price"] = 1500
+    metadata["new_progressive_multiplier"] = 0.9
     payment_id = "platega-upgrade-bundle-01"
     await ProcessedPayments.create(
         payment_id=payment_id,
@@ -279,6 +306,21 @@ async def test_webhook_applies_all_three_effects(monkeypatch):
     active_after = await ActiveTariffs.get(id=active.id)
     assert int(active_after.hwid_limit or 0) == 5
     assert int(active_after.lte_gb_total or 0) == 15
+    # BLOCKER 1 invariant: when device_delta > 0, the snapshot price MUST be
+    # rewritten so auto-renew / compute_daily_rate / notifications see the
+    # right post-upgrade price (not the pre-upgrade 600₽).
+    assert int(active_after.price or 0) != active_before_price
+    assert int(active_after.price or 0) > 0
+    assert active_after.progressive_multiplier is not None
+    assert 0 < float(active_after.progressive_multiplier) <= 1.0
+
+    # BLOCKER 2 invariant: scheduler is re-armed at least once for this user.
+    # (Users.save() auto-reschedules on expired_at change, AND the webhook
+    # adds an explicit post-commit call — so >=1 invocation is the contract.
+    # The explicit call protects us if the auto-reschedule path is ever
+    # changed to skip writes that go through update_fields.)
+    assert user_id in scheduler_calls
+    assert len(scheduler_calls) >= 1
 
     # Exactly one succeeded payment row tagged with upgrade_bundle purpose.
     rows = await ProcessedPayments.filter(payment_id=payment_id).all()
@@ -537,3 +579,86 @@ async def test_webhook_rollback_on_partial_failure(monkeypatch):
         {"status": "ok"},
         {"status": "error", "message": "Upgrade bundle effect failed"},
     )
+
+
+@pytest.mark.asyncio
+async def test_webhook_uses_deltas_not_absolutes(monkeypatch):
+    """MAJOR 4: if a parallel devices/LTE topup landed between invoice creation
+    and webhook delivery, the webhook MUST apply our delta on top of the live
+    DB state rather than overwriting it with the stale absolute target.
+    """
+    from bloobcat.db.active_tariff import ActiveTariffs
+    from bloobcat.db.payments import ProcessedPayments
+    from bloobcat.db.users import Users
+
+    payment_route = _silence_payment_side_effects(monkeypatch)
+
+    user_id = 7_001_010
+    # Invoice was created when user had 3 devices; target = 5 (delta = 2).
+    user, active = await _seed_user_with_active_tariff(
+        user_id=user_id, hwid_limit=3, lte_gb_total=10, days_remaining=30, price=600
+    )
+
+    metadata = _build_upgrade_bundle_metadata(
+        user_id=user_id,
+        target_devices=5,    # absolute target captured at invoice time
+        target_lte_gb=12,
+        target_extra_days=0,
+        device_delta=2,      # +2 devices
+        lte_delta_gb=2,      # +2 GB
+        extra_days=0,
+        amount_external=500.0,
+        current_devices=3,
+        current_lte_gb=10,
+        previous_price=600,
+    )
+    payment_id = "platega-upgrade-bundle-deltas-10"
+    await ProcessedPayments.create(
+        payment_id=payment_id,
+        provider="platega",
+        user_id=user_id,
+        amount=500.0,
+        amount_external=500.0,
+        amount_from_balance=0,
+        status="pending",
+        provider_payload=json.dumps({"metadata": metadata}),
+    )
+
+    # Simulate a parallel devices/LTE topup that landed BEFORE the webhook:
+    # +1 device → 4, +5 GB → 15.
+    active.hwid_limit = 4
+    active.lte_gb_total = 15
+    await active.save(update_fields=["hwid_limit", "lte_gb_total"])
+    user.hwid_limit = 4
+    user.lte_gb_total = 15
+    await user.save(update_fields=["hwid_limit", "lte_gb_total"])
+
+    body = {
+        "id": payment_id,
+        "status": "CONFIRMED",
+        "amount": 500.0,
+        "currency": "RUB",
+        "payload": json.dumps({"metadata": metadata}),
+    }
+    request = await _make_platega_request(
+        {"X-MerchantId": "m1", "X-Secret": "s1"}, body
+    )
+    response = await payment_route.platega_webhook(request)
+    assert response == {"status": "ok"}, f"Unexpected response: {response}"
+
+    user_after = await Users.get(id=user_id)
+    active_after = await ActiveTariffs.get(id=active.id)
+
+    # MUST be 4 + 2 = 6 (delta-based), not 5 (absolute target — would silently
+    # wipe the parallel topup).
+    assert user_after.hwid_limit == 6, (
+        f"Expected delta-based 6 devices, got {user_after.hwid_limit} "
+        f"(absolute-target bug would yield 5)"
+    )
+    assert int(active_after.hwid_limit or 0) == 6
+    # Same invariant for LTE: 15 + 2 = 17, not 12.
+    assert user_after.lte_gb_total == 17, (
+        f"Expected delta-based 17 GB, got {user_after.lte_gb_total} "
+        f"(absolute-target bug would yield 12)"
+    )
+    assert int(active_after.lte_gb_total or 0) == 17

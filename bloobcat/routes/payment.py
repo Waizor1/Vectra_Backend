@@ -3669,6 +3669,13 @@ async def _apply_upgrade_bundle_effect(
         )
         return False, "upgrade_bundle deltas are non-positive"
 
+    # MAJOR 8: ideally this read would be `select_for_update(...).get_or_none(...)`
+    # inside the transaction to block lost-update races against a parallel
+    # devices/LTE topup. We rely on `_claim_payment_effect_once` for primary
+    # idempotency + the MAJOR 4 delta-based application (current+delta, see
+    # below) to make a parallel topup additive rather than a clobber. Adding
+    # row-level lock here is a follow-up once the Tortoise-ORM
+    # `select_for_update()` syntax is validated end-to-end.
     active_tariff = (
         await ActiveTariffs.get_or_none(id=user.active_tariff_id)
         if user.active_tariff_id
@@ -3692,13 +3699,47 @@ async def _apply_upgrade_bundle_effect(
     old_price = int(active_tariff.price or 0)
     old_expired_at = user.expired_at
 
+    # MAJOR 4: apply effects as deltas off the current DB state, not as
+    # absolute targets captured at invoice creation. If the user did a
+    # parallel devices/LTE topup between invoice and webhook, using
+    # `target_*` would silently roll that back.
     new_device_count = (
-        target_device_count if device_delta > 0 else old_hwid_limit
+        old_hwid_limit + device_delta if device_delta > 0 else old_hwid_limit
     )
-    new_lte_gb_total = target_lte_gb if lte_delta_gb > 0 else old_lte_gb_total
+    new_lte_gb_total = (
+        old_lte_gb_total + lte_delta_gb if lte_delta_gb > 0 else old_lte_gb_total
+    )
 
-    new_active_tariff_price = meta.get("new_active_tariff_price")
-    new_progressive_multiplier = meta.get("new_progressive_multiplier")
+    # Recompute price/multiplier from the live `new_device_count` rather than
+    # trusting metadata snapshots that may have been invalidated by a parallel
+    # topup. If the helper fails, fall back to the metadata snapshot (still
+    # safer than skipping the price update entirely).
+    new_active_tariff_price = None
+    new_progressive_multiplier = None
+    if device_delta > 0 and new_device_count > 0:
+        try:
+            from bloobcat.db.tariff import Tariffs as _Tariffs
+            from bloobcat.services.upgrade_quote import (
+                _compute_progressive_full_price,
+            )
+
+            _original = await _Tariffs.filter(
+                name=active_tariff.name, months=active_tariff.months
+            ).first()
+            _new_price, _new_mult = _compute_progressive_full_price(
+                active_tariff, _original, new_device_count
+            )
+            new_active_tariff_price = int(_new_price)
+            new_progressive_multiplier = float(_new_mult)
+        except Exception as price_exc:
+            logger.warning(
+                "Upgrade bundle: recompute progressive price failed for user=%s "
+                "(falling back to metadata snapshot): %s",
+                user.id,
+                price_exc,
+            )
+            new_active_tariff_price = meta.get("new_active_tariff_price")
+            new_progressive_multiplier = meta.get("new_progressive_multiplier")
 
     try:
         async with in_transaction():
@@ -3812,6 +3853,24 @@ async def _apply_upgrade_bundle_effect(
                         await remnawave_client_local.close()
                     except Exception:
                         pass
+
+    # Period was extended: reschedule subscription-lifecycle tasks (reminder
+    # / expiry / housekeeping) so the apscheduler-held jobs target the new
+    # `expired_at`. Best-effort — must not roll back the committed effect
+    # nor block the `_mark_payment_effect_success` ack to the provider.
+    if extra_days > 0:
+        try:
+            from bloobcat.scheduler import schedule_user_tasks
+
+            await schedule_user_tasks(user)
+        except Exception as sched_exc:
+            logger.warning(
+                "Upgrade bundle: schedule_user_tasks failed for user=%s (payment=%s, provider=%s): %s",
+                user.id,
+                payment_id,
+                provider,
+                sched_exc,
+            )
 
     total_amount = amount_external + amount_from_balance
     await _mark_payment_effect_success(

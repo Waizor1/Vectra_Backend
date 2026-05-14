@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, asdict
 from datetime import date
-from decimal import Decimal, ROUND_HALF_UP, getcontext
+from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP, getcontext
 from typing import Any
 
 from bloobcat.db.active_tariff import ActiveTariffs
@@ -67,6 +67,26 @@ def _to_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return float(default)
+
+
+def _compute_period_extra_cost(price: int, months: int, extra_days: int) -> int:
+    """Compute the prorated extra cost for `extra_days` based on a fixed 30-day
+    month convention. All math is in `Decimal` so we never observe float
+    rounding drift like `599 / 180 * 30 ≈ 99.83… → 100` (off-by-1 vs the
+    correct 99).
+
+    We round DOWN (truncate toward zero) on purpose — the float-bug behaviour
+    that motivated this fix was *systematic overcharging* (extra 1₽ on 30
+    days, up to 5₽ on a full year). Truncation guarantees we never charge
+    fractional rubles the user did not consent to, and matches the user-
+    expected "round-in-the-customer's-favor" semantics.
+
+    Returns 0 for any degenerate input (zero/negative price, months, or days).
+    """
+    if price <= 0 or months <= 0 or extra_days <= 0:
+        return 0
+    total = Decimal(int(price)) * Decimal(int(extra_days)) / Decimal(int(months) * 30)
+    return int(total.to_integral_value(rounding=ROUND_DOWN))
 
 
 def compute_daily_rate(active_tariff: ActiveTariffs | dict[str, Any]) -> float:
@@ -289,14 +309,16 @@ async def build_upgrade_bundle_quote(
     daily_rate = compute_daily_rate(active_tariff)
     period_extra_cost_rub = 0
     if target_extra_days > 0:
-        if daily_rate <= 0:
+        # Compute directly from (price, months, extra_days) in Decimal so the
+        # rounded daily_rate float does not propagate compounding error into
+        # the prorated period cost. `daily_rate` is kept for UI display only.
+        price_for_period = _to_int(getattr(active_tariff, "price", 0), 0)
+        months_for_period = _to_int(getattr(active_tariff, "months", 0), 0)
+        period_extra_cost_rub = _compute_period_extra_cost(
+            price_for_period, months_for_period, target_extra_days
+        )
+        if period_extra_cost_rub <= 0 and daily_rate <= 0:
             errors.append("daily_rate_unavailable")
-        else:
-            period_extra_cost_rub = int(
-                Decimal(str(daily_rate * target_extra_days)).to_integral_value(
-                    rounding=ROUND_HALF_UP
-                )
-            )
 
     total_extra_cost_rub = max(
         0, device_extra_cost_rub + lte_extra_cost_rub + period_extra_cost_rub

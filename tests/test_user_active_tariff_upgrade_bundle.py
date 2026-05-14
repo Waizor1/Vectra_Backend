@@ -424,12 +424,40 @@ async def test_quote_extra_days_over_year(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_apply_with_sufficient_balance(monkeypatch):
+    from unittest.mock import AsyncMock
+
     from bloobcat.db.active_tariff import ActiveTariffs
     from bloobcat.db.payments import ProcessedPayments
     from bloobcat.db.users import Users
+    from bloobcat.routes import payment as payment_module
     from bloobcat.routes.user import UpgradeBundleRequest, upgrade_bundle
 
     _silence_side_effects(monkeypatch)
+
+    # Replace cashback + scheduler so we can assert they were exercised.
+    referral_cashback_mock = AsyncMock(return_value={"applied": False})
+    monkeypatch.setattr(
+        payment_module,
+        "_award_standard_referral_cashback",
+        referral_cashback_mock,
+        raising=False,
+    )
+    scheduler_mock = AsyncMock(return_value=None)
+    # Patch through sys.modules to survive any prior test that may have
+    # rebound `bloobcat.scheduler` to its own stub: production code does a
+    # function-local `from bloobcat.scheduler import schedule_user_tasks`
+    # so it always resolves through sys.modules at call time.
+    import sys as _sys
+    import types as _types
+
+    scheduler_module = _sys.modules.get("bloobcat.scheduler")
+    if scheduler_module is None:
+        scheduler_module = _types.ModuleType("bloobcat.scheduler")
+        monkeypatch.setitem(_sys.modules, "bloobcat.scheduler", scheduler_module)
+    monkeypatch.setattr(
+        scheduler_module, "schedule_user_tasks", scheduler_mock, raising=False
+    )
+
     user, _active, _tariff = await _setup_user_with_active_tariff(
         user_id=9101, balance=50_000, hwid_limit=2, lte_gb_total=10
     )
@@ -484,6 +512,22 @@ async def test_apply_with_sufficient_balance(monkeypatch):
     assert int(payments[0].amount_from_balance) == expected_total
     assert int(payments[0].amount_external) == 0
     assert payments[0].status == "succeeded"
+
+    # Standard referral cashback must be awarded (symmetric with webhook flow).
+    assert referral_cashback_mock.await_count == 1
+    ref_call_kwargs = referral_cashback_mock.await_args.kwargs
+    assert int(ref_call_kwargs["amount_external_rub"]) == 0
+    assert getattr(ref_call_kwargs["referral_user"], "id", None) == user.id
+
+    # Subscription period changed → scheduler must be re-armed at least once
+    # for this user. (Users.save() auto-reschedules on expired_at change AND
+    # the endpoint adds an explicit post-commit call as a defence-in-depth
+    # against future refactors of the save override.)
+    assert scheduler_mock.await_count >= 1
+    awaited_user_ids = {
+        getattr(call.args[0], "id", None) for call in scheduler_mock.await_args_list
+    }
+    assert user.id in awaited_user_ids
 
 
 @pytest.mark.asyncio
@@ -616,3 +660,171 @@ async def test_apply_zero_total_returns_400(monkeypatch):
     with pytest.raises(HTTPException) as exc_info:
         await upgrade_bundle(payload=payload, user=user)
     assert exc_info.value.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Pure-function precision tests (no DB)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "price, months, extra_days, expected",
+    [
+        # 599/180*30 = 99.833 → 99 (float-bug produced 100).
+        (599, 6, 30, 99),
+        # 599/180*365 = 1214.638 → 1214.
+        (599, 6, 365, 1214),
+        # 1000/360*30 = 83.333 → 83.
+        (1000, 12, 30, 83),
+        # 1000/360*365 = 1013.888 → 1013 (ROUND_DOWN: round in customer's
+        # favor; see _compute_period_extra_cost docstring).
+        (1000, 12, 365, 1013),
+        (0, 6, 30, 0),
+        (599, 0, 30, 0),     # zero months — safety
+        (599, 6, 0, 0),      # zero days — safety
+        (-100, 6, 30, 0),    # negative — safety
+    ],
+)
+def test_period_cost_decimal_precision(price, months, extra_days, expected):
+    """`_compute_period_extra_cost` must round only once via Decimal so we
+    don't accumulate float drift (cf. BLOCKER 3 in the upgrade_bundle review).
+    """
+    from bloobcat.services.upgrade_quote import _compute_period_extra_cost
+
+    assert _compute_period_extra_cost(price, months, extra_days) == expected
+
+
+@pytest.mark.asyncio
+async def test_external_metadata_includes_new_active_tariff_price(monkeypatch):
+    """BLOCKER 1: when balance is insufficient and device_delta > 0, the
+    metadata sent to Platega/YooKassa MUST include `new_active_tariff_price`
+    and `new_progressive_multiplier`, otherwise the webhook leaves the price
+    stale and breaks auto-renew / daily_rate / notifications.
+    """
+    from bloobcat.routes import user as user_module
+    from bloobcat.routes.user import UpgradeBundleRequest, upgrade_bundle
+
+    _silence_side_effects(monkeypatch)
+    user, _active, _tariff = await _setup_user_with_active_tariff(
+        user_id=9201, balance=1, hwid_limit=2, lte_gb_total=10
+    )
+
+    captured = {}
+
+    async def _fake_external_payment(
+        *, user, active_tariff, amount_to_pay, amount_from_balance, metadata
+    ):
+        captured.update(metadata)
+        return {
+            "status": "payment_required",
+            "redirect_to": "https://example.test/x",
+            "payment_id": "fake",
+            "provider": "platega",
+            "_metadata": metadata,
+        }
+
+    monkeypatch.setattr(
+        user_module,
+        "_create_external_upgrade_bundle_payment",
+        _fake_external_payment,
+    )
+
+    result = await upgrade_bundle(
+        payload=UpgradeBundleRequest(
+            target_device_count=3,
+            target_lte_gb=10,
+            target_extra_days=0,
+            dry_run=False,
+        ),
+        user=user,
+    )
+
+    assert result["status"] == "payment_required"
+    assert captured.get("device_delta") == 1
+    assert "new_active_tariff_price" in captured
+    assert int(captured["new_active_tariff_price"]) > 0
+    assert "new_progressive_multiplier" in captured
+    assert 0 < float(captured["new_progressive_multiplier"]) <= 1.0
+
+
+@pytest.mark.asyncio
+async def test_external_metadata_skips_price_when_no_device_delta(monkeypatch):
+    """When device_delta == 0, metadata must NOT carry stale price fields —
+    they would override an unrelated tariff state in the webhook."""
+    from bloobcat.routes import user as user_module
+    from bloobcat.routes.user import UpgradeBundleRequest, upgrade_bundle
+
+    _silence_side_effects(monkeypatch)
+    user, _active, _tariff = await _setup_user_with_active_tariff(
+        user_id=9202, balance=1, hwid_limit=2, lte_gb_total=10
+    )
+
+    captured = {}
+
+    async def _fake_external_payment(
+        *, user, active_tariff, amount_to_pay, amount_from_balance, metadata
+    ):
+        captured.update(metadata)
+        return {
+            "status": "payment_required",
+            "redirect_to": "https://example.test/x",
+            "payment_id": "fake",
+            "provider": "platega",
+            "_metadata": metadata,
+        }
+
+    monkeypatch.setattr(
+        user_module,
+        "_create_external_upgrade_bundle_payment",
+        _fake_external_payment,
+    )
+
+    await upgrade_bundle(
+        payload=UpgradeBundleRequest(
+            target_device_count=2,  # same as current → device_delta = 0
+            target_lte_gb=15,
+            target_extra_days=0,
+            dry_run=False,
+        ),
+        user=user,
+    )
+
+    assert captured.get("device_delta") == 0
+    assert "new_active_tariff_price" not in captured
+    assert "new_progressive_multiplier" not in captured
+
+
+@pytest.mark.asyncio
+async def test_dry_run_response_includes_is_actionable_flag(monkeypatch):
+    """MINOR: dry_run quote must expose `is_actionable` to the frontend so
+    it can disable the Pay button without re-deriving the rule client-side.
+    """
+    from bloobcat.routes.user import UpgradeBundleRequest, upgrade_bundle
+
+    _silence_side_effects(monkeypatch)
+    user, _active, _tariff = await _setup_user_with_active_tariff(
+        user_id=9203, balance=10_000, hwid_limit=2, lte_gb_total=10
+    )
+
+    actionable = await upgrade_bundle(
+        payload=UpgradeBundleRequest(
+            target_device_count=3,
+            target_lte_gb=15,
+            target_extra_days=10,
+            dry_run=True,
+        ),
+        user=user,
+    )
+    assert actionable["is_actionable"] is True
+    assert actionable["total_extra_cost_rub"] > 0
+
+    not_actionable = await upgrade_bundle(
+        payload=UpgradeBundleRequest(
+            target_device_count=2,
+            target_lte_gb=10,
+            target_extra_days=0,
+            dry_run=True,
+        ),
+        user=user,
+    )
+    assert not_actionable["is_actionable"] is False

@@ -612,8 +612,8 @@ class UpgradeBundleRequest(BaseModel):
     All three target_* fields are absolute (final desired values), not deltas.
     """
 
-    target_device_count: int = Field(ge=1)
-    target_lte_gb: int = Field(ge=0)
+    target_device_count: int = Field(ge=1, le=100)
+    target_lte_gb: int = Field(ge=0, le=10000)
     target_extra_days: int = Field(ge=0, le=365)
     dry_run: bool = False
 
@@ -1739,6 +1739,19 @@ async def devices_topup(
     )
 
 
+class _BalanceRaceLost(Exception):
+    """Internal marker: atomic balance UPDATE returned 0 rows."""
+
+
+def _safe_json_dumps(payload: dict[str, Any]) -> str:
+    import json
+
+    try:
+        return json.dumps(payload, ensure_ascii=False, default=str)
+    except Exception:
+        return "{}"
+
+
 async def _create_external_upgrade_bundle_payment(
     *,
     user: Users,
@@ -1945,7 +1958,12 @@ async def upgrade_bundle(
     )
 
     if payload.dry_run:
-        return {"status": "quote", **quote.to_response_dict()}
+        quote_dict = quote.to_response_dict()
+        is_actionable = (
+            not quote_dict.get("validation_errors")
+            and int(quote_dict.get("total_extra_cost_rub", 0)) > 0
+        )
+        return {"status": "quote", "is_actionable": is_actionable, **quote_dict}
 
     if quote.validation_errors:
         raise HTTPException(
@@ -2028,10 +2046,7 @@ async def upgrade_bundle(
                     user.expired_at = new_expired_at
                     await user.save(update_fields=["expired_at"])
 
-                payment_id = (
-                    f"balance_upgrade_bundle_{user.id}_"
-                    f"{int(datetime.now().timestamp())}_{randint(100, 999)}"
-                )
+                payment_id = f"balance_upgrade_bundle_{user.id}_{uuid.uuid4().hex}"
                 await ProcessedPayments.create(
                     payment_id=payment_id,
                     user_id=user.id,
@@ -2091,6 +2106,41 @@ async def upgrade_bundle(
                     partner_exc,
                 )
 
+            # Mirror the webhook flow: balance-only upgrades must also award
+            # the standard referral cashback so referees aren't silently
+            # skipped when the user pays from bonus balance.
+            try:
+                from bloobcat.routes.payment import (
+                    _award_standard_referral_cashback,
+                )
+
+                await _award_standard_referral_cashback(
+                    payment_id=str(payment_id),
+                    referral_user=user,
+                    amount_external_rub=0,
+                )
+            except Exception as ref_cashback_exc:
+                logger.warning(
+                    "Не удалось начислить обычный реферальный кэшбек за апгрейд подписки с баланса %s: %s",
+                    payment_id,
+                    ref_cashback_exc,
+                )
+
+            # Period was extended: reschedule subscription-lifecycle tasks so
+            # reminder/expiry jobs target the new `expired_at`. Best-effort —
+            # transaction has already committed.
+            if extra_days > 0:
+                try:
+                    from bloobcat.scheduler import schedule_user_tasks
+
+                    await schedule_user_tasks(user)
+                except Exception as sched_exc:
+                    logger.warning(
+                        "schedule_user_tasks failed after balance upgrade_bundle user=%s: %s",
+                        user.id,
+                        sched_exc,
+                    )
+
             return {
                 "status": "ok",
                 "expired_at": user.expired_at,
@@ -2105,6 +2155,27 @@ async def upgrade_bundle(
     # ----- fallback: external payment for the full amount ----------------
     amount_to_pay = max(1, total_extra_cost - int(user.balance or 0))
     amount_from_balance = max(0, total_extra_cost - amount_to_pay)
+
+    # Precompute the new ActiveTariffs.price/multiplier when devices are being
+    # bumped so the webhook can persist them as-is. Without this, the webhook
+    # raises hwid_limit but leaves the old price intact, breaking auto-renew /
+    # compute_daily_rate / admin notifications (BLOCKER 1).
+    new_active_tariff_price: int | None = None
+    new_progressive_multiplier: float | None = None
+    if quote.device_delta > 0:
+        from bloobcat.services.upgrade_quote import (
+            _compute_progressive_full_price,
+        )
+
+        original = await Tariffs.filter(
+            name=active_tariff.name, months=active_tariff.months
+        ).first()
+        _new_full_price, _new_multiplier = _compute_progressive_full_price(
+            active_tariff, original, int(payload.target_device_count)
+        )
+        new_active_tariff_price = int(_new_full_price)
+        new_progressive_multiplier = float(_new_multiplier)
+
     metadata: dict[str, Any] = {
         "user_id": user.id,
         "upgrade_bundle": True,
@@ -2124,6 +2195,10 @@ async def upgrade_bundle(
         "total_extra_cost_rub": int(total_extra_cost),
         "amount_from_balance": amount_from_balance,
     }
+    if new_active_tariff_price is not None:
+        metadata["new_active_tariff_price"] = new_active_tariff_price
+    if new_progressive_multiplier is not None:
+        metadata["new_progressive_multiplier"] = new_progressive_multiplier
     return await _create_external_upgrade_bundle_payment(
         user=user,
         active_tariff=active_tariff,
@@ -2131,19 +2206,6 @@ async def upgrade_bundle(
         amount_from_balance=float(amount_from_balance),
         metadata=metadata,
     )
-
-
-class _BalanceRaceLost(Exception):
-    """Internal marker: atomic balance UPDATE returned 0 rows."""
-
-
-def _safe_json_dumps(payload: dict[str, Any]) -> str:
-    import json
-
-    try:
-        return json.dumps(payload, ensure_ascii=False, default=str)
-    except Exception:
-        return "{}"
 
 
 @router.get("/family/{familyurl}")
