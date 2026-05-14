@@ -255,6 +255,14 @@ async def _apply_concurrent_index_patches(conn) -> None:
         # processed_payments is hot — CONCURRENTLY is required by the lint.
         'CREATE INDEX CONCURRENTLY IF NOT EXISTS "idx_processed_payments_user_purpose"\n'
         '    ON "processed_payments" ("user_id", "payment_purpose")',
+        # PWA push delivery: lookup of active subscriptions per user is the
+        # hot path for broadcasts and per-user notifications. Migration 117
+        # creates the empty table; indexes ship here so the brand-new table
+        # also satisfies the post-107 CONCURRENTLY policy.
+        'CREATE INDEX CONCURRENTLY IF NOT EXISTS "idx_push_subscriptions_user_active"\n'
+        '    ON "push_subscriptions" ("user_id", "is_active")',
+        'CREATE INDEX CONCURRENTLY IF NOT EXISTS "idx_push_subscriptions_active"\n'
+        '    ON "push_subscriptions" ("is_active")',
     ]
     for stmt in concurrent_index_statements:
         try:

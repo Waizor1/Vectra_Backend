@@ -1,3 +1,13 @@
+"""Create push_subscriptions table for PWA Web Push delivery.
+
+Indexes are added separately via `_apply_concurrent_index_patches` in
+`__main__.py` so they can use CREATE INDEX CONCURRENTLY outside the
+migration transaction (lint requirement, see
+scripts/check_migration_safety.py). The table itself is brand new and
+empty on first deploy so the CREATE TABLE is safe inside the migration
+transaction.
+"""
+
 from tortoise import BaseDBAsyncClient
 
 
@@ -19,15 +29,12 @@ async def upgrade(db: BaseDBAsyncClient) -> str:
             "created_at" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             "updated_at" TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
-
-        CREATE INDEX IF NOT EXISTS "ix_push_subscriptions_user_active"
-            ON "push_subscriptions" ("user_id", "is_active");
-        CREATE INDEX IF NOT EXISTS "ix_push_subscriptions_active"
-            ON "push_subscriptions" ("is_active");
     """
 
 
 async def downgrade(db: BaseDBAsyncClient) -> str:
     return """
+        DROP INDEX IF EXISTS "idx_push_subscriptions_user_active";
+        DROP INDEX IF EXISTS "idx_push_subscriptions_active";
         DROP TABLE IF EXISTS "push_subscriptions";
     """
