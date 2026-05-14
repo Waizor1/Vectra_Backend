@@ -1716,6 +1716,23 @@ def _to_positive_int(value: Any, default: int = 1) -> int:
     return parsed if parsed > 0 else max(1, int(default or 1))
 
 
+def _compute_lte_carryover_gb(old_active_tariff: Any) -> int:
+    """Unused LTE GBs from the old active_tariff carried over to its replacement.
+
+    The legacy code refunded `remaining_gb * old.lte_price_per_gb` to the
+    monetary balance, but this silently returned 0 when the old tariff had
+    `lte_price_per_gb == 0` (trial / promo / synthetic active_tariff topped up
+    via LTE top-up — which adds GB but does not update the stored price). The
+    user paid for gigabytes; carrying gigabytes preserves what they paid for.
+    `int(used)` floors so any partial-GB remainder rounds in the user's favor.
+    """
+    if old_active_tariff is None:
+        return 0
+    total = int(getattr(old_active_tariff, "lte_gb_total", 0) or 0)
+    used = float(getattr(old_active_tariff, "lte_gb_used", 0.0) or 0.0)
+    return max(0, total - int(used))
+
+
 def _build_base_tariff_snapshot(
     *,
     tariff: Tariffs | None,
@@ -2089,6 +2106,7 @@ async def _apply_succeeded_payment_fallback(
             pid,
         )
 
+    fallback_lte_carryover_gb = 0
     if tariff_id is not None and not preserve_active_tariff_state:
         await _refresh_payment_processing_lease(
             payment_id=pid,
@@ -2098,6 +2116,13 @@ async def _apply_succeeded_payment_fallback(
         if user.active_tariff_id:
             old_active = await ActiveTariffs.get_or_none(id=user.active_tariff_id)
             if old_active:
+                fallback_lte_carryover_gb = _compute_lte_carryover_gb(old_active)
+                if fallback_lte_carryover_gb > 0:
+                    logger.info(
+                        "Fallback: переносим остаток LTE %s GB на новый тариф пользователя %s",
+                        fallback_lte_carryover_gb,
+                        user.id,
+                    )
                 await old_active.delete()
 
         if "lte_price_per_gb" in meta:
@@ -2151,13 +2176,16 @@ async def _apply_succeeded_payment_fallback(
                 extra={"user_id": user.id, "tariff_id": tariff_id, "payment_id": pid},
             )
 
+        effective_fallback_lte_total = int(lte_gb or 0) + int(
+            fallback_lte_carryover_gb or 0
+        )
         active_tariff = await ActiveTariffs.create(
             user=user,
             name=active_name,
             months=active_months,
             price=calculated_price,
             hwid_limit=device_count,
-            lte_gb_total=lte_gb,
+            lte_gb_total=effective_fallback_lte_total,
             lte_gb_used=0.0,
             lte_price_per_gb=lte_price_snapshot,
             lte_usage_last_date=msk_today,
@@ -2169,7 +2197,7 @@ async def _apply_succeeded_payment_fallback(
         )
         user.active_tariff_id = active_tariff.id
         user.hwid_limit = device_count
-        user.lte_gb_total = lte_gb
+        user.lte_gb_total = effective_fallback_lte_total
 
     is_auto_payment = _meta_bool(meta.get("is_auto"), False)
     if provider == PAYMENT_PROVIDER_YOOKASSA and not is_auto_payment:
@@ -4070,6 +4098,11 @@ async def yookassa_webhook(request: Request, secret: str):
         should_preserve_active_tariff_state = (
             purchase_kind == "base" and is_active_family_overlay
         )
+        # Capture LTE carryover BEFORE the legacy code path can delete the old
+        # active_tariff later (lines below ~4220). Used as a delta added to the
+        # new tariff's lte_gb_total so users do not lose gigabytes they paid
+        # for via top-up.
+        webhook_lte_carryover_gb = 0
         try:
             if (
                 tariff_id is not None
@@ -4080,19 +4113,14 @@ async def yookassa_webhook(request: Request, secret: str):
                     id=user.active_tariff_id
                 )
                 if old_active_tariff:
-                    remaining_gb = max(
-                        0.0,
-                        float(old_active_tariff.lte_gb_total or 0)
-                        - float(old_active_tariff.lte_gb_used or 0),
+                    webhook_lte_carryover_gb = _compute_lte_carryover_gb(
+                        old_active_tariff
                     )
-                    lte_refund_amount = _round_rub(
-                        remaining_gb * float(old_active_tariff.lte_price_per_gb or 0)
-                    )
-                    if lte_refund_amount > 0:
-                        user.balance += lte_refund_amount
+                    if webhook_lte_carryover_gb > 0:
                         logger.info(
-                            f"Начислен бонус за остаток LTE-трафика {remaining_gb:.2f} GB "
-                            f"({lte_refund_amount:.2f} руб.) пользователю {user.id}"
+                            "Переносим остаток LTE %s GB на новый тариф пользователя %s",
+                            webhook_lte_carryover_gb,
+                            user.id,
                         )
             elif (
                 tariff_id is not None
@@ -4100,7 +4128,7 @@ async def yookassa_webhook(request: Request, secret: str):
                 and should_preserve_active_tariff_state
             ):
                 logger.info(
-                    "Webhook base purchase during active family overlay: skip LTE refund and active tariff replacement user=%s",
+                    "Webhook base purchase during active family overlay: skip LTE carryover and active tariff replacement user=%s",
                     user.id,
                 )
 
@@ -4264,13 +4292,16 @@ async def yookassa_webhook(request: Request, secret: str):
                         lte_price_snapshot = float(data.get("lte_price_per_gb") or 0)
                     else:
                         lte_price_snapshot = float(original.lte_price_per_gb or 0)
+                    effective_lte_gb_total = int(lte_gb or 0) + int(
+                        webhook_lte_carryover_gb or 0
+                    )
                     active_tariff = await ActiveTariffs.create(
                         user=user,  # Link to this user
                         name=original.name,
                         months=original.months,
                         price=calculated_price,  # Используем рассчитанную цену
                         hwid_limit=device_count,  # Используем выбранное количество устройств
-                        lte_gb_total=lte_gb,
+                        lte_gb_total=effective_lte_gb_total,
                         lte_gb_used=0.0,
                         lte_price_per_gb=lte_price_snapshot,
                         lte_usage_last_date=msk_today,
@@ -4283,7 +4314,7 @@ async def yookassa_webhook(request: Request, secret: str):
                     active_tariff_for_lte = active_tariff
                     # Link user to this active tariff
                     user.active_tariff_id = active_tariff.id
-                    user.lte_gb_total = lte_gb
+                    user.lte_gb_total = effective_lte_gb_total
 
                     # Устанавливаем hwid_limit пользователю из выбранного количества устройств
                     user.hwid_limit = device_count
@@ -4873,20 +4904,13 @@ async def pay(
     user_balance = float(user.balance)
     old_expired_at = user.expired_at
     old_active_tariff = None
-    lte_refund_amount = 0
+    balance_lte_carryover_gb = 0
     if user.active_tariff_id:
         old_active_tariff = await ActiveTariffs.get_or_none(id=user.active_tariff_id)
         if old_active_tariff and not (
             purchase_kind == "base" and is_active_family_overlay
         ):
-            remaining_gb = max(
-                0.0,
-                float(old_active_tariff.lte_gb_total or 0)
-                - float(old_active_tariff.lte_gb_used or 0),
-            )
-            lte_refund_amount = _round_rub(
-                remaining_gb * float(old_active_tariff.lte_price_per_gb or 0)
-            )
+            balance_lte_carryover_gb = _compute_lte_carryover_gb(old_active_tariff)
 
     try:
         current_date = date.today()
@@ -4918,7 +4942,10 @@ async def pay(
             expected_amount=float(full_price),
         )
 
-    effective_balance = user_balance + lte_refund_amount
+    # Carryover replaces the legacy LTE refund: remaining GBs roll over to the
+    # new tariff instead of being converted to balance, so balance eligibility
+    # is checked against the cash balance only.
+    effective_balance = user_balance
     if effective_balance >= full_price or recovered_balance_retry:
         logger.info(
             f"Оплата тарифа {tariff_id} для пользователя {user.id} полностью с баланса. "
@@ -4986,7 +5013,7 @@ async def pay(
                 expected_amount=float(full_price),
             )
 
-        net_debit = float(full_price) - float(lte_refund_amount)
+        net_debit = float(full_price)
         if net_debit > 0:
             if not balance_debit_already_applied:
                 updated_rows = await Users.filter(
@@ -5012,13 +5039,12 @@ async def pay(
                     payment_id,
                     user.id,
                 )
-        elif net_debit < 0:
-            await Users.filter(id=user.id).update(balance=F("balance") + abs(net_debit))
 
-        if lte_refund_amount > 0:
+        if balance_lte_carryover_gb > 0:
             logger.info(
-                f"Начислен бонус за остаток LTE-трафика "
-                f"({lte_refund_amount:.2f} руб.) пользователю {user.id} перед списанием"
+                "Переносим остаток LTE %s GB на новый тариф пользователя %s (balance flow)",
+                balance_lte_carryover_gb,
+                user.id,
             )
 
         try:
@@ -5200,13 +5226,16 @@ async def pay(
                 # чтобы автоплатежи не применяли скидку дважды
                 _, effective_multiplier = tariff.get_effective_pricing()
                 base_calculated_price = tariff.calculate_price(device_count)
+                effective_balance_lte_total = int(lte_gb or 0) + int(
+                    balance_lte_carryover_gb or 0
+                )
                 active_tariff = await ActiveTariffs.create(
                     user=user,
                     name=tariff.name,
                     months=tariff.months,
                     price=base_calculated_price,  # Цена без персональной скидки
                     hwid_limit=device_count,  # Используем выбранное количество устройств
-                    lte_gb_total=lte_gb,
+                    lte_gb_total=effective_balance_lte_total,
                     lte_gb_used=0.0,
                     lte_price_per_gb=lte_price_per_gb,
                     lte_usage_last_date=msk_today,
@@ -5217,7 +5246,7 @@ async def pay(
                     residual_day_fraction=0.0,
                 )
                 user.active_tariff_id = active_tariff.id
-                user.lte_gb_total = lte_gb
+                user.lte_gb_total = effective_balance_lte_total
 
                 # Устанавливаем hwid_limit пользователю из выбранного количества устройств
                 user.hwid_limit = device_count
