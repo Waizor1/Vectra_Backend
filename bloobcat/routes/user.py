@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 from typing import Dict, Any
 from datetime import datetime, timedelta, timezone, date, time
 from decimal import Decimal, ROUND_HALF_UP, getcontext
@@ -603,6 +603,18 @@ class ChangeDevicesRequest(BaseModel):
 
 class DevicesTopupRequest(BaseModel):
     device_count: int
+    dry_run: bool = False
+
+
+class UpgradeBundleRequest(BaseModel):
+    """Combined upgrade quote/apply payload for `/active_tariff/upgrade_bundle`.
+
+    All three target_* fields are absolute (final desired values), not deltas.
+    """
+
+    target_device_count: int = Field(ge=1, le=100)
+    target_lte_gb: int = Field(ge=0, le=10000)
+    target_extra_days: int = Field(ge=0, le=365)
     dry_run: bool = False
 
 
@@ -1719,6 +1731,497 @@ async def devices_topup(
         "amount_from_balance": amount_from_balance,
     }
     return await _create_external_devices_topup_payment(
+        user=user,
+        active_tariff=active_tariff,
+        amount_to_pay=float(amount_to_pay),
+        amount_from_balance=float(amount_from_balance),
+        metadata=metadata,
+    )
+
+
+class _BalanceRaceLost(Exception):
+    """Internal marker: atomic balance UPDATE returned 0 rows."""
+
+
+def _safe_json_dumps(payload: dict[str, Any]) -> str:
+    import json
+
+    try:
+        return json.dumps(payload, ensure_ascii=False, default=str)
+    except Exception:
+        return "{}"
+
+
+async def _create_external_upgrade_bundle_payment(
+    *,
+    user: Users,
+    active_tariff: ActiveTariffs,
+    amount_to_pay: float,
+    amount_from_balance: float,
+    metadata: dict[str, Any],
+) -> dict[str, Any]:
+    """Create an external Platega/YooKassa payment for a combined upgrade bundle.
+
+    Mirrors `_create_external_devices_topup_payment` but with an upgrade-bundle
+    description so users see the right context at the payment provider.
+    """
+    from bloobcat.routes.payment import (
+        PAYMENT_CURRENCY_RUB,
+        PAYMENT_PROVIDER_PLATEGA,
+        PAYMENT_PROVIDER_YOOKASSA,
+        PlategaAPIError,
+        PlategaClient,
+        PlategaConfigError,
+        _active_payment_provider,
+        _provider_payload_json,
+        _resolve_payment_return_url,
+        _upsert_processed_payment,
+    )
+
+    provider = _active_payment_provider()
+    return_url = await _resolve_payment_return_url()
+    metadata["expected_amount"] = float(amount_to_pay)
+    metadata["expected_currency"] = PAYMENT_CURRENCY_RUB
+    metadata["payment_provider"] = provider
+
+    description = f"Апгрейд подписки пользователю {user.id}"
+
+    if provider == PAYMENT_PROVIDER_PLATEGA:
+        provider_payload = _provider_payload_json({"metadata": metadata})
+        try:
+            payment = await PlategaClient().create_transaction(
+                amount=float(amount_to_pay),
+                currency=PAYMENT_CURRENCY_RUB,
+                description=description,
+                return_url=return_url,
+                failed_url=return_url,
+                payload=provider_payload,
+            )
+        except PlategaConfigError:
+            logger.error(
+                "Platega selected for upgrade bundle but credentials are not configured"
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Сервис оплаты временно недоступен. Пожалуйста, попробуйте позже.",
+            )
+        except PlategaAPIError as exc:
+            logger.error(
+                "Ошибка при создании Platega-платежа за апгрейд подписки",
+                extra={
+                    "user_id": user.id,
+                    "active_tariff_id": active_tariff.id,
+                    "amount": amount_to_pay,
+                    "status_code": exc.status_code,
+                },
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Сервис оплаты временно недоступен. Пожалуйста, попробуйте позже.",
+            )
+
+        await _upsert_processed_payment(
+            payment_id=payment.transaction_id,
+            user_id=user.id,
+            amount=float(amount_to_pay) + float(amount_from_balance),
+            amount_external=float(amount_to_pay),
+            amount_from_balance=float(amount_from_balance),
+            status="pending",
+            provider=PAYMENT_PROVIDER_PLATEGA,
+            payment_url=payment.redirect_url,
+            provider_payload=_provider_payload_json(
+                {
+                    "metadata": metadata,
+                    "provider_status": payment.status,
+                    "provider_response": {
+                        "transactionId": payment.transaction_id,
+                        "status": payment.status,
+                        "redirect": payment.redirect_url,
+                    },
+                }
+            ),
+        )
+        return {
+            "status": "payment_required",
+            "redirect_to": payment.redirect_url,
+            "payment_id": payment.transaction_id,
+            "provider": PAYMENT_PROVIDER_PLATEGA,
+        }
+
+    if provider != PAYMENT_PROVIDER_YOOKASSA:
+        logger.error("Unsupported upgrade bundle payment provider: %s", provider)
+        raise HTTPException(
+            status_code=503, detail="Сервис оплаты временно недоступен"
+        )
+
+    try:
+        payment_data = {
+            "amount": {
+                "value": str(amount_to_pay),
+                "currency": PAYMENT_CURRENCY_RUB,
+            },
+            "confirmation": {
+                "type": "redirect",
+                "return_url": return_url,
+            },
+            "metadata": metadata,
+            "capture": True,
+            "description": description,
+        }
+        idempotence_key = str(randint(100000, 999999999999))
+        payment = await asyncio.wait_for(
+            asyncio.to_thread(partial(Payment.create, payment_data, idempotence_key)),
+            timeout=30.0,
+        )
+        await _upsert_processed_payment(
+            payment_id=payment.id,
+            user_id=user.id,
+            amount=float(amount_to_pay) + float(amount_from_balance),
+            amount_external=float(amount_to_pay),
+            amount_from_balance=float(amount_from_balance),
+            status="pending",
+            provider=PAYMENT_PROVIDER_YOOKASSA,
+            payment_url=payment.confirmation.confirmation_url,
+            provider_payload=_provider_payload_json({"metadata": metadata}),
+        )
+        return {
+            "status": "payment_required",
+            "redirect_to": payment.confirmation.confirmation_url,
+            "payment_id": payment.id,
+            "provider": PAYMENT_PROVIDER_YOOKASSA,
+        }
+    except Exception as e:
+        logger.error(
+            f"Ошибка при создании платежа за апгрейд подписки для {user.id}: {e}"
+        )
+        raise HTTPException(status_code=500, detail="Ошибка при создании платежа")
+
+
+@router.post("/active_tariff/upgrade_bundle")
+async def upgrade_bundle(
+    payload: UpgradeBundleRequest, user: Users = Depends(validate)
+) -> Dict[str, Any]:
+    """Combined upgrade: bump device limit, LTE GB, and/or remaining days in
+    a single endpoint and a single payment.
+
+    `dry_run=true` returns just the quote (no DB writes, no payment).
+    `dry_run=false` either debits the bonus balance and applies all deltas in
+    one DB transaction, or returns `payment_required` with a Platega/YooKassa
+    redirect when the balance can't cover the bill.
+
+    The webhook handler for the upgrade bundle uses the existing
+    `_apply_devices_topup_effect` / `_apply_lte_topup_effect` helpers plus a
+    `pending_extra_days` metadata key — applied here in
+    `_apply_upgrade_bundle_effects_from_balance` for the in-balance branch.
+    """
+    from bloobcat.services.upgrade_quote import build_upgrade_bundle_quote
+
+    if not user.active_tariff_id:
+        raise HTTPException(
+            status_code=400, detail="У пользователя нет активного тарифа"
+        )
+
+    active_tariff = await ActiveTariffs.get_or_none(id=user.active_tariff_id)
+    if not active_tariff:
+        raise HTTPException(status_code=404, detail="Активный тариф не найден")
+
+    is_family_member = await FamilyMembers.filter(
+        member_id=user.id, status="active"
+    ).exists()
+    if is_family_member:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Подпиской управляет организатор семьи. "
+                "Апгрейд доступен только владельцу подписки."
+            ),
+        )
+
+    today = date.today()
+    user_expired_at = normalize_date(user.expired_at)
+    if not user_expired_at or user_expired_at <= today:
+        raise HTTPException(
+            status_code=400,
+            detail="Апгрейд подписки доступен только при активной подписке",
+        )
+
+    quote = await build_upgrade_bundle_quote(
+        user_id=int(user.id),
+        user_balance=int(user.balance or 0),
+        user_expired_at=user_expired_at,
+        user_hwid_limit=int(user.hwid_limit) if user.hwid_limit is not None else None,
+        active_tariff=active_tariff,
+        target_devices=int(payload.target_device_count),
+        target_lte_gb=int(payload.target_lte_gb),
+        target_extra_days=int(payload.target_extra_days),
+        today=today,
+    )
+
+    if payload.dry_run:
+        quote_dict = quote.to_response_dict()
+        is_actionable = (
+            not quote_dict.get("validation_errors")
+            and int(quote_dict.get("total_extra_cost_rub", 0)) > 0
+        )
+        return {"status": "quote", "is_actionable": is_actionable, **quote_dict}
+
+    if quote.validation_errors:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "upgrade_bundle_validation_error",
+                "errors": quote.validation_errors,
+                "quote": quote.to_response_dict(),
+            },
+        )
+
+    total_extra_cost = int(quote.total_extra_cost_rub)
+    if total_extra_cost <= 0:
+        raise HTTPException(status_code=400, detail="nothing_to_upgrade")
+
+    current_devices = max(
+        1,
+        int(user.hwid_limit or 0)
+        or int(getattr(active_tariff, "hwid_limit", 1) or 1),
+    )
+    current_lte_gb_total = int(getattr(active_tariff, "lte_gb_total", 0) or 0)
+    new_device_count = current_devices + int(quote.device_delta)
+    new_lte_gb_total = current_lte_gb_total + int(quote.lte_delta_gb)
+    extra_days = int(quote.extra_days)
+
+    # ----- happy path: balance covers everything -------------------------
+    if int(user.balance or 0) >= total_extra_cost:
+        # Atomic debit. Single DB transaction wraps all three effects so
+        # either everything lands or nothing does — matches the plan's
+        # contract: never apply 2 of 3 deltas on partial failure.
+        from tortoise.transactions import in_transaction
+
+        try:
+            async with in_transaction():
+                updated = await Users.filter(
+                    id=user.id, balance__gte=total_extra_cost
+                ).update(balance=F("balance") - total_extra_cost)
+                if not updated:
+                    # Concurrent debit won the race — fall through to
+                    # external payment so we don't double-charge.
+                    raise _BalanceRaceLost()
+
+                await user.refresh_from_db(fields=["balance"])
+
+                # Device delta: update both user.hwid_limit + active_tariff
+                if quote.device_delta > 0:
+                    from bloobcat.services.upgrade_quote import (
+                        _compute_progressive_full_price,
+                    )
+
+                    original = await Tariffs.filter(
+                        name=active_tariff.name, months=active_tariff.months
+                    ).first()
+                    new_full_price, new_multiplier = _compute_progressive_full_price(
+                        active_tariff, original, new_device_count
+                    )
+                    user.hwid_limit = new_device_count
+                    await user.save(update_fields=["hwid_limit"])
+                    active_tariff.hwid_limit = new_device_count
+                    active_tariff.price = int(new_full_price)
+                    active_tariff.progressive_multiplier = float(new_multiplier)
+                    await active_tariff.save(
+                        update_fields=["hwid_limit", "price", "progressive_multiplier"]
+                    )
+
+                # LTE delta
+                if quote.lte_delta_gb > 0:
+                    active_tariff.lte_gb_total = new_lte_gb_total
+                    await active_tariff.save(update_fields=["lte_gb_total"])
+                    user.lte_gb_total = new_lte_gb_total
+                    await user.save(update_fields=["lte_gb_total"])
+
+                # Extra days: extend in-place. We intentionally don't call
+                # `user.extend_subscription()` because that triggers
+                # `schedule_user_tasks` and full save — keeping the write
+                # narrow makes the transaction rollback-safe and avoids
+                # scheduler side-effects when something later raises.
+                if extra_days > 0:
+                    new_expired_at = user_expired_at + timedelta(days=extra_days)
+                    user.expired_at = new_expired_at
+                    await user.save(update_fields=["expired_at"])
+
+                payment_id = f"balance_upgrade_bundle_{user.id}_{uuid.uuid4().hex}"
+                await ProcessedPayments.create(
+                    payment_id=payment_id,
+                    user_id=user.id,
+                    amount=total_extra_cost,
+                    amount_external=0,
+                    amount_from_balance=total_extra_cost,
+                    status="succeeded",
+                    payment_purpose="upgrade_bundle",
+                    provider_payload=_safe_json_dumps(
+                        {
+                            "device_delta": int(quote.device_delta),
+                            "lte_delta_gb": int(quote.lte_delta_gb),
+                            "extra_days": int(extra_days),
+                            "device_extra_cost_rub": int(quote.device_extra_cost_rub),
+                            "lte_extra_cost_rub": int(quote.lte_extra_cost_rub),
+                            "period_extra_cost_rub": int(quote.period_extra_cost_rub),
+                            "total_extra_cost_rub": int(total_extra_cost),
+                        }
+                    ),
+                )
+        except _BalanceRaceLost:
+            # Fall through to external payment branch below.
+            user = await Users.get(id=user.id)
+        else:
+            # Schedule downstream RemnaWave sync outside the transaction.
+            if user.remnawave_uuid:
+                try:
+                    if user.is_device_per_user_enabled():
+                        from bloobcat.services.device_service import (
+                            sync_device_entitlements,
+                        )
+
+                        await sync_device_entitlements(user)
+                    else:
+                        await remnawave_client.users.update_user(
+                            uuid=user.remnawave_uuid,
+                            expireAt=user.expired_at,
+                            hwidDeviceLimit=int(user.hwid_limit),
+                        )
+                except Exception as e:
+                    logger.error(
+                        f"Ошибка обновления RemnaWave при апгрейде подписки с баланса: {e}"
+                    )
+
+            try:
+                from bloobcat.routes.payment import _award_partner_cashback
+
+                await _award_partner_cashback(
+                    payment_id=str(payment_id),
+                    referral_user=user,
+                    amount_rub_total=int(total_extra_cost),
+                )
+            except Exception as partner_exc:
+                logger.warning(
+                    "Не удалось начислить партнёрский кэшбек за апгрейд подписки с баланса %s: %s",
+                    payment_id,
+                    partner_exc,
+                )
+
+            # Mirror the webhook flow: balance-only upgrades must also award
+            # the standard referral cashback so referees aren't silently
+            # skipped when the user pays from bonus balance.
+            try:
+                from bloobcat.routes.payment import (
+                    _award_standard_referral_cashback,
+                )
+
+                await _award_standard_referral_cashback(
+                    payment_id=str(payment_id),
+                    referral_user=user,
+                    amount_external_rub=0,
+                )
+            except Exception as ref_cashback_exc:
+                logger.warning(
+                    "Не удалось начислить обычный реферальный кэшбек за апгрейд подписки с баланса %s: %s",
+                    payment_id,
+                    ref_cashback_exc,
+                )
+
+            # Period was extended: reschedule subscription-lifecycle tasks so
+            # reminder/expiry jobs target the new `expired_at`. Best-effort —
+            # transaction has already committed.
+            if extra_days > 0:
+                try:
+                    from bloobcat.scheduler import schedule_user_tasks
+
+                    await schedule_user_tasks(user)
+                except Exception as sched_exc:
+                    # MINOR 3: functional regression (reminder/expiry job is
+                    # now armed against the stale expired_at) — log at error
+                    # so production alerting picks it up. Include payment_id
+                    # for grepability in incident response.
+                    logger.error(
+                        "schedule_user_tasks failed after balance upgrade_bundle "
+                        "user=%s payment=%s: %s",
+                        user.id,
+                        payment_id,
+                        sched_exc,
+                    )
+
+            return {
+                "status": "ok",
+                "expired_at": user.expired_at,
+                "devices_limit": int(user.hwid_limit),
+                "lte_gb_total": int(active_tariff.lte_gb_total or 0),
+                "total_extra_cost_rub": int(total_extra_cost),
+                "device_delta": int(quote.device_delta),
+                "lte_delta_gb": int(quote.lte_delta_gb),
+                "extra_days": int(extra_days),
+            }
+
+    # ----- fallback: external payment for the full amount ----------------
+    amount_to_pay = max(1, total_extra_cost - int(user.balance or 0))
+    amount_from_balance = max(0, total_extra_cost - amount_to_pay)
+
+    # Precompute the new ActiveTariffs.price/multiplier when devices are being
+    # bumped so the webhook can persist them as-is. Without this, the webhook
+    # raises hwid_limit but leaves the old price intact, breaking auto-renew /
+    # compute_daily_rate / admin notifications (BLOCKER 1).
+    new_active_tariff_price: int | None = None
+    new_progressive_multiplier: float | None = None
+    if quote.device_delta > 0:
+        from bloobcat.services.upgrade_quote import (
+            _compute_progressive_full_price,
+        )
+
+        original = await Tariffs.filter(
+            name=active_tariff.name, months=active_tariff.months
+        ).first()
+        _new_full_price, _new_multiplier = _compute_progressive_full_price(
+            active_tariff, original, int(payload.target_device_count)
+        )
+        new_active_tariff_price = int(_new_full_price)
+        new_progressive_multiplier = float(_new_multiplier)
+
+    # MAJOR 1: persist a full snapshot of the live state at invoice time so the
+    # webhook can detect admin-refund / admin-edit drift before re-applying the
+    # deltas. The webhook still applies the delta (parallel topup is desired),
+    # but a logged warning lets us alert on the legitimately suspicious case
+    # where the snapshot disagrees with live state.
+    current_expired_at_ms: int | None = None
+    if user_expired_at is not None:
+        try:
+            current_expired_at_ms = int(
+                datetime.combine(user_expired_at, datetime.min.time()).timestamp()
+                * 1000
+            )
+        except Exception:
+            current_expired_at_ms = None
+
+    metadata: dict[str, Any] = {
+        "user_id": user.id,
+        "upgrade_bundle": True,
+        "payment_purpose": "upgrade_bundle",
+        "target_device_count": int(payload.target_device_count),
+        "target_lte_gb": int(payload.target_lte_gb),
+        "target_extra_days": int(payload.target_extra_days),
+        "device_delta": int(quote.device_delta),
+        "lte_delta_gb": int(quote.lte_delta_gb),
+        "extra_days": int(extra_days),
+        "current_device_count": int(current_devices),
+        "current_lte_gb_total": int(current_lte_gb_total),
+        "current_expired_at_ms": current_expired_at_ms,
+        "previous_active_tariff_price": int(getattr(active_tariff, "price", 0) or 0),
+        "device_extra_cost_rub": int(quote.device_extra_cost_rub),
+        "lte_extra_cost_rub": int(quote.lte_extra_cost_rub),
+        "period_extra_cost_rub": int(quote.period_extra_cost_rub),
+        "total_extra_cost_rub": int(total_extra_cost),
+        "amount_from_balance": amount_from_balance,
+    }
+    if new_active_tariff_price is not None:
+        metadata["new_active_tariff_price"] = new_active_tariff_price
+    if new_progressive_multiplier is not None:
+        metadata["new_progressive_multiplier"] = new_progressive_multiplier
+    return await _create_external_upgrade_bundle_payment(
         user=user,
         active_tariff=active_tariff,
         amount_to_pay=float(amount_to_pay),

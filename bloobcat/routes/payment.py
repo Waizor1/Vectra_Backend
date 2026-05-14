@@ -217,6 +217,7 @@ def _provider_payload_json(payload: dict[str, Any]) -> str:
 PAYMENT_PURPOSE_SUBSCRIPTION = "subscription"
 PAYMENT_PURPOSE_LTE_TOPUP = "lte_topup"
 PAYMENT_PURPOSE_DEVICES_TOPUP = "devices_topup"
+PAYMENT_PURPOSE_UPGRADE_BUNDLE = "upgrade_bundle"
 
 
 def _derive_payment_purpose(
@@ -251,6 +252,11 @@ def _derive_payment_purpose(
             return value.strip().lower() in {"true", "1", "yes"}
         return False
 
+    if _is_truthy_flag(metadata.get("upgrade_bundle")) or (
+        str(metadata.get("payment_purpose") or "").strip().lower()
+        == PAYMENT_PURPOSE_UPGRADE_BUNDLE
+    ):
+        return PAYMENT_PURPOSE_UPGRADE_BUNDLE
     if _is_truthy_flag(metadata.get("lte_topup")):
         return PAYMENT_PURPOSE_LTE_TOPUP
     if _is_truthy_flag(metadata.get("devices_topup")):
@@ -2503,6 +2509,33 @@ async def _apply_confirmed_platega_payment(
 
     # Route LTE / devices top-ups to shared provider-agnostic helpers BEFORE
     # _apply_succeeded_payment_fallback, which crashes on missing "month" field.
+    if _meta_bool(metadata.get("upgrade_bundle"), False) or (
+        str(metadata.get("payment_purpose") or "").strip().lower()
+        == PAYMENT_PURPOSE_UPGRADE_BUNDLE
+    ):
+        claimed = await _claim_payment_effect_once(
+            payment_id=payment_id,
+            user_id=int(user.id),
+            source="platega_upgrade_bundle",
+            provider=PAYMENT_PROVIDER_PLATEGA,
+        )
+        if not claimed:
+            return True  # already processed, idempotent
+        await _refresh_payment_processing_lease(
+            payment_id=payment_id,
+            user_id=int(user.id),
+            source="platega_upgrade_bundle",
+        )
+        ok, _reason = await _apply_upgrade_bundle_effect(
+            payment_id=payment_id,
+            user=user,
+            meta=metadata,
+            amount_external=float(amount_external),
+            amount_from_balance=float(amount_from_balance),
+            provider=PAYMENT_PROVIDER_PLATEGA,
+        )
+        return ok
+
     if _meta_bool(metadata.get("lte_topup"), False):
         claimed = await _claim_payment_effect_once(
             payment_id=payment_id,
@@ -3567,6 +3600,496 @@ async def _apply_devices_topup_effect(
     return True, None
 
 
+async def _apply_upgrade_bundle_effect(
+    *,
+    payment_id: str,
+    user: Users,
+    meta: dict,
+    amount_external: float,
+    amount_from_balance: float,
+    provider: str,
+) -> tuple[bool, str | None]:
+    """Provider-agnostic combined upgrade-bundle effect: extends subscription
+    period, raises device limit, and credits extra LTE GB — all in one DB
+    transaction so partial application is impossible (matches the plan
+    contract: never apply 2 of 3 deltas).
+
+    Reads precomputed deltas from metadata produced by the upgrade_bundle
+    endpoint:
+      - ``target_device_count`` — absolute target after upgrade
+      - ``target_lte_gb`` — absolute target after upgrade
+      - ``target_extra_days`` — original requested days delta (logged only)
+      - ``device_delta`` / ``lte_delta_gb`` / ``extra_days`` — actual deltas
+        used as switches (>0 ⇒ apply that effect)
+      - ``previous_active_tariff_price`` — for admin notification
+      - ``new_active_tariff_price`` / ``new_progressive_multiplier`` — optional
+        snapshot to persist on ActiveTariffs (if provided by the issuer)
+    Preserves `_claim_payment_effect_once` / `_mark_payment_effect_success`
+    idempotency. Called from both yookassa_webhook and
+    `_apply_confirmed_platega_payment`.
+
+    Returns (True, None) on success or (False, reason) on failure. On failure
+    the whole transaction is rolled back and the payment is marked failed so
+    the provider will retry / admins will be alerted.
+    """
+    try:
+        device_delta = int(meta.get("device_delta") or 0)
+    except (TypeError, ValueError):
+        device_delta = 0
+    try:
+        lte_delta_gb = int(meta.get("lte_delta_gb") or 0)
+    except (TypeError, ValueError):
+        lte_delta_gb = 0
+    try:
+        extra_days = int(meta.get("extra_days") or 0)
+    except (TypeError, ValueError):
+        extra_days = 0
+    try:
+        target_device_count = int(meta.get("target_device_count") or 0)
+    except (TypeError, ValueError):
+        target_device_count = 0
+    try:
+        target_lte_gb = int(meta.get("target_lte_gb") or 0)
+    except (TypeError, ValueError):
+        target_lte_gb = 0
+
+    if device_delta <= 0 and lte_delta_gb <= 0 and extra_days <= 0:
+        await _mark_payment_effect_failed(
+            payment_id=payment_id,
+            error="upgrade_bundle metadata has no positive deltas",
+        )
+        logger.error(
+            "Upgrade bundle: metadata без положительных дельт — "
+            "device_delta=%s, lte_delta_gb=%s, extra_days=%s (provider=%s, payment=%s)",
+            device_delta,
+            lte_delta_gb,
+            extra_days,
+            provider,
+            payment_id,
+        )
+        return False, "upgrade_bundle deltas are non-positive"
+
+    # MAJOR 8: ideally this read would be `select_for_update(...).get_or_none(...)`
+    # inside the transaction to block lost-update races against a parallel
+    # devices/LTE topup. We rely on `_claim_payment_effect_once` for primary
+    # idempotency + the MAJOR 4 delta-based application (current+delta, see
+    # below) to make a parallel topup additive rather than a clobber. Adding
+    # row-level lock here is a follow-up once the Tortoise-ORM
+    # `select_for_update()` syntax is validated end-to-end.
+    active_tariff = (
+        await ActiveTariffs.get_or_none(id=user.active_tariff_id)
+        if user.active_tariff_id
+        else None
+    )
+    if not active_tariff:
+        logger.error(
+            "Upgrade bundle: активный тариф не найден для пользователя %s (payment %s, provider=%s)",
+            user.id,
+            payment_id,
+            provider,
+        )
+        await _mark_payment_effect_failed(
+            payment_id=payment_id,
+            error="Active tariff not found for upgrade_bundle",
+        )
+        return False, "Active tariff not found"
+
+    old_hwid_limit = int(active_tariff.hwid_limit or 0)
+    old_lte_gb_total = int(active_tariff.lte_gb_total or 0)
+    old_price = int(active_tariff.price or 0)
+    old_expired_at = user.expired_at
+
+    # MAJOR 1: detect drift between the metadata snapshot (captured at invoice
+    # creation) and the live DB state. Drift typically means an admin made an
+    # out-of-band edit (refund, manual adjustment) while the invoice was
+    # outstanding. The desired behaviour for the primary use-case (parallel
+    # devices/LTE topup) is to still apply the delta on top of live state, so
+    # we only LOG drift here — visibility/alerting first, abort+refund later
+    # as a follow-up. Each axis is checked independently because legitimate
+    # parallel topups can legitimately mutate any of the three.
+    snapshot_devices = meta.get("current_device_count")
+    if snapshot_devices is not None and device_delta > 0:
+        try:
+            _snap_dev = int(snapshot_devices)
+            if _snap_dev != old_hwid_limit:
+                logger.warning(
+                    "upgrade_bundle: device_count drift detected "
+                    "(payment=%s, user=%s, snapshot=%s, current=%s, delta=%s, provider=%s)",
+                    payment_id,
+                    user.id,
+                    _snap_dev,
+                    old_hwid_limit,
+                    device_delta,
+                    provider,
+                )
+        except (TypeError, ValueError):
+            pass
+    snapshot_lte = meta.get("current_lte_gb_total")
+    if snapshot_lte is not None and lte_delta_gb > 0:
+        try:
+            _snap_lte = int(snapshot_lte)
+            if _snap_lte != old_lte_gb_total:
+                logger.warning(
+                    "upgrade_bundle: lte_gb_total drift detected "
+                    "(payment=%s, user=%s, snapshot=%s, current=%s, delta=%s, provider=%s)",
+                    payment_id,
+                    user.id,
+                    _snap_lte,
+                    old_lte_gb_total,
+                    lte_delta_gb,
+                    provider,
+                )
+        except (TypeError, ValueError):
+            pass
+    snapshot_expired_at_ms = meta.get("current_expired_at_ms")
+    if snapshot_expired_at_ms is not None and extra_days > 0 and old_expired_at is not None:
+        try:
+            _snap_ms = int(snapshot_expired_at_ms)
+            _live_ms = int(
+                datetime.combine(old_expired_at, datetime.min.time()).timestamp() * 1000
+            )
+            if _snap_ms != _live_ms:
+                logger.warning(
+                    "upgrade_bundle: expired_at drift detected "
+                    "(payment=%s, user=%s, snapshot_ms=%s, current_ms=%s, delta_days=%s, provider=%s)",
+                    payment_id,
+                    user.id,
+                    _snap_ms,
+                    _live_ms,
+                    extra_days,
+                    provider,
+                )
+        except (TypeError, ValueError, OSError):
+            pass
+
+    # MAJOR 4: apply effects as deltas off the current DB state, not as
+    # absolute targets captured at invoice creation. If the user did a
+    # parallel devices/LTE topup between invoice and webhook, using
+    # `target_*` would silently roll that back.
+    new_device_count = (
+        old_hwid_limit + device_delta if device_delta > 0 else old_hwid_limit
+    )
+    new_lte_gb_total = (
+        old_lte_gb_total + lte_delta_gb if lte_delta_gb > 0 else old_lte_gb_total
+    )
+
+    # MAJOR 2: the user paid the price quoted at invoice creation
+    # (`new_active_tariff_price` / `new_progressive_multiplier` in metadata).
+    # If Tariffs.base_price changed in the meantime, recompute will yield a
+    # different number — but the user did not consent to that new price, so we
+    # PREFER the metadata snapshot. We still recompute to detect the drift and
+    # log it for admin visibility; if recompute fails or metadata is absent we
+    # fall back to whichever value is available.
+    meta_price_raw = meta.get("new_active_tariff_price")
+    meta_mult_raw = meta.get("new_progressive_multiplier")
+    new_active_tariff_price = None
+    new_progressive_multiplier = None
+    if device_delta > 0 and new_device_count > 0:
+        recomputed_price = None
+        recomputed_mult = None
+        try:
+            from bloobcat.db.tariff import Tariffs as _Tariffs
+            from bloobcat.services.upgrade_quote import (
+                _compute_progressive_full_price,
+            )
+
+            _original = await _Tariffs.filter(
+                name=active_tariff.name, months=active_tariff.months
+            ).first()
+            _new_price, _new_mult = _compute_progressive_full_price(
+                active_tariff, _original, new_device_count
+            )
+            recomputed_price = int(_new_price)
+            recomputed_mult = float(_new_mult)
+        except Exception as price_exc:
+            logger.warning(
+                "Upgrade bundle: recompute progressive price failed for user=%s "
+                "(falling back to metadata snapshot): %s",
+                user.id,
+                price_exc,
+            )
+
+        # Prefer the metadata snapshot — that's the price the user actually
+        # consented to at invoice creation. Recompute is used only to detect
+        # drift (admin lowered/raised Tariffs.base_price while invoice was
+        # outstanding) for alerting purposes.
+        try:
+            meta_price_int = (
+                int(meta_price_raw) if meta_price_raw is not None else None
+            )
+        except (TypeError, ValueError):
+            meta_price_int = None
+        try:
+            meta_mult_float = (
+                float(meta_mult_raw) if meta_mult_raw is not None else None
+            )
+        except (TypeError, ValueError):
+            meta_mult_float = None
+
+        if (
+            meta_price_int is not None
+            and recomputed_price is not None
+            and meta_price_int != recomputed_price
+        ):
+            logger.warning(
+                "upgrade_bundle: price drift detected "
+                "(payment=%s, user=%s, quoted=%s, recomputed=%s, provider=%s)",
+                payment_id,
+                user.id,
+                meta_price_int,
+                recomputed_price,
+                provider,
+            )
+        if (
+            meta_mult_float is not None
+            and recomputed_mult is not None
+            and abs(meta_mult_float - recomputed_mult) > 1e-9
+        ):
+            logger.warning(
+                "upgrade_bundle: progressive_multiplier drift detected "
+                "(payment=%s, user=%s, quoted=%s, recomputed=%s, provider=%s)",
+                payment_id,
+                user.id,
+                meta_mult_float,
+                recomputed_mult,
+                provider,
+            )
+
+        new_active_tariff_price = (
+            meta_price_int if meta_price_int is not None else recomputed_price
+        )
+        new_progressive_multiplier = (
+            meta_mult_float if meta_mult_float is not None else recomputed_mult
+        )
+
+    try:
+        async with in_transaction():
+            if amount_from_balance > 0:
+                initial_balance = user.balance
+                user.balance = max(0, user.balance - amount_from_balance)
+                await user.save(update_fields=["balance"])
+                logger.info(
+                    "Upgrade bundle: списано %.2f с бонусного баланса пользователя %s. "
+                    "Баланс до: %s, после: %s (provider=%s)",
+                    amount_from_balance,
+                    user.id,
+                    initial_balance,
+                    user.balance,
+                    provider,
+                )
+
+            if extra_days > 0 and old_expired_at is not None:
+                user.expired_at = old_expired_at + timedelta(days=extra_days)
+                await user.save(update_fields=["expired_at"])
+
+            if device_delta > 0 and new_device_count > 0:
+                user.hwid_limit = new_device_count
+                await user.save(update_fields=["hwid_limit"])
+                active_tariff.hwid_limit = new_device_count
+                update_fields = ["hwid_limit"]
+                if new_active_tariff_price is not None:
+                    try:
+                        active_tariff.price = int(new_active_tariff_price)
+                        update_fields.append("price")
+                    except (TypeError, ValueError):
+                        pass
+                if new_progressive_multiplier is not None:
+                    try:
+                        active_tariff.progressive_multiplier = float(
+                            new_progressive_multiplier
+                        )
+                        update_fields.append("progressive_multiplier")
+                    except (TypeError, ValueError):
+                        pass
+                await active_tariff.save(update_fields=update_fields)
+
+            if lte_delta_gb > 0:
+                active_tariff.lte_gb_total = new_lte_gb_total
+                await active_tariff.save(update_fields=["lte_gb_total"])
+                user.lte_gb_total = new_lte_gb_total
+                await user.save(update_fields=["lte_gb_total"])
+    except Exception as effect_exc:
+        logger.error(
+            "Upgrade bundle: ошибка применения эффектов для пользователя %s "
+            "(payment %s, provider=%s): %s",
+            user.id,
+            payment_id,
+            provider,
+            effect_exc,
+        )
+        await _mark_payment_effect_failed(
+            payment_id=payment_id,
+            error=f"upgrade_bundle effect error: {effect_exc}",
+        )
+        return False, "upgrade_bundle effect failed"
+
+    if user.remnawave_uuid:
+        if user.is_device_per_user_enabled():
+            try:
+                await _sync_device_per_user_after_payment(
+                    user, source="upgrade_bundle"
+                )
+            except Exception as sync_exc:
+                logger.warning(
+                    "Upgrade bundle: ошибка sync_device_per_user_after_payment для %s: %s (provider=%s)",
+                    user.id,
+                    sync_exc,
+                    provider,
+                )
+        else:
+            remnawave_client_local = None
+            try:
+                await _refresh_payment_processing_lease(
+                    payment_id=payment_id,
+                    user_id=int(user.id),
+                    source="upgrade_bundle_remna_pre",
+                )
+                remnawave_client_local = RemnaWaveClient(
+                    remnawave_settings.url,
+                    remnawave_settings.token.get_secret_value(),
+                )
+                await _await_payment_external_call(
+                    remnawave_client_local.users.update_user(
+                        uuid=user.remnawave_uuid,
+                        expireAt=user.expired_at,
+                        hwidDeviceLimit=int(user.hwid_limit or new_device_count),
+                    ),
+                    operation="upgrade_bundle_remnawave_update_user",
+                )
+                await _refresh_payment_processing_lease(
+                    payment_id=payment_id,
+                    user_id=int(user.id),
+                    source="upgrade_bundle_remna_post",
+                )
+            except Exception as e:
+                logger.error(
+                    "Upgrade bundle: ошибка обновления RemnaWave для %s: %s (provider=%s)",
+                    user.id,
+                    e,
+                    provider,
+                )
+            finally:
+                if remnawave_client_local:
+                    try:
+                        await remnawave_client_local.close()
+                    except Exception:
+                        pass
+
+    # Period was extended: reschedule subscription-lifecycle tasks (reminder
+    # / expiry / housekeeping) so the apscheduler-held jobs target the new
+    # `expired_at`. Best-effort — must not roll back the committed effect
+    # nor block the `_mark_payment_effect_success` ack to the provider.
+    if extra_days > 0:
+        try:
+            from bloobcat.scheduler import schedule_user_tasks
+
+            await schedule_user_tasks(user)
+        except Exception as sched_exc:
+            # MINOR 3: this is a functional regression (the reminder / expiry
+            # job is now scheduled against the stale expired_at), not a soft
+            # warning — log at error so production alerting picks it up.
+            logger.error(
+                "Upgrade bundle: schedule_user_tasks failed for user=%s (payment=%s, provider=%s): %s",
+                user.id,
+                payment_id,
+                provider,
+                sched_exc,
+            )
+
+    total_amount = amount_external + amount_from_balance
+    await _mark_payment_effect_success(
+        payment_id=payment_id,
+        user_id=user.id,
+        amount=total_amount,
+        amount_external=amount_external,
+        amount_from_balance=amount_from_balance,
+        status="succeeded",
+        provider=provider,
+    )
+
+    # Tag the row with payment_purpose='upgrade_bundle' so analytics/reports
+    # and `_derive_payment_purpose` consumers do not have to re-derive from
+    # the metadata. Best-effort — failure here must not roll back the effect.
+    try:
+        await ProcessedPayments.filter(payment_id=payment_id).update(
+            payment_purpose=PAYMENT_PURPOSE_UPGRADE_BUNDLE,
+        )
+    except Exception as tag_exc:
+        logger.warning(
+            "Upgrade bundle: не удалось записать payment_purpose для payment %s: %s",
+            payment_id,
+            tag_exc,
+        )
+
+    try:
+        await notify_active_tariff_change(
+            user=user,
+            tariff_name=active_tariff.name,
+            months=int(active_tariff.months),
+            old_limit=old_hwid_limit,
+            new_limit=int(active_tariff.hwid_limit or new_device_count or old_hwid_limit),
+            old_lte_gb=old_lte_gb_total,
+            new_lte_gb=int(active_tariff.lte_gb_total or new_lte_gb_total),
+            old_price=int(meta.get("previous_active_tariff_price") or old_price),
+            new_price=int(active_tariff.price or old_price),
+            old_expired_at=old_expired_at,
+            new_expired_at=user.expired_at,
+            auto_renew_enabled=(
+                bool(user.renew_id)
+                and payment_settings.auto_renewal_mode == "yookassa"
+            ),
+        )
+    except Exception as e:
+        logger.error(
+            "Upgrade bundle: не удалось отправить уведомление пользователю %s: %s (provider=%s)",
+            user.id,
+            e,
+            provider,
+        )
+
+    try:
+        await _award_partner_cashback(
+            payment_id=payment_id,
+            referral_user=user,
+            amount_rub_total=int(_round_rub(total_amount)),
+        )
+    except Exception as e_partner:
+        logger.warning(
+            "Upgrade bundle: не удалось начислить партнёрский кэшбек для payment %s: %s (provider=%s)",
+            payment_id,
+            e_partner,
+            provider,
+        )
+    try:
+        await _award_standard_referral_cashback(
+            payment_id=payment_id,
+            referral_user=user,
+            amount_external_rub=int(_round_rub(amount_external)),
+        )
+    except Exception as e_ref_cashback:
+        logger.warning(
+            "Upgrade bundle: не удалось начислить обычный реферальный кэшбек для payment %s: %s (provider=%s)",
+            payment_id,
+            e_ref_cashback,
+            provider,
+        )
+
+    logger.info(
+        "Upgrade bundle успешно: user=%s, devices %s -> %s, lte_gb %s -> %s, "
+        "expired_at %s -> %s, provider=%s, payment=%s",
+        user.id,
+        old_hwid_limit,
+        int(active_tariff.hwid_limit or 0),
+        old_lte_gb_total,
+        int(active_tariff.lte_gb_total or 0),
+        old_expired_at,
+        user.expired_at,
+        provider,
+        payment_id,
+    )
+    return True, None
+
+
 @router.post("/webhook/yookassa/{secret}")
 @webhook_router.post("/webhook/yookassa/{secret}")
 async def yookassa_webhook(request: Request, secret: str):
@@ -3848,6 +4371,25 @@ async def yookassa_webhook(request: Request, secret: str):
             user_id=int(user.id),
             source="webhook",
         )
+
+        if _meta_bool(data.get("upgrade_bundle"), False) or (
+            str(data.get("payment_purpose") or "").strip().lower()
+            == PAYMENT_PURPOSE_UPGRADE_BUNDLE
+        ):
+            ok, reason = await _apply_upgrade_bundle_effect(
+                payment_id=str(payment.id),
+                user=user,
+                meta=data,
+                amount_external=float(payment.amount.value),
+                amount_from_balance=_round_rub(data.get("amount_from_balance", 0)),
+                provider=provider,
+            )
+            if ok:
+                return {"status": "ok"}
+            return {
+                "status": "error",
+                "message": reason or "Upgrade bundle effect failed",
+            }
 
         if _meta_bool(data.get("lte_topup"), False):
             ok, reason = await _apply_lte_topup_effect(
