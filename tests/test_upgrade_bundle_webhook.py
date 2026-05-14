@@ -662,3 +662,213 @@ async def test_webhook_uses_deltas_not_absolutes(monkeypatch):
         f"(absolute-target bug would yield 12)"
     )
     assert int(active_after.lte_gb_total or 0) == 17
+
+
+def _capture_webhook_warnings(monkeypatch, payment_route):
+    """Loguru bypasses pytest caplog; replace the module-level logger.warning
+    with a stub that records formatted warning messages so drift-detection
+    tests can assert on them.
+    """
+    captured: list[str] = []
+
+    def _warn(template, *args, **kwargs):
+        try:
+            captured.append(template % args if args else str(template))
+        except TypeError:
+            captured.append(str(template))
+
+    monkeypatch.setattr(payment_route.logger, "warning", _warn)
+    return captured
+
+
+@pytest.mark.asyncio
+async def test_webhook_logs_warning_on_admin_drift(monkeypatch):
+    """MAJOR 1: if an admin refunded one device between invoice creation and
+    webhook delivery (current_device_count snapshot=3, live=2), the webhook
+    must STILL apply the delta on top of live state — but log a drift warning
+    so admins can see the discrepancy.
+    """
+    from bloobcat.db.active_tariff import ActiveTariffs
+    from bloobcat.db.payments import ProcessedPayments
+    from bloobcat.db.users import Users
+
+    payment_route = _silence_payment_side_effects(monkeypatch)
+    warnings = _capture_webhook_warnings(monkeypatch, payment_route)
+
+    user_id = 7_001_011
+    # Invoice was created when user had 3 devices / 10 GB / 30 days remaining.
+    user, active = await _seed_user_with_active_tariff(
+        user_id=user_id, hwid_limit=3, lte_gb_total=10, days_remaining=30, price=600
+    )
+    snapshot_expired_at = user.expired_at
+
+    metadata = _build_upgrade_bundle_metadata(
+        user_id=user_id,
+        target_devices=5,
+        target_lte_gb=12,
+        target_extra_days=15,
+        device_delta=2,
+        lte_delta_gb=2,
+        extra_days=15,
+        amount_external=500.0,
+        current_devices=3,        # snapshot at invoice creation
+        current_lte_gb=10,        # snapshot at invoice creation
+        previous_price=600,
+    )
+    # The endpoint also stores expired_at as ms-since-epoch; mirror that here
+    # so the webhook's drift check has the full snapshot.
+    metadata["current_expired_at_ms"] = int(
+        __import__("datetime").datetime.combine(
+            snapshot_expired_at, __import__("datetime").datetime.min.time()
+        ).timestamp() * 1000
+    )
+    # Simulate admin lowered the price from 600 → 550 in Tariffs.base_price
+    # between invoice and webhook, so the recompute would diverge from the
+    # quoted price the user paid for.
+    metadata["new_active_tariff_price"] = 1500
+    metadata["new_progressive_multiplier"] = 0.9
+
+    payment_id = "platega-upgrade-bundle-drift-11"
+    await ProcessedPayments.create(
+        payment_id=payment_id,
+        provider="platega",
+        user_id=user_id,
+        amount=500.0,
+        amount_external=500.0,
+        amount_from_balance=0,
+        status="pending",
+        provider_payload=json.dumps({"metadata": metadata}),
+    )
+
+    # Simulate an admin refund landing BEFORE the webhook: hwid_limit 3 → 2,
+    # lte_gb_total 10 → 8, expired_at shifted back by 5 days.
+    active.hwid_limit = 2
+    active.lte_gb_total = 8
+    await active.save(update_fields=["hwid_limit", "lte_gb_total"])
+    user.hwid_limit = 2
+    user.lte_gb_total = 8
+    user.expired_at = snapshot_expired_at - timedelta(days=5)
+    await user.save(update_fields=["hwid_limit", "lte_gb_total", "expired_at"])
+
+    body = {
+        "id": payment_id,
+        "status": "CONFIRMED",
+        "amount": 500.0,
+        "currency": "RUB",
+        "payload": json.dumps({"metadata": metadata}),
+    }
+    request = await _make_platega_request(
+        {"X-MerchantId": "m1", "X-Secret": "s1"}, body
+    )
+    response = await payment_route.platega_webhook(request)
+    assert response == {"status": "ok"}, f"Unexpected response: {response}"
+
+    # The delta is still applied (parallel-topup is the primary use-case): the
+    # webhook adds +2 devices on top of the refunded value (2 → 4), not on top
+    # of the snapshot (3 → 5).
+    user_after = await Users.get(id=user_id)
+    active_after = await ActiveTariffs.get(id=active.id)
+    assert user_after.hwid_limit == 4, (
+        f"Expected delta on top of live state (2+2=4), got {user_after.hwid_limit}"
+    )
+    assert int(active_after.hwid_limit or 0) == 4
+    assert user_after.lte_gb_total == 10, (
+        f"Expected delta on top of live state (8+2=10), got {user_after.lte_gb_total}"
+    )
+
+    # And the drift warning is recorded so admins can audit it.
+    combined = " | ".join(warnings)
+    assert "device_count drift detected" in combined, (
+        f"Missing device_count drift warning. Captured: {warnings}"
+    )
+    assert "lte_gb_total drift detected" in combined, (
+        f"Missing lte_gb_total drift warning. Captured: {warnings}"
+    )
+    assert "expired_at drift detected" in combined, (
+        f"Missing expired_at drift warning. Captured: {warnings}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_webhook_uses_metadata_price_on_drift(monkeypatch):
+    """MAJOR 2: if Tariffs.base_price was changed between invoice and webhook,
+    the recompute will diverge from the quoted price. The user paid the quoted
+    price, so the webhook must persist the metadata snapshot — NOT the
+    recomputed value — and log a drift warning.
+    """
+    from bloobcat.db.active_tariff import ActiveTariffs
+    from bloobcat.db.payments import ProcessedPayments
+    from bloobcat.db.tariff import Tariffs
+    from bloobcat.db.users import Users
+
+    payment_route = _silence_payment_side_effects(monkeypatch)
+    warnings = _capture_webhook_warnings(monkeypatch, payment_route)
+
+    user_id = 7_001_012
+    user, active = await _seed_user_with_active_tariff(
+        user_id=user_id, hwid_limit=2, lte_gb_total=10, days_remaining=30, price=600
+    )
+
+    # User paid 200₽ as the quoted post-upgrade price at invoice creation.
+    metadata = _build_upgrade_bundle_metadata(
+        user_id=user_id,
+        target_devices=4,
+        target_lte_gb=10,
+        target_extra_days=0,
+        device_delta=2,
+        lte_delta_gb=0,
+        extra_days=0,
+        amount_external=400.0,
+        current_devices=2,
+        current_lte_gb=10,
+        previous_price=600,
+    )
+    metadata["new_active_tariff_price"] = 200
+    metadata["new_progressive_multiplier"] = 0.5
+
+    payment_id = "platega-upgrade-bundle-price-drift-12"
+    await ProcessedPayments.create(
+        payment_id=payment_id,
+        provider="platega",
+        user_id=user_id,
+        amount=400.0,
+        amount_external=400.0,
+        amount_from_balance=0,
+        status="pending",
+        provider_payload=json.dumps({"metadata": metadata}),
+    )
+
+    # Admin lowered Tariffs.base_price after invoice was created. Recompute
+    # would yield a different number than the 200₽ snapshot the user paid for.
+    seed_tariff = await Tariffs.get(id=user_id)
+    seed_tariff.base_price = 100  # was 300 → recompute will diverge from 200
+    seed_tariff.progressive_multiplier = 0.5
+    await seed_tariff.save(update_fields=["base_price", "progressive_multiplier"])
+
+    body = {
+        "id": payment_id,
+        "status": "CONFIRMED",
+        "amount": 400.0,
+        "currency": "RUB",
+        "payload": json.dumps({"metadata": metadata}),
+    }
+    request = await _make_platega_request(
+        {"X-MerchantId": "m1", "X-Secret": "s1"}, body
+    )
+    response = await payment_route.platega_webhook(request)
+    assert response == {"status": "ok"}, f"Unexpected response: {response}"
+
+    # The metadata snapshot wins — the user paid for 200₽, not whatever the
+    # admin's new base_price computes to.
+    active_after = await ActiveTariffs.get(id=active.id)
+    assert int(active_after.price or 0) == 200, (
+        f"Expected metadata-snapshot price 200, got {active_after.price} "
+        f"(would be recomputed value if MAJOR 2 fix were missing)"
+    )
+    assert float(active_after.progressive_multiplier or 0) == 0.5
+
+    # And the drift warning was emitted.
+    combined = " | ".join(warnings)
+    assert "price drift detected" in combined, (
+        f"Missing price drift warning. Captured: {warnings}"
+    )

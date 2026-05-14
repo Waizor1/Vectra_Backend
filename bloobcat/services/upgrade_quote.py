@@ -317,7 +317,12 @@ async def build_upgrade_bundle_quote(
         period_extra_cost_rub = _compute_period_extra_cost(
             price_for_period, months_for_period, target_extra_days
         )
-        if period_extra_cost_rub <= 0 and daily_rate <= 0:
+        # MINOR 4: only flag `daily_rate_unavailable` when the period extension
+        # is genuinely unpriceable (no daily rate to extrapolate from). A zero
+        # `period_extra_cost_rub` with a positive `daily_rate` just means the
+        # truncation rounded a tiny fraction to 0 — that's not an error and
+        # must not leak into `validation_errors` (which gates `is_actionable`).
+        if daily_rate <= 0:
             errors.append("daily_rate_unavailable")
 
     total_extra_cost_rub = max(

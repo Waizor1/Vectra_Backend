@@ -3699,6 +3699,69 @@ async def _apply_upgrade_bundle_effect(
     old_price = int(active_tariff.price or 0)
     old_expired_at = user.expired_at
 
+    # MAJOR 1: detect drift between the metadata snapshot (captured at invoice
+    # creation) and the live DB state. Drift typically means an admin made an
+    # out-of-band edit (refund, manual adjustment) while the invoice was
+    # outstanding. The desired behaviour for the primary use-case (parallel
+    # devices/LTE topup) is to still apply the delta on top of live state, so
+    # we only LOG drift here — visibility/alerting first, abort+refund later
+    # as a follow-up. Each axis is checked independently because legitimate
+    # parallel topups can legitimately mutate any of the three.
+    snapshot_devices = meta.get("current_device_count")
+    if snapshot_devices is not None and device_delta > 0:
+        try:
+            _snap_dev = int(snapshot_devices)
+            if _snap_dev != old_hwid_limit:
+                logger.warning(
+                    "upgrade_bundle: device_count drift detected "
+                    "(payment=%s, user=%s, snapshot=%s, current=%s, delta=%s, provider=%s)",
+                    payment_id,
+                    user.id,
+                    _snap_dev,
+                    old_hwid_limit,
+                    device_delta,
+                    provider,
+                )
+        except (TypeError, ValueError):
+            pass
+    snapshot_lte = meta.get("current_lte_gb_total")
+    if snapshot_lte is not None and lte_delta_gb > 0:
+        try:
+            _snap_lte = int(snapshot_lte)
+            if _snap_lte != old_lte_gb_total:
+                logger.warning(
+                    "upgrade_bundle: lte_gb_total drift detected "
+                    "(payment=%s, user=%s, snapshot=%s, current=%s, delta=%s, provider=%s)",
+                    payment_id,
+                    user.id,
+                    _snap_lte,
+                    old_lte_gb_total,
+                    lte_delta_gb,
+                    provider,
+                )
+        except (TypeError, ValueError):
+            pass
+    snapshot_expired_at_ms = meta.get("current_expired_at_ms")
+    if snapshot_expired_at_ms is not None and extra_days > 0 and old_expired_at is not None:
+        try:
+            _snap_ms = int(snapshot_expired_at_ms)
+            _live_ms = int(
+                datetime.combine(old_expired_at, datetime.min.time()).timestamp() * 1000
+            )
+            if _snap_ms != _live_ms:
+                logger.warning(
+                    "upgrade_bundle: expired_at drift detected "
+                    "(payment=%s, user=%s, snapshot_ms=%s, current_ms=%s, delta_days=%s, provider=%s)",
+                    payment_id,
+                    user.id,
+                    _snap_ms,
+                    _live_ms,
+                    extra_days,
+                    provider,
+                )
+        except (TypeError, ValueError, OSError):
+            pass
+
     # MAJOR 4: apply effects as deltas off the current DB state, not as
     # absolute targets captured at invoice creation. If the user did a
     # parallel devices/LTE topup between invoice and webhook, using
@@ -3710,13 +3773,20 @@ async def _apply_upgrade_bundle_effect(
         old_lte_gb_total + lte_delta_gb if lte_delta_gb > 0 else old_lte_gb_total
     )
 
-    # Recompute price/multiplier from the live `new_device_count` rather than
-    # trusting metadata snapshots that may have been invalidated by a parallel
-    # topup. If the helper fails, fall back to the metadata snapshot (still
-    # safer than skipping the price update entirely).
+    # MAJOR 2: the user paid the price quoted at invoice creation
+    # (`new_active_tariff_price` / `new_progressive_multiplier` in metadata).
+    # If Tariffs.base_price changed in the meantime, recompute will yield a
+    # different number — but the user did not consent to that new price, so we
+    # PREFER the metadata snapshot. We still recompute to detect the drift and
+    # log it for admin visibility; if recompute fails or metadata is absent we
+    # fall back to whichever value is available.
+    meta_price_raw = meta.get("new_active_tariff_price")
+    meta_mult_raw = meta.get("new_progressive_multiplier")
     new_active_tariff_price = None
     new_progressive_multiplier = None
     if device_delta > 0 and new_device_count > 0:
+        recomputed_price = None
+        recomputed_mult = None
         try:
             from bloobcat.db.tariff import Tariffs as _Tariffs
             from bloobcat.services.upgrade_quote import (
@@ -3729,8 +3799,8 @@ async def _apply_upgrade_bundle_effect(
             _new_price, _new_mult = _compute_progressive_full_price(
                 active_tariff, _original, new_device_count
             )
-            new_active_tariff_price = int(_new_price)
-            new_progressive_multiplier = float(_new_mult)
+            recomputed_price = int(_new_price)
+            recomputed_mult = float(_new_mult)
         except Exception as price_exc:
             logger.warning(
                 "Upgrade bundle: recompute progressive price failed for user=%s "
@@ -3738,8 +3808,59 @@ async def _apply_upgrade_bundle_effect(
                 user.id,
                 price_exc,
             )
-            new_active_tariff_price = meta.get("new_active_tariff_price")
-            new_progressive_multiplier = meta.get("new_progressive_multiplier")
+
+        # Prefer the metadata snapshot — that's the price the user actually
+        # consented to at invoice creation. Recompute is used only to detect
+        # drift (admin lowered/raised Tariffs.base_price while invoice was
+        # outstanding) for alerting purposes.
+        try:
+            meta_price_int = (
+                int(meta_price_raw) if meta_price_raw is not None else None
+            )
+        except (TypeError, ValueError):
+            meta_price_int = None
+        try:
+            meta_mult_float = (
+                float(meta_mult_raw) if meta_mult_raw is not None else None
+            )
+        except (TypeError, ValueError):
+            meta_mult_float = None
+
+        if (
+            meta_price_int is not None
+            and recomputed_price is not None
+            and meta_price_int != recomputed_price
+        ):
+            logger.warning(
+                "upgrade_bundle: price drift detected "
+                "(payment=%s, user=%s, quoted=%s, recomputed=%s, provider=%s)",
+                payment_id,
+                user.id,
+                meta_price_int,
+                recomputed_price,
+                provider,
+            )
+        if (
+            meta_mult_float is not None
+            and recomputed_mult is not None
+            and abs(meta_mult_float - recomputed_mult) > 1e-9
+        ):
+            logger.warning(
+                "upgrade_bundle: progressive_multiplier drift detected "
+                "(payment=%s, user=%s, quoted=%s, recomputed=%s, provider=%s)",
+                payment_id,
+                user.id,
+                meta_mult_float,
+                recomputed_mult,
+                provider,
+            )
+
+        new_active_tariff_price = (
+            meta_price_int if meta_price_int is not None else recomputed_price
+        )
+        new_progressive_multiplier = (
+            meta_mult_float if meta_mult_float is not None else recomputed_mult
+        )
 
     try:
         async with in_transaction():
@@ -3864,7 +3985,10 @@ async def _apply_upgrade_bundle_effect(
 
             await schedule_user_tasks(user)
         except Exception as sched_exc:
-            logger.warning(
+            # MINOR 3: this is a functional regression (the reminder / expiry
+            # job is now scheduled against the stale expired_at), not a soft
+            # warning — log at error so production alerting picks it up.
+            logger.error(
                 "Upgrade bundle: schedule_user_tasks failed for user=%s (payment=%s, provider=%s): %s",
                 user.id,
                 payment_id,

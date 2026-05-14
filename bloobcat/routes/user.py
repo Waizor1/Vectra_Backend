@@ -2135,9 +2135,15 @@ async def upgrade_bundle(
 
                     await schedule_user_tasks(user)
                 except Exception as sched_exc:
-                    logger.warning(
-                        "schedule_user_tasks failed after balance upgrade_bundle user=%s: %s",
+                    # MINOR 3: functional regression (reminder/expiry job is
+                    # now armed against the stale expired_at) — log at error
+                    # so production alerting picks it up. Include payment_id
+                    # for grepability in incident response.
+                    logger.error(
+                        "schedule_user_tasks failed after balance upgrade_bundle "
+                        "user=%s payment=%s: %s",
                         user.id,
+                        payment_id,
                         sched_exc,
                     )
 
@@ -2176,6 +2182,21 @@ async def upgrade_bundle(
         new_active_tariff_price = int(_new_full_price)
         new_progressive_multiplier = float(_new_multiplier)
 
+    # MAJOR 1: persist a full snapshot of the live state at invoice time so the
+    # webhook can detect admin-refund / admin-edit drift before re-applying the
+    # deltas. The webhook still applies the delta (parallel topup is desired),
+    # but a logged warning lets us alert on the legitimately suspicious case
+    # where the snapshot disagrees with live state.
+    current_expired_at_ms: int | None = None
+    if user_expired_at is not None:
+        try:
+            current_expired_at_ms = int(
+                datetime.combine(user_expired_at, datetime.min.time()).timestamp()
+                * 1000
+            )
+        except Exception:
+            current_expired_at_ms = None
+
     metadata: dict[str, Any] = {
         "user_id": user.id,
         "upgrade_bundle": True,
@@ -2188,6 +2209,7 @@ async def upgrade_bundle(
         "extra_days": int(extra_days),
         "current_device_count": int(current_devices),
         "current_lte_gb_total": int(current_lte_gb_total),
+        "current_expired_at_ms": current_expired_at_ms,
         "previous_active_tariff_price": int(getattr(active_tariff, "price", 0) or 0),
         "device_extra_cost_rub": int(quote.device_extra_cost_rub),
         "lte_extra_cost_rub": int(quote.lte_extra_cost_rub),
