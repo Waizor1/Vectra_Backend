@@ -1458,7 +1458,7 @@ async def devices_topup(
         raise HTTPException(status_code=404, detail="Активный тариф не найден")
 
     is_family_member = await FamilyMembers.filter(
-        user_id=user.id, status="active"
+        member_id=user.id, status="active"
     ).exists()
     if is_family_member:
         raise HTTPException(
