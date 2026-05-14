@@ -274,13 +274,21 @@ async def test_quote_lte_only(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_quote_period_only(monkeypatch):
+    from bloobcat.services.upgrade_quote import compute_total_period_days
     from bloobcat.routes.user import UpgradeBundleRequest, upgrade_bundle
 
     _silence_side_effects(monkeypatch)
     user, _active, _tariff = await _setup_user_with_active_tariff(
         user_id=9003, balance=10_000, price=600, months=1
     )
-    # daily_rate = 600 / 30 = 20 ₽/day
+    # Calendar-aware: total_days = compute_total_period_days(1, today). For a
+    # 1-month tariff, total_days is the calendar gap from today to today+1mo
+    # (28-31 depending on the month). daily_rate = 600 / total_days_today.
+    today = date.today()
+    expected_total_days = compute_total_period_days(1, anchor=today)
+    expected_period_cost = (600 * 10) // expected_total_days  # ROUND_DOWN
+    expected_daily_rate = 600 / expected_total_days
+
     payload = UpgradeBundleRequest(
         target_device_count=2,
         target_lte_gb=10,
@@ -293,9 +301,9 @@ async def test_quote_period_only(monkeypatch):
     assert result["device_delta"] == 0
     assert result["lte_delta_gb"] == 0
     assert result["extra_days"] == 10
-    assert result["period_extra_cost_rub"] == 200  # 20 ₽ * 10 дней
-    assert result["total_extra_cost_rub"] == 200
-    assert abs(result["daily_rate"] - 20.0) < 0.01
+    assert result["period_extra_cost_rub"] == expected_period_cost
+    assert result["total_extra_cost_rub"] == expected_period_cost
+    assert abs(result["daily_rate"] - expected_daily_rate) < 0.01
     assert result["validation_errors"] == []
 
 
@@ -668,30 +676,101 @@ async def test_apply_zero_total_returns_400(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "price, months, extra_days, expected",
+    "price, months, extra_days, anchor, expected",
     [
-        # 599/180*30 = 99.833 → 99 (float-bug produced 100).
-        (599, 6, 30, 99),
-        # 599/180*365 = 1214.638 → 1214.
-        (599, 6, 365, 1214),
-        # 1000/360*30 = 83.333 → 83.
-        (1000, 12, 30, 83),
-        # 1000/360*365 = 1013.888 → 1013 (ROUND_DOWN: round in customer's
-        # favor; see _compute_period_extra_cost docstring).
-        (1000, 12, 365, 1013),
-        (0, 6, 30, 0),
-        (599, 0, 30, 0),     # zero months — safety
-        (599, 6, 0, 0),      # zero days — safety
-        (-100, 6, 30, 0),    # negative — safety
+        # 12mo anchor 2026-01-15 → 365 days. 2190*365/365 = 2190 exactly
+        # (yearly regression — same as buying a fresh year today).
+        (2190, 12, 365, date(2026, 1, 15), 2190),
+        # 6mo anchor 2026-01-15 → 181 days (Jan 15 → Jul 15).
+        # 1290*30/181 = 213.81 → 213.
+        (1290, 6, 30, date(2026, 1, 15), 213),
+        # 1mo anchor 2026-01-15 → 31 days (Jan 15 → Feb 15).
+        # 290*7/31 = 65.48 → 65.
+        (290, 1, 7, date(2026, 1, 15), 65),
+        # 3mo anchor 2026-01-15 → 90 days (Jan 15 → Apr 15).
+        # 749*30/90 = 249.67 → 249.
+        (749, 3, 30, date(2026, 1, 15), 249),
+        # Safety branches — anchor irrelevant for these, but supplied for
+        # determinism.
+        (0, 6, 30, date(2026, 1, 15), 0),
+        (1290, 0, 30, date(2026, 1, 15), 0),
+        (1290, 6, 0, date(2026, 1, 15), 0),
+        (-100, 6, 30, date(2026, 1, 15), 0),
+        (599, 0, 30, date(2026, 1, 15), 0),
     ],
 )
-def test_period_cost_decimal_precision(price, months, extra_days, expected):
-    """`_compute_period_extra_cost` must round only once via Decimal so we
-    don't accumulate float drift (cf. BLOCKER 3 in the upgrade_bundle review).
+def test_period_cost_calendar_aware(price, months, extra_days, anchor, expected):
+    """`_compute_period_extra_cost` uses calendar-aware month length
+    (`add_months_safe`), the same convention as `pay()` and
+    `_apply_devices_topup_effect`. Anchor is supplied explicitly so the
+    expected values are deterministic regardless of `date.today()`.
+
+    Replaces the old fixed-30-day formulation which overcharged by ~5d/year.
     """
     from bloobcat.services.upgrade_quote import _compute_period_extra_cost
 
-    assert _compute_period_extra_cost(price, months, extra_days) == expected
+    assert (
+        _compute_period_extra_cost(price, months, extra_days, anchor=anchor)
+        == expected
+    )
+
+
+@pytest.mark.asyncio
+async def test_snapshot_multiplier_does_not_drift(monkeypatch):
+    """Fix C: the per-seat progressive multiplier on `active_tariff` is a
+    snapshot of what the user paid. If an admin later edits
+    `Tariffs.progressive_multiplier`, our re-quote MUST keep using the
+    snapshot — not the live value — otherwise we silently price under a
+    different rate than the user consented to.
+    """
+    from bloobcat.services.upgrade_quote import _compute_progressive_full_price
+
+    _silence_side_effects(monkeypatch)
+    user, active, tariff = await _setup_user_with_active_tariff(
+        user_id=9301, balance=10_000, hwid_limit=2
+    )
+
+    # Snapshot multiplier was 0.85 at purchase time (user-paid).
+    active.progressive_multiplier = 0.85
+    await active.save(update_fields=["progressive_multiplier"])
+
+    # Admin later edits the live tariff to a much steeper discount.
+    tariff.progressive_multiplier = 0.5
+    await tariff.save(update_fields=["progressive_multiplier"])
+
+    price_rub, multiplier = _compute_progressive_full_price(
+        active, tariff, target_device_count=3
+    )
+    # Must reflect 0.85 (snapshot), not 0.5 (live).
+    assert abs(multiplier - 0.85) < 1e-9, (
+        f"Multiplier drifted to live value: expected 0.85 (snapshot), "
+        f"got {multiplier}"
+    )
+    # And the price must be the snapshot-based geometric sum, not the
+    # cheaper live one: base*(1 + 0.85 + 0.85^2) = base*2.5725 (snapshot)
+    # vs base*(1 + 0.5 + 0.25) = base*1.75 (live). Snapshot is strictly
+    # larger, so a leak to live would show as a much smaller price_rub.
+    base = float(tariff.base_price)
+    expected_min = base * 2.5  # well above the live=0.5 sum of 1.75
+    assert price_rub >= expected_min, (
+        f"Price {price_rub} too low — likely used live multiplier 0.5 "
+        f"instead of snapshot 0.85"
+    )
+
+
+def test_period_cost_yearly_regression():
+    """Regression: a 12-month tariff (2190₽ — real Vectra seed) extended by
+    exactly one year of days should bill the user the same 2190₽ — never
+    more. Under the old `months * 30 = 360` formula this returned 2220₽
+    (15₽ overcharge on every yearly customer).
+    """
+    from bloobcat.services.upgrade_quote import _compute_period_extra_cost
+
+    # Anchor in a non-leap window so the calendar yields exactly 365 days.
+    anchor = date(2026, 1, 15)
+    assert (
+        _compute_period_extra_cost(2190, 12, 365, anchor=anchor) == 2190
+    ), "12-month tariff extended by 1 year must cost exactly its own price"
 
 
 @pytest.mark.asyncio

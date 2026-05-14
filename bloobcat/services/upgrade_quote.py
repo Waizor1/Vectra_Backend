@@ -11,9 +11,10 @@ this module only produces a deterministic, side-effect-free quote dataclass.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, asdict
 from datetime import date
-from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP, getcontext
+from decimal import Decimal, ROUND_DOWN, getcontext
 from typing import Any
 
 from bloobcat.db.active_tariff import ActiveTariffs
@@ -22,6 +23,9 @@ from bloobcat.services.subscription_limits import (
     lte_default_max_gb,
     subscription_devices_max,
 )
+from bloobcat.utils.dates import add_months_safe
+
+logger = logging.getLogger(__name__)
 
 
 # Hard cap on device topups regardless of tariff: matches the global
@@ -69,33 +73,72 @@ def _to_float(value: Any, default: float = 0.0) -> float:
         return float(default)
 
 
-def _compute_period_extra_cost(price: int, months: int, extra_days: int) -> int:
-    """Compute the prorated extra cost for `extra_days` based on a fixed 30-day
-    month convention. All math is in `Decimal` so we never observe float
-    rounding drift like `599 / 180 * 30 ≈ 99.83… → 100` (off-by-1 vs the
-    correct 99).
+def compute_total_period_days(months: int, anchor: date | None = None) -> int:
+    """Exact number of days in a calendar-aware `months`-period from `anchor`.
 
-    We round DOWN (truncate toward zero) on purpose — the float-bug behaviour
-    that motivated this fix was *systematic overcharging* (extra 1₽ on 30
-    days, up to 5₽ on a full year). Truncation guarantees we never charge
-    fractional rubles the user did not consent to, and matches the user-
-    expected "round-in-the-customer's-favor" semantics.
+    Mirrors the convention used everywhere else in the codebase for
+    subscription time math:
+      - `bloobcat.db.users.extend_subscription` (users.py:1550-1571)
+      - `bloobcat.routes.payment.pay` (payment.py:4019-4020) where
+        `target_date = add_months_safe(current_date, months); days = (target_date - current_date).days`
+      - `bloobcat.routes.payment._apply_devices_topup_effect` (payment.py:3943-4000)
+
+    Returns the **actual** calendar distance — e.g. `compute_total_period_days(12)`
+    from 2026-01-15 returns 365 (Jan 15 2026 → Jan 15 2027), not 360.
+
+    The previous fixed-30-day convention systematically overcharged users
+    (≈5d on a year-long tariff, ≈1d on a monthly). Switching to calendar-
+    aware days is a price decrease in the user's favor and matches what
+    `pay()` would compute if the same period were purchased fresh.
+
+    `anchor` defaults to `date.today()`. Use an explicit anchor for tests
+    or any place that needs determinism across midnights.
+    """
+    if months <= 0:
+        return 0
+    today = anchor or date.today()
+    target = add_months_safe(today, months)
+    return max(0, (target - today).days)
+
+
+def _compute_period_extra_cost(
+    price: int,
+    months: int,
+    extra_days: int,
+    anchor: date | None = None,
+) -> int:
+    """Compute the prorated extra cost for `extra_days` based on a calendar-
+    aware month convention (see `compute_total_period_days`). All math runs
+    in `Decimal` so we never observe float rounding drift.
+
+    We round DOWN (truncate toward zero) on purpose: the upgrade-bundle
+    pricing principle is "never charge fractional rubles the user did not
+    consent to" — symmetric with the device and LTE components which also
+    round down (Fix B). Always round in the customer's favor.
 
     Returns 0 for any degenerate input (zero/negative price, months, or days).
     """
     if price <= 0 or months <= 0 or extra_days <= 0:
         return 0
-    total = Decimal(int(price)) * Decimal(int(extra_days)) / Decimal(int(months) * 30)
-    return int(total.to_integral_value(rounding=ROUND_DOWN))
+    total_days = compute_total_period_days(months, anchor=anchor)
+    if total_days <= 0:
+        return 0
+    cost = Decimal(int(price)) * Decimal(int(extra_days)) / Decimal(total_days)
+    return int(cost.to_integral_value(rounding=ROUND_DOWN))
 
 
 def compute_daily_rate(active_tariff: ActiveTariffs | dict[str, Any]) -> float:
     """Average rubles-per-day for an active tariff snapshot.
 
-    Formula: `price / (months * 30)`. We deliberately use the fixed-length
-    month convention (30 days) rather than calendar months because the
-    snapshot doesn't carry `subscription_started_at` and the extra-days
-    quote should be predictable regardless of when the period started.
+    Uses the calendar-aware day count (`compute_total_period_days(months)`)
+    so the per-day price equals what `pay()` would compute if the same
+    period were purchased fresh today. This is the same convention used by
+    `_apply_devices_topup_effect` and `extend_subscription`.
+
+    Note: the result is sensitive to `date.today()` (next month's length
+    differs from this month's). Callers that need determinism should
+    snapshot the value and use `compute_total_period_days(months, anchor=...)`
+    directly.
 
     `ActiveTariffs.residual_day_fraction` is intentionally NOT used here:
     it captures fractional-day residuals from device-count conversions
@@ -114,8 +157,10 @@ def compute_daily_rate(active_tariff: ActiveTariffs | dict[str, Any]) -> float:
 
     if price <= 0 or months <= 0:
         return 0.0
-    rate = price / float(months * 30)
-    return max(0.0, rate)
+    total_days = compute_total_period_days(months)
+    if total_days <= 0:
+        return 0.0
+    return max(0.0, float(Decimal(price) / Decimal(total_days)))
 
 
 def _compute_progressive_full_price(
@@ -130,14 +175,31 @@ def _compute_progressive_full_price(
     Returns `(price_rub, multiplier)`.
     """
     getcontext().prec = 28
+
+    # Fix C — strict snapshot semantics. Use the multiplier the user
+    # actually paid (stored on `active_tariff`) and never silently fall
+    # back to a live `tariff.progressive_multiplier` that an admin may
+    # have edited since purchase. Live fallback is permitted only when
+    # the snapshot is genuinely missing (None), and we log a warning so
+    # we can detect data loss in production.
+    multiplier = getattr(active_tariff, "progressive_multiplier", None)
+    if multiplier is None:
+        logger.warning(
+            "active_tariff.progressive_multiplier missing — snapshot lost; "
+            "falling back to live tariff (active_tariff_id=%s)",
+            getattr(active_tariff, "id", None),
+        )
+        if (
+            original_tariff is not None
+            and original_tariff.progressive_multiplier is not None
+        ):
+            multiplier = original_tariff.progressive_multiplier
+        else:
+            multiplier = 0.9
+
     if original_tariff is not None:
         base_price = original_tariff.base_price
-        multiplier = (
-            active_tariff.progressive_multiplier
-            or original_tariff.progressive_multiplier
-        )
     else:
-        multiplier = active_tariff.progressive_multiplier or 0.9
         n = max(1, _to_int(getattr(active_tariff, "hwid_limit", 1), 1))
         if n == 1:
             base_price = _to_int(active_tariff.price, 0)
@@ -158,7 +220,11 @@ def _compute_progressive_full_price(
         total_dec = base_dec
         for k in range(2, target_device_count + 1):
             total_dec += base_dec * (mult_dec ** (k - 1))
-    price_rub = int(total_dec.to_integral_value(rounding=ROUND_HALF_UP))
+    # Round DOWN here too — keeps the per-axis cost in the customer's
+    # favor (Fix B). Matters when the new full-price math produces a
+    # fractional ruble; truncation guarantees we never charge a kopek
+    # the user did not consent to.
+    price_rub = int(total_dec.to_integral_value(rounding=ROUND_DOWN))
     return price_rub, float(multiplier)
 
 
@@ -268,11 +334,12 @@ async def build_upgrade_bundle_quote(
         applies_progressive_discount = (
             multiplier > 0 and multiplier < 1.0 and target_devices > 1
         )
-        from bloobcat.utils.dates import add_months_safe
 
+        # Fix D — same calendar-aware day count `pay()` uses. Replaces the
+        # old `months * 30` convention which understated total_days by
+        # ~5 days/year and overcharged the device delta accordingly.
         active_months = _to_int(getattr(active_tariff, "months", 1), 1)
-        target_date_full = add_months_safe(today, active_months)
-        total_days_full = max(1, (target_date_full - today).days)
+        total_days_full = max(1, compute_total_period_days(active_months, anchor=today))
 
         full_price_delta = max(
             0, int(new_full_price) - _to_int(getattr(active_tariff, "price", 0), 0)
@@ -284,8 +351,10 @@ async def build_upgrade_bundle_quote(
                 * Decimal(days_remaining_now)
                 / Decimal(total_days_full)
             )
+            # Fix B — ROUND_DOWN to keep the device component in the
+            # customer's favor and symmetric with LTE and period axes.
             device_extra_cost_rub = int(
-                extra_cost_dec.to_integral_value(rounding=ROUND_HALF_UP)
+                extra_cost_dec.to_integral_value(rounding=ROUND_DOWN)
             )
         else:
             device_extra_cost_rub = 0
@@ -300,9 +369,10 @@ async def build_upgrade_bundle_quote(
             errors.append("lte_unavailable_for_tariff")
             lte_delta_gb = 0
         else:
+            # Fix B — ROUND_DOWN, symmetric with period & device axes.
             lte_extra_cost_rub = int(
                 Decimal(str(lte_delta_gb * lte_price_per_gb)).to_integral_value(
-                    rounding=ROUND_HALF_UP
+                    rounding=ROUND_DOWN
                 )
             )
 
@@ -315,7 +385,7 @@ async def build_upgrade_bundle_quote(
         price_for_period = _to_int(getattr(active_tariff, "price", 0), 0)
         months_for_period = _to_int(getattr(active_tariff, "months", 0), 0)
         period_extra_cost_rub = _compute_period_extra_cost(
-            price_for_period, months_for_period, target_extra_days
+            price_for_period, months_for_period, target_extra_days, anchor=today
         )
         # MINOR 4: only flag `daily_rate_unavailable` when the period extension
         # is genuinely unpriceable (no daily rate to extrapolate from). A zero
