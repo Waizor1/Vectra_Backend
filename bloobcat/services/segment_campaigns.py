@@ -14,6 +14,8 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
+from tortoise.expressions import Q
+
 from bloobcat.db.payments import ProcessedPayments
 from bloobcat.db.segment_campaigns import SegmentCampaign
 from bloobcat.db.users import Users, normalize_date
@@ -24,18 +26,39 @@ LOYAL_PAID_PAYMENTS_THRESHOLD = 2
 LOYAL_TENURE_DAYS_THRESHOLD = 180
 
 
-async def _count_successful_paid_payments(user_id: int) -> int:
-    """Считаем ровно «оплаченные деньгами» транзакции.
+#: Назначения платежей, которые НЕ считаются «покупкой подписки»
+#: для маркетинговой логики сегментов. Топапы трафика и устройств —
+#: это апсейл уже состоявшейся подписки, а не первая покупка, поэтому
+#: они не должны выбивать пользователя из сегментов `no_purchase_yet`
+#: и `trial_active`.
+_NON_SUBSCRIPTION_PAYMENT_PURPOSES = ("lte_topup", "devices_topup")
 
-    `amount_external > 0` исключает чисто-бонусные/реферальные списания
-    с внутреннего баланса, чтобы такие пользователи всё ещё считались
-    «не платившими» для маркетинговой логики.
+
+async def _count_successful_paid_payments(user_id: int) -> int:
+    """Считаем ровно «оплаченные деньгами» покупки подписки.
+
+    Фильтры:
+    - `amount_external > 0` исключает чисто-бонусные/реферальные списания
+      с внутреннего баланса, чтобы такие пользователи всё ещё считались
+      «не платившими» для маркетинговой логики.
+    - `payment_purpose NOT IN (lte_topup, devices_topup)` исключает
+      топапы трафика и устройств — они апсейл подписки, не первая покупка.
+      NULL у legacy-записей (до миграции 116) трактуется как
+      «subscription» и попадает в счётчик, что сохраняет историческое
+      поведение для старых пользователей.
     """
 
+    # Тонкость SQL: `NOT IN (...)` возвращает NULL (=== не-true) для строк,
+    # где `payment_purpose IS NULL`, и они исключаются из результата. Нам
+    # нужно явно сохранить такие строки — это legacy-записи до миграции 116,
+    # которые трактуются как подписка.
     qs = ProcessedPayments.filter(
         user_id=user_id,
         status="succeeded",
         amount_external__gt=0,
+    ).filter(
+        Q(payment_purpose__isnull=True)
+        | ~Q(payment_purpose__in=list(_NON_SUBSCRIPTION_PAYMENT_PURPOSES))
     )
     return await qs.count()
 

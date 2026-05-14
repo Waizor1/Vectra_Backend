@@ -249,6 +249,12 @@ async def _apply_concurrent_index_patches(conn) -> None:
         'CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS "idx_users_story_code_unique"\n'
         '    ON "users" ("story_code")\n'
         '    WHERE "story_code" IS NOT NULL',
+        # Speeds up the segment-resolver count query (paid subscription
+        # purchases per user, excluding LTE/devices top-ups). Migration 116
+        # added the column but deferred index creation to here because
+        # processed_payments is hot — CONCURRENTLY is required by the lint.
+        'CREATE INDEX CONCURRENTLY IF NOT EXISTS "idx_processed_payments_user_purpose"\n'
+        '    ON "processed_payments" ("user_id", "payment_purpose")',
     ]
     for stmt in concurrent_index_statements:
         try:
