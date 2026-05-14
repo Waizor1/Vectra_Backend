@@ -155,8 +155,22 @@ def _silence_side_effects(monkeypatch):
         payment_module, "_award_partner_cashback", _noop, raising=False
     )
 
-    # FamilyMembers.filter(user_id=...).exists() — на тестовой sqlite-схеме
-    # колонки user_id нет. Заменяем модель на заглушку с .filter().exists().
+    # FamilyMembers.filter(member_id=...).exists() — на тестовой sqlite-схеме
+    # FK-колонки нет. Стаб валидирует имена аргументов по реальной модели,
+    # чтобы опечатки вроде user_id= вместо member_id= падали в тесте, а не в
+    # проде через 500 Internal Server Error.
+    _allowed_family_filter_keys = {
+        "id",
+        "owner_id",
+        "member_id",
+        "owner",
+        "member",
+        "status",
+        "allocated_devices",
+        "created_at",
+        "updated_at",
+    }
+
     class _StubFamilyFilter:
         def __init__(self, value):
             self._value = value
@@ -166,7 +180,14 @@ def _silence_side_effects(monkeypatch):
 
     class _StubFamilyMembers:
         @classmethod
-        def filter(cls, **_kwargs):
+        def filter(cls, **kwargs):
+            for key in kwargs:
+                base = key.split("__", 1)[0]
+                if base not in _allowed_family_filter_keys:
+                    raise AssertionError(
+                        f"FamilyMembers.filter got unknown field '{key}'. "
+                        f"Allowed: {sorted(_allowed_family_filter_keys)}"
+                    )
             return _StubFamilyFilter(False)
 
     monkeypatch.setattr(user_module, "FamilyMembers", _StubFamilyMembers)

@@ -1,6 +1,8 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+from bloobcat.bot.notifications.web_push import is_configured as web_push_is_configured
+
 
 def get_main_admin_menu() -> InlineKeyboardMarkup:
     """Главное админ меню"""
@@ -318,24 +320,22 @@ def get_back_to_main_menu() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def get_broadcast_audience_menu() -> InlineKeyboardMarkup:
-    """Клавиатура выбора аудитории для рассылки"""
-    builder = InlineKeyboardBuilder()
-    
-    builder.row(
-        InlineKeyboardButton(text="Всем пользователям", callback_data="broadcast:audience:all")
-    )
-    builder.row(
-        InlineKeyboardButton(text="Только активным", callback_data="broadcast:audience:active")
-    )
-    builder.row(
-        InlineKeyboardButton(text="Неактивным пользователям", callback_data="broadcast:audience:inactive")
-    )
-    builder.row(
-        InlineKeyboardButton(text="🏠 Главное меню", callback_data="admin:main")
-    )
-    
-    return builder.as_markup()
+def get_broadcast_channel_keyboard() -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(text="📨 Только Telegram", callback_data="send_channel:tg")],
+    ]
+    if web_push_is_configured():
+        rows.append([InlineKeyboardButton(text="📱 Только PWA Push", callback_data="send_channel:push")])
+        rows.append([InlineKeyboardButton(text="🚀 Telegram + PWA Push", callback_data="send_channel:both")])
+    else:
+        rows.append([
+            InlineKeyboardButton(
+                text="📱 PWA Push (не настроен) ⛔️",
+                callback_data="send_channel:disabled",
+            )
+        ])
+    rows.append([InlineKeyboardButton(text="❌ Отменить", callback_data="send_cancel")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def get_confirmation_keyboard(action: str, params: str = "") -> InlineKeyboardMarkup:

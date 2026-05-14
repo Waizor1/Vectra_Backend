@@ -205,50 +205,16 @@ async def system_menu_callback(callback: CallbackQuery):
 
 
 @router.callback_query(F.data == "admin:broadcasts", IsAdmin())
-async def broadcasts_menu_callback(callback: CallbackQuery):
-    """Переход к рассылкам"""
-    await callback.answer()
-    await callback.message.edit_text(
-        "📢 **РАССЫЛКИ**\n\n"
-        "Выберите аудиторию для рассылки:",
-        reply_markup=get_broadcast_audience_menu(),
-        parse_mode="Markdown"
-    )
-
-
-# ============ ОБРАБОТЧИКИ РАССЫЛОК ============
-
-@router.callback_query(F.data.startswith("broadcast:audience:"), IsAdmin())
-async def broadcast_audience_callback(callback: CallbackQuery, state: FSMContext):
-    """Обработчик выбора аудитории для рассылки"""
-    await callback.answer()
-    
-    # Очищаем предыдущее состояние
+async def broadcasts_menu_callback(callback: CallbackQuery, state: FSMContext):
+    """Переход к рассылкам — открывает полный мастер /send."""
     await state.clear()
-    
-    # Получаем тип аудитории
-    audience_type = callback.data.split(":", 2)[2]
-    audience_map = {
-        "all": "Всем пользователям", 
-        "active": "Только активным", 
-        "inactive": "Неактивным пользователям"
-    }
-    audience_name = audience_map.get(audience_type, "Всем пользователям")
-    
-    # Сохраняем выбор в состоянии
-    await state.update_data(audience=audience_name)
-    
-    # Показываем инструкцию для ввода сообщения
+    await callback.answer()
     await callback.message.edit_text(
-        f"📢 **РАССЫЛКА: {audience_name}**\n\n"
-        "Введите текст для рассылки. Поддерживается текст и одно вложение (фото, видео, документ).\n"
-        "Для возврата в главное меню используйте кнопку ниже.",
-        reply_markup=get_back_to_main_menu(),
-        parse_mode="Markdown"
+        "📣 <b>Новая рассылка</b>\n\nВыберите каналы доставки:",
+        reply_markup=get_broadcast_channel_keyboard(),
+        parse_mode="HTML",
     )
-    
-    # Устанавливаем состояние ожидания сообщения
-    await state.set_state(SendFSM.waiting_for_message)
+    await state.set_state(SendFSM.waiting_for_channel)
 
 
 
