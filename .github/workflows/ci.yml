@@ -3,8 +3,31 @@ name: Backend CI
 on:
   pull_request:
     branches: [main]
+    # Skip CI for changes that cannot affect runtime behaviour. Anything that
+    # touches code, configs, migrations, Dockerfile, workflows, lockfiles, or
+    # tests still triggers — only pure documentation is excluded.
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'memory-base/**'
+      - '.cursor/**'
+      - 'ai_docs/**'
+      - 'AGENTS.md'
+      - 'CLAUDE.md'
+      - 'GEMINI.md'
+      - 'LICENSE'
   push:
     branches: [main]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'memory-base/**'
+      - '.cursor/**'
+      - 'ai_docs/**'
+      - 'AGENTS.md'
+      - 'CLAUDE.md'
+      - 'GEMINI.md'
+      - 'LICENSE'
 
 permissions:
   contents: read
@@ -120,6 +143,7 @@ jobs:
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
 
       - name: Build and push image
+        id: build_push
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -131,3 +155,14 @@ jobs:
             BUILD_TIME=${{ github.event.head_commit.timestamp }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # `continue-on-error: true` (above) hides push failures from required-check
+      # gating so a flaky GHCR push doesn't block a green CI. The trade-off is
+      # silent regressions: if pushes start failing, the deploy workflow falls
+      # back to local `--build` and the GHCR speedup disappears without warning.
+      # This step surfaces the failure as a workflow annotation so it shows up
+      # in the Actions UI on the run summary even when the job is reported green.
+      - name: Annotate GHCR push failure
+        if: failure()
+        run: |
+          echo "::warning title=GHCR push failed::build-and-push-image failed for ref ${{ github.sha }}; next deploy will fall back to local --build path. Investigate registry credentials, rate limits, or token rotation."
