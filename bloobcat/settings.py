@@ -389,6 +389,44 @@ class PromoSettings(BaseSettings):
 promo_settings = PromoSettings()
 
 
+class WebPushSettings(BaseSettings):
+    """VAPID keys and delivery config for Web Push (PWA notifications).
+
+    Generate keys once and persist as env vars:
+        WEB_PUSH_VAPID_PUBLIC_KEY  (URL-safe base64, used by browsers)
+        WEB_PUSH_VAPID_PRIVATE_KEY (URL-safe base64, kept secret)
+        WEB_PUSH_VAPID_SUBJECT     (mailto:ops@vectra-pro.net)
+    Sender helper degrades gracefully when keys are missing — disabling the
+    feature without breaking startup.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="WEB_PUSH_")
+
+    vapid_public_key: str | None = None
+    vapid_private_key: SecretStr | None = None
+    vapid_subject: str = "mailto:ops@vectra-pro.net"
+    default_icon_url: str | None = None
+    default_badge_url: str | None = None
+    ttl_seconds: int = 86400
+    request_timeout_seconds: float = 10.0
+
+    @field_validator("vapid_public_key", "default_icon_url", "default_badge_url", mode="before")
+    @classmethod
+    def normalize_optional(cls, value):
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+    @property
+    def is_configured(self) -> bool:
+        priv = self.vapid_private_key.get_secret_value() if self.vapid_private_key else ""
+        return bool(self.vapid_public_key and priv)
+
+
+web_push_settings = WebPushSettings()
+
+
 admin_integration_settings = AdminIntegrationSettings()
 auth_settings = AuthSettings()
 cors_settings = CORSSettings()

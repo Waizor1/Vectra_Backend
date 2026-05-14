@@ -33,6 +33,7 @@ TORTOISE_ORM = {
                 "bloobcat.db.auth",
                 "bloobcat.db.analytics",
                 "bloobcat.db.segment_campaigns",
+                "bloobcat.db.push_subscriptions",
             ],
             "default_connection": "default",
         },
