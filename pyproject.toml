@@ -5,7 +5,7 @@ src_folder = "./bloobcat"
 
 [tool.poetry]
 name = "bloobcat"
-version = "1.65.0"
+version = "1.66.0"
 description = ""
 authors = ["Your Name <you@example.com>"]
 readme = "README.md"
@@ -36,6 +36,9 @@ urllib3 = "^2.7.0"
 # Story-share image renderer — Pillow 12 has the latest wheels for Python 3.12
 # and aligns with the version baked into our requirements.txt lock.
 Pillow = "^12.0.0"
+# Web Push (PWA) delivery — VAPID-signed messages to browsers via push services.
+# Brings in `cryptography`, `http-ece`, `py-vapid`.
+pywebpush = "^2.0.0"
 
 
 

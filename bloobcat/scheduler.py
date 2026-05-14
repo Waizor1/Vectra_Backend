@@ -787,6 +787,9 @@ async def schedule_all_tasks():
     # Start periodic blocked users cleanup
     from bloobcat.tasks.blocked_users_cleanup import run_blocked_users_cleanup_scheduler  # noqa: WPS433
     asyncio.create_task(run_blocked_users_cleanup_scheduler())
+    # Start periodic cleanup of stale Web Push subscriptions
+    from bloobcat.tasks.push_subscriptions_cleanup import run_push_subscriptions_cleanup_scheduler  # noqa: WPS433
+    asyncio.create_task(run_push_subscriptions_cleanup_scheduler())
     # Start periodic retry of missed trial notifications
     asyncio.create_task(run_retry_trial_notifications_scheduler())
     # Start periodic retry of missed trial extension notifications
