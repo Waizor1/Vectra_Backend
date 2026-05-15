@@ -1496,3 +1496,189 @@ def test_users_lte_grant_stamp_hook_stamps_on_first_grant():
         }}
         """
     )
+
+
+def test_admin_widgets_users_lookup_finds_oauth_users_by_email():
+    """`/users/lookup` must search both users.email and auth_identities.email,
+    merge results, sort telegram before web, and report empty-query as empty."""
+
+    source_url = (ROOT / "directus/extensions/admin-widgets/src/index.js").as_uri()
+    src_source = _read("directus/extensions/admin-widgets/src/index.js")
+    dist_source = _read("directus/extensions/admin-widgets/dist/index.js")
+
+    assert '"/users/lookup"' in src_source, "users/lookup route missing from src"
+    assert "users/lookup" in dist_source, "users/lookup route missing from dist"
+    assert "Failed to look up users" in src_source
+
+    _node(
+        f"""
+        import registerEndpoint from {source_url!r};
+
+        const routes = new Map();
+        const router = {{
+          use() {{}},
+          get(path, fn) {{ routes.set(path, fn); }},
+          post() {{}},
+          patch() {{}},
+          delete() {{}},
+        }};
+
+        // Fake knex builder: each `database(table)` call returns a
+        // chainable mock; `await qb` resolves to a canned result keyed by
+        // the table name and accumulated WHERE shape. Good enough to drive
+        // the four code paths we care about.
+        function makeDb(scenario) {{
+          const fakeDb = (table) => {{
+            const state = {{ table, joined: null, whereRaw: [] }};
+            const qb = {{
+              innerJoin(other) {{ state.joined = other; return qb; }},
+              select() {{ return qb; }},
+              limit() {{ return qb; }},
+              orderBy() {{ return qb; }},
+              where(builder) {{ if (typeof builder === 'function') builder({{
+                orWhere() {{ return this; }},
+                orWhereRaw(_sql, params) {{ state.whereRaw.push(params); return this; }},
+              }}); return qb; }},
+              whereRaw(_sql, params) {{ state.whereRaw.push(params); return qb; }},
+              whereIn(_col, values) {{ state.whereIn = values; return qb; }},
+              first: async () => {{
+                if (table === 'information_schema.tables') return {{ table_name: 'x' }};
+                return null;
+              }},
+              then(resolve, reject) {{
+                try {{
+                  resolve(scenario(state));
+                }} catch (err) {{
+                  reject(err);
+                }}
+              }},
+            }};
+            return qb;
+          }};
+          fakeDb.raw = (sql) => sql;
+          return fakeDb;
+        }}
+
+        // Scenario A: query "test@example.com" — match in users.email AND
+        // a second match in auth_identities.email pointing to a different
+        // (web) user. Expect 2 matches, telegram-id first.
+        const scenarioA = (state) => {{
+          if (state.table === 'information_schema.tables') return [];
+          if (state.table === 'users') {{
+            return [
+              {{ id: 12345, username: 'tg_user', full_name: 'Telegram User', email: 'test@example.com', registration_date: '2026-05-01T00:00:00Z' }},
+            ];
+          }}
+          if (state.table === 'auth_identities AS ai') {{
+            return [
+              {{ id: 8500000000000001, username: null, full_name: 'Google User', email: 'test@example.com', registration_date: '2026-05-10T00:00:00Z', provider: 'google', provider_email: 'test@example.com' }},
+            ];
+          }}
+          if (state.table === 'auth_identities') {{
+            // Second-pass enrichment for already-matched user ids.
+            return [
+              {{ user_id: 12345, provider: 'telegram', email: null }},
+              {{ user_id: 8500000000000001, provider: 'google', email: 'test@example.com' }},
+            ];
+          }}
+          return [];
+        }};
+
+        registerEndpoint(router, {{ database: makeDb(scenarioA) }});
+        const handler = routes.get('/users/lookup');
+        if (!handler) throw new Error('users/lookup handler not registered');
+
+        let statusCode = 200;
+        let body = null;
+        await handler(
+          {{ query: {{ q: 'test@example.com' }} }},
+          {{
+            status(code) {{ statusCode = code; return this; }},
+            json(payload) {{ body = payload; return payload; }},
+          }},
+        );
+        if (statusCode !== 200) throw new Error(`scenario A expected 200, got ${{statusCode}}`);
+        if (!body) throw new Error('scenario A: no body');
+        if (body.query !== 'test@example.com') throw new Error(`scenario A: query echo wrong: ${{body.query}}`);
+        if (!Array.isArray(body.matches)) throw new Error('scenario A: matches not array');
+        if (body.matches.length !== 2) throw new Error(`scenario A: expected 2 matches, got ${{body.matches.length}}`);
+        // Telegram id (< 8e15) must be first.
+        if (Number(body.matches[0].user_id) >= 8_000_000_000_000_000) {{
+          throw new Error('scenario A: telegram user must sort before web user');
+        }}
+        // Providers must be aggregated from enrichment pass.
+        const webRow = body.matches[1];
+        if (!webRow.providers.includes('google')) {{
+          throw new Error('scenario A: web user must have google provider listed');
+        }}
+        if (webRow.user_card_url !== '/admin/content/users/8500000000000001') {{
+          throw new Error(`scenario A: user_card_url wrong: ${{webRow.user_card_url}}`);
+        }}
+
+        // Scenario B: empty query → empty matches, no DB hit beyond table check.
+        const router2 = {{ use() {{}}, get(path, fn) {{ routes.set(path, fn); }}, post() {{}}, patch() {{}}, delete() {{}} }};
+        registerEndpoint(router2, {{ database: makeDb(() => []) }});
+        const handler2 = routes.get('/users/lookup');
+        let statusB = 0;
+        let bodyB = null;
+        await handler2(
+          {{ query: {{ q: '   ' }} }},
+          {{
+            status(code) {{ statusB = code; return this; }},
+            json(payload) {{ bodyB = payload; return payload; }},
+          }},
+        );
+        if (statusB !== 200 && statusB !== 0) throw new Error(`scenario B expected 200 default, got ${{statusB}}`);
+        if (!bodyB || !Array.isArray(bodyB.matches) || bodyB.matches.length !== 0) {{
+          throw new Error('scenario B: empty-query must return empty matches array');
+        }}
+
+        // Scenario C: no users.email match, but auth_identities.email match → still 1 result.
+        const scenarioC = (state) => {{
+          if (state.table === 'information_schema.tables') return [];
+          if (state.table === 'users') return [];
+          if (state.table === 'auth_identities AS ai') {{
+            return [
+              {{ id: 8500000000000002, username: null, full_name: 'Apple User', email: null, registration_date: '2026-04-20T00:00:00Z', provider: 'apple', provider_email: 'apple@example.com' }},
+            ];
+          }}
+          if (state.table === 'auth_identities') {{
+            return [{{ user_id: 8500000000000002, provider: 'apple', email: 'apple@example.com' }}];
+          }}
+          return [];
+        }};
+        const routesC = new Map();
+        const routerC = {{ use() {{}}, get(path, fn) {{ routesC.set(path, fn); }}, post() {{}}, patch() {{}}, delete() {{}} }};
+        registerEndpoint(routerC, {{ database: makeDb(scenarioC) }});
+        const handlerC = routesC.get('/users/lookup');
+        let bodyC = null;
+        await handlerC(
+          {{ query: {{ q: 'apple@example.com' }} }},
+          {{ status() {{ return this; }}, json(payload) {{ bodyC = payload; return payload; }} }},
+        );
+        if (!bodyC || bodyC.matches.length !== 1) {{
+          throw new Error(`scenario C: expected 1 match, got ${{bodyC?.matches?.length}}`);
+        }}
+        if (bodyC.matches[0].providers[0] !== 'apple') {{
+          throw new Error('scenario C: provider must be "apple"');
+        }}
+        if (!bodyC.matches[0].provider_emails.includes('apple@example.com')) {{
+          throw new Error('scenario C: provider_emails must contain matched email');
+        }}
+
+        // Scenario D: no matches anywhere → empty array, 200.
+        const scenarioD = () => [];
+        const routesD = new Map();
+        const routerD = {{ use() {{}}, get(path, fn) {{ routesD.set(path, fn); }}, post() {{}}, patch() {{}}, delete() {{}} }};
+        registerEndpoint(routerD, {{ database: makeDb(scenarioD) }});
+        const handlerD = routesD.get('/users/lookup');
+        let bodyD = null;
+        await handlerD(
+          {{ query: {{ q: 'unknown@example.com' }} }},
+          {{ status() {{ return this; }}, json(payload) {{ bodyD = payload; return payload; }} }},
+        );
+        if (!bodyD || bodyD.matches.length !== 0) {{
+          throw new Error('scenario D: expected empty matches');
+        }}
+        """
+    )
