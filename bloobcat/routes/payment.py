@@ -3862,6 +3862,21 @@ async def _apply_upgrade_bundle_effect(
             meta_mult_float if meta_mult_float is not None else recomputed_mult
         )
 
+    # Phase 2 fresh-equivalent: when pricing_mode=fresh_minus_refund, persist
+    # the optimal SKU months onto active_tariff so the user's plan reflects the
+    # new subscription period they actually paid for.
+    pricing_mode_meta = meta.get("pricing_mode", "delta_legacy_shadow")
+    new_active_tariff_months: int | None = None
+    if pricing_mode_meta == "fresh_minus_refund":
+        try:
+            _opt_months_raw = meta.get("optimal_sku_months")
+            if _opt_months_raw is not None:
+                _opt_months = int(_opt_months_raw)
+                if _opt_months > 0:
+                    new_active_tariff_months = _opt_months
+        except (TypeError, ValueError):
+            pass
+
     try:
         async with in_transaction():
             if amount_from_balance > 0:
@@ -3905,6 +3920,12 @@ async def _apply_upgrade_bundle_effect(
                             new_progressive_multiplier
                         )
                         update_fields.append("progressive_multiplier")
+                    except (TypeError, ValueError):
+                        pass
+                if new_active_tariff_months is not None:
+                    try:
+                        active_tariff.months = int(new_active_tariff_months)
+                        update_fields.append("months")
                     except (TypeError, ValueError):
                         pass
                 await active_tariff.save(update_fields=update_fields)
