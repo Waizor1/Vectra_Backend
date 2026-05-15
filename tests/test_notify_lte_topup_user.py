@@ -69,6 +69,22 @@ def _install_lte_module_stubs() -> dict:
     eh_mod.handle_telegram_forbidden_error = AsyncMock(return_value=True)
     eh_mod.handle_telegram_bad_request = AsyncMock(return_value=True)
     eh_mod.reset_user_failed_count = AsyncMock(return_value=True)
+
+    def _coerce_user_id(value, *, caller="stub"):
+        """Stub mirror of bloobcat.bot.error_handler._coerce_user_id.
+        Real version is in bloobcat/bot/error_handler.py — this just keeps the
+        test isolation pattern from breaking when other tests import it."""
+        if isinstance(value, int):
+            return value
+        fallback_id = getattr(value, "id", None)
+        if isinstance(fallback_id, int):
+            return fallback_id
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    eh_mod._coerce_user_id = _coerce_user_id
     sys.modules["bloobcat.bot.error_handler"] = eh_mod
 
     # keyboard stub (not used by notify_lte_topup_user but imported at top of lte.py)

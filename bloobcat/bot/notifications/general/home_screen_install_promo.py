@@ -53,11 +53,11 @@ async def send_home_screen_install_promo(user: Users) -> bool:
     keyboard = await webapp_inline_button(text=button_text, url=deep_link)
     try:
         await bot.send_message(chat_id=user.id, text=text, reply_markup=keyboard)
-    except TelegramForbiddenError:
-        await handle_telegram_forbidden_error(user)
+    except TelegramForbiddenError as exc:
+        await handle_telegram_forbidden_error(user.id, exc)
         return False
     except TelegramBadRequest as err:
-        await handle_telegram_bad_request(user, err)
+        await handle_telegram_bad_request(user.id, err)
         return False
     except Exception as exc:
         logger.warning(
