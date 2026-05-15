@@ -242,7 +242,24 @@ def _compute_progressive_full_price(
         live_multiplier = getattr(original_tariff, "progressive_multiplier", None)
         if live_multiplier is None:
             live_multiplier = 0.9
-        return price, float(live_multiplier)
+        # Sanitize before handing off downstream so `applies_progressive_discount`
+        # and the discount-breakdown math don't have to deal with admin-side
+        # data drift (e.g. someone saved `1.2` in Directus and the value
+        # escapes the [0.1, 0.9999] design range). `calculate_price` already
+        # sanitizes inside `get_effective_pricing`, but the raw scalar leaked
+        # out here and caused per-device escalation in the snapshot path
+        # below as well as `applies_progressive_discount=False` for tariffs
+        # whose admin-saved multiplier accidentally crossed 1.0.
+        sanitized_live = Tariffs._sanitize_multiplier(float(live_multiplier))
+        if sanitized_live != float(live_multiplier):
+            logger.warning(
+                "progressive_multiplier=%s on tariff_id=%s is outside the "
+                "[0.1, 0.9999] design range; clamped to %s for pricing math",
+                live_multiplier,
+                getattr(original_tariff, "id", None),
+                sanitized_live,
+            )
+        return price, sanitized_live
 
     # Tariff deleted from Directus: reconstruct from the snapshot so the
     # endpoint still produces a (best-effort) quote rather than 500ing.
@@ -254,6 +271,20 @@ def _compute_progressive_full_price(
             getattr(active_tariff, "id", None),
         )
         multiplier = 0.9
+    # Clamp snapshot multiplier into the same [0.1, 0.9999] design range as
+    # the live path; otherwise admin drift escapes downstream geometric-sum
+    # math and produces escalation (per-device cost growing with device count).
+    sanitized_snapshot = Tariffs._sanitize_multiplier(float(multiplier))
+    if sanitized_snapshot != float(multiplier):
+        logger.warning(
+            "snapshot progressive_multiplier=%s on active_tariff_id=%s is "
+            "outside the [0.1, 0.9999] design range; clamped to %s for "
+            "pricing math",
+            multiplier,
+            getattr(active_tariff, "id", None),
+            sanitized_snapshot,
+        )
+    multiplier = sanitized_snapshot
 
     n = max(1, _to_int(getattr(active_tariff, "hwid_limit", 1), 1))
     if n == 1:
