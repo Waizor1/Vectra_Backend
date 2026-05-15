@@ -19,10 +19,7 @@ from typing import Any
 
 from bloobcat.db.active_tariff import ActiveTariffs
 from bloobcat.db.tariff import Tariffs
-from bloobcat.services.subscription_limits import (
-    lte_default_max_gb,
-    subscription_devices_max,
-)
+from bloobcat.services.subscription_limits import subscription_devices_max
 from bloobcat.utils.dates import add_months_safe
 
 logger = logging.getLogger(__name__)
@@ -371,16 +368,22 @@ async def build_upgrade_bundle_quote(
     # consistent with `pay()` for fresh purchases. Snapshot
     # (`active_tariff.lte_price_per_gb`) is preserved only for fallback when
     # the original tariff was deleted from Directus.
-    live_lte_price_per_gb = _to_float(
-        getattr(original_tariff, "lte_price_per_gb", 0.0) if original_tariff else 0.0,
-        0.0,
-    )
     snapshot_lte_price_per_gb = _to_float(
         getattr(active_tariff, "lte_price_per_gb", 0.0), 0.0
     )
-    effective_lte_price_per_gb = (
-        live_lte_price_per_gb if live_lte_price_per_gb > 0 else snapshot_lte_price_per_gb
-    )
+    # Fallback semantics (review M1): snapshot kicks in ONLY when the live
+    # tariff row is missing (admin retired the tariff from Directus). When
+    # the row exists but `lte_price_per_gb=0`, that's the admin intent to
+    # disable LTE for this tariff — DO NOT silently fall back to the
+    # historical snapshot, because the user would otherwise pay yesterday's
+    # price for something we're not selling anymore.
+    if original_tariff is not None:
+        live_lte_price_per_gb = _to_float(
+            getattr(original_tariff, "lte_price_per_gb", 0.0), 0.0
+        )
+        effective_lte_price_per_gb = live_lte_price_per_gb
+    else:
+        effective_lte_price_per_gb = snapshot_lte_price_per_gb
 
     lte_extra_cost_rub = 0
     if lte_delta_gb > 0:
