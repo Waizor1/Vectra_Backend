@@ -374,6 +374,74 @@ async def test_platega_status_confirmed_applies_fallback_without_renew_id(monkey
     assert row.status == "succeeded"
     assert row.effect_applied is True
 
+    # Source enrichment is opt-in: omitted when metadata carries no discount_id.
+    assert "applied_personal_discount_source" not in response
+    assert "applied_personal_discount_percent" not in response
+
+
+@pytest.mark.asyncio
+async def test_platega_status_exposes_applied_trial_early_bird_discount_source(monkeypatch):
+    from bloobcat.db.discounts import PersonalDiscount
+    from bloobcat.db.payments import ProcessedPayments
+    from bloobcat.routes import payment as payment_route
+    from bloobcat.services.platega import PlategaStatusResult
+
+    user, tariff = await _seed_user_and_tariff()
+    discount = await PersonalDiscount.create(
+        user_id=user.id,
+        percent=50,
+        is_permanent=False,
+        remaining_uses=0,  # consumed at settlement, source still observable
+        expires_at=date.today() + timedelta(days=2),
+        source="trial_early_bird",
+        max_months=1,
+    )
+    metadata = {
+        "user_id": user.id,
+        "month": 1,
+        "amount_from_balance": 0,
+        "tariff_id": tariff.id,
+        "device_count": 1,
+        "tariff_kind": "base",
+        "expected_amount": 500.0,
+        "expected_currency": "RUB",
+        "payment_provider": "platega",
+        "discount_id": discount.id,
+        "discount_percent": 50,
+    }
+    await ProcessedPayments.create(
+        payment_id="platega-tx-early-bird",
+        provider="platega",
+        user_id=user.id,
+        amount=500,
+        amount_external=500,
+        amount_from_balance=0,
+        status="pending",
+        provider_payload=json.dumps({"metadata": metadata}),
+    )
+
+    class FakePlategaClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def get_transaction_status(self, transaction_id: str):
+            return PlategaStatusResult(
+                transaction_id=transaction_id,
+                status="CONFIRMED",
+                amount=500.0,
+                currency="RUB",
+                payload=json.dumps({"metadata": metadata}),
+                raw={},
+            )
+
+    monkeypatch.setattr(payment_route, "PlategaClient", FakePlategaClient)
+
+    response = await payment_route.get_payment_status("platega-tx-early-bird", user=user)
+
+    assert response["is_paid"] is True
+    assert response["applied_personal_discount_source"] == "trial_early_bird"
+    assert response["applied_personal_discount_percent"] == 50
+
 
 @pytest.mark.asyncio
 async def test_platega_status_requires_local_payment_before_provider_lookup(monkeypatch):

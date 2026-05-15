@@ -92,6 +92,7 @@ from bloobcat.db.notifications import NotificationMarks
 from bloobcat.routes.remnawave.client import RemnaWaveClient
 from bloobcat.routes.remnawave.hwid_utils import cleanup_user_hwid_devices
 from bloobcat.routes.remnawave.lte_utils import set_lte_squad_status
+from bloobcat.db.discounts import PersonalDiscount
 from bloobcat.services.discounts import (
     apply_personal_discount,
     consume_discount_if_needed,
@@ -2441,6 +2442,38 @@ def _parse_platega_metadata_from_payload(payload: Any) -> dict[str, Any]:
     return parsed
 
 
+async def _resolve_applied_personal_discount(
+    metadata: Any,
+) -> tuple[str | None, int | None]:
+    """Look up the personal discount that was applied to a confirmed payment.
+
+    Returns ``(source, percent)``. Both fields are ``None`` when the payment
+    did not carry a personal-discount id, or when the discount row was deleted
+    after consumption. Used by ``get_payment_status`` to expose the discount
+    source to the frontend so conversion goals (e.g. ``trial_early_bird``)
+    can be tracked. ``PersonalDiscount`` rows are not deleted on
+    ``consume_one``, so the source remains observable post-settlement.
+    """
+    if not isinstance(metadata, dict):
+        return None, None
+    raw_id = metadata.get("discount_id")
+    if raw_id in (None, "", 0):
+        return None, None
+    try:
+        discount_id = int(raw_id)
+    except (TypeError, ValueError):
+        return None, None
+    discount = await PersonalDiscount.get_or_none(id=discount_id)
+    if discount is None:
+        return None, None
+    source = str(discount.source).strip() if discount.source else None
+    try:
+        percent = int(discount.percent or 0) or None
+    except (TypeError, ValueError):
+        percent = None
+    return source or None, percent
+
+
 def _round_amount_for_compare(value: Any) -> Decimal:
     try:
         amount = Decimal(str(value))
@@ -2739,6 +2772,13 @@ async def _get_platega_payment_status_response(
         "processed_status": (processed.status if processed else None),
         "entitlements_ready": entitlements_ready,
     }
+    if response["is_paid"]:
+        discount_source, discount_percent = await _resolve_applied_personal_discount(
+            metadata
+        )
+        if discount_source:
+            response["applied_personal_discount_source"] = discount_source
+            response["applied_personal_discount_percent"] = discount_percent
     if overlay_snapshot is not None:
         response["overlay_snapshot"] = overlay_snapshot
     return response
@@ -2900,7 +2940,7 @@ async def get_payment_status(
                 e,
             )
 
-    response = {
+    response: dict[str, Any] = {
         "payment_id": payment_id,
         "provider": PAYMENT_PROVIDER_YOOKASSA,
         "provider_status": status,
@@ -2915,6 +2955,13 @@ async def get_payment_status(
         # entitlement coherence (overlay/freeze-safe success confirmation).
         "entitlements_ready": entitlements_ready,
     }
+    if response["is_paid"]:
+        discount_source, discount_percent = await _resolve_applied_personal_discount(
+            meta if isinstance(meta, dict) else None
+        )
+        if discount_source:
+            response["applied_personal_discount_source"] = discount_source
+            response["applied_personal_discount_percent"] = discount_percent
     if overlay_snapshot is not None:
         response["overlay_snapshot"] = overlay_snapshot
     return response
