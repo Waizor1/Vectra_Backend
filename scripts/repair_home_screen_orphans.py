@@ -94,6 +94,16 @@ def _parse_args() -> argparse.Namespace:
         default="repair-script",
         help="Free-text actor identifier written to the audit log. (default: repair-script)",
     )
+    parser.add_argument(
+        "--include-balance-suspects",
+        action="store_true",
+        help=(
+            "Include users with home_screen_reward_granted_at set + no install "
+            "discount + balance >= 50. These are most likely successful "
+            "balance-kind claimers (no reward_kind persisted to distinguish), "
+            "so they are filtered out of the default scan to avoid double-grants."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -103,26 +113,42 @@ async def run() -> int:
     await Tortoise.init(config=TORTOISE_ORM)
     try:
         orphans = await scan_home_screen_orphans(
-            user_id=args.user_id, limit=args.limit
+            user_id=args.user_id,
+            limit=args.limit,
+            include_balance_suspects=args.include_balance_suspects,
         )
         if not orphans:
             print("No orphan home-screen claims found.")
             return 0
 
-        print(f"Found {len(orphans)} orphan claim(s):")
+        likely = [r for r in orphans if r["likely_orphan"]]
+        suspects = [r for r in orphans if not r["likely_orphan"]]
+        print(
+            f"Found {len(orphans)} flagged row(s): "
+            f"{len(likely)} likely orphan, {len(suspects)} balance-kind suspect."
+        )
         for row in orphans:
+            tag = "ORPHAN  " if row["likely_orphan"] else "SUSPECT "
             print(
-                f"  user_id={row['user_id']} granted_at={row['granted_at']} "
+                f"  {tag} user_id={row['user_id']} granted_at={row['granted_at']} "
                 f"balance={row['balance']} has_install_discount={row['has_install_discount']}"
             )
 
         if args.dry_run:
             return 0
 
+        if not likely and not args.include_balance_suspects:
+            print(
+                "No high-confidence orphans to repair. Re-run with --include-balance-suspects "
+                "to operate on balance-kind suspects (risky: may double-grant)."
+            )
+            return 0
+
         mode = "clear" if args.clear else "credit"
         kind = args.kind if mode == "credit" else None
         failures = 0
-        for row in orphans:
+        targets = orphans if args.include_balance_suspects else likely
+        for row in targets:
             try:
                 result = await repair_home_screen_reward(
                     user_id=int(row["user_id"]),

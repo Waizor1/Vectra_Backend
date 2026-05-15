@@ -327,6 +327,46 @@ async def test_scan_orphans_respects_user_id_filter():
 
 
 @pytest.mark.asyncio
+async def test_scan_orphans_filters_balance_kind_successes_by_default():
+    """Balance-kind successful claims look identical to discount-kind
+    orphans (granted_at set + no PersonalDiscount). The default scan
+    must filter them out by checking balance — otherwise a credit-mode
+    repair would double-grant the +50 ₽."""
+    from datetime import datetime, timezone
+
+    from bloobcat.db.users import Users
+    from bloobcat.services.home_screen_rewards import (
+        HOME_SCREEN_BALANCE_BONUS_RUB,
+        scan_home_screen_orphans,
+    )
+
+    # Balance-kind success: flag set, balance == 50, no discount row.
+    await Users.create(
+        id=100080,
+        full_name="balance-success",
+        balance=HOME_SCREEN_BALANCE_BONUS_RUB,
+        home_screen_reward_granted_at=datetime.now(timezone.utc),
+    )
+    # Likely orphan: flag set, balance == 0, no discount row.
+    await Users.create(
+        id=100081,
+        full_name="likely-orphan",
+        balance=0,
+        home_screen_reward_granted_at=datetime.now(timezone.utc),
+    )
+
+    default = await scan_home_screen_orphans()
+    default_ids = [r["user_id"] for r in default]
+    assert 100081 in default_ids, "likely orphan must be in default scan"
+    assert 100080 not in default_ids, "balance-kind success must be filtered"
+
+    with_suspects = await scan_home_screen_orphans(include_balance_suspects=True)
+    with_ids = [(r["user_id"], r["likely_orphan"]) for r in with_suspects]
+    assert (100081, True) in with_ids
+    assert (100080, False) in with_ids
+
+
+@pytest.mark.asyncio
 async def test_repair_clear_mode_drops_flag():
     from datetime import datetime, timezone
 

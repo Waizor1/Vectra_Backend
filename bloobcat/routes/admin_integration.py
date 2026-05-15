@@ -245,12 +245,14 @@ class HomeScreenOrphanScanResponse(BaseModel):
 async def list_home_screen_orphans(
     user_id: Optional[int] = None,
     limit: int = 200,
+    include_balance_suspects: bool = False,
 ) -> HomeScreenOrphanScanResponse:
     from bloobcat.services.home_screen_rewards import scan_home_screen_orphans
 
     orphans = await scan_home_screen_orphans(
         user_id=user_id,
         limit=max(1, min(int(limit or 200), 1000)),
+        include_balance_suspects=include_balance_suspects,
     )
     return HomeScreenOrphanScanResponse(
         orphans=list(orphans),

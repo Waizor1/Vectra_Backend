@@ -221,20 +221,30 @@ class HomeScreenOrphanRow(TypedDict):
     home_screen_added_at: str | None
     balance: int
     has_install_discount: bool
+    likely_orphan: bool
 
 
 async def scan_home_screen_orphans(
     *,
     user_id: int | None = None,
     limit: int | None = None,
+    include_balance_suspects: bool = False,
 ) -> list[HomeScreenOrphanRow]:
     """Return users whose `home_screen_reward_granted_at` is set but who
     have no `PersonalDiscount(source='home_screen_install')` row.
 
-    Balance orphans don't exist in the original code (the UPDATE was a
-    single atomic statement that set balance AND flag together), so we
-    only flag discount-kind orphans here. A balance "orphan" report would
-    be a frontend-display problem, not a database inconsistency.
+    Balance-kind claims also have no PersonalDiscount row (the +50 ₽
+    landed atomically in `users.balance`), so a strict
+    "flag set + no discount" filter has false positives — balance-kind
+    successes appear identical to discount-kind orphans because the
+    chosen `reward_kind` isn't persisted on the user row.
+
+    We compute `likely_orphan = True` only when `balance <`
+    HOME_SCREEN_BALANCE_BONUS_RUB — the user has neither a discount row
+    nor the +50 ₽ in their balance, so the bonus genuinely did not land.
+    Balance-kind successes (balance ≥ 50, no discount) get
+    `likely_orphan = False` and are filtered out of the default scan;
+    pass `include_balance_suspects=True` to see them too.
 
     Pass `user_id` to scope the scan to a single user.
     """
@@ -246,14 +256,18 @@ async def scan_home_screen_orphans(
         candidates_q = candidates_q.limit(int(limit))
 
     candidates = await candidates_q.all()
-    orphans: list[HomeScreenOrphanRow] = []
+    rows: list[HomeScreenOrphanRow] = []
     for user in candidates:
         has_discount = await PersonalDiscount.filter(
             user_id=int(user.id), source="home_screen_install"
         ).exists()
         if has_discount:
             continue
-        orphans.append(
+        balance = int(getattr(user, "balance", 0) or 0)
+        likely_orphan = balance < HOME_SCREEN_BALANCE_BONUS_RUB
+        if not likely_orphan and not include_balance_suspects:
+            continue
+        rows.append(
             HomeScreenOrphanRow(
                 user_id=int(user.id),
                 granted_at=(
@@ -266,11 +280,12 @@ async def scan_home_screen_orphans(
                     if user.home_screen_added_at
                     else None
                 ),
-                balance=int(getattr(user, "balance", 0) or 0),
+                balance=balance,
                 has_install_discount=False,
+                likely_orphan=likely_orphan,
             )
         )
-    return orphans
+    return rows
 
 
 class HomeScreenRepairResult(TypedDict):
