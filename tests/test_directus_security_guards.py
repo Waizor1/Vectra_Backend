@@ -1016,9 +1016,11 @@ def test_admin_widgets_user_card_attribution_chain_payload():
 
 
 def test_tvpn_user_card_bootstrap_hook_inserts_field_when_missing():
-    """The bootstrap hook must idempotently ensure a presentation field on the
-    `users` collection bound to interface=`tvpn-user-card`. First boot inserts;
-    second boot must NOT overwrite (so manual operator tweaks survive)."""
+    """The bootstrap hook must idempotently ensure three directus_fields rows:
+    the presentation alias on `users`, plus `users.email` and `auth_identities.email`
+    so Google-only OAuth registrations are findable via the admin content-search bar.
+    First boot inserts all three; second boot must NOT overwrite (so manual
+    operator tweaks survive)."""
 
     src_path = ROOT / "directus/extensions/tvpn-user-card-bootstrap/src/index.js"
     dist_path = ROOT / "directus/extensions/tvpn-user-card-bootstrap/dist/index.js"
@@ -1030,6 +1032,7 @@ def test_tvpn_user_card_bootstrap_hook_inserts_field_when_missing():
     assert "tvpn-user-card" in src_source
     assert "directus_fields" in src_source
     assert "init(\"app.after\"" in src_source, "must hook on app.after to run after Directus boot"
+    assert "auth_identities" in src_source, "must also seed auth_identities.email metadata"
 
     subprocess.run(["node", "--check", str(dist_path)], cwd=ROOT, check=True)
 
@@ -1038,10 +1041,11 @@ def test_tvpn_user_card_bootstrap_hook_inserts_field_when_missing():
         f"""
         import registerHook from {source_url!r};
 
-        // Capture mode: track .where() conds and .insert() payloads.
-        let lookups = 0;
+        // Capture mode: track .where() conds and .insert() payloads per (collection, field).
+        let lookups = [];
         let inserts = [];
-        let lookupResult = null;
+        // Map "collection:field" → row to return from .first(); default null (missing).
+        const lookupResults = new Map();
 
         const fakeDatabase = (table) => {{
           let conds = null;
@@ -1049,8 +1053,9 @@ def test_tvpn_user_card_bootstrap_hook_inserts_field_when_missing():
             where(c) {{ conds = c; return qb; }},
             first: async () => {{
               if (table !== 'directus_fields') throw new Error('unexpected table: ' + table);
-              lookups += 1;
-              return lookupResult;
+              const key = `${{conds.collection}}:${{conds.field}}`;
+              lookups.push(key);
+              return lookupResults.get(key) ?? null;
             }},
             insert: async (row) => {{
               if (table !== 'directus_fields') throw new Error('unexpected insert table: ' + table);
@@ -1074,24 +1079,49 @@ def test_tvpn_user_card_bootstrap_hook_inserts_field_when_missing():
         const handler = initHandlers.get('app.after');
         if (!handler) throw new Error('app.after not registered');
 
-        // First boot: directus_fields has no row for users.tvpn_user_card_presentation → insert.
-        lookupResult = null;
+        // First boot: directus_fields has no rows for any of the three managed fields → insert all.
         await handler({{ }});
-        if (lookups !== 1) throw new Error(`expected 1 lookup, got ${{lookups}}`);
-        if (inserts.length !== 1) throw new Error(`expected 1 insert, got ${{inserts.length}}`);
-        const inserted = inserts[0].row;
-        if (inserted.collection !== 'users') throw new Error('collection must be users');
-        if (inserted.field !== 'tvpn_user_card_presentation') throw new Error('field name must be the presentation alias');
-        if (inserted.interface !== 'tvpn-user-card') throw new Error('interface must be tvpn-user-card');
-        if (!inserted.special.includes('alias')) throw new Error('special must mark this as alias');
-        const opts = JSON.parse(inserted.options);
+        if (lookups.length !== 3) throw new Error(`expected 3 lookups (presentation + 2 emails), got ${{lookups.length}}: ${{lookups.join(',')}}`);
+        if (inserts.length !== 3) throw new Error(`expected 3 inserts, got ${{inserts.length}}`);
+
+        const byKey = new Map(inserts.map(({{ row }}) => [`${{row.collection}}:${{row.field}}`, row]));
+
+        const presentation = byKey.get('users:tvpn_user_card_presentation');
+        if (!presentation) throw new Error('missing presentation field insert');
+        if (presentation.interface !== 'tvpn-user-card') throw new Error('presentation interface must be tvpn-user-card');
+        if (!presentation.special?.includes('alias')) throw new Error('presentation special must mark this as alias');
+        const opts = JSON.parse(presentation.options);
         if (opts.endpoint !== '/admin-widgets/user-card') throw new Error('endpoint option must point at admin-widgets');
 
-        // Second boot: row exists → NO insert (idempotency + no clobber).
-        lookupResult = {{ id: 42, collection: 'users', field: 'tvpn_user_card_presentation', interface: 'tvpn-user-card' }};
+        const usersEmail = byKey.get('users:email');
+        if (!usersEmail) throw new Error('missing users.email field insert');
+        if (usersEmail.hidden !== false) throw new Error('users.email must be hidden=false so it appears in admin UI');
+        if (usersEmail.interface !== 'input') throw new Error('users.email interface must be input');
+        if (usersEmail.special !== null) throw new Error('users.email is a real column, not an alias');
+
+        const authEmail = byKey.get('auth_identities:email');
+        if (!authEmail) throw new Error('missing auth_identities.email field insert');
+        if (authEmail.hidden !== false) throw new Error('auth_identities.email must be hidden=false');
+
+        // Second boot: all rows exist → NO inserts (idempotency + no clobber).
+        lookupResults.set('users:tvpn_user_card_presentation', {{ id: 42, collection: 'users', field: 'tvpn_user_card_presentation' }});
+        lookupResults.set('users:email', {{ id: 43, collection: 'users', field: 'email' }});
+        lookupResults.set('auth_identities:email', {{ id: 44, collection: 'auth_identities', field: 'email' }});
+        lookups = [];
         inserts = [];
         await handler({{ }});
-        if (inserts.length !== 0) throw new Error(`second boot must not insert when field exists, got ${{inserts.length}} inserts`);
+        if (lookups.length !== 3) throw new Error(`second boot must still probe all 3 fields, got ${{lookups.length}}`);
+        if (inserts.length !== 0) throw new Error(`second boot must not insert when fields exist, got ${{inserts.length}} inserts`);
+
+        // Third boot: only users.email is missing (admin manually deleted it) → insert just that one.
+        lookupResults.delete('users:email');
+        inserts = [];
+        lookups = [];
+        await handler({{ }});
+        if (inserts.length !== 1) throw new Error(`third boot must insert only the missing field, got ${{inserts.length}}`);
+        if (inserts[0].row.field !== 'email' || inserts[0].row.collection !== 'users') {{
+          throw new Error('third boot must re-create users.email specifically');
+        }}
         """
     )
 
