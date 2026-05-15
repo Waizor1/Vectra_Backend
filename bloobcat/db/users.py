@@ -822,6 +822,26 @@ class Users(models.Model):
                                         "Ошибка при отправке уведомления о предоставлении триала "
                                         f"пользователю {self.id} в _ensure_remnawave_user: {e_notify}"
                                     )
+                                # Trial Early-Bird discount: −50 % stimulus
+                                # anchored to the trial expiry. Gated by
+                                # TRIAL_EARLY_BIRD_ENABLED. Skipped for
+                                # referral invitees (they have their own
+                                # bundle) and partners.
+                                try:
+                                    from bloobcat.services.trial_early_bird import (
+                                        grant_trial_early_bird_discount,
+                                    )
+
+                                    await grant_trial_early_bird_discount(
+                                        current_user,
+                                        is_referral_invite=is_referral_invite,
+                                    )
+                                except Exception as e_eb:
+                                    logger.error(
+                                        "Ошибка при выдаче early-bird скидки пользователю %s: %s",
+                                        self.id,
+                                        e_eb,
+                                    )
                             else:
                                 refreshed_user = await Users.get_or_none(
                                     id=current_user.id
