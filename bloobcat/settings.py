@@ -386,6 +386,16 @@ class AppSettings(BaseSettings):
     # runtime. Override with a tariff name (e.g. "premium_12m") to pin a
     # specific SKU regardless of price ranking.
     reverse_trial_tariff_sku: str = ""
+    # Golden Period — 24h invite blitz (PR 3/4 of referral v2). The feature
+    # itself is gated by the DB row `golden_period_configs.is_enabled`. These
+    # env-driven knobs are runtime guard-rails that the DB row cannot override:
+    #   * admin_alert_threshold — single-day clawback total above which we ping
+    #     ops via dispatch_admin_alert (operational visibility, not security).
+    #   * active_days_lookback — window over which `connections` rows are
+    #     counted as "active days" by `get_cumulative_active_days`. 90 days
+    #     keeps the query bounded on large `connections` tables.
+    golden_period_admin_alert_threshold_rub: int = 5000
+    golden_period_active_days_lookback_days: int = 90
 
 
 app_settings = AppSettings()

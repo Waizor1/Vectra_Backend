@@ -69,6 +69,26 @@ class ReferralRewardHistoryItem(BaseModel):
     createdAt: str
 
 
+class GoldenPeriodInviteeRow(BaseModel):
+    id: str
+    displayName: str
+    status: Literal["waiting", "paid", "clawed_back"] | str
+    paidAtMs: Optional[int] = None
+    clawbackReason: Optional[str] = None
+
+
+class GoldenPeriodPayload(BaseModel):
+    active: bool
+    startedAtMs: int
+    expiresAtMs: int
+    cap: int
+    paidOutCount: int
+    totalPaidRub: int
+    payoutAmount: int
+    seen: bool
+    invitees: list[GoldenPeriodInviteeRow]
+
+
 class ReferralStatusResponse(BaseModel):
     referralLink: str
     friendsCount: int
@@ -84,6 +104,8 @@ class ReferralStatusResponse(BaseModel):
     totalBonusDays: int
     # Legacy numeric level for older clients. New UI uses currentLevel instead.
     level: int
+    # Golden Period (PR3) — null when feature disabled or no active period.
+    goldenPeriod: GoldenPeriodPayload | None = None
 
 
 class ReferralChestRewardResponse(BaseModel):
@@ -103,7 +125,19 @@ class ReferralChestOpenResponse(BaseModel):
 
 @router.get("/status", response_model=ReferralStatusResponse)
 async def get_status(user: Users = Depends(validate)) -> ReferralStatusResponse:
-    return ReferralStatusResponse(**(await build_referral_status(user)))
+    payload = await build_referral_status(user)
+    # Inject Golden Period state. None means feature off or no active period
+    # — the FE conditionally renders the banner. Wrapped in try/except so the
+    # Golden Period stack cannot break the existing referral status surface.
+    try:
+        from bloobcat.services.golden_period import build_golden_period_status
+
+        gp_state = await build_golden_period_status(user)
+        if gp_state is not None:
+            payload["goldenPeriod"] = gp_state
+    except Exception as exc:  # noqa: BLE001 - never break the parent endpoint
+        logger.debug("golden_period_status_inject_failed user=%s err=%s", user.id, exc)
+    return ReferralStatusResponse(**payload)
 
 
 @router.post("/chests/{chest_id}/open", response_model=ReferralChestOpenResponse)

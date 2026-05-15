@@ -60,6 +60,15 @@ from bloobcat.tasks.reverse_trial_downgrade import (
 from bloobcat.tasks.reverse_trial_pre_warning import (
     run_reverse_trial_pre_warning_scheduler,
 )
+from bloobcat.tasks.golden_period_dispatcher import (
+    run_golden_period_dispatcher_scheduler,
+)
+from bloobcat.tasks.golden_period_expiry import (
+    run_golden_period_expiry_scheduler,
+)
+from bloobcat.tasks.golden_period_clawback import (
+    run_golden_period_clawback_scheduler,
+)
 
 logger = get_logger("scheduler")
 
@@ -835,6 +844,12 @@ async def schedule_all_tasks():
     # Daily reverse-trial downgrade pass (09:00 MSK) and pre-expiry warning (12:00 MSK).
     asyncio.create_task(run_reverse_trial_downgrade_scheduler())
     asyncio.create_task(run_reverse_trial_pre_warning_scheduler())
+    # Golden Period (PR3) — scheduler trio. Each task is a no-op while
+    # the GoldenPeriodConfig.is_enabled flag is False, so wiring them up
+    # here is safe even before ops flips the toggle.
+    asyncio.create_task(run_golden_period_dispatcher_scheduler())
+    asyncio.create_task(run_golden_period_expiry_scheduler())
+    asyncio.create_task(run_golden_period_clawback_scheduler())
     # Start automatic statistics scheduler
     from bloobcat.statistics.scheduler import statistics_scheduler
-    asyncio.create_task(statistics_scheduler()) 
+    asyncio.create_task(statistics_scheduler())

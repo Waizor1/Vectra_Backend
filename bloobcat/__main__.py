@@ -272,6 +272,28 @@ async def _apply_concurrent_index_patches(conn) -> None:
         '    ON "reverse_trial_states" ("status", "expires_at")',
         'CREATE INDEX CONCURRENTLY IF NOT EXISTS "ix_reverse_trial_states_user"\n'
         '    ON "reverse_trial_states" ("user_id")',
+        # Golden Period (migration 119) — partial UNIQUE on user_id where
+        # status='active' is the contract that "one ACTIVE period per user
+        # at a time". Other rows (expired/closed) are intentionally allowed
+        # so future repeat campaigns can insert another row.
+        'CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS "uq_golden_periods_user_active"\n'
+        '    ON "golden_periods" ("user_id")\n'
+        '    WHERE "status" = \'active\'',
+        # Drives the dispatcher's "do I already have a GoldenPeriod row?" check.
+        'CREATE INDEX CONCURRENTLY IF NOT EXISTS "ix_golden_periods_user"\n'
+        '    ON "golden_periods" ("user_id")',
+        # Drives the expiry scheduler scan: WHERE status='active' AND expires_at <= NOW().
+        'CREATE INDEX CONCURRENTLY IF NOT EXISTS "ix_golden_periods_status_expires"\n'
+        '    ON "golden_periods" ("status", "expires_at")',
+        # Analytics: date-range filter on dashboard endpoint.
+        'CREATE INDEX CONCURRENTLY IF NOT EXISTS "ix_golden_periods_started_at"\n'
+        '    ON "golden_periods" ("started_at")',
+        # Per-referrer payouts list (history endpoint).
+        'CREATE INDEX CONCURRENTLY IF NOT EXISTS "ix_golden_payouts_referrer_status"\n'
+        '    ON "golden_period_payouts" ("referrer_user_id", "status")',
+        # Drives the clawback scanner: WHERE status='optimistic' AND paid_at >= cutoff.
+        'CREATE INDEX CONCURRENTLY IF NOT EXISTS "ix_golden_payouts_status_paid_at"\n'
+        '    ON "golden_period_payouts" ("status", "paid_at")',
     ]
     for stmt in concurrent_index_statements:
         try:
