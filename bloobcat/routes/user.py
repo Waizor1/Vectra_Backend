@@ -180,11 +180,36 @@ SUBSCRIPTION_URL_PENDING_MESSAGE = (
 SUBSCRIPTION_URL_UNAVAILABLE_MESSAGE = (
     "Не удалось получить ключ подключения. Обновите экран или попробуйте позже."
 )
+SUBSCRIPTION_URL_NEEDS_PURCHASE_MESSAGE = (
+    "Триал истёк. Оформите тариф, чтобы получить ключ подключения."
+)
 
 
 async def _resolve_subscription_url_state(
-    user: Users, *, source: str
+    user: Users,
+    *,
+    source: str,
+    effective_expired_at: date | None = None,
 ) -> Dict[str, str | None]:
+    # Caller may pass an explicit effective_expired_at (e.g. owner-based date for
+    # active family members). Fallback: the user's own expired_at.
+    if effective_expired_at is None:
+        raw_expired_at = getattr(user, "expired_at", None)
+        effective_expired_at = normalize_date(raw_expired_at) if raw_expired_at else None
+
+    if not _is_active_subscription(effective_expired_at):
+        logger.debug(
+            "Пользователь {} без активной подписки, нужна покупка ({}).",
+            getattr(user, "id", None),
+            source,
+        )
+        return {
+            "subscription_url": None,
+            "subscription_url_error": SUBSCRIPTION_URL_NEEDS_PURCHASE_MESSAGE,
+            "subscription_url_error_code": "no_active_subscription",
+            "subscription_url_status": "needs_purchase",
+        }
+
     if not user.remnawave_uuid:
         logger.warning(
             "Пользователь {} прошел валидацию, но еще не создан в RemnaWave ({}).",
@@ -274,15 +299,6 @@ async def check(user: Users = Depends(validate)) -> Dict[str, Any]:
         resumed = await resume_frozen_base_if_due(user)
         if resumed:
             user = await Users.get(id=user.id)
-        subscription_url_state = await _resolve_subscription_url_state(
-            user, source="/user"
-        )
-
-        # Получаем стандартные данные пользователя
-        user_data = await User_Pydantic.from_tortoise_orm(user)
-        user_dict = _dump_user_pydantic_compat(user_data)
-        user_dict["has_completed_onboarding"] = _has_completed_onboarding(user)
-        user_dict.update(await get_overlay_payload(user))
 
         # Effective family context for members:
         # - show owner as subscription source
@@ -295,6 +311,33 @@ async def check(user: Users = Depends(validate)) -> Dict[str, Any]:
             status="active",
             allocated_devices__gt=0,
         ).prefetch_related("owner")
+
+        # Subscription URL resolution must honour the effective expiration so an
+        # active family member with their own trial expired still receives a URL
+        # via the owner's active plan rather than being told to purchase.
+        effective_expired_at_for_url = (
+            normalize_date(user.expired_at) if user.expired_at else None
+        )
+        if family_membership and family_membership.owner:
+            owner_expired_at = (
+                normalize_date(family_membership.owner.expired_at)
+                if family_membership.owner.expired_at
+                else None
+            )
+            if _is_active_subscription(owner_expired_at):
+                effective_expired_at_for_url = owner_expired_at
+
+        subscription_url_state = await _resolve_subscription_url_state(
+            user,
+            source="/user",
+            effective_expired_at=effective_expired_at_for_url,
+        )
+
+        # Получаем стандартные данные пользователя
+        user_data = await User_Pydantic.from_tortoise_orm(user)
+        user_dict = _dump_user_pydantic_compat(user_data)
+        user_dict["has_completed_onboarding"] = _has_completed_onboarding(user)
+        user_dict.update(await get_overlay_payload(user))
         if family_membership:
             owner = family_membership.owner
             owner_expired = normalize_date(owner.expired_at)

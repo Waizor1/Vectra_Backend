@@ -58,11 +58,17 @@ class UpgradeBundleQuote:
     # charges — avoiding the "UI says 1.5, charged 2" confusion.
     lte_price_per_gb: float
     # Bug 3 (BE v4): how many ₽ the user saved relative to the linear
-    # (no-progressive-discount) device price for the same number of seats,
-    # prorated over the same window we charge for. 0 when device_delta == 0
-    # or multiplier >= 1.0 (no discount applies). Frontend renders this as
-    # «−10% прогрессивная скидка за 3 устройства».
+    # (no-progressive-discount) device price, prorated over the SAME
+    # `(remaining + extra) / total` window that `device_extra_cost_rub`
+    # uses. 0 when device_delta == 0 or multiplier >= 1.0.
     device_discount_rub: int
+    # Tariff-level discount percentage on the FULL period price (not the
+    # prorated window). It represents the structural saving baked into the
+    # progressive ladder of the chosen tariff — independent of how many days
+    # are left on the current subscription. The frontend renders this as the
+    # «−10%» label next to the prorated `device_discount_rub` amount; the
+    # two intentionally describe different facets (rate vs. money) and are
+    # NOT required to multiply back to each other.
     device_discount_percent: float
     validation_errors: list[str]
 
@@ -282,18 +288,45 @@ async def build_upgrade_bundle_quote(
     # the fallback: first try (name, months); if that misses, try any live
     # tariff matching only `months`; finally any tariff with `lte_enabled`
     # so the user always sees Directus's current LTE pricing.
+    # Each lookup is `order_by("order", "id")` to make the choice deterministic
+    # across PostgreSQL `vacuum/analyze` cycles. Without explicit ordering the
+    # SQL standard does NOT guarantee row ordering, and `.first()` could swap
+    # the matched row arbitrarily between queries — leading to a user seeing a
+    # different tariff's `lte_price_per_gb` between two refreshes. Stable
+    # ordering also matches how Directus list views surface tariffs to admins.
     original_tariff = await Tariffs.filter(
         name=getattr(active_tariff, "name", None),
         months=getattr(active_tariff, "months", None),
-    ).first()
+    ).order_by("order", "id").first()
     if original_tariff is None:
         active_months_for_lookup = getattr(active_tariff, "months", None)
         if active_months_for_lookup is not None:
             original_tariff = await Tariffs.filter(
                 months=active_months_for_lookup
-            ).first()
+            ).order_by("order", "id").first()
+            if original_tariff is not None:
+                logger.warning(
+                    "upgrade_bundle: original_tariff fallback on months-only — "
+                    "active_tariff name=%r missing in Directus, picked tariff id=%s name=%r "
+                    "(LTE pricing may diverge from user's purchase if multipliers differ)",
+                    getattr(active_tariff, "name", None),
+                    getattr(original_tariff, "id", None),
+                    getattr(original_tariff, "name", None),
+                )
     if original_tariff is None:
-        original_tariff = await Tariffs.filter(lte_enabled=True).first()
+        original_tariff = await Tariffs.filter(
+            lte_enabled=True
+        ).order_by("order", "id").first()
+        if original_tariff is not None:
+            logger.warning(
+                "upgrade_bundle: original_tariff wide-fallback to ANY lte_enabled tariff "
+                "(active_tariff months=%r,name=%r not found by either lookup) — using id=%s name=%r months=%r",
+                getattr(active_tariff, "months", None),
+                getattr(active_tariff, "name", None),
+                getattr(original_tariff, "id", None),
+                getattr(original_tariff, "name", None),
+                getattr(original_tariff, "months", None),
+            )
 
     devices_cap = subscription_devices_max()
     raw_family_cap = (
