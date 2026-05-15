@@ -1,10 +1,41 @@
 from datetime import datetime
+from typing import Any
 from zoneinfo import ZoneInfo
 from aiogram.exceptions import TelegramForbiddenError, TelegramBadRequest
 from bloobcat.logger import get_logger
 
 logger = get_logger("telegram_error_handler")
 MOSCOW = ZoneInfo("Europe/Moscow")
+
+
+def _coerce_user_id(value: Any, *, caller: str) -> int | None:
+    """Defensive coercion: if a Users object is passed instead of its .id,
+    fall back to value.id and log a deprecation warning so the offending
+    call site can be fixed. Returns None if coercion is impossible.
+    """
+    if isinstance(value, int):
+        return value
+    fallback_id = getattr(value, "id", None)
+    if isinstance(fallback_id, int):
+        logger.warning(
+            "%s received non-int user_id (got %s); coercing via .id=%s. "
+            "Fix the call site to pass user.id directly.",
+            caller,
+            type(value).__name__,
+            fallback_id,
+        )
+        return fallback_id
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        logger.error(
+            "%s received uncoercible user_id (got %r of type %s); skipping.",
+            caller,
+            value,
+            type(value).__name__,
+        )
+        return None
+
 
 async def handle_telegram_forbidden_error(user_id: int, error: TelegramForbiddenError) -> bool:
     """
@@ -20,7 +51,11 @@ async def handle_telegram_forbidden_error(user_id: int, error: TelegramForbidden
     try:
         from bloobcat.db.users import Users
         from bloobcat.scheduler import cancel_user_tasks
-        
+
+        user_id = _coerce_user_id(user_id, caller="handle_telegram_forbidden_error")
+        if user_id is None:
+            return False
+
         user = await Users.get_or_none(id=user_id)
         if not user:
             logger.warning(f"User {user_id} not found when handling Telegram forbidden error")
@@ -61,13 +96,17 @@ async def handle_telegram_bad_request(user_id: int, error: TelegramBadRequest) -
         bool: True если пользователь был помечен как заблокированный, False в противном случае
     """
     try:
+        user_id = _coerce_user_id(user_id, caller="handle_telegram_bad_request")
+        if user_id is None:
+            return False
+
         error_text = str(error).lower()
-        
+
         # "chat not found" обычно означает, что пользователь удалил аккаунт
         if "chat not found" in error_text:
             from bloobcat.db.users import Users
             from bloobcat.scheduler import cancel_user_tasks
-            
+
             user = await Users.get_or_none(id=user_id)
             if not user:
                 logger.warning(f"User {user_id} not found when handling chat not found error")
@@ -109,7 +148,11 @@ async def handle_telegram_error_with_retry(user_id: int, error: Exception) -> bo
         from bloobcat.db.users import Users
         from bloobcat.scheduler import cancel_user_tasks
         from bloobcat.settings import app_settings
-        
+
+        user_id = _coerce_user_id(user_id, caller="handle_telegram_error_with_retry")
+        if user_id is None:
+            return False
+
         user = await Users.get_or_none(id=user_id)
         if not user or user.is_blocked:
             return False
