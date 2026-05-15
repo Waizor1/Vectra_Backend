@@ -136,6 +136,48 @@ def resolve_severity(type_: Optional[str], severity_hint: Optional[str]) -> str:
     return TYPE_SEVERITY_MAP.get((type_ or "").upper(), "medium")
 
 
+# Tortoise CharField max_length values mirrored from bloobcat/db/error_reports.py.
+# The route-level helper truncates to (max_length - len(suffix)) so the marker
+# always fits. Production observed FE sending tgWebApp URLs of 736+ chars into
+# the 512-cap `route` column (Telegram WebApp `tgWebAppThemeParams` query
+# string), causing every offending /errors/report POST to crash with a
+# tortoise.exceptions.ValidationError 500 — see logs 2026-05-15.
+_TRUNCATION_SUFFIX = "…[truncated]"
+_FIELD_MAX_LENGTHS: Dict[str, int] = {
+    # Long URL-shaped fields — most likely overflow source.
+    "route": 512,
+    "href": 1024,
+    "referrer": 1024,
+    "user_agent": 512,
+    "sw_controller": 256,
+    # Free-text fields with non-trivial caps; truncate defensively.
+    "message": 1024,
+    "name": 256,
+    "code": 128,
+    "event_id": 64,
+    "session_id": 64,
+}
+
+
+def _truncate_field(value: Optional[str], field: str) -> Optional[str]:
+    """Cap a CharField value to its model max_length.
+
+    The frontend cannot always control the length of URLs (Telegram WebApp
+    appends `tgWebAppThemeParams` etc.) or exception messages, so we truncate
+    server-side rather than reject the report. A `…[truncated]` suffix tells
+    triage humans the value was clipped.
+    """
+    if value is None:
+        return None
+    max_len = _FIELD_MAX_LENGTHS.get(field)
+    if not max_len or len(value) <= max_len:
+        return value
+    head_len = max_len - len(_TRUNCATION_SUFFIX)
+    if head_len <= 0:
+        return value[:max_len]
+    return value[:head_len] + _TRUNCATION_SUFFIX
+
+
 # --- Payload model ---------------------------------------------------------
 
 
@@ -630,20 +672,20 @@ async def report_error(payload: ErrorReportPayload, request: Request) -> Dict[st
 
     fields: Dict[str, Any] = dict(
         user_id=user_id,
-        event_id=redacted_event_id,
-        code=redacted_code,
+        event_id=_truncate_field(redacted_event_id, "event_id"),
+        code=_truncate_field(redacted_code, "code"),
         type=payload.type,
-        message=redacted_message,
-        name=redacted_name,
-        stack=redacted_stack,
-        route=route,
-        href=href,
-        user_agent=redacted_user_agent,
+        message=_truncate_field(redacted_message, "message"),
+        name=_truncate_field(redacted_name, "name"),
+        stack=redacted_stack,  # TextField — no length cap
+        route=_truncate_field(route, "route"),
+        href=_truncate_field(href, "href"),
+        user_agent=_truncate_field(redacted_user_agent, "user_agent"),
         extra=redacted_extra,
         app_version=payload.appVersion,
         commit_sha=payload.commitSha,
         bundle_hash=payload.bundleHash,
-        session_id=payload.sessionId,
+        session_id=_truncate_field(payload.sessionId, "session_id"),
         platform=payload.platform,
         tg_platform=payload.tgPlatform,
         tg_version=payload.tgVersion,
@@ -665,8 +707,8 @@ async def report_error(payload: ErrorReportPayload, request: Request) -> Dict[st
         js_heap_used_mb=payload.jsHeapUsedMb,
         js_heap_total_mb=payload.jsHeapTotalMb,
         js_heap_limit_mb=payload.jsHeapLimitMb,
-        sw_controller=payload.swController,
-        referrer=referrer_redacted,
+        sw_controller=_truncate_field(payload.swController, "sw_controller"),
+        referrer=_truncate_field(referrer_redacted, "referrer"),
         triage_severity=severity,
         triage_status="new",
         triage_due_at=datetime.now(timezone.utc) + timedelta(hours=24),
