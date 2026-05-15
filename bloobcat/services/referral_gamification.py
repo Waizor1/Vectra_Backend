@@ -35,10 +35,10 @@ class ReferralLevel:
 
 
 REFERRAL_LEVELS: tuple[ReferralLevel, ...] = (
-    ReferralLevel("bronze", "Бронза", 0, 10, "50 ₽ или скидка 10%"),
-    ReferralLevel("silver", "Серебро", 1, 15, "100 ₽ или скидка 15%"),
-    ReferralLevel("gold", "Золото", 3, 20, "200 ₽ или скидка 20%"),
-    ReferralLevel("platinum", "Платина", 6, 30, "300 ₽ или скидка 25%"),
+    ReferralLevel("bronze", "Бронза", 0, 20, "50 ₽ или скидка 10%"),
+    ReferralLevel("silver", "Серебро", 1, 25, "100 ₽ или скидка 15%"),
+    ReferralLevel("gold", "Золото", 3, 30, "200 ₽ или скидка 20%"),
+    ReferralLevel("platinum", "Платина", 6, 35, "300 ₽ или скидка 25%"),
     ReferralLevel("diamond", "Алмаз", 9, 40, "500 ₽ или скидка 30%"),
 )
 
