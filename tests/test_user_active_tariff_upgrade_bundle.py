@@ -1020,12 +1020,16 @@ def test_period_cost_calendar_aware(price, months, extra_days, anchor, expected)
 
 
 @pytest.mark.asyncio
-async def test_snapshot_multiplier_does_not_drift(monkeypatch):
-    """Fix C: the per-seat progressive multiplier on `active_tariff` is a
-    snapshot of what the user paid. If an admin later edits
-    `Tariffs.progressive_multiplier`, our re-quote MUST keep using the
-    snapshot — not the live value — otherwise we silently price under a
-    different rate than the user consented to.
+async def test_upgrade_uses_live_multiplier_matches_regular_constructor(monkeypatch):
+    """Pricing symmetry: upgrade quote MUST use the LIVE tariff multiplier
+    (not the snapshot), so that adding a device on an existing subscription
+    costs the same as the difference between two regular-constructor quotes.
+
+    Previously the helper mixed live `base_price` with snapshot
+    `progressive_multiplier`, which produced absurd quotes (~600₽/device on
+    annual) when admin had edited live pricing after the user's purchase.
+    The user asked us to align upgrade economics with the regular
+    constructor; this test guards that alignment.
     """
     from bloobcat.services.upgrade_quote import _compute_progressive_full_price
 
@@ -1034,31 +1038,84 @@ async def test_snapshot_multiplier_does_not_drift(monkeypatch):
         user_id=9301, balance=10_000, hwid_limit=2
     )
 
-    # Snapshot multiplier was 0.85 at purchase time (user-paid).
+    # User's snapshot multiplier at purchase was 0.85.
     active.progressive_multiplier = 0.85
     await active.save(update_fields=["progressive_multiplier"])
 
-    # Admin later edits the live tariff to a much steeper discount.
+    # Admin later edits the live tariff to a steeper discount (cheaper devices).
     tariff.progressive_multiplier = 0.5
     await tariff.save(update_fields=["progressive_multiplier"])
+    tariff = await tariff.__class__.get(id=tariff.id)  # re-read effective fields
 
     price_rub, multiplier = _compute_progressive_full_price(
         active, tariff, target_device_count=3
     )
-    # Must reflect 0.85 (snapshot), not 0.5 (live).
-    assert abs(multiplier - 0.85) < 1e-9, (
-        f"Multiplier drifted to live value: expected 0.85 (snapshot), "
+    # Must reflect 0.5 (live), not 0.85 (snapshot). The user gets today's
+    # price for new seats — identical to a fresh-purchase quote.
+    assert abs(multiplier - 0.5) < 1e-9, (
+        f"Multiplier did not follow live tariff: expected 0.5 (live), "
         f"got {multiplier}"
     )
-    # And the price must be the snapshot-based geometric sum, not the
-    # cheaper live one: base*(1 + 0.85 + 0.85^2) = base*2.5725 (snapshot)
-    # vs base*(1 + 0.5 + 0.25) = base*1.75 (live). Snapshot is strictly
-    # larger, so a leak to live would show as a much smaller price_rub.
-    base = float(tariff.base_price)
-    expected_min = base * 2.5  # well above the live=0.5 sum of 1.75
-    assert price_rub >= expected_min, (
-        f"Price {price_rub} too low — likely used live multiplier 0.5 "
-        f"instead of snapshot 0.85"
+    # And the price equals exactly `tariff.calculate_price(3)` — same path
+    # the regular tariff constructor uses (`tariff_quote.py:227`).
+    expected_price = int(tariff.calculate_price(3))
+    assert price_rub == expected_price, (
+        f"Upgrade price {price_rub} diverged from regular constructor "
+        f"`calculate_price(3)` = {expected_price}; live pricing broken"
+    )
+
+
+@pytest.mark.asyncio
+async def test_upgrade_delta_matches_regular_constructor_delta(monkeypatch):
+    """Regression guard: the prorated `device_extra_cost_rub` returned by
+    `build_upgrade_bundle_quote` MUST equal (within ≤1₽ truncation) the
+    cost difference a user would pay if they bought the same device count
+    fresh on the regular constructor. Anchors the «match regular constructor»
+    contract the user explicitly requested after seeing ~600₽/device.
+    """
+    from bloobcat.routes.user import UpgradeBundleRequest, upgrade_bundle
+    from bloobcat.services.upgrade_quote import compute_total_period_days
+
+    _silence_side_effects(monkeypatch)
+
+    # 12-month tariff, user has 2 seats, full year ahead. The snapshot
+    # `active_tariff.price` is intentionally left at the fixture default —
+    # the new live-pricing math derives current_full_price from
+    # `tariff.calculate_price(current_devices)` and ignores the snapshot,
+    # so the test result is independent of whatever was stored at purchase.
+    today = date.today()
+    full_year_days = compute_total_period_days(12, anchor=today)
+    user, _active, tariff = await _setup_user_with_active_tariff(
+        user_id=9302,
+        balance=100_000,
+        hwid_limit=2,
+        days_remaining=full_year_days,
+        months=12,
+    )
+
+    # +1 device, no LTE / period changes, full year window.
+    result = await upgrade_bundle(
+        payload=UpgradeBundleRequest(
+            target_device_count=3,
+            target_lte_gb=10,
+            target_extra_days=0,
+            dry_run=True,
+        ),
+        user=user,
+    )
+    assert result["status"] == "quote"
+
+    # Regular constructor delta for the same +1 device step.
+    regular_delta_full_period = int(tariff.calculate_price(3)) - int(
+        tariff.calculate_price(2)
+    )
+    # Full-year window means the prorating factor is 1.0 → upgrade delta
+    # equals the regular constructor delta within at most ±1₽ ROUND_DOWN.
+    diff = abs(result["device_extra_cost_rub"] - regular_delta_full_period)
+    assert diff <= 1, (
+        f"Upgrade device cost {result['device_extra_cost_rub']} diverges "
+        f"from regular constructor delta {regular_delta_full_period} by "
+        f"{diff}₽ — pricing symmetry broken"
     )
 
 
