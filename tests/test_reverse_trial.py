@@ -477,3 +477,64 @@ async def test_get_state_payload_shape(monkeypatch):
     assert post_payload["discount"]["percent"] == 50
     assert post_payload["discount"]["expires_at_ms"] is not None
     assert post_payload["discount"]["used"] is False
+
+
+def test_route_adapter_emits_camelcase_and_maps_statuses():
+    """Service uses snake_case + 'none'/'converted_to_paid' internally; the
+    HTTP route adapter must convert to camelCase + 'absent'/'converted' to
+    match the FE contract (see Vectra_Frontend src/hooks/useReverseTrialState).
+    """
+    from bloobcat.routes.reverse_trial import (
+        _service_payload_to_response,
+        _service_redeem_to_response,
+    )
+
+    none_resp = _service_payload_to_response(
+        {
+            "status": "none",
+            "granted_at_ms": None,
+            "expires_at_ms": None,
+            "days_remaining": 0,
+            "tariff_name": None,
+            "discount": {
+                "available": False,
+                "percent": 50,
+                "expires_at_ms": None,
+                "used": False,
+            },
+        }
+    )
+    dumped = none_resp.model_dump()
+    assert dumped["status"] == "absent"
+    assert "grantedAtMs" in dumped and "granted_at_ms" not in dumped
+    assert "daysRemaining" in dumped and "days_remaining" not in dumped
+    assert "tariffName" in dumped and "tariff_name" not in dumped
+    assert dumped["discount"]["expiresAtMs"] is None
+    assert "expires_at_ms" not in dumped["discount"]
+
+    converted_resp = _service_payload_to_response(
+        {
+            "status": "converted_to_paid",
+            "granted_at_ms": 1737000000000,
+            "expires_at_ms": 1737604800000,
+            "days_remaining": 0,
+            "tariff_name": "premium_12m",
+            "discount": {
+                "available": False,
+                "percent": 0,
+                "expires_at_ms": None,
+                "used": True,
+            },
+        }
+    )
+    dumped_c = converted_resp.model_dump()
+    assert dumped_c["status"] == "converted"
+    assert dumped_c["grantedAtMs"] == 1737000000000
+    assert dumped_c["tariffName"] == "premium_12m"
+
+    redeem_dumped = _service_redeem_to_response(
+        {"applicable": True, "discount_id": 42, "percent": 50}
+    ).model_dump()
+    assert redeem_dumped["applicable"] is True
+    assert redeem_dumped["discountId"] == 42
+    assert "discount_id" not in redeem_dumped
