@@ -77,13 +77,13 @@ async def db(_install_stubs_once):
 @pytest.mark.parametrize(
     ("paid_count", "key", "percent"),
     [
-        (0, "bronze", 10),
-        (1, "silver", 15),
-        (2, "silver", 15),
-        (3, "gold", 20),
-        (5, "gold", 20),
-        (6, "platinum", 30),
-        (8, "platinum", 30),
+        (0, "bronze", 20),
+        (1, "silver", 25),
+        (2, "silver", 25),
+        (3, "gold", 30),
+        (5, "gold", 30),
+        (6, "platinum", 35),
+        (8, "platinum", 35),
         (9, "diamond", 40),
         (15, "diamond", 40),
         (50, "diamond", 40),
@@ -98,9 +98,9 @@ def test_referral_level_thresholds(paid_count, key, percent):
     assert level.cashback_percent == percent
 
 
-def test_referral_levels_baseline_is_bronze_with_ten_percent():
-    """Spec 2026-05-12: 'start' level removed. Bronze is now the baseline
-    (Level 1) with 10% cashback at zero paid friends. Next level is silver."""
+def test_referral_levels_baseline_is_bronze_with_twenty_percent():
+    """Spec 2026-05-15: linear scale 20/25/30/35/40. Bronze baseline
+    starts at 20% cashback at zero paid friends. Next level is silver (25%)."""
     from bloobcat.services.referral_gamification import (
         REFERRAL_LEVELS,
         get_next_referral_level,
@@ -110,11 +110,12 @@ def test_referral_levels_baseline_is_bronze_with_ten_percent():
     assert len(REFERRAL_LEVELS) == 5
     assert REFERRAL_LEVELS[0].key == "bronze"
     assert get_referral_level(0).key == "bronze"
-    assert get_referral_level(0).cashback_percent == 10
+    assert get_referral_level(0).cashback_percent == 20
 
     next_level = get_next_referral_level(0)
     assert next_level is not None
     assert next_level.key == "silver"
+    assert next_level.cashback_percent == 25
 
 
 async def _make_first_payment_pair(*, referrer_id: int = 2001, referred_id: int = 2002, utm=None, partner=False):
@@ -166,19 +167,19 @@ async def test_awards_standard_cashback_from_external_payment_and_creates_chest(
         amount_external_rub=1000,
     )
 
-    # With the 2026-05-12 gradation update, 1 paid friend lands the referrer
-    # on silver (15%) — the first referral itself is the entry to the silver
-    # tier, and silver chest is auto-created alongside bronze.
+    # With the 2026-05-15 linear scale (20/25/30/35/40), 1 paid friend lands
+    # the referrer on silver (25%) — the first referral itself is the entry to
+    # the silver tier, and silver chest is auto-created alongside bronze.
     assert res["applied"] is True
-    assert res["cashback_percent"] == 15
+    assert res["cashback_percent"] == 25
     assert res["level_key"] == "silver"
-    assert res["reward_rub"] == 150
+    assert res["reward_rub"] == 250
 
     referrer_after = await Users.get(id=referrer.id)
-    assert int(referrer_after.balance or 0) == 150
+    assert int(referrer_after.balance or 0) == 250
 
     ledger = await ReferralCashbackRewards.get(payment_id="ordinary-ext-1")
-    assert int(ledger.reward_rub or 0) == 150
+    assert int(ledger.reward_rub or 0) == 250
     assert int(ledger.amount_external_rub or 0) == 1000
 
     silver_chest = await ReferralLevelRewards.get(user_id=referrer.id, level_key="silver")
@@ -230,8 +231,8 @@ async def test_cashback_is_idempotent_by_payment_id():
     assert second["applied"] is False
     assert second["reason"] == "duplicate_payment"
     assert await ReferralCashbackRewards.all().count() == 1
-    # 1 paid friend → silver (15%) under the 2026-05-12 gradation.
-    assert int((await Users.get(id=referrer.id)).balance or 0) == 150
+    # 1 paid friend → silver (25%) under the 2026-05-15 linear scale.
+    assert int((await Users.get(id=referrer.id)).balance or 0) == 250
 
 
 @pytest.mark.asyncio
@@ -287,7 +288,7 @@ async def test_chest_created_once_and_opened_once(monkeypatch):
     created = await ensure_referral_level_rewards(user_id=int(user.id), paid_friends_count=3)
     created_again = await ensure_referral_level_rewards(user_id=int(user.id), paid_friends_count=3)
 
-    # 3 paid friends reaches gold under the 2026-05-12 gradation; bronze, silver,
+    # 3 paid friends reaches gold under the 2026-05-15 linear scale; bronze, silver,
     # and gold chests are auto-created on first pass and idempotent on the second.
     assert {row.level_key for row in created} == {"bronze", "silver", "gold"}
     assert created_again == []
@@ -333,5 +334,5 @@ async def test_backfill_style_chests_do_not_create_retro_cashback():
     await ensure_referral_level_rewards(user_id=int(referrer.id), paid_friends_count=paid_count)
 
     assert await ReferralCashbackRewards.all().count() == 0
-    # 3 paid friends → bronze + silver + gold chests under 2026-05-12 gradation.
+    # 3 paid friends → bronze + silver + gold chests under 2026-05-15 linear scale.
     assert await ReferralLevelRewards.filter(user_id=referrer.id).count() == 3
