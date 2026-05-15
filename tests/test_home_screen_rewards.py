@@ -178,6 +178,280 @@ async def test_home_screen_claim_raises_for_unknown_user():
         await claim_home_screen_reward(99999999, "balance")
 
 
+@pytest.mark.asyncio
+async def test_discount_path_rolls_back_flag_when_personaldiscount_create_fails(
+    monkeypatch,
+):
+    """Critical regression: pre-1.79.0 the timestamp UPDATE ran BEFORE
+    PersonalDiscount.create(), so a create() failure left the user with
+    home_screen_reward_granted_at set but no discount row — a stuck
+    'orphan claim'. The 1.79.0 reorder puts create() first inside the
+    same transaction so any failure rolls back BOTH writes."""
+    from bloobcat.db.discounts import PersonalDiscount
+    from bloobcat.db.users import Users
+    from bloobcat.services import home_screen_rewards as svc
+
+    user = await Users.create(id=100010, full_name="rollback-victim", balance=0)
+
+    original_create = PersonalDiscount.create
+
+    async def _failing_create(*args, **kwargs):  # noqa: ANN001
+        raise RuntimeError("simulated DB failure during PersonalDiscount.create")
+
+    monkeypatch.setattr(PersonalDiscount, "create", _failing_create)
+
+    with pytest.raises(RuntimeError, match="simulated DB failure"):
+        await svc.claim_home_screen_reward(user.id, "discount", platform_hint="ios")
+
+    monkeypatch.setattr(PersonalDiscount, "create", original_create)
+
+    refreshed = await Users.get(id=user.id)
+    assert refreshed.home_screen_reward_granted_at is None, (
+        "flag must NOT be set when discount delivery fails"
+    )
+    assert (
+        await PersonalDiscount.filter(user_id=user.id).count() == 0
+    ), "no PersonalDiscount row should remain after rollback"
+
+    # User can retry successfully now that the rollback freed the flag.
+    result = await svc.claim_home_screen_reward(user.id, "discount", platform_hint="ios")
+    assert result["already_claimed"] is False
+    assert result["reward_kind"] == "discount"
+    final = await Users.get(id=user.id)
+    assert final.home_screen_reward_granted_at is not None
+    assert await PersonalDiscount.filter(user_id=user.id).count() == 1
+
+
+@pytest.mark.asyncio
+async def test_claim_logs_already_claimed_cache_path(monkeypatch):
+    """The pre-1.79.0 service silently returned `{already_claimed: True}`
+    on the cache path — production had no log entry to debug missing
+    bonuses. 1.79.0 logs every exit."""
+    from bloobcat.db.users import Users
+    from bloobcat.services import home_screen_rewards as svc
+
+    user = await Users.create(id=100011, full_name="cache-path", balance=0)
+    await svc.claim_home_screen_reward(user.id, "balance", platform_hint="android")
+
+    captured: list[str] = []
+
+    def _record(template, *args, **kwargs):  # noqa: ANN001
+        try:
+            captured.append(template % args)
+        except Exception:
+            captured.append(str(template))
+
+    monkeypatch.setattr(svc.logger, "info", _record)
+
+    again = await svc.claim_home_screen_reward(
+        user.id, "balance", platform_hint="android"
+    )
+    assert again["already_claimed"] is True
+
+    cache_hits = [m for m in captured if "already-claimed (cache)" in m]
+    assert cache_hits, (
+        "cache-path return must emit a log line for prod debugging — "
+        f"captured: {captured!r}"
+    )
+    assert str(user.id) in cache_hits[-1]
+
+
+# ── orphan repair tooling ────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_scan_orphans_finds_discount_orphan_only():
+    """scan_home_screen_orphans returns users whose flag is set but who
+    have no PersonalDiscount(source='home_screen_install') row."""
+    from datetime import datetime, timezone
+
+    from bloobcat.db.discounts import PersonalDiscount
+    from bloobcat.db.users import Users
+    from bloobcat.services.home_screen_rewards import scan_home_screen_orphans
+
+    # Orphan: flag set, no discount.
+    orphan = await Users.create(
+        id=100020,
+        full_name="orphan",
+        balance=0,
+        home_screen_reward_granted_at=datetime.now(timezone.utc),
+    )
+    # Consistent: flag set, discount present.
+    consistent = await Users.create(
+        id=100021,
+        full_name="consistent",
+        balance=0,
+        home_screen_reward_granted_at=datetime.now(timezone.utc),
+    )
+    await PersonalDiscount.create(
+        user_id=consistent.id,
+        percent=10,
+        is_permanent=False,
+        remaining_uses=1,
+        expires_at=date.today() + timedelta(days=90),
+        source="home_screen_install",
+    )
+    # Never claimed: flag NULL — must not appear.
+    await Users.create(id=100022, full_name="never-claimed", balance=0)
+
+    rows = await scan_home_screen_orphans()
+    ids = [r["user_id"] for r in rows]
+    assert orphan.id in ids
+    assert consistent.id not in ids
+    assert 100022 not in ids
+
+
+@pytest.mark.asyncio
+async def test_scan_orphans_respects_user_id_filter():
+    from datetime import datetime, timezone
+
+    from bloobcat.db.users import Users
+    from bloobcat.services.home_screen_rewards import scan_home_screen_orphans
+
+    await Users.create(
+        id=100030,
+        full_name="other-orphan",
+        balance=0,
+        home_screen_reward_granted_at=datetime.now(timezone.utc),
+    )
+    await Users.create(
+        id=100031,
+        full_name="target-orphan",
+        balance=0,
+        home_screen_reward_granted_at=datetime.now(timezone.utc),
+    )
+
+    rows = await scan_home_screen_orphans(user_id=100031)
+    assert len(rows) == 1
+    assert rows[0]["user_id"] == 100031
+
+
+@pytest.mark.asyncio
+async def test_repair_clear_mode_drops_flag():
+    from datetime import datetime, timezone
+
+    from bloobcat.db.users import Users
+    from bloobcat.services.home_screen_rewards import repair_home_screen_reward
+
+    user = await Users.create(
+        id=100040,
+        full_name="clear-target",
+        balance=0,
+        home_screen_reward_granted_at=datetime.now(timezone.utc),
+    )
+
+    result = await repair_home_screen_reward(user.id, "clear", actor="test")
+    assert result["repaired"] is True
+    assert result["action"] == "cleared_flag"
+    refreshed = await Users.get(id=user.id)
+    assert refreshed.home_screen_reward_granted_at is None
+
+
+@pytest.mark.asyncio
+async def test_repair_credit_discount_creates_missing_row():
+    from datetime import datetime, timezone
+
+    from bloobcat.db.discounts import PersonalDiscount
+    from bloobcat.db.users import Users
+    from bloobcat.services.home_screen_rewards import (
+        HOME_SCREEN_DISCOUNT_PERCENT,
+        repair_home_screen_reward,
+    )
+
+    user = await Users.create(
+        id=100050,
+        full_name="discount-orphan",
+        balance=0,
+        home_screen_reward_granted_at=datetime.now(timezone.utc),
+    )
+
+    result = await repair_home_screen_reward(
+        user.id, "credit", reward_kind="discount", actor="test"
+    )
+    assert result["repaired"] is True
+    assert result["action"] == "credited_discount"
+    discounts = await PersonalDiscount.filter(
+        user_id=user.id, source="home_screen_install"
+    ).all()
+    assert len(discounts) == 1
+    assert discounts[0].percent == HOME_SCREEN_DISCOUNT_PERCENT
+
+
+@pytest.mark.asyncio
+async def test_repair_credit_discount_is_noop_when_already_consistent():
+    from datetime import datetime, timezone
+
+    from bloobcat.db.discounts import PersonalDiscount
+    from bloobcat.db.users import Users
+    from bloobcat.services.home_screen_rewards import repair_home_screen_reward
+
+    user = await Users.create(
+        id=100051,
+        full_name="already-consistent",
+        balance=0,
+        home_screen_reward_granted_at=datetime.now(timezone.utc),
+    )
+    await PersonalDiscount.create(
+        user_id=user.id,
+        percent=10,
+        is_permanent=False,
+        remaining_uses=1,
+        expires_at=date.today() + timedelta(days=90),
+        source="home_screen_install",
+    )
+
+    result = await repair_home_screen_reward(
+        user.id, "credit", reward_kind="discount", actor="test"
+    )
+    assert result["repaired"] is False
+    assert result["action"] == "already_consistent"
+    # No second discount row created.
+    assert (
+        await PersonalDiscount.filter(
+            user_id=user.id, source="home_screen_install"
+        ).count()
+        == 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_repair_credit_balance_force_credits_50_rub():
+    """Caller-confirmed force-credit path: adds +50 ₽ even without an
+    audit trail. Callers MUST verify the user wasn't already credited."""
+    from datetime import datetime, timezone
+
+    from bloobcat.db.users import Users
+    from bloobcat.services.home_screen_rewards import (
+        HOME_SCREEN_BALANCE_BONUS_RUB,
+        repair_home_screen_reward,
+    )
+
+    user = await Users.create(
+        id=100060,
+        full_name="balance-force",
+        balance=10,
+        home_screen_reward_granted_at=datetime.now(timezone.utc),
+    )
+
+    result = await repair_home_screen_reward(
+        user.id, "credit", reward_kind="balance", actor="admin@example"
+    )
+    assert result["repaired"] is True
+    assert result["action"] == "credited_balance"
+    refreshed = await Users.get(id=user.id)
+    assert refreshed.balance == 10 + HOME_SCREEN_BALANCE_BONUS_RUB
+
+
+@pytest.mark.asyncio
+async def test_repair_credit_requires_reward_kind():
+    from bloobcat.db.users import Users
+    from bloobcat.services.home_screen_rewards import repair_home_screen_reward
+
+    await Users.create(id=100070, full_name="kindless")
+    with pytest.raises(ValueError, match="credit mode requires reward_kind"):
+        await repair_home_screen_reward(100070, "credit")
+
+
 # ── story-share + referrer lookup ─────────────────────────────────────
 
 
