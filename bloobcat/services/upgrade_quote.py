@@ -32,8 +32,13 @@ logger = logging.getLogger(__name__)
 # `subscription_devices_max()` (default 30) — we don't allow building a quote
 # that exceeds it even if a tariff snapshot accidentally permits more.
 DEVICES_TOPUP_HARD_CAP_FALLBACK = 30
-# Fallback LTE cap when the snapshot/tariff has no `lte_max_gb` (default 500).
-LTE_TOPUP_FALLBACK_TOTAL_MAX_GB = 500
+# Absolute LTE cap for upgrade top-ups. Tariff-level `lte_max_gb` is a soft
+# UX recommendation; for top-up flow we deliberately allow up to this hard
+# cap so a user who exhausted their tariff quota can ALWAYS pay for more.
+# Business principle: «человек платит — получает услугу», do not block
+# revenue at an arbitrary tariff line. RemnaWave already unblocks LTE
+# traffic when `lte_gb_total > lte_gb_used` regardless of tariff line.
+LTE_TOPUP_FALLBACK_TOTAL_MAX_GB = 10000
 # Cannot extend a subscription more than 365 days past `today` — keeps quotes
 # from growing unbounded and matches the plan contract.
 MAX_TOTAL_DAYS_AHEAD = 365
@@ -50,6 +55,11 @@ class UpgradeBundleQuote:
     total_extra_cost_rub: int
     applies_progressive_discount: bool
     daily_rate: float
+    # Live price-per-GB the user will actually pay for the NEW GB at this
+    # moment (taken from `Tariffs` not the active_tariff snapshot). Frontend
+    # uses this for the per-unit hint so UI matches what backend actually
+    # charges — avoiding the "UI says 1.5, charged 2" confusion.
+    lte_price_per_gb: float
     validation_errors: list[str]
 
     def to_response_dict(self) -> dict[str, Any]:
@@ -276,13 +286,10 @@ async def build_upgrade_bundle_quote(
     if devices_cap <= 0:
         devices_cap = DEVICES_TOPUP_HARD_CAP_FALLBACK
 
-    lte_cap = (
-        _to_int(getattr(original_tariff, "lte_max_gb", None), lte_default_max_gb())
-        if original_tariff is not None
-        else lte_default_max_gb()
-    )
-    if lte_cap <= 0:
-        lte_cap = LTE_TOPUP_FALLBACK_TOTAL_MAX_GB
+    # Absolute hard cap for top-ups — deliberately ignore `tariff.lte_max_gb`
+    # so a user at 500/500 (their tariff line) can still pay for additional
+    # GB up to the absolute system limit. Tariff line is informational only.
+    lte_cap = LTE_TOPUP_FALLBACK_TOTAL_MAX_GB
 
     # ----- compute deltas -------------------------------------------------
     device_delta = 0
@@ -359,19 +366,31 @@ async def build_upgrade_bundle_quote(
         else:
             device_extra_cost_rub = 0
 
-    # LTE: linear in the price-per-gb snapshot stored on the active tariff.
+    # LTE: linear in the LIVE price-per-gb from Directus (`Tariffs`). Reason:
+    # user pays today's price for the NEW GB they're buying right now —
+    # consistent with `pay()` for fresh purchases. Snapshot
+    # (`active_tariff.lte_price_per_gb`) is preserved only for fallback when
+    # the original tariff was deleted from Directus.
+    live_lte_price_per_gb = _to_float(
+        getattr(original_tariff, "lte_price_per_gb", 0.0) if original_tariff else 0.0,
+        0.0,
+    )
+    snapshot_lte_price_per_gb = _to_float(
+        getattr(active_tariff, "lte_price_per_gb", 0.0), 0.0
+    )
+    effective_lte_price_per_gb = (
+        live_lte_price_per_gb if live_lte_price_per_gb > 0 else snapshot_lte_price_per_gb
+    )
+
     lte_extra_cost_rub = 0
     if lte_delta_gb > 0:
-        lte_price_per_gb = _to_float(
-            getattr(active_tariff, "lte_price_per_gb", 0.0), 0.0
-        )
-        if lte_price_per_gb <= 0:
+        if effective_lte_price_per_gb <= 0:
             errors.append("lte_unavailable_for_tariff")
             lte_delta_gb = 0
         else:
             # Fix B — ROUND_DOWN, symmetric with period & device axes.
             lte_extra_cost_rub = int(
-                Decimal(str(lte_delta_gb * lte_price_per_gb)).to_integral_value(
+                Decimal(str(lte_delta_gb * effective_lte_price_per_gb)).to_integral_value(
                     rounding=ROUND_DOWN
                 )
             )
@@ -409,5 +428,6 @@ async def build_upgrade_bundle_quote(
         total_extra_cost_rub=int(total_extra_cost_rub),
         applies_progressive_discount=bool(applies_progressive_discount),
         daily_rate=float(daily_rate),
+        lte_price_per_gb=float(effective_lte_price_per_gb),
         validation_errors=errors,
     )

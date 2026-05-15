@@ -3905,7 +3905,19 @@ async def _apply_upgrade_bundle_effect(
 
             if lte_delta_gb > 0:
                 active_tariff.lte_gb_total = new_lte_gb_total
-                await active_tariff.save(update_fields=["lte_gb_total"])
+                # Refresh the price-per-gb snapshot to the price quoted at
+                # invoice time (live Tariffs.lte_price_per_gb). Matches the
+                # value charged so user's saved tariff reflects what they
+                # actually paid for the new GB.
+                lte_save_fields = ["lte_gb_total"]
+                try:
+                    quoted_lte_price = float(meta.get("new_lte_price_per_gb") or 0.0)
+                except (TypeError, ValueError):
+                    quoted_lte_price = 0.0
+                if quoted_lte_price > 0:
+                    active_tariff.lte_price_per_gb = quoted_lte_price
+                    lte_save_fields.append("lte_price_per_gb")
+                await active_tariff.save(update_fields=lte_save_fields)
                 user.lte_gb_total = new_lte_gb_total
                 await user.save(update_fields=["lte_gb_total"])
     except Exception as effect_exc:
