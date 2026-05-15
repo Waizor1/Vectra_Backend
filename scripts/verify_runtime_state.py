@@ -91,6 +91,148 @@ RETRY_ACTIVE_KEY_COLUMNS = ["job_type", "user_id"]
 STATUS_IDENTIFIER_PATTERN = r"(?:\(\s*)*status(?:\s*\))*"
 
 
+# --- Recent-migration table existence guard ---------------------------------
+#
+# 2026-05-15 incident: PR #88 deployed and `apply_migrations.py` logged
+# "Applied migrations: 119_..." plus "Post-migration runtime-state verification
+# passed", but `golden_period_configs` (and the rest of the new tables) were
+# NOT actually present in production. The trigger path is the legacy-tolerant
+# upgrade in `_legacy_tolerant_upgrade` — it silently no-ops the SQL under
+# certain conditions while still writing the "applied" log line.
+#
+# The narrow runtime-schema query above only checks five long-standing tables;
+# anything created by recent migrations is invisible to the verification gate.
+# This guard fixes that by parsing every migration file that landed in the
+# last `MIGRATION_LOOKBACK_COUNT` revisions, extracting the table names from
+# their `CREATE TABLE [IF NOT EXISTS] "name"` statements, and confirming each
+# one actually exists in the runtime schema. Fails closed on missing tables
+# — no more silent no-op deploys.
+
+MIGRATIONS_DIR = ROOT / "migrations" / "models"
+MIGRATION_LOOKBACK_COUNT = 15
+_CREATE_TABLE_RE = re.compile(
+    r'CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?"([a-z_][a-z0-9_]*)"',
+    re.IGNORECASE,
+)
+
+
+def _list_recent_migration_files(
+    migrations_dir: Path = MIGRATIONS_DIR,
+    lookback: int = MIGRATION_LOOKBACK_COUNT,
+) -> list[Path]:
+    """Return the most recent migration files sorted by their numeric prefix.
+
+    Migration files follow the pattern ``<NN>_<YYYYMMDDHHMMSS>_<slug>.py`` —
+    we sort by the integer prefix so the lookback window is stable even when
+    timestamps drift between machines or merge order.
+    """
+    if not migrations_dir.is_dir():
+        return []
+    candidates: list[tuple[int, Path]] = []
+    for path in migrations_dir.glob("*.py"):
+        if path.name == "__init__.py":
+            continue
+        prefix = path.name.split("_", 1)[0]
+        try:
+            order = int(prefix)
+        except ValueError:
+            continue
+        candidates.append((order, path))
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return [path for _, path in candidates[:lookback]]
+
+
+def _extract_table_names_from_migration(path: Path) -> list[str]:
+    """Pull all CREATE TABLE table names out of a migration file.
+
+    The regex matches both ``CREATE TABLE "x"`` and ``CREATE TABLE IF NOT
+    EXISTS "x"`` styles which are the two forms used across the migration
+    history. Names are deduplicated while preserving order so the verification
+    log is stable.
+    """
+    try:
+        source = path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for match in _CREATE_TABLE_RE.finditer(source):
+        name = match.group(1)
+        if name not in seen:
+            seen.add(name)
+            out.append(name)
+    return out
+
+
+async def _verify_recent_migration_tables(
+    conn: asyncpg.Connection,
+    *,
+    runtime_schema: str | None,
+    migrations_dir: Path | None = None,
+    lookback: int | None = None,
+) -> str | None:
+    """Confirm every table from recent migrations actually exists.
+
+    Returns an issue string when any expected table is missing, or ``None``
+    when the schema matches the migration intent. Skipped (returns ``None``)
+    when the runtime schema couldn't be resolved — the runtime-schema check
+    is the prerequisite signal that the DB is reachable at all.
+
+    `migrations_dir` and `lookback` fall back to the module-level constants
+    when not supplied so tests can monkeypatch the module values without
+    re-threading them through ``_collect_issues``.
+    """
+    if runtime_schema is None:
+        return None
+
+    effective_dir = migrations_dir if migrations_dir is not None else MIGRATIONS_DIR
+    effective_lookback = lookback if lookback is not None else MIGRATION_LOOKBACK_COUNT
+
+    recent_files = _list_recent_migration_files(effective_dir, effective_lookback)
+    if not recent_files:
+        # No migration files found locally — this is a packaging issue, not a
+        # silent-no-op deploy. Surface as a separate issue instead of false
+        # success.
+        return (
+            f"No migration files found under {effective_dir} "
+            "(packaging or path resolution issue)."
+        )
+
+    expected: dict[str, str] = {}  # table_name -> origin migration file
+    for path in recent_files:
+        for table in _extract_table_names_from_migration(path):
+            # First-seen wins — older create wins over later ALTER references.
+            expected.setdefault(table, path.name)
+
+    if not expected:
+        return None
+
+    rows = await conn.fetch(
+        """
+        SELECT table_name
+        FROM information_schema.tables
+        WHERE table_schema = $1
+          AND table_name = ANY($2::text[])
+        """,
+        runtime_schema,
+        list(expected.keys()),
+    )
+    present = {str(row["table_name"]) for row in rows}
+
+    missing = [(name, origin) for name, origin in expected.items() if name not in present]
+    if not missing:
+        return None
+
+    formatted = ", ".join(f"{name} (from {origin})" for name, origin in missing)
+    return (
+        f"Recent migrations claim to create tables that are absent from runtime "
+        f"schema {runtime_schema!r}: {formatted}. "
+        f"This usually means apply_migrations.py logged success but the SQL did "
+        f"not actually execute — see scripts/apply_migrations.py "
+        f"_legacy_tolerant_upgrade comment."
+    )
+
+
 def _format_fk_rows(rows: list[dict]) -> str:
     if not rows:
         return "none"
@@ -367,6 +509,12 @@ async def _collect_issues(conn: asyncpg.Connection) -> list[str]:
     index_issue = _build_retry_index_issue([dict(row) for row in index_rows])
     if index_issue:
         issues.append(index_issue)
+
+    migration_tables_issue = await _verify_recent_migration_tables(
+        conn, runtime_schema=runtime_schema
+    )
+    if migration_tables_issue:
+        issues.append(migration_tables_issue)
 
     return issues
 

@@ -14,10 +14,16 @@ class _FakeConnection:
         runtime_schema_rows: list[dict],
         fk_rows: dict[tuple[str, str, str, str, str], list[dict]],
         retry_index_rows: list[dict],
+        present_tables: set[str] | None = None,
     ):
         self._runtime_schema_rows = runtime_schema_rows
         self._fk_rows = fk_rows
         self._retry_index_rows = retry_index_rows
+        # Tables visible to the recent-migration verifier. None = "match every
+        # request" so legacy tests don't have to enumerate them; existing tests
+        # also disable the verifier via monkeypatch so this is mostly a
+        # safety net.
+        self._present_tables = present_tables
 
     async def fetch(self, query: str, *params):
         if "FROM pg_namespace n" in query:
@@ -29,6 +35,17 @@ class _FakeConnection:
 
         if "FROM pg_indexes" in query:
             return self._retry_index_rows
+
+        if "FROM information_schema.tables" in query:
+            requested = list(params[1]) if len(params) >= 2 else []
+            if self._present_tables is None:
+                # Default: pretend every requested table exists.
+                return [{"table_name": name} for name in requested]
+            return [
+                {"table_name": name}
+                for name in requested
+                if name in self._present_tables
+            ]
 
         raise AssertionError(f"Unexpected query in test fake: {query}")
 
@@ -437,3 +454,221 @@ async def test_apply_migrations_skip_runtime_verify_flag(monkeypatch):
 
     await apply_migrations.run(skip_runtime_verify=args.skip_runtime_verify)
     assert called["verify"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Recent-migration table-existence guard
+# ---------------------------------------------------------------------------
+#
+# 2026-05-15 incident root cause: `apply_migrations.py::_legacy_tolerant_upgrade`
+# logged "Applied migrations: 119_..." but the SQL never executed against the
+# real DB (silent no-op). The narrow runtime-schema query was satisfied by the
+# pre-existing core tables, so the deploy went green. The new
+# `_verify_recent_migration_tables` helper closes that gap by walking the last
+# N migration files and confirming every CREATE TABLE landed.
+
+from pathlib import Path  # noqa: E402  (kept local to the new test block)
+
+
+def test_extract_table_names_handles_both_create_table_styles(tmp_path: Path):
+    verifier = _load_module("scripts.verify_runtime_state")
+    fake_migration = tmp_path / "120_dummy.py"
+    fake_migration.write_text(
+        '''
+async def upgrade(db):
+    return """
+        CREATE TABLE "first_table" ("id" SERIAL PRIMARY KEY);
+        CREATE TABLE IF NOT EXISTS "second_table" ("id" SERIAL PRIMARY KEY);
+        ALTER TABLE first_table ADD COLUMN extra INT;
+    """
+'''
+    )
+    names = verifier._extract_table_names_from_migration(fake_migration)
+    assert names == ["first_table", "second_table"]
+
+
+def test_extract_table_names_deduplicates_repeated_creates(tmp_path: Path):
+    verifier = _load_module("scripts.verify_runtime_state")
+    fake = tmp_path / "121_dummy.py"
+    fake.write_text(
+        'CREATE TABLE "shared" (id int);\n'
+        'CREATE TABLE IF NOT EXISTS "shared" (id int);\n'
+    )
+    assert verifier._extract_table_names_from_migration(fake) == ["shared"]
+
+
+def test_extract_table_names_empty_for_missing_or_no_create(tmp_path: Path):
+    verifier = _load_module("scripts.verify_runtime_state")
+    assert verifier._extract_table_names_from_migration(tmp_path / "missing.py") == []
+    only_alters = tmp_path / "only_alters.py"
+    only_alters.write_text("ALTER TABLE x ADD COLUMN y INT;")
+    assert verifier._extract_table_names_from_migration(only_alters) == []
+
+
+def test_list_recent_migration_files_orders_by_numeric_prefix(tmp_path: Path):
+    verifier = _load_module("scripts.verify_runtime_state")
+    for name in [
+        "117_a.py",
+        "118_b.py",
+        "119_c.py",
+        "120_d.py",
+        "__init__.py",
+        "not-a-migration.py",
+    ]:
+        (tmp_path / name).write_text("")
+    paths = verifier._list_recent_migration_files(tmp_path, lookback=3)
+    assert [p.name for p in paths] == ["120_d.py", "119_c.py", "118_b.py"]
+
+
+def test_list_recent_migration_files_handles_missing_directory():
+    verifier = _load_module("scripts.verify_runtime_state")
+    paths = verifier._list_recent_migration_files(Path("/no/such/path"), lookback=5)
+    assert paths == []
+
+
+@pytest.mark.asyncio
+async def test_verify_recent_migration_tables_returns_none_when_all_present(tmp_path: Path):
+    verifier = _load_module("scripts.verify_runtime_state")
+    (tmp_path / "119_create.py").write_text(
+        'CREATE TABLE "alpha" (id int);\nCREATE TABLE IF NOT EXISTS "beta" (id int);'
+    )
+
+    conn = _FakeConnection(
+        runtime_schema_rows=[{"schema_name": "public"}],
+        fk_rows={},
+        retry_index_rows=[],
+        present_tables={"alpha", "beta"},
+    )
+
+    issue = await verifier._verify_recent_migration_tables(
+        conn, runtime_schema="public", migrations_dir=tmp_path, lookback=5
+    )
+    assert issue is None
+
+
+@pytest.mark.asyncio
+async def test_verify_recent_migration_tables_flags_missing(tmp_path: Path):
+    """Reproduces the 2026-05-15 PR #88 incident pattern: migration claims to
+    create golden_period_configs but the SQL never executed."""
+    verifier = _load_module("scripts.verify_runtime_state")
+    (tmp_path / "119_golden_period.py").write_text(
+        'CREATE TABLE IF NOT EXISTS "golden_period_configs" (id int);\n'
+        'CREATE TABLE IF NOT EXISTS "golden_periods" (id int);\n'
+    )
+
+    conn = _FakeConnection(
+        runtime_schema_rows=[{"schema_name": "public"}],
+        fk_rows={},
+        retry_index_rows=[],
+        present_tables=set(),  # Neither table exists in the DB.
+    )
+
+    issue = await verifier._verify_recent_migration_tables(
+        conn, runtime_schema="public", migrations_dir=tmp_path, lookback=5
+    )
+    assert issue is not None
+    assert "golden_period_configs" in issue
+    assert "golden_periods" in issue
+    assert "119_golden_period.py" in issue
+
+
+@pytest.mark.asyncio
+async def test_verify_recent_migration_tables_flags_partial_apply(tmp_path: Path):
+    verifier = _load_module("scripts.verify_runtime_state")
+    (tmp_path / "119_partial.py").write_text(
+        'CREATE TABLE "applied_one" (id int);\nCREATE TABLE "missing_one" (id int);\n'
+    )
+
+    conn = _FakeConnection(
+        runtime_schema_rows=[{"schema_name": "public"}],
+        fk_rows={},
+        retry_index_rows=[],
+        present_tables={"applied_one"},
+    )
+
+    issue = await verifier._verify_recent_migration_tables(
+        conn, runtime_schema="public", migrations_dir=tmp_path, lookback=5
+    )
+    assert issue is not None
+    assert "missing_one" in issue
+    assert "applied_one" not in issue
+
+
+@pytest.mark.asyncio
+async def test_verify_recent_migration_tables_skips_when_runtime_schema_unknown(tmp_path: Path):
+    verifier = _load_module("scripts.verify_runtime_state")
+    (tmp_path / "119_dummy.py").write_text('CREATE TABLE "x" (id int);')
+
+    conn = _FakeConnection(
+        runtime_schema_rows=[],
+        fk_rows={},
+        retry_index_rows=[],
+        present_tables=set(),
+    )
+
+    issue = await verifier._verify_recent_migration_tables(
+        conn, runtime_schema=None, migrations_dir=tmp_path, lookback=5
+    )
+    assert issue is None  # No schema → can't verify; surface only the schema issue.
+
+
+@pytest.mark.asyncio
+async def test_verify_recent_migration_tables_flags_empty_directory(tmp_path: Path):
+    verifier = _load_module("scripts.verify_runtime_state")
+
+    conn = _FakeConnection(
+        runtime_schema_rows=[{"schema_name": "public"}],
+        fk_rows={},
+        retry_index_rows=[],
+    )
+
+    issue = await verifier._verify_recent_migration_tables(
+        conn, runtime_schema="public", migrations_dir=tmp_path, lookback=5
+    )
+    assert issue is not None
+    assert "No migration files found" in issue
+
+
+@pytest.mark.asyncio
+async def test_collect_issues_includes_migration_tables_failure(tmp_path: Path, monkeypatch):
+    """End-to-end: a missing migration table surfaces from _collect_issues
+    (which is what verify_runtime_state actually consumes)."""
+    verifier = _load_module("scripts.verify_runtime_state")
+    migrations_dir = tmp_path / "models"
+    migrations_dir.mkdir()
+    (migrations_dir / "119_create.py").write_text('CREATE TABLE "ghost" (id int);')
+
+    monkeypatch.setattr(verifier, "MIGRATIONS_DIR", migrations_dir)
+
+    conn = _FakeConnection(
+        runtime_schema_rows=[{"schema_name": "public"}],
+        fk_rows={
+            ("active_tariffs", "user_id", "users", "id", "public"): [
+                {"constraint_schema": "public", "constraint_name": "x", "delete_rule": "CASCADE"}
+            ],
+            ("notification_marks", "user_id", "users", "id", "public"): [
+                {"constraint_schema": "public", "constraint_name": "x", "delete_rule": "CASCADE"}
+            ],
+            ("promo_usages", "user_id", "users", "id", "public"): [
+                {"constraint_schema": "public", "constraint_name": "x", "delete_rule": "CASCADE"}
+            ],
+            ("users", "referred_by", "users", "id", "public"): [
+                {"constraint_schema": "public", "constraint_name": "x", "delete_rule": "SET NULL"}
+            ],
+        },
+        retry_index_rows=[
+            {
+                "schemaname": "public",
+                "indexname": "ux_remnawave_retry_jobs_active_user",
+                "indexdef": (
+                    'CREATE UNIQUE INDEX "ux_remnawave_retry_jobs_active_user" '
+                    'ON public."remnawave_retry_jobs" USING btree ("job_type", "user_id") '
+                    "WHERE (\"status\" = ANY (ARRAY['pending'::text, 'processing'::text]))"
+                ),
+            }
+        ],
+        present_tables=set(),  # ghost table is missing
+    )
+
+    issues = await verifier._collect_issues(conn)
+    assert any("ghost" in i for i in issues)
