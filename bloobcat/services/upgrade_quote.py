@@ -188,49 +188,60 @@ def _compute_progressive_full_price(
     original_tariff: Tariffs | None,
     target_device_count: int,
 ) -> tuple[int, float]:
-    """Recompute the snapshot full-period price for `target_device_count` seats.
+    """Compute the full-period price for `target_device_count` seats.
 
-    Mirrors the math in `bloobcat.routes.user._compute_active_tariff_full_price`
-    (kept local here so the service has no cyclic import on the route module).
+    LIVE pricing semantics: when `original_tariff` is present, delegate to
+    `original_tariff.calculate_price()` — the exact same path the regular
+    tariff constructor uses (see `bloobcat/services/tariff_quote.py:227`).
+    This guarantees that:
+      `upgrade_quote.full_price_delta(N→M) == build_subscription_quote(M) − build_subscription_quote(N)`
+
     Returns `(price_rub, multiplier)`.
+
+    Replaces the previous «live base + snapshot multiplier» asymmetry which
+    quoted absurd prices when admin-edited live pricing diverged from the
+    user's snapshot (e.g. ~600₽/device on annual when live multiplier had
+    been lowered since the user's purchase). Cohort protection by snapshot
+    multiplier is deliberately removed — the user now pays today's rate for
+    new seats, identical to what a fresh purchase would cost.
+
+    The snapshot-only path is preserved for the exotic edge where Directus
+    has no matching tariff at all (admin retired every line), so callers
+    can still build a quote without crashing.
     """
     getcontext().prec = 28
 
-    # Fix C — strict snapshot semantics. Use the multiplier the user
-    # actually paid (stored on `active_tariff`) and never silently fall
-    # back to a live `tariff.progressive_multiplier` that an admin may
-    # have edited since purchase. Live fallback is permitted only when
-    # the snapshot is genuinely missing (None), and we log a warning so
-    # we can detect data loss in production.
+    if original_tariff is not None:
+        # Live path — single source of truth for device pricing across the
+        # whole product (purchase / upgrade / webhook snapshot update).
+        price = int(original_tariff.calculate_price(int(target_device_count)))
+        live_multiplier = getattr(original_tariff, "progressive_multiplier", None)
+        if live_multiplier is None:
+            live_multiplier = 0.9
+        return price, float(live_multiplier)
+
+    # Tariff deleted from Directus: reconstruct from the snapshot so the
+    # endpoint still produces a (best-effort) quote rather than 500ing.
     multiplier = getattr(active_tariff, "progressive_multiplier", None)
     if multiplier is None:
         logger.warning(
-            "active_tariff.progressive_multiplier missing — snapshot lost; "
-            "falling back to live tariff (active_tariff_id=%s)",
+            "active_tariff.progressive_multiplier missing AND no live tariff "
+            "available — falling back to default 0.9 (active_tariff_id=%s)",
             getattr(active_tariff, "id", None),
         )
-        if (
-            original_tariff is not None
-            and original_tariff.progressive_multiplier is not None
-        ):
-            multiplier = original_tariff.progressive_multiplier
-        else:
-            multiplier = 0.9
+        multiplier = 0.9
 
-    if original_tariff is not None:
-        base_price = original_tariff.base_price
+    n = max(1, _to_int(getattr(active_tariff, "hwid_limit", 1), 1))
+    if n == 1:
+        base_price = _to_int(active_tariff.price, 0)
     else:
-        n = max(1, _to_int(getattr(active_tariff, "hwid_limit", 1), 1))
-        if n == 1:
-            base_price = _to_int(active_tariff.price, 0)
-        else:
-            denom = 1 - multiplier
-            geom_sum = (1 - (multiplier**n)) / denom if denom != 0 else n
-            base_price = (
-                _to_int(active_tariff.price, 0) / geom_sum
-                if geom_sum > 0
-                else _to_int(active_tariff.price, 0)
-            )
+        denom = 1 - multiplier
+        geom_sum = (1 - (multiplier**n)) / denom if denom != 0 else n
+        base_price = (
+            _to_int(active_tariff.price, 0) / geom_sum
+            if geom_sum > 0
+            else _to_int(active_tariff.price, 0)
+        )
 
     mult_dec = Decimal(str(multiplier))
     base_dec = Decimal(str(base_price))
@@ -240,10 +251,6 @@ def _compute_progressive_full_price(
         total_dec = base_dec
         for k in range(2, target_device_count + 1):
             total_dec += base_dec * (mult_dec ** (k - 1))
-    # Round DOWN here too — keeps the per-axis cost in the customer's
-    # favor (Fix B). Matters when the new full-price math produces a
-    # fractional ruble; truncation guarantees we never charge a kopek
-    # the user did not consent to.
     price_rub = int(total_dec.to_integral_value(rounding=ROUND_DOWN))
     return price_rub, float(multiplier)
 
@@ -380,11 +387,14 @@ async def build_upgrade_bundle_quote(
         errors.append("nothing_to_upgrade")
 
     # ----- price each axis ------------------------------------------------
-    # Devices: reuse the same prorate logic as `_apply_devices_topup_effect`
-    # (see bloobcat/routes/payment.py:3374 and the upstream computation in
-    # bloobcat/routes/user.py:1500-1524). Formula:
-    #   extra_cost = (new_full_price - current_price)
-    #              * (days_remaining + target_extra_days) / total_days_full
+    # Devices: symmetric LIVE pricing — full_price_delta is the delta between
+    # `calculate_price(target)` and `calculate_price(current)` on the live
+    # tariff, exactly matching `build_subscription_quote` (tariff_quote.py:227).
+    # Then prorated over `(days_remaining + extra_days) / total_days_full`.
+    # The previous formula compared a live-base × snapshot-mult `new_full_price`
+    # against the raw `active_tariff.price` snapshot — that asymmetry quoted
+    # absurd prices (e.g. ~600₽/device on annual) when live and snapshot
+    # multipliers diverged.
     device_extra_cost_rub = 0
     device_discount_rub = 0
     device_discount_percent = 0.0
@@ -393,26 +403,24 @@ async def build_upgrade_bundle_quote(
         new_full_price, multiplier = _compute_progressive_full_price(
             active_tariff, original_tariff, target_devices
         )
+        current_full_price, _ = _compute_progressive_full_price(
+            active_tariff, original_tariff, current_devices
+        )
         applies_progressive_discount = (
             multiplier > 0 and multiplier < 1.0 and target_devices > 1
         )
 
-        # Fix D — same calendar-aware day count `pay()` uses. Replaces the
-        # old `months * 30` convention which understated total_days by
-        # ~5 days/year and overcharged the device delta accordingly.
+        # Calendar-aware day count `pay()` uses (replaces fixed `months * 30`
+        # which understated by ~5d/year on annual and overcharged accordingly).
         active_months = _to_int(getattr(active_tariff, "months", 1), 1)
         total_days_full = max(1, compute_total_period_days(active_months, anchor=today))
 
-        # Bug 2 (BE v4): when a user buys +1 device AND +N extra days in the
-        # same upgrade, the new device serves for the FULL window — current
-        # remaining days PLUS extra days. Charging only `days_remaining_now`
-        # leaves the extra-days portion of the device cost unpaid. When
-        # `target_extra_days == 0` this collapses to the original formula.
+        # When a user buys +1 device AND +N extra days in one bundle, the
+        # new device serves for the FULL window (current remaining + extra),
+        # not just current. Collapses to `days_remaining_now` when extra=0.
         total_days_for_device = days_remaining_now + max(0, target_extra_days)
 
-        full_price_delta = max(
-            0, int(new_full_price) - _to_int(getattr(active_tariff, "price", 0), 0)
-        )
+        full_price_delta = max(0, int(new_full_price) - int(current_full_price))
         if total_days_for_device > 0 and full_price_delta > 0:
             getcontext().prec = 28
             extra_cost_dec = (
@@ -420,28 +428,23 @@ async def build_upgrade_bundle_quote(
                 * Decimal(total_days_for_device)
                 / Decimal(total_days_full)
             )
-            # Fix B — ROUND_DOWN to keep the device component in the
-            # customer's favor and symmetric with LTE and period axes.
+            # ROUND_DOWN — keeps the device component in the customer's
+            # favor and symmetric with LTE and period axes.
             device_extra_cost_rub = int(
                 extra_cost_dec.to_integral_value(rounding=ROUND_DOWN)
             )
-        else:
-            device_extra_cost_rub = 0
 
-        # Bug 3 (BE v4): expose the progressive-discount breakdown to the
-        # frontend so we can render «−10% прогрессивная скидка». The linear
-        # baseline is `base_price × target_devices` (no geometric decay) —
-        # the gap to `new_full_price` is the user's saving on the full
-        # period, then prorated over `total_days_for_device` to match the
-        # window we actually charge for.
+        # Progressive-discount breakdown — savings on the ADDED devices only.
+        # Linear baseline = `base_price × device_delta` (what those new seats
+        # would cost without progressive decay). Prorated over the same
+        # window as device_extra_cost_rub so the «−N% прогрессивная скидка»
+        # sub-row is consistent with the parent «+N устройств» row.
         if applies_progressive_discount:
             if original_tariff is not None:
                 base_price = _to_int(
                     getattr(original_tariff, "base_price", 0), 0
                 )
             else:
-                # Same fallback as `_compute_progressive_full_price` —
-                # derive a synthetic base from the snapshot.
                 n = max(
                     1, _to_int(getattr(active_tariff, "hwid_limit", 1), 1)
                 )
@@ -456,8 +459,8 @@ async def build_upgrade_bundle_quote(
                     base_price = int(
                         snapshot_price / geom_sum if geom_sum > 0 else snapshot_price
                     )
-            linear_full_price = int(base_price) * int(target_devices)
-            full_discount = max(0, linear_full_price - int(new_full_price))
+            linear_delta_cost = int(base_price) * int(device_delta)
+            full_discount = max(0, linear_delta_cost - full_price_delta)
             if total_days_for_device > 0 and full_discount > 0:
                 getcontext().prec = 28
                 discount_dec = (
@@ -468,9 +471,9 @@ async def build_upgrade_bundle_quote(
                 device_discount_rub = int(
                     discount_dec.to_integral_value(rounding=ROUND_DOWN)
                 )
-            if linear_full_price > 0:
+            if linear_delta_cost > 0:
                 device_discount_percent = round(
-                    100.0 * full_discount / linear_full_price, 1
+                    100.0 * full_discount / linear_delta_cost, 1
                 )
 
     # LTE: linear in the LIVE price-per-gb from Directus (`Tariffs`). Reason:
