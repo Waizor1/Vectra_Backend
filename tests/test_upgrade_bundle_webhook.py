@@ -965,3 +965,159 @@ async def test_webhook_uses_metadata_price_on_drift(monkeypatch):
     assert "price drift detected" in combined, (
         f"Missing price drift warning. Captured: {warnings}"
     )
+
+
+@pytest.mark.asyncio
+async def test_webhook_persists_optimal_sku_baseline_in_fresh_mode(monkeypatch):
+    """When pricing_mode=fresh_minus_refund, webhook must set active_tariff.months
+    from optimal_sku_months in metadata (Phase 2 contract).
+    """
+    from bloobcat.db.active_tariff import ActiveTariffs
+    from bloobcat.db.payments import ProcessedPayments
+    from bloobcat.db.tariff import Tariffs
+
+    payment_route = _silence_payment_side_effects(monkeypatch)
+
+    user_id = 7_002_001
+    user, active = await _seed_user_with_active_tariff(
+        user_id=user_id, hwid_limit=2, lte_gb_total=10, days_remaining=5, price=150
+    )
+
+    # Seed a 12mo SKU so the webhook can look it up.
+    sku_12mo = await Tariffs.create(
+        id=user_id + 10000,
+        name="12m_prod",
+        months=12,
+        base_price=1299,
+        progressive_multiplier=0.9164,
+        order=4,
+        is_active=True,
+        devices_limit_default=1,
+        devices_limit_family=30,
+        final_price_default=1299,
+        final_price_family=14399,
+        lte_max_gb=500,
+        lte_price_per_gb=1.5,
+        lte_enabled=True,
+    )
+
+    metadata = _build_upgrade_bundle_metadata(
+        user_id=user_id,
+        target_devices=10,
+        target_lte_gb=10,
+        target_extra_days=240,
+        device_delta=8,
+        lte_delta_gb=0,
+        extra_days=240,
+        amount_external=12000.0,
+        current_devices=2,
+        current_lte_gb=10,
+        previous_price=150,
+    )
+    metadata["new_active_tariff_price"] = 14399
+    metadata["new_progressive_multiplier"] = 0.9164
+    # Phase 2 fields.
+    metadata["pricing_mode"] = "fresh_minus_refund"
+    metadata["optimal_sku_months"] = 12
+    metadata["optimal_sku_id"] = sku_12mo.id
+    metadata["new_active_tariff_months"] = 12
+    metadata["optimal_sku_multiplier"] = 0.9164
+
+    payment_id = "platega-upgrade-fresh-mode-01"
+    await ProcessedPayments.create(
+        payment_id=payment_id,
+        provider="platega",
+        user_id=user_id,
+        amount=12000.0,
+        amount_external=12000.0,
+        amount_from_balance=0,
+        status="pending",
+        provider_payload=json.dumps({"metadata": metadata}),
+    )
+
+    body = {
+        "id": payment_id,
+        "status": "CONFIRMED",
+        "amount": 12000.0,
+        "currency": "RUB",
+        "payload": json.dumps({"metadata": metadata}),
+    }
+    request = await _make_platega_request(
+        {"X-MerchantId": "m1", "X-Secret": "s1"}, body
+    )
+    response = await payment_route.platega_webhook(request)
+    assert response == {"status": "ok"}, f"Unexpected response: {response}"
+
+    active_after = await ActiveTariffs.get(id=active.id)
+    # Phase 2: months must be updated to 12 from optimal_sku_months.
+    assert int(active_after.months or 0) == 12, (
+        f"Expected months=12 from fresh mode, got {active_after.months}"
+    )
+    assert int(active_after.price or 0) == 14399
+    assert abs(float(active_after.progressive_multiplier or 0) - 0.9164) < 1e-4
+
+
+@pytest.mark.asyncio
+async def test_webhook_keeps_legacy_baseline_in_legacy_mode(monkeypatch):
+    """When metadata has no pricing_mode (legacy), active_tariff.months must
+    remain unchanged after the webhook (Phase 2 must not apply).
+    """
+    from bloobcat.db.active_tariff import ActiveTariffs
+    from bloobcat.db.payments import ProcessedPayments
+
+    payment_route = _silence_payment_side_effects(monkeypatch)
+
+    user_id = 7_002_002
+    user, active = await _seed_user_with_active_tariff(
+        user_id=user_id, hwid_limit=2, lte_gb_total=10, days_remaining=30, price=600
+    )
+    original_months = int(active.months or 1)
+
+    # Build metadata WITHOUT pricing_mode key (legacy invoice).
+    metadata = _build_upgrade_bundle_metadata(
+        user_id=user_id,
+        target_devices=5,
+        target_lte_gb=10,
+        target_extra_days=0,
+        device_delta=3,
+        lte_delta_gb=0,
+        extra_days=0,
+        amount_external=300.0,
+        current_devices=2,
+        current_lte_gb=10,
+        previous_price=600,
+    )
+    metadata["new_active_tariff_price"] = 900
+    metadata["new_progressive_multiplier"] = 0.9
+    # Deliberately do NOT set pricing_mode, optimal_sku_months, etc.
+
+    payment_id = "platega-upgrade-legacy-mode-01"
+    await ProcessedPayments.create(
+        payment_id=payment_id,
+        provider="platega",
+        user_id=user_id,
+        amount=300.0,
+        amount_external=300.0,
+        amount_from_balance=0,
+        status="pending",
+        provider_payload=json.dumps({"metadata": metadata}),
+    )
+
+    body = {
+        "id": payment_id,
+        "status": "CONFIRMED",
+        "amount": 300.0,
+        "currency": "RUB",
+        "payload": json.dumps({"metadata": metadata}),
+    }
+    request = await _make_platega_request(
+        {"X-MerchantId": "m1", "X-Secret": "s1"}, body
+    )
+    response = await payment_route.platega_webhook(request)
+    assert response == {"status": "ok"}, f"Unexpected response: {response}"
+
+    active_after = await ActiveTariffs.get(id=active.id)
+    # Legacy mode: months must be unchanged (Phase 2 path must not activate).
+    assert int(active_after.months or 0) == original_months, (
+        f"months changed unexpectedly from {original_months} to {active_after.months}"
+    )

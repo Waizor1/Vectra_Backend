@@ -2289,6 +2289,22 @@ async def upgrade_bundle(
         metadata["new_active_tariff_price"] = new_active_tariff_price
     if new_progressive_multiplier is not None:
         metadata["new_progressive_multiplier"] = new_progressive_multiplier
+    # Phase 2 fresh-equivalent: persist optimal SKU details in metadata so the
+    # webhook can update active_tariff.months on CONFIRMED payment.
+    metadata["pricing_mode"] = getattr(quote, "pricing_mode", "delta_legacy_shadow")
+    if getattr(quote, "optimal_sku_id", None) is not None:
+        metadata["optimal_sku_id"] = int(quote.optimal_sku_id)
+    metadata["optimal_sku_months"] = int(getattr(quote, "optimal_sku_months", 0))
+    metadata["new_active_tariff_months"] = int(getattr(quote, "optimal_sku_months", 0))
+    if getattr(quote, "optimal_sku_id", None) is not None:
+        try:
+            _opt_sku = await Tariffs.get_or_none(id=int(quote.optimal_sku_id))
+            if _opt_sku is not None:
+                metadata["optimal_sku_multiplier"] = float(
+                    getattr(_opt_sku, "progressive_multiplier", 0.9) or 0.9
+                )
+        except Exception:
+            pass
     return await _create_external_upgrade_bundle_payment(
         user=user,
         active_tariff=active_tariff,

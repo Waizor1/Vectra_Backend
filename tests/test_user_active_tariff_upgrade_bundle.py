@@ -251,9 +251,11 @@ async def test_quote_devices_only(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_quote_lte_only(monkeypatch):
+    import bloobcat.services.upgrade_quote as _uq
     from bloobcat.routes.user import UpgradeBundleRequest, upgrade_bundle
 
     _silence_side_effects(monkeypatch)
+    monkeypatch.setattr(_uq, "_upgrade_fresh_mode_enabled", lambda: False)
     user, _active, _tariff = await _setup_user_with_active_tariff(
         user_id=9002, balance=10_000, lte_gb_total=10, lte_price_per_gb=5.0
     )
@@ -278,10 +280,12 @@ async def test_quote_lte_only(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_quote_period_only(monkeypatch):
+    import bloobcat.services.upgrade_quote as _uq
     from bloobcat.services.upgrade_quote import compute_total_period_days
     from bloobcat.routes.user import UpgradeBundleRequest, upgrade_bundle
 
     _silence_side_effects(monkeypatch)
+    monkeypatch.setattr(_uq, "_upgrade_fresh_mode_enabled", lambda: False)
     user, _active, _tariff = await _setup_user_with_active_tariff(
         user_id=9003, balance=10_000, price=600, months=1
     )
@@ -458,10 +462,12 @@ async def test_quote_lte_fallback_uses_any_live_tariff_with_lte(monkeypatch):
     rate, not the stale snapshot. This is the failure mode the user reported:
     "видел 2 ₽ вместо 1.5 ₽" after a rename.
     """
+    import bloobcat.services.upgrade_quote as _uq
     from bloobcat.db.tariff import Tariffs
     from bloobcat.routes.user import UpgradeBundleRequest, upgrade_bundle
 
     _silence_side_effects(monkeypatch)
+    monkeypatch.setattr(_uq, "_upgrade_fresh_mode_enabled", lambda: False)
     user, _active, tariff = await _setup_user_with_active_tariff(
         user_id=9021,
         balance=100_000,
@@ -597,10 +603,13 @@ async def test_quote_returns_device_discount_breakdown(monkeypatch):
     and `device_discount_percent` so the frontend can render the
     progressive-discount badge («−10% прогрессивная скидка за 3 устройства»)
     without re-deriving math client-side.
+    In legacy mode the progressive discount fields are populated normally.
     """
+    import bloobcat.services.upgrade_quote as _uq
     from bloobcat.routes.user import UpgradeBundleRequest, upgrade_bundle
 
     _silence_side_effects(monkeypatch)
+    monkeypatch.setattr(_uq, "_upgrade_fresh_mode_enabled", lambda: False)
     user, _active, _tariff = await _setup_user_with_active_tariff(
         user_id=9101,
         balance=100_000,
@@ -1072,11 +1081,15 @@ async def test_upgrade_delta_matches_regular_constructor_delta(monkeypatch):
     cost difference a user would pay if they bought the same device count
     fresh on the regular constructor. Anchors the «match regular constructor»
     contract the user explicitly requested after seeing ~600₽/device.
+    This test pins legacy mode so the delta-math contract stays verifiable
+    independently of fresh-equivalent pricing.
     """
+    import bloobcat.services.upgrade_quote as _uq
     from bloobcat.routes.user import UpgradeBundleRequest, upgrade_bundle
     from bloobcat.services.upgrade_quote import compute_total_period_days
 
     _silence_side_effects(monkeypatch)
+    monkeypatch.setattr(_uq, "_upgrade_fresh_mode_enabled", lambda: False)
 
     # 12-month tariff, user has 2 seats, full year ahead. The snapshot
     # `active_tariff.price` is intentionally left at the fixture default —
@@ -1316,7 +1329,10 @@ async def _setup_four_prod_skus(base_id: int = 80000) -> list:
 class TestShadowMode:
     @pytest.mark.asyncio
     async def test_shadow_fields_present_with_default_zero_when_no_skus(self, monkeypatch):
-        """When DB has no Tariffs at all, shadow fields default to 0/None."""
+        """When DB has no Tariffs at all, shadow fields default to 0/None.
+        In Phase 2 fresh-mode with no SKUs, pricing_mode becomes snapshot_fallback.
+        """
+        import bloobcat.services.upgrade_quote as _uq
         from bloobcat.db.tariff import Tariffs
         from bloobcat.routes.user import UpgradeBundleRequest, upgrade_bundle
 
@@ -1341,7 +1357,8 @@ class TestShadowMode:
         assert result["refund_rub"] == 0
         assert result["optimal_sku_months"] == 0
         assert result["optimal_sku_id"] is None
-        assert result["pricing_mode"] == "delta_legacy_shadow"
+        # Phase 2: no SKU found with fresh mode on → snapshot_fallback
+        assert result["pricing_mode"] == "snapshot_fallback"
 
     @pytest.mark.asyncio
     async def test_shadow_fresh_equivalent_uses_optimal_sku(self, monkeypatch):
@@ -1451,13 +1468,15 @@ class TestShadowMode:
         assert sku.months == 12, f"expected 12mo fallback, got {sku.months}mo"
 
     @pytest.mark.asyncio
-    async def test_shadow_total_unchanged_in_phase_1(self, monkeypatch):
-        """Even when shadow_fresh_total < legacy_total (the unfair case),
-        total_extra_cost_rub MUST still match the legacy sum. Phase 2 flips this.
+    async def test_legacy_total_when_flag_off(self, monkeypatch):
+        """With UPGRADE_PRICING_FRESH_MODE disabled, total_extra_cost_rub must
+        equal the legacy axis sum regardless of shadow fresh values.
         """
+        import bloobcat.services.upgrade_quote as _uq
         from bloobcat.routes.user import UpgradeBundleRequest, upgrade_bundle
 
         _silence_side_effects(monkeypatch)
+        monkeypatch.setattr(_uq, "_upgrade_fresh_mode_enabled", lambda: False)
         user, _active, _tariff = await _setup_user_with_active_tariff(
             user_id=88004,
             balance=50_000,
@@ -1480,7 +1499,7 @@ class TestShadowMode:
             user=user,
         )
 
-        # Legacy sum invariant must hold regardless of shadow values.
+        # Legacy sum invariant must hold when flag is off.
         assert result["total_extra_cost_rub"] == (
             result["device_extra_cost_rub"]
             + result["lte_extra_cost_rub"]
@@ -1491,3 +1510,282 @@ class TestShadowMode:
         assert "refund_rub" in result
         assert "pricing_mode" in result
         assert result["pricing_mode"] == "delta_legacy_shadow"
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: fresh-equivalent pricing tests
+# ---------------------------------------------------------------------------
+
+
+class TestFreshEquivalentMode:
+    """Tests for UPGRADE_PRICING_FRESH_MODE=true (Phase 2 flip)."""
+
+    @pytest.mark.asyncio
+    async def test_pricing_mode_is_fresh_minus_refund(self, monkeypatch):
+        """With flag on and SKUs available, pricing_mode must be fresh_minus_refund."""
+        import bloobcat.services.upgrade_quote as _uq
+        from bloobcat.routes.user import UpgradeBundleRequest, upgrade_bundle
+
+        _silence_side_effects(monkeypatch)
+        monkeypatch.setattr(_uq, "_upgrade_fresh_mode_enabled", lambda: True)
+        user, _active, _tariff = await _setup_user_with_active_tariff(
+            user_id=89001,
+            balance=50_000,
+            hwid_limit=2,
+            lte_gb_total=0,
+            lte_price_per_gb=1.5,
+            days_remaining=5,
+            price=150,
+            months=1,
+        )
+        await _setup_four_prod_skus(base_id=89100)
+
+        result = await upgrade_bundle(
+            payload=UpgradeBundleRequest(
+                target_device_count=30,
+                target_lte_gb=0,
+                target_extra_days=240,
+                dry_run=True,
+            ),
+            user=user,
+        )
+
+        assert result["pricing_mode"] == "fresh_minus_refund"
+
+    @pytest.mark.asyncio
+    async def test_total_equals_fresh_minus_refund(self, monkeypatch):
+        """total_extra_cost_rub == max(0, fresh_equivalent - refund) in Phase 2."""
+        import bloobcat.services.upgrade_quote as _uq
+        from bloobcat.routes.user import UpgradeBundleRequest, upgrade_bundle
+
+        _silence_side_effects(monkeypatch)
+        monkeypatch.setattr(_uq, "_upgrade_fresh_mode_enabled", lambda: True)
+        user, _active, _tariff = await _setup_user_with_active_tariff(
+            user_id=89002,
+            balance=50_000,
+            hwid_limit=2,
+            lte_gb_total=0,
+            lte_price_per_gb=1.5,
+            days_remaining=5,
+            price=150,
+            months=1,
+        )
+        await _setup_four_prod_skus(base_id=89200)
+
+        result = await upgrade_bundle(
+            payload=UpgradeBundleRequest(
+                target_device_count=30,
+                target_lte_gb=0,
+                target_extra_days=240,
+                dry_run=True,
+            ),
+            user=user,
+        )
+
+        assert result["pricing_mode"] == "fresh_minus_refund"
+        expected_total = max(
+            0,
+            result["fresh_equivalent_total_rub"] - result["refund_rub"],
+        )
+        assert result["total_extra_cost_rub"] == expected_total
+
+    @pytest.mark.asyncio
+    async def test_axes_sum_to_total_in_fresh_mode(self, monkeypatch):
+        """device + lte + period axes must always sum to total in fresh mode."""
+        import bloobcat.services.upgrade_quote as _uq
+        from bloobcat.routes.user import UpgradeBundleRequest, upgrade_bundle
+
+        _silence_side_effects(monkeypatch)
+        monkeypatch.setattr(_uq, "_upgrade_fresh_mode_enabled", lambda: True)
+        user, _active, _tariff = await _setup_user_with_active_tariff(
+            user_id=89003,
+            balance=50_000,
+            hwid_limit=2,
+            lte_gb_total=0,
+            lte_price_per_gb=1.5,
+            days_remaining=5,
+            price=150,
+            months=1,
+        )
+        await _setup_four_prod_skus(base_id=89300)
+
+        result = await upgrade_bundle(
+            payload=UpgradeBundleRequest(
+                target_device_count=10,
+                target_lte_gb=20,
+                target_extra_days=60,
+                dry_run=True,
+            ),
+            user=user,
+        )
+
+        assert result["pricing_mode"] == "fresh_minus_refund"
+        axis_sum = (
+            result["device_extra_cost_rub"]
+            + result["lte_extra_cost_rub"]
+            + result["period_extra_cost_rub"]
+        )
+        assert axis_sum == result["total_extra_cost_rub"]
+
+    @pytest.mark.asyncio
+    async def test_zero_delta_stays_zero_in_fresh_mode(self, monkeypatch):
+        """Zero-delta quote (no upgrade on any axis) must remain 0 in fresh mode."""
+        import bloobcat.services.upgrade_quote as _uq
+        from bloobcat.routes.user import UpgradeBundleRequest, upgrade_bundle
+
+        _silence_side_effects(monkeypatch)
+        monkeypatch.setattr(_uq, "_upgrade_fresh_mode_enabled", lambda: True)
+        user, _active, _tariff = await _setup_user_with_active_tariff(
+            user_id=89004,
+            balance=50_000,
+            hwid_limit=2,
+            lte_gb_total=10,
+            lte_price_per_gb=1.5,
+            days_remaining=30,
+            price=150,
+            months=1,
+        )
+        await _setup_four_prod_skus(base_id=89400)
+
+        result = await upgrade_bundle(
+            payload=UpgradeBundleRequest(
+                target_device_count=2,   # same as current — no device delta
+                target_lte_gb=10,        # same as current — no LTE delta
+                target_extra_days=0,     # no period extension
+                dry_run=True,
+            ),
+            user=user,
+        )
+
+        # has_any_upgrade is False → must stay at 0 regardless of flag.
+        assert result["total_extra_cost_rub"] == 0
+        assert result["device_extra_cost_rub"] == 0
+        assert result["lte_extra_cost_rub"] == 0
+        assert result["period_extra_cost_rub"] == 0
+
+    @pytest.mark.asyncio
+    async def test_fresh_mode_lower_than_legacy_for_renewal_upgrade(self, monkeypatch):
+        """For a user close to expiry doing a device upgrade + period extension,
+        fresh-equivalent pricing must be <= legacy delta pricing (the 'fairness'
+        guarantee that drove Phase 2).
+        """
+        import bloobcat.services.upgrade_quote as _uq
+        from bloobcat.routes.user import UpgradeBundleRequest, upgrade_bundle
+
+        _silence_side_effects(monkeypatch)
+        user, _active, _tariff = await _setup_user_with_active_tariff(
+            user_id=89005,
+            balance=50_000,
+            hwid_limit=2,
+            lte_gb_total=0,
+            lte_price_per_gb=1.5,
+            days_remaining=5,
+            price=150,
+            months=1,
+        )
+        await _setup_four_prod_skus(base_id=89500)
+
+        # Get legacy total.
+        monkeypatch.setattr(_uq, "_upgrade_fresh_mode_enabled", lambda: False)
+        legacy_result = await upgrade_bundle(
+            payload=UpgradeBundleRequest(
+                target_device_count=30,
+                target_lte_gb=0,
+                target_extra_days=240,
+                dry_run=True,
+            ),
+            user=user,
+        )
+        legacy_total = legacy_result["total_extra_cost_rub"]
+
+        # Get fresh total.
+        monkeypatch.setattr(_uq, "_upgrade_fresh_mode_enabled", lambda: True)
+        fresh_result = await upgrade_bundle(
+            payload=UpgradeBundleRequest(
+                target_device_count=30,
+                target_lte_gb=0,
+                target_extra_days=240,
+                dry_run=True,
+            ),
+            user=user,
+        )
+        fresh_total = fresh_result["total_extra_cost_rub"]
+
+        # Fresh should be <= legacy for near-expiry + big device + big period upgrade.
+        assert fresh_total <= legacy_total, (
+            f"fresh={fresh_total} > legacy={legacy_total} — fairness contract broken"
+        )
+
+    @pytest.mark.asyncio
+    async def test_progressive_discount_zeroed_in_fresh_mode(self, monkeypatch):
+        """In fresh-equivalent mode applies_progressive_discount must be False
+        since the SKU multiplier is already baked into the fresh price.
+        """
+        import bloobcat.services.upgrade_quote as _uq
+        from bloobcat.routes.user import UpgradeBundleRequest, upgrade_bundle
+
+        _silence_side_effects(monkeypatch)
+        monkeypatch.setattr(_uq, "_upgrade_fresh_mode_enabled", lambda: True)
+        user, _active, _tariff = await _setup_user_with_active_tariff(
+            user_id=89006,
+            balance=50_000,
+            hwid_limit=1,
+            lte_gb_total=0,
+            lte_price_per_gb=1.5,
+            days_remaining=30,
+            price=300,
+            months=1,
+        )
+        await _setup_four_prod_skus(base_id=89600)
+
+        result = await upgrade_bundle(
+            payload=UpgradeBundleRequest(
+                target_device_count=5,
+                target_lte_gb=0,
+                target_extra_days=0,
+                dry_run=True,
+            ),
+            user=user,
+        )
+
+        assert result["pricing_mode"] == "fresh_minus_refund"
+        assert result["applies_progressive_discount"] is False
+        assert result["device_discount_rub"] == 0
+        assert result["device_discount_percent"] == 0.0
+
+    @pytest.mark.asyncio
+    async def test_optimal_sku_fields_populated_in_fresh_mode(self, monkeypatch):
+        """optimal_sku_months and optimal_sku_id must be set in fresh mode."""
+        import bloobcat.services.upgrade_quote as _uq
+        from bloobcat.routes.user import UpgradeBundleRequest, upgrade_bundle
+
+        _silence_side_effects(monkeypatch)
+        monkeypatch.setattr(_uq, "_upgrade_fresh_mode_enabled", lambda: True)
+        user, _active, _tariff = await _setup_user_with_active_tariff(
+            user_id=89007,
+            balance=50_000,
+            hwid_limit=2,
+            lte_gb_total=0,
+            lte_price_per_gb=1.5,
+            days_remaining=5,
+            price=150,
+            months=1,
+        )
+        skus = await _setup_four_prod_skus(base_id=89700)
+
+        result = await upgrade_bundle(
+            payload=UpgradeBundleRequest(
+                target_device_count=10,
+                target_lte_gb=0,
+                target_extra_days=240,
+                dry_run=True,
+            ),
+            user=user,
+        )
+
+        assert result["pricing_mode"] == "fresh_minus_refund"
+        assert result["optimal_sku_months"] > 0
+        assert result["optimal_sku_id"] is not None
+        # The picked SKU id must be one of the seeded SKUs.
+        seeded_ids = {sku.id for sku in skus}
+        assert result["optimal_sku_id"] in seeded_ids

@@ -12,6 +12,7 @@ this module only produces a deterministic, side-effect-free quote dataclass.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, asdict
 from datetime import date
 from decimal import Decimal, ROUND_DOWN, getcontext
@@ -23,6 +24,21 @@ from bloobcat.services.subscription_limits import subscription_devices_max
 from bloobcat.utils.dates import add_months_safe
 
 logger = logging.getLogger(__name__)
+
+
+def _upgrade_fresh_mode_enabled() -> bool:
+    """Return True when Phase 2 fresh-equivalent pricing is active.
+
+    Reads UPGRADE_PRICING_FRESH_MODE env var at call time so the flag can be
+    toggled without restarting the process (instant rollback via env update).
+    Default: enabled (true). Disable with "0", "false", "no", or "off".
+    """
+    return os.environ.get("UPGRADE_PRICING_FRESH_MODE", "true").lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
 
 
 # Hard cap on device topups regardless of tariff: matches the global
@@ -623,34 +639,99 @@ async def build_upgrade_bundle_quote(
         0, device_extra_cost_rub + lte_extra_cost_rub + period_extra_cost_rub
     )
 
-    # Phase 1 SHADOW: compute fresh-equivalent + refund alongside legacy.
-    # total_extra_cost_rub is NOT replaced — user still pays the legacy amount.
-    # These fields are returned for: (a) FE display of "Выгода vs новая покупка"
-    # in Phase 2, (b) shadow logging to validate the new formula on real traffic.
+    # ----- Phase 2: fresh-equivalent pricing + optional flip ----------------
+    # When UPGRADE_PRICING_FRESH_MODE=true (default), the user pays
+    # max(0, fresh_equivalent - refund) instead of the legacy delta sum.
+    # The flag can be toggled at runtime for instant rollback.
+    _fresh_mode_on = _upgrade_fresh_mode_enabled()
+
     target_total_days = max(0, days_remaining_now + max(0, target_extra_days))
     shadow_sku, _shadow_sku_days = await _pick_optimal_sku(active_tariff, target_total_days, today)
     shadow_fresh_total = 0
+    _shadow_devices_share = 0
+    shadow_lte_share = 0
     shadow_refund = 0
     shadow_sku_months = 0
     shadow_sku_id: int | None = None
     if shadow_sku is not None and target_total_days > 0:
-        shadow_fresh_total, _, _ = _compute_fresh_equivalent(
+        shadow_fresh_total, _shadow_devices_share, shadow_lte_share = _compute_fresh_equivalent(
             shadow_sku, target_devices, target_lte_gb, target_total_days, today
         )
         shadow_refund = _compute_refund(active_tariff, days_remaining_now, today)
         shadow_sku_months = int(getattr(shadow_sku, "months", 0) or 0)
         shadow_sku_id = getattr(shadow_sku, "id", None)
 
-    # Shadow log — once per quote, structured for grep + aggregation.
+    # Guard: only flip pricing when the quote has at least one upgrade axis.
+    # Zero-delta quotes must remain at 0 regardless of the flag.
+    has_any_upgrade = device_delta > 0 or lte_delta_gb > 0 or target_extra_days > 0
+
+    pricing_mode_str = "delta_legacy_shadow"
+    legacy_total = total_extra_cost_rub
+
+    if _fresh_mode_on and has_any_upgrade and shadow_sku is not None and target_total_days > 0:
+        # Flip: user pays fresh_equivalent - refund instead of legacy delta.
+        new_total = max(0, int(shadow_fresh_total) - int(shadow_refund))
+
+        # Re-allocate axis breakdown so axes sum to new_total.
+        new_lte = int(shadow_lte_share) if lte_delta_gb > 0 else 0
+        new_lte = min(new_lte, new_total)
+        non_lte_total = max(0, new_total - new_lte)
+
+        has_devices = device_delta > 0
+        has_period = target_extra_days > 0
+        if has_devices and has_period:
+            # Split non-LTE proportionally to legacy device/period ratio.
+            legacy_dev = max(0, int(device_extra_cost_rub))
+            legacy_per = max(0, int(period_extra_cost_rub))
+            legacy_split = legacy_dev + legacy_per
+            if legacy_split > 0:
+                getcontext().prec = 28
+                new_dev = int(
+                    (
+                        Decimal(non_lte_total) * Decimal(legacy_dev) / Decimal(legacy_split)
+                    ).to_integral_value(rounding=ROUND_DOWN)
+                )
+                new_per = max(0, non_lte_total - new_dev)
+            else:
+                new_dev = non_lte_total // 2
+                new_per = non_lte_total - new_dev
+        elif has_devices:
+            new_dev = non_lte_total
+            new_per = 0
+        elif has_period:
+            new_dev = 0
+            new_per = non_lte_total
+        else:
+            new_dev = 0
+            new_per = 0
+
+        device_extra_cost_rub = new_dev
+        period_extra_cost_rub = new_per
+        lte_extra_cost_rub = new_lte
+        total_extra_cost_rub = new_total
+        pricing_mode_str = "fresh_minus_refund"
+        # Progressive discount concept doesn't apply in fresh-equivalent mode —
+        # the SKU already bakes in the right multiplier via fresh pricing.
+        device_discount_rub = 0
+        device_discount_percent = 0.0
+        applies_progressive_discount = False
+
+    elif _fresh_mode_on and has_any_upgrade and shadow_sku is None:
+        # Fresh mode on but no SKU found — fall back to legacy total.
+        pricing_mode_str = "snapshot_fallback"
+
     logger.info(
-        "upgrade_bundle_shadow user_id=%s legacy_total=%d shadow_fresh_total=%d "
-        "shadow_refund=%d shadow_diff=%d shadow_sku_months=%d "
-        "target_devices=%d target_lte_gb=%d target_total_days=%d active_months=%d",
+        "upgrade_bundle_shadow user_id=%s pricing_mode=%s legacy_total=%d "
+        "charged_total=%d shadow_fresh_total=%d shadow_refund=%d shadow_diff=%d "
+        "shadow_sku_months=%d target_devices=%d target_lte_gb=%d "
+        "target_total_days=%d active_months=%d",
         user_id,
+        pricing_mode_str,
+        int(legacy_total),
         int(total_extra_cost_rub),
         int(shadow_fresh_total),
         int(shadow_refund),
-        int(total_extra_cost_rub - max(0, shadow_fresh_total - shadow_refund)),
+        int(legacy_total - max(0, shadow_fresh_total - shadow_refund)),
         int(shadow_sku_months),
         int(target_devices),
         int(target_lte_gb),
@@ -676,5 +757,5 @@ async def build_upgrade_bundle_quote(
         refund_rub=int(shadow_refund),
         optimal_sku_months=int(shadow_sku_months),
         optimal_sku_id=shadow_sku_id,
-        pricing_mode="delta_legacy_shadow",
+        pricing_mode=pricing_mode_str,
     )
