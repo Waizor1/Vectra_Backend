@@ -71,6 +71,14 @@ class UpgradeBundleQuote:
     # NOT required to multiply back to each other.
     device_discount_percent: float
     validation_errors: list[str]
+    # Phase 1 SHADOW fields — new formula result, user is NOT charged yet.
+    # total_extra_cost_rub stays on the legacy delta path.
+    # FE may display "Выгода vs новая покупка" once Phase 2 flips.
+    fresh_equivalent_total_rub: int = 0
+    refund_rub: int = 0
+    optimal_sku_months: int = 0
+    optimal_sku_id: int | None = None
+    pricing_mode: str = "delta_legacy_shadow"
 
     def to_response_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -253,6 +261,88 @@ def _compute_progressive_full_price(
             total_dec += base_dec * (mult_dec ** (k - 1))
     price_rub = int(total_dec.to_integral_value(rounding=ROUND_DOWN))
     return price_rub, float(multiplier)
+
+
+async def _pick_optimal_sku(
+    active_tariff: ActiveTariffs,
+    target_total_days: int,
+    today: date,
+) -> tuple["Tariffs | None", int]:
+    """Smallest SKU whose natural period covers target_total_days.
+
+    Filters Tariffs(lte_enabled=True, is_active=True), ordered by months/order/id.
+    If none cover target_total_days, picks the longest available.
+    Returns (sku, sku_natural_days) or (None, 0) when no SKUs exist.
+    """
+    skus = await Tariffs.filter(lte_enabled=True, is_active=True).order_by(
+        "months", "order", "id"
+    ).all()
+    if not skus:
+        return None, 0
+
+    covering = [s for s in skus if compute_total_period_days(s.months, anchor=today) >= target_total_days]
+    sku = covering[0] if covering else skus[-1]
+    return sku, compute_total_period_days(sku.months, anchor=today)
+
+
+def _compute_fresh_equivalent(
+    sku: "Tariffs",
+    target_devices: int,
+    target_lte_gb: int,
+    target_total_days: int,
+    today: date,
+) -> tuple[int, int, int]:
+    """Returns (total_rub, devices_share_rub, lte_share_rub).
+
+    devices_share = sku.calculate_price(target_devices) × target_total_days / sku_natural_days
+    lte_share = target_lte_gb × sku.lte_price_per_gb if lte_enabled, else 0.
+    All Decimal, ROUND_DOWN.
+    """
+    getcontext().prec = 28
+    sku_natural_days = compute_total_period_days(sku.months, anchor=today)
+    if sku_natural_days <= 0 or target_total_days <= 0:
+        return 0, 0, 0
+
+    device_price = int(sku.calculate_price(int(target_devices)))
+    devices_share_dec = (
+        Decimal(device_price) * Decimal(target_total_days) / Decimal(sku_natural_days)
+    )
+    devices_share = int(devices_share_dec.to_integral_value(rounding=ROUND_DOWN))
+
+    lte_share = 0
+    lte_enabled = getattr(sku, "lte_enabled", False)
+    if lte_enabled and target_lte_gb > 0:
+        lte_price = _to_float(getattr(sku, "lte_price_per_gb", 0.0), 0.0)
+        if lte_price > 0:
+            lte_share = int(
+                Decimal(str(target_lte_gb * lte_price)).to_integral_value(rounding=ROUND_DOWN)
+            )
+
+    return devices_share + lte_share, devices_share, lte_share
+
+
+def _compute_refund(
+    active_tariff: ActiveTariffs,
+    days_remaining: int,
+    today: date,
+) -> int:
+    """Prorated refund: price × days_remaining / total_days_full.
+
+    total_days_full = compute_total_period_days(active_tariff.months, anchor=today).
+    Decimal, ROUND_DOWN. Returns 0 for any degenerate input.
+    """
+    if days_remaining <= 0:
+        return 0
+    price = _to_int(getattr(active_tariff, "price", 0), 0)
+    months = _to_int(getattr(active_tariff, "months", 0), 0)
+    if price <= 0 or months <= 0:
+        return 0
+    total_days = compute_total_period_days(months, anchor=today)
+    if total_days <= 0:
+        return 0
+    getcontext().prec = 28
+    refund_dec = Decimal(price) * Decimal(days_remaining) / Decimal(total_days)
+    return int(refund_dec.to_integral_value(rounding=ROUND_DOWN))
 
 
 async def build_upgrade_bundle_quote(
@@ -533,6 +623,41 @@ async def build_upgrade_bundle_quote(
         0, device_extra_cost_rub + lte_extra_cost_rub + period_extra_cost_rub
     )
 
+    # Phase 1 SHADOW: compute fresh-equivalent + refund alongside legacy.
+    # total_extra_cost_rub is NOT replaced — user still pays the legacy amount.
+    # These fields are returned for: (a) FE display of "Выгода vs новая покупка"
+    # in Phase 2, (b) shadow logging to validate the new formula on real traffic.
+    target_total_days = max(0, days_remaining_now + max(0, target_extra_days))
+    shadow_sku, _shadow_sku_days = await _pick_optimal_sku(active_tariff, target_total_days, today)
+    shadow_fresh_total = 0
+    shadow_refund = 0
+    shadow_sku_months = 0
+    shadow_sku_id: int | None = None
+    if shadow_sku is not None and target_total_days > 0:
+        shadow_fresh_total, _, _ = _compute_fresh_equivalent(
+            shadow_sku, target_devices, target_lte_gb, target_total_days, today
+        )
+        shadow_refund = _compute_refund(active_tariff, days_remaining_now, today)
+        shadow_sku_months = int(getattr(shadow_sku, "months", 0) or 0)
+        shadow_sku_id = getattr(shadow_sku, "id", None)
+
+    # Shadow log — once per quote, structured for grep + aggregation.
+    logger.info(
+        "upgrade_bundle_shadow user_id=%s legacy_total=%d shadow_fresh_total=%d "
+        "shadow_refund=%d shadow_diff=%d shadow_sku_months=%d "
+        "target_devices=%d target_lte_gb=%d target_total_days=%d active_months=%d",
+        user_id,
+        int(total_extra_cost_rub),
+        int(shadow_fresh_total),
+        int(shadow_refund),
+        int(total_extra_cost_rub - max(0, shadow_fresh_total - shadow_refund)),
+        int(shadow_sku_months),
+        int(target_devices),
+        int(target_lte_gb),
+        int(target_total_days),
+        int(getattr(active_tariff, "months", 0) or 0),
+    )
+
     return UpgradeBundleQuote(
         device_delta=int(device_delta),
         lte_delta_gb=int(lte_delta_gb),
@@ -547,4 +672,9 @@ async def build_upgrade_bundle_quote(
         device_discount_rub=int(device_discount_rub),
         device_discount_percent=float(device_discount_percent),
         validation_errors=errors,
+        fresh_equivalent_total_rub=int(shadow_fresh_total),
+        refund_rub=int(shadow_refund),
+        optimal_sku_months=int(shadow_sku_months),
+        optimal_sku_id=shadow_sku_id,
+        pricing_mode="delta_legacy_shadow",
     )

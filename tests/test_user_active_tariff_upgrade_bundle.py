@@ -1268,3 +1268,226 @@ async def test_dry_run_response_includes_is_actionable_flag(monkeypatch):
         user=user,
     )
     assert not_actionable["is_actionable"] is False
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 Shadow mode tests
+# ---------------------------------------------------------------------------
+
+
+async def _setup_four_prod_skus(base_id: int = 80000) -> list:
+    """Seed 4 prod-like SKUs (1mo/3mo/6mo/12mo) with real Vectra pricing.
+
+    Real prod tariffs verified 2026-05-15:
+    - 1mo:  base=150, mult=0.9616, final_price_default=150, final_price_family=2700,  devices_limit_default=1, devices_limit_family=30
+    - 3mo:  base=399, mult=0.9564, default=399,   family=6751, 1/30
+    - 6mo:  base=749, mult=0.9423, default=749,   family=10800, 1/30
+    - 12mo: base=1299, mult=0.9164, default=1299, family=14399, 1/30
+    """
+    from bloobcat.db.tariff import Tariffs
+
+    skus = []
+    for i, (months, base, mult, fpd, fpf) in enumerate([
+        (1,  150,  0.9616, 150,  2700),
+        (3,  399,  0.9564, 399,  6751),
+        (6,  749,  0.9423, 749,  10800),
+        (12, 1299, 0.9164, 1299, 14399),
+    ]):
+        sku = await Tariffs.create(
+            id=base_id + i,
+            name=f"{months}m_prod",
+            months=months,
+            base_price=base,
+            progressive_multiplier=mult,
+            order=i + 1,
+            is_active=True,
+            devices_limit_default=1,
+            devices_limit_family=30,
+            final_price_default=fpd,
+            final_price_family=fpf,
+            lte_max_gb=500,
+            lte_price_per_gb=1.5,
+            lte_enabled=True,
+        )
+        skus.append(sku)
+    return skus
+
+
+class TestShadowMode:
+    @pytest.mark.asyncio
+    async def test_shadow_fields_present_with_default_zero_when_no_skus(self, monkeypatch):
+        """When DB has no Tariffs at all, shadow fields default to 0/None."""
+        from bloobcat.db.tariff import Tariffs
+        from bloobcat.routes.user import UpgradeBundleRequest, upgrade_bundle
+
+        _silence_side_effects(monkeypatch)
+        user, _active, tariff = await _setup_user_with_active_tariff(
+            user_id=88001, balance=50_000, hwid_limit=1, lte_gb_total=0, days_remaining=5
+        )
+        # Wipe all Tariffs so SKU lookup returns nothing.
+        await Tariffs.all().delete()
+
+        result = await upgrade_bundle(
+            payload=UpgradeBundleRequest(
+                target_device_count=3,
+                target_lte_gb=0,
+                target_extra_days=30,
+                dry_run=True,
+            ),
+            user=user,
+        )
+
+        assert result["fresh_equivalent_total_rub"] == 0
+        assert result["refund_rub"] == 0
+        assert result["optimal_sku_months"] == 0
+        assert result["optimal_sku_id"] is None
+        assert result["pricing_mode"] == "delta_legacy_shadow"
+
+    @pytest.mark.asyncio
+    async def test_shadow_fresh_equivalent_uses_optimal_sku(self, monkeypatch):
+        """User on 1mo SKU, 5 days remaining, target +28 devices + 240 days.
+        Assert: optimal_sku_months==12, fresh_equivalent_total_rub>0,
+        refund_rub>0, total_extra_cost_rub UNCHANGED (legacy).
+        """
+        from bloobcat.routes.user import UpgradeBundleRequest, upgrade_bundle
+
+        _silence_side_effects(monkeypatch)
+        # Create user on 1mo tariff with 5 days remaining.
+        user, _active, base_tariff = await _setup_user_with_active_tariff(
+            user_id=88002,
+            balance=50_000,
+            hwid_limit=2,
+            lte_gb_total=0,
+            lte_price_per_gb=1.5,
+            days_remaining=5,
+            price=150,
+            months=1,
+        )
+        skus = await _setup_four_prod_skus(base_id=88100)
+
+        # Get the legacy baseline first.
+        legacy_result = await upgrade_bundle(
+            payload=UpgradeBundleRequest(
+                target_device_count=30,
+                target_lte_gb=0,
+                target_extra_days=240,
+                dry_run=True,
+            ),
+            user=user,
+        )
+
+        assert legacy_result["optimal_sku_months"] == 12, (
+            f"expected optimal_sku_months=12, got {legacy_result['optimal_sku_months']}"
+        )
+        assert legacy_result["fresh_equivalent_total_rub"] > 0
+        assert legacy_result["refund_rub"] > 0
+        # Phase 1: total is still legacy, not changed.
+        assert legacy_result["total_extra_cost_rub"] == (
+            legacy_result["device_extra_cost_rub"]
+            + legacy_result["lte_extra_cost_rub"]
+            + legacy_result["period_extra_cost_rub"]
+        )
+
+    @pytest.mark.asyncio
+    async def test_shadow_refund_prorated_by_days(self, monkeypatch):
+        """active_tariff.price=1200, months=12, days_remaining=half-year → refund≈600."""
+        from datetime import date as date_cls
+        from bloobcat.services.upgrade_quote import _compute_refund, compute_total_period_days
+        from bloobcat.db.active_tariff import ActiveTariffs
+
+        today = date_cls(2026, 1, 15)
+        total_days = compute_total_period_days(12, anchor=today)  # 365
+
+        active = ActiveTariffs.__new__(ActiveTariffs)
+        active.price = 1200
+        active.months = 12
+
+        half = total_days // 2
+        refund = _compute_refund(active, half, today)
+        # ROUND_DOWN: 1200 * 182 / 365 = 598.35... → 598 (or 600 if total_days=360)
+        expected = int((1200 * half) // total_days)
+        assert refund == expected
+        assert refund > 0
+
+    @pytest.mark.asyncio
+    async def test_shadow_picks_smallest_covering_sku(self, monkeypatch):
+        """target_total_days=100 → picks 6mo (covers ~180d, since 3mo≈90d doesn't)."""
+        from datetime import date as date_cls
+        from bloobcat.services.upgrade_quote import _pick_optimal_sku, compute_total_period_days
+        from bloobcat.db.active_tariff import ActiveTariffs
+
+        _silence_side_effects(monkeypatch)
+        await _setup_four_prod_skus(base_id=88200)
+
+        active = ActiveTariffs.__new__(ActiveTariffs)
+        active.months = 1
+
+        today = date_cls(2026, 1, 15)
+        sku, sku_days = await _pick_optimal_sku(active, 100, today)
+
+        assert sku is not None
+        # 3mo from 2026-01-15 = 90 days (Jan→Apr 15), doesn't cover 100.
+        # 6mo from 2026-01-15 = 181 days (Jan→Jul 15), covers 100.
+        assert sku.months == 6, f"expected 6mo, got {sku.months}mo"
+        assert sku_days >= 100
+
+    @pytest.mark.asyncio
+    async def test_shadow_falls_back_to_longest_when_target_exceeds_all(self, monkeypatch):
+        """target_total_days=1000 → picks 12mo (longest available)."""
+        from datetime import date as date_cls
+        from bloobcat.services.upgrade_quote import _pick_optimal_sku
+        from bloobcat.db.active_tariff import ActiveTariffs
+
+        _silence_side_effects(monkeypatch)
+        await _setup_four_prod_skus(base_id=88300)
+
+        active = ActiveTariffs.__new__(ActiveTariffs)
+        active.months = 1
+
+        today = date_cls(2026, 1, 15)
+        sku, _days = await _pick_optimal_sku(active, 1000, today)
+
+        assert sku is not None
+        assert sku.months == 12, f"expected 12mo fallback, got {sku.months}mo"
+
+    @pytest.mark.asyncio
+    async def test_shadow_total_unchanged_in_phase_1(self, monkeypatch):
+        """Even when shadow_fresh_total < legacy_total (the unfair case),
+        total_extra_cost_rub MUST still match the legacy sum. Phase 2 flips this.
+        """
+        from bloobcat.routes.user import UpgradeBundleRequest, upgrade_bundle
+
+        _silence_side_effects(monkeypatch)
+        user, _active, _tariff = await _setup_user_with_active_tariff(
+            user_id=88004,
+            balance=50_000,
+            hwid_limit=2,
+            lte_gb_total=0,
+            lte_price_per_gb=1.5,
+            days_remaining=5,
+            price=150,
+            months=1,
+        )
+        await _setup_four_prod_skus(base_id=88400)
+
+        result = await upgrade_bundle(
+            payload=UpgradeBundleRequest(
+                target_device_count=30,
+                target_lte_gb=0,
+                target_extra_days=240,
+                dry_run=True,
+            ),
+            user=user,
+        )
+
+        # Legacy sum invariant must hold regardless of shadow values.
+        assert result["total_extra_cost_rub"] == (
+            result["device_extra_cost_rub"]
+            + result["lte_extra_cost_rub"]
+            + result["period_extra_cost_rub"]
+        )
+        # Shadow fields are present in response.
+        assert "fresh_equivalent_total_rub" in result
+        assert "refund_rub" in result
+        assert "pricing_mode" in result
+        assert result["pricing_mode"] == "delta_legacy_shadow"
