@@ -180,11 +180,36 @@ SUBSCRIPTION_URL_PENDING_MESSAGE = (
 SUBSCRIPTION_URL_UNAVAILABLE_MESSAGE = (
     "Не удалось получить ключ подключения. Обновите экран или попробуйте позже."
 )
+SUBSCRIPTION_URL_NEEDS_PURCHASE_MESSAGE = (
+    "Триал истёк. Оформите тариф, чтобы получить ключ подключения."
+)
 
 
 async def _resolve_subscription_url_state(
-    user: Users, *, source: str
+    user: Users,
+    *,
+    source: str,
+    effective_expired_at: date | None = None,
 ) -> Dict[str, str | None]:
+    # Caller may pass an explicit effective_expired_at (e.g. owner-based date for
+    # active family members). Fallback: the user's own expired_at.
+    if effective_expired_at is None:
+        raw_expired_at = getattr(user, "expired_at", None)
+        effective_expired_at = normalize_date(raw_expired_at) if raw_expired_at else None
+
+    if not _is_active_subscription(effective_expired_at):
+        logger.debug(
+            "Пользователь {} без активной подписки, нужна покупка ({}).",
+            getattr(user, "id", None),
+            source,
+        )
+        return {
+            "subscription_url": None,
+            "subscription_url_error": SUBSCRIPTION_URL_NEEDS_PURCHASE_MESSAGE,
+            "subscription_url_error_code": "no_active_subscription",
+            "subscription_url_status": "needs_purchase",
+        }
+
     if not user.remnawave_uuid:
         logger.warning(
             "Пользователь {} прошел валидацию, но еще не создан в RemnaWave ({}).",
@@ -274,15 +299,6 @@ async def check(user: Users = Depends(validate)) -> Dict[str, Any]:
         resumed = await resume_frozen_base_if_due(user)
         if resumed:
             user = await Users.get(id=user.id)
-        subscription_url_state = await _resolve_subscription_url_state(
-            user, source="/user"
-        )
-
-        # Получаем стандартные данные пользователя
-        user_data = await User_Pydantic.from_tortoise_orm(user)
-        user_dict = _dump_user_pydantic_compat(user_data)
-        user_dict["has_completed_onboarding"] = _has_completed_onboarding(user)
-        user_dict.update(await get_overlay_payload(user))
 
         # Effective family context for members:
         # - show owner as subscription source
@@ -295,6 +311,33 @@ async def check(user: Users = Depends(validate)) -> Dict[str, Any]:
             status="active",
             allocated_devices__gt=0,
         ).prefetch_related("owner")
+
+        # Subscription URL resolution must honour the effective expiration so an
+        # active family member with their own trial expired still receives a URL
+        # via the owner's active plan rather than being told to purchase.
+        effective_expired_at_for_url = (
+            normalize_date(user.expired_at) if user.expired_at else None
+        )
+        if family_membership and family_membership.owner:
+            owner_expired_at = (
+                normalize_date(family_membership.owner.expired_at)
+                if family_membership.owner.expired_at
+                else None
+            )
+            if _is_active_subscription(owner_expired_at):
+                effective_expired_at_for_url = owner_expired_at
+
+        subscription_url_state = await _resolve_subscription_url_state(
+            user,
+            source="/user",
+            effective_expired_at=effective_expired_at_for_url,
+        )
+
+        # Получаем стандартные данные пользователя
+        user_data = await User_Pydantic.from_tortoise_orm(user)
+        user_dict = _dump_user_pydantic_compat(user_data)
+        user_dict["has_completed_onboarding"] = _has_completed_onboarding(user)
+        user_dict.update(await get_overlay_payload(user))
         if family_membership:
             owner = family_membership.owner
             owner_expired = normalize_date(owner.expired_at)
@@ -1932,6 +1975,12 @@ async def upgrade_bundle(
     active_tariff = await ActiveTariffs.get_or_none(id=user.active_tariff_id)
     if not active_tariff:
         raise HTTPException(status_code=404, detail="Активный тариф не найден")
+    if bool(getattr(user, "is_trial", False)) or bool(
+        getattr(active_tariff, "is_promo_synthetic", False)
+    ):
+        raise HTTPException(
+            status_code=400, detail="Апгрейд доступен только для платной подписки"
+        )
 
     is_family_member = await FamilyMembers.filter(
         member_id=user.id, status="active"
@@ -2037,20 +2086,16 @@ async def upgrade_bundle(
                         update_fields=["hwid_limit", "price", "progressive_multiplier"]
                     )
 
-                # LTE delta — also refresh the price-per-gb snapshot to the
-                # live price the user actually paid. This keeps `active_tariff.
-                # lte_price_per_gb` in sync with what the UI showed at quote
-                # time and matches what backend charged, eliminating the
-                # "UI says 1.5, charged 2" confusion. Snapshot is preserved
-                # only when quote could not resolve a live price.
+                # LTE delta — Bug 1 (BE v4): we do NOT touch
+                # `active_tariff.lte_price_per_gb` anymore. The snapshot is
+                # the original purchase price (audit trail); the quote /
+                # webhook always read the LIVE Directus price for new GB.
+                # Writing the snapshot here historically caused users to
+                # keep seeing the price from their first top-up even after
+                # admin lowered Directus pricing.
                 if quote.lte_delta_gb > 0:
                     active_tariff.lte_gb_total = new_lte_gb_total
-                    lte_save_fields = ["lte_gb_total"]
-                    quoted_price = float(getattr(quote, "lte_price_per_gb", 0.0) or 0.0)
-                    if quoted_price > 0:
-                        active_tariff.lte_price_per_gb = quoted_price
-                        lte_save_fields.append("lte_price_per_gb")
-                    await active_tariff.save(update_fields=lte_save_fields)
+                    await active_tariff.save(update_fields=["lte_gb_total"])
                     user.lte_gb_total = new_lte_gb_total
                     await user.save(update_fields=["lte_gb_total"])
 
@@ -2235,13 +2280,11 @@ async def upgrade_bundle(
         "total_extra_cost_rub": int(total_extra_cost),
         "amount_from_balance": amount_from_balance,
     }
-    # Persist the live LTE price the user saw at invoice time so the
-    # webhook updates active_tariff.lte_price_per_gb to the same value —
-    # any subsequent admin price change won't retroactively confuse the
-    # user's paid receipt.
-    quoted_lte_price = float(getattr(quote, "lte_price_per_gb", 0.0) or 0.0)
-    if quoted_lte_price > 0:
-        metadata["new_lte_price_per_gb"] = quoted_lte_price
+    # Bug 1 (BE v4): we used to persist `new_lte_price_per_gb` here so the
+    # webhook would overwrite `active_tariff.lte_price_per_gb`. That broke
+    # the live-pricing contract — once written, the snapshot became the
+    # floor the user kept seeing. The snapshot is now immutable after the
+    # original purchase; quote+webhook always read live Directus pricing.
     if new_active_tariff_price is not None:
         metadata["new_active_tariff_price"] = new_active_tariff_price
     if new_progressive_multiplier is not None:

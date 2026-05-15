@@ -119,6 +119,7 @@ async def _seed_user_with_active_tariff(
     lte_gb_total: int = 10,
     days_remaining: int = 30,
     price: int = 600,
+    balance: int = 0,
 ):
     from bloobcat.db.active_tariff import ActiveTariffs
     from bloobcat.db.tariff import Tariffs
@@ -140,7 +141,7 @@ async def _seed_user_with_active_tariff(
         id=user_id,
         username=f"user{user_id}",
         full_name=f"User {user_id}",
-        balance=0,
+        balance=balance,
         is_registered=True,
         expired_at=date.today() + timedelta(days=days_remaining),
         hwid_limit=hwid_limit,
@@ -316,11 +317,14 @@ async def test_webhook_applies_all_three_effects(monkeypatch):
     assert int(active_after.price or 0) > 0
     assert active_after.progressive_multiplier is not None
     assert 0 < float(active_after.progressive_multiplier) <= 1.0
-    # v3 invariant: webhook updates lte_price_per_gb snapshot to the live
-    # quote price the user paid (here: 7.5 from metadata override). Without
-    # this, the per-GB display in the UI would forever lag the actual
-    # debited rate.
-    assert float(active_after.lte_price_per_gb) == 7.5
+    # v4 invariant (Bug 1): webhook does NOT rewrite the
+    # `lte_price_per_gb` snapshot anymore. The snapshot is the original
+    # purchase price (audit trail); per-GB display reads the LIVE Directus
+    # price on every quote, not the snapshot. Asserting the snapshot
+    # survived unchanged (5.0 from purchase) is the new contract — the
+    # `new_lte_price_per_gb` metadata key has been retired and is
+    # ignored even if a legacy invoice still carries it.
+    assert float(active_after.lte_price_per_gb) == 5.0
 
     # BLOCKER 2 invariant: scheduler is re-armed at least once for this user.
     # (Users.save() auto-reschedules on expired_at change, AND the webhook
@@ -338,6 +342,87 @@ async def test_webhook_applies_all_three_effects(monkeypatch):
     assert row.effect_applied is True
     assert row.processing_state == "applied"
     assert row.payment_purpose == "upgrade_bundle"
+
+
+@pytest.mark.asyncio
+async def test_webhook_rejects_upgrade_bundle_when_balance_share_is_missing(monkeypatch):
+    """Partial external invoices must not apply entitlements if the balance
+    share recorded at invoice time has already been spent elsewhere.
+    """
+    from bloobcat.db.active_tariff import ActiveTariffs
+    from bloobcat.db.payments import ProcessedPayments
+    from bloobcat.db.users import Users
+
+    payment_route = _silence_payment_side_effects(monkeypatch)
+
+    user_id = 7_001_013
+    user, active = await _seed_user_with_active_tariff(
+        user_id=user_id,
+        hwid_limit=2,
+        lte_gb_total=10,
+        days_remaining=30,
+        price=600,
+        balance=10,
+    )
+    old_expired_at = user.expired_at
+    metadata = _build_upgrade_bundle_metadata(
+        user_id=user_id,
+        target_devices=3,
+        target_lte_gb=15,
+        target_extra_days=7,
+        device_delta=1,
+        lte_delta_gb=5,
+        extra_days=7,
+        amount_external=1.0,
+        current_devices=2,
+        current_lte_gb=10,
+        previous_price=600,
+    )
+    metadata["amount_from_balance"] = 100
+    metadata["new_active_tariff_price"] = 900
+    metadata["new_progressive_multiplier"] = 0.9
+
+    payment_id = "platega-upgrade-bundle-missing-balance-13"
+    await ProcessedPayments.create(
+        payment_id=payment_id,
+        provider="platega",
+        user_id=user_id,
+        amount=101.0,
+        amount_external=1.0,
+        amount_from_balance=100.0,
+        status="pending",
+        provider_payload=json.dumps({"metadata": metadata}),
+    )
+
+    body = {
+        "id": payment_id,
+        "status": "CONFIRMED",
+        "amount": 1.0,
+        "currency": "RUB",
+        "payload": json.dumps({"metadata": metadata}),
+    }
+    request = await _make_platega_request(
+        {"X-MerchantId": "m1", "X-Secret": "s1"}, body
+    )
+    response = await payment_route.platega_webhook(request)
+    assert response in (
+        {"status": "ok"},
+        {"status": "error", "message": "Upgrade bundle effect failed"},
+    )
+
+    user_after = await Users.get(id=user_id)
+    active_after = await ActiveTariffs.get(id=active.id)
+    assert user_after.balance == 10
+    assert user_after.hwid_limit == 2
+    assert user_after.lte_gb_total == 10
+    assert user_after.expired_at == old_expired_at
+    assert int(active_after.hwid_limit or 0) == 2
+    assert int(active_after.lte_gb_total or 0) == 10
+
+    row = await ProcessedPayments.get(payment_id=payment_id)
+    assert row.effect_applied is False
+    assert row.processing_state == "failed"
+    assert "Insufficient bonus balance" in (row.last_error or "")
 
 
 @pytest.mark.asyncio

@@ -57,6 +57,19 @@ class UpgradeBundleQuote:
     # uses this for the per-unit hint so UI matches what backend actually
     # charges — avoiding the "UI says 1.5, charged 2" confusion.
     lte_price_per_gb: float
+    # Bug 3 (BE v4): how many ₽ the user saved relative to the linear
+    # (no-progressive-discount) device price, prorated over the SAME
+    # `(remaining + extra) / total` window that `device_extra_cost_rub`
+    # uses. 0 when device_delta == 0 or multiplier >= 1.0.
+    device_discount_rub: int
+    # Tariff-level discount percentage on the FULL period price (not the
+    # prorated window). It represents the structural saving baked into the
+    # progressive ladder of the chosen tariff — independent of how many days
+    # are left on the current subscription. The frontend renders this as the
+    # «−10%» label next to the prorated `device_discount_rub` amount; the
+    # two intentionally describe different facets (rate vs. money) and are
+    # NOT required to multiply back to each other.
+    device_discount_percent: float
     validation_errors: list[str]
 
     def to_response_dict(self) -> dict[str, Any]:
@@ -268,10 +281,52 @@ async def build_upgrade_bundle_quote(
     target_extra_days = _to_int(target_extra_days, 0)
 
     # ----- look up tariff caps --------------------------------------------
+    # Bug 1 (BE v4): when admin renames a tariff in Directus, the strict
+    # (name, months) lookup misses and we fall through to the historical
+    # snapshot — meaning a user who paid at the old 2 ₽/GB rate keeps
+    # seeing 2 ₽ even after admin dropped the live price to 1.5 ₽. Broaden
+    # the fallback: first try (name, months); if that misses, try any live
+    # tariff matching only `months`; finally any tariff with `lte_enabled`
+    # so the user always sees Directus's current LTE pricing.
+    # Each lookup is `order_by("order", "id")` to make the choice deterministic
+    # across PostgreSQL `vacuum/analyze` cycles. Without explicit ordering the
+    # SQL standard does NOT guarantee row ordering, and `.first()` could swap
+    # the matched row arbitrarily between queries — leading to a user seeing a
+    # different tariff's `lte_price_per_gb` between two refreshes. Stable
+    # ordering also matches how Directus list views surface tariffs to admins.
     original_tariff = await Tariffs.filter(
         name=getattr(active_tariff, "name", None),
         months=getattr(active_tariff, "months", None),
-    ).first()
+    ).order_by("order", "id").first()
+    if original_tariff is None:
+        active_months_for_lookup = getattr(active_tariff, "months", None)
+        if active_months_for_lookup is not None:
+            original_tariff = await Tariffs.filter(
+                months=active_months_for_lookup
+            ).order_by("order", "id").first()
+            if original_tariff is not None:
+                logger.warning(
+                    "upgrade_bundle: original_tariff fallback on months-only — "
+                    "active_tariff name=%r missing in Directus, picked tariff id=%s name=%r "
+                    "(LTE pricing may diverge from user's purchase if multipliers differ)",
+                    getattr(active_tariff, "name", None),
+                    getattr(original_tariff, "id", None),
+                    getattr(original_tariff, "name", None),
+                )
+    if original_tariff is None:
+        original_tariff = await Tariffs.filter(
+            lte_enabled=True
+        ).order_by("order", "id").first()
+        if original_tariff is not None:
+            logger.warning(
+                "upgrade_bundle: original_tariff wide-fallback to ANY lte_enabled tariff "
+                "(active_tariff months=%r,name=%r not found by either lookup) — using id=%s name=%r months=%r",
+                getattr(active_tariff, "months", None),
+                getattr(active_tariff, "name", None),
+                getattr(original_tariff, "id", None),
+                getattr(original_tariff, "name", None),
+                getattr(original_tariff, "months", None),
+            )
 
     devices_cap = subscription_devices_max()
     raw_family_cap = (
@@ -328,8 +383,11 @@ async def build_upgrade_bundle_quote(
     # Devices: reuse the same prorate logic as `_apply_devices_topup_effect`
     # (see bloobcat/routes/payment.py:3374 and the upstream computation in
     # bloobcat/routes/user.py:1500-1524). Formula:
-    #   extra_cost = (new_full_price - current_price) * days_remaining / total_days_full
+    #   extra_cost = (new_full_price - current_price)
+    #              * (days_remaining + target_extra_days) / total_days_full
     device_extra_cost_rub = 0
+    device_discount_rub = 0
+    device_discount_percent = 0.0
     applies_progressive_discount = False
     if device_delta > 0:
         new_full_price, multiplier = _compute_progressive_full_price(
@@ -345,14 +403,21 @@ async def build_upgrade_bundle_quote(
         active_months = _to_int(getattr(active_tariff, "months", 1), 1)
         total_days_full = max(1, compute_total_period_days(active_months, anchor=today))
 
+        # Bug 2 (BE v4): when a user buys +1 device AND +N extra days in the
+        # same upgrade, the new device serves for the FULL window — current
+        # remaining days PLUS extra days. Charging only `days_remaining_now`
+        # leaves the extra-days portion of the device cost unpaid. When
+        # `target_extra_days == 0` this collapses to the original formula.
+        total_days_for_device = days_remaining_now + max(0, target_extra_days)
+
         full_price_delta = max(
             0, int(new_full_price) - _to_int(getattr(active_tariff, "price", 0), 0)
         )
-        if days_remaining_now > 0 and full_price_delta > 0:
+        if total_days_for_device > 0 and full_price_delta > 0:
             getcontext().prec = 28
             extra_cost_dec = (
                 Decimal(full_price_delta)
-                * Decimal(days_remaining_now)
+                * Decimal(total_days_for_device)
                 / Decimal(total_days_full)
             )
             # Fix B — ROUND_DOWN to keep the device component in the
@@ -363,20 +428,64 @@ async def build_upgrade_bundle_quote(
         else:
             device_extra_cost_rub = 0
 
+        # Bug 3 (BE v4): expose the progressive-discount breakdown to the
+        # frontend so we can render «−10% прогрессивная скидка». The linear
+        # baseline is `base_price × target_devices` (no geometric decay) —
+        # the gap to `new_full_price` is the user's saving on the full
+        # period, then prorated over `total_days_for_device` to match the
+        # window we actually charge for.
+        if applies_progressive_discount:
+            if original_tariff is not None:
+                base_price = _to_int(
+                    getattr(original_tariff, "base_price", 0), 0
+                )
+            else:
+                # Same fallback as `_compute_progressive_full_price` —
+                # derive a synthetic base from the snapshot.
+                n = max(
+                    1, _to_int(getattr(active_tariff, "hwid_limit", 1), 1)
+                )
+                snapshot_price = _to_int(getattr(active_tariff, "price", 0), 0)
+                if n == 1:
+                    base_price = snapshot_price
+                else:
+                    denom = 1 - multiplier
+                    geom_sum = (
+                        (1 - (multiplier**n)) / denom if denom != 0 else n
+                    )
+                    base_price = int(
+                        snapshot_price / geom_sum if geom_sum > 0 else snapshot_price
+                    )
+            linear_full_price = int(base_price) * int(target_devices)
+            full_discount = max(0, linear_full_price - int(new_full_price))
+            if total_days_for_device > 0 and full_discount > 0:
+                getcontext().prec = 28
+                discount_dec = (
+                    Decimal(full_discount)
+                    * Decimal(total_days_for_device)
+                    / Decimal(total_days_full)
+                )
+                device_discount_rub = int(
+                    discount_dec.to_integral_value(rounding=ROUND_DOWN)
+                )
+            if linear_full_price > 0:
+                device_discount_percent = round(
+                    100.0 * full_discount / linear_full_price, 1
+                )
+
     # LTE: linear in the LIVE price-per-gb from Directus (`Tariffs`). Reason:
     # user pays today's price for the NEW GB they're buying right now —
-    # consistent with `pay()` for fresh purchases. Snapshot
-    # (`active_tariff.lte_price_per_gb`) is preserved only for fallback when
-    # the original tariff was deleted from Directus.
+    # consistent with `pay()` for fresh purchases.
+    #
+    # Bug 1 (BE v4): we no longer write a new snapshot to
+    # `active_tariff.lte_price_per_gb` on apply (see user.py / payment.py
+    # changes). The snapshot is preserved as the original purchase price for
+    # audit. The fallback when no live tariff exists at all is to read that
+    # snapshot — exotic edge only, since the `original_tariff` lookup above
+    # already widens to "any live tariff with lte_enabled".
     snapshot_lte_price_per_gb = _to_float(
         getattr(active_tariff, "lte_price_per_gb", 0.0), 0.0
     )
-    # Fallback semantics (review M1): snapshot kicks in ONLY when the live
-    # tariff row is missing (admin retired the tariff from Directus). When
-    # the row exists but `lte_price_per_gb=0`, that's the admin intent to
-    # disable LTE for this tariff — DO NOT silently fall back to the
-    # historical snapshot, because the user would otherwise pay yesterday's
-    # price for something we're not selling anymore.
     if original_tariff is not None:
         live_lte_price_per_gb = _to_float(
             getattr(original_tariff, "lte_price_per_gb", 0.0), 0.0
@@ -432,5 +541,7 @@ async def build_upgrade_bundle_quote(
         applies_progressive_discount=bool(applies_progressive_discount),
         daily_rate=float(daily_rate),
         lte_price_per_gb=float(effective_lte_price_per_gb),
+        device_discount_rub=int(device_discount_rub),
+        device_discount_percent=float(device_discount_percent),
         validation_errors=errors,
     )

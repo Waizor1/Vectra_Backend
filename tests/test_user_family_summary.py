@@ -756,7 +756,11 @@ async def test_subscription_url_state_uses_public_pending_message_for_missing_re
     from bloobcat.routes import user as user_module
 
     state = await user_module._resolve_subscription_url_state(
-        types.SimpleNamespace(id=3301, remnawave_uuid=None),
+        types.SimpleNamespace(
+            id=3301,
+            remnawave_uuid=None,
+            expired_at=date.today() + timedelta(days=30),
+        ),
         source="test",
     )
 
@@ -767,6 +771,98 @@ async def test_subscription_url_state_uses_public_pending_message_for_missing_re
         "Аккаунт ещё настраивается. Обычно это занимает несколько секунд."
     )
     assert "Failed to initialize" not in str(state["subscription_url_error"])
+
+
+@pytest.mark.asyncio
+async def test_subscription_url_state_returns_needs_purchase_for_expired_user(monkeypatch):
+    from bloobcat.routes import user as user_module
+
+    sentinel_calls = {"count": 0}
+
+    async def _should_not_be_called(_user):
+        sentinel_calls["count"] += 1
+        return "should-not-reach"
+
+    monkeypatch.setattr(
+        user_module.remnawave_client.users,
+        "get_subscription_url",
+        _should_not_be_called,
+    )
+
+    state = await user_module._resolve_subscription_url_state(
+        types.SimpleNamespace(
+            id=3303,
+            remnawave_uuid="00000000-0000-0000-0000-000000003303",
+            expired_at=date.today() - timedelta(days=1),
+        ),
+        source="test",
+    )
+
+    assert state["subscription_url"] is None
+    assert state["subscription_url_status"] == "needs_purchase"
+    assert state["subscription_url_error_code"] == "no_active_subscription"
+    assert state["subscription_url_error"] == (
+        "Триал истёк. Оформите тариф, чтобы получить ключ подключения."
+    )
+    assert sentinel_calls["count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_subscription_url_state_needs_purchase_when_expired_at_missing(monkeypatch):
+    from bloobcat.routes import user as user_module
+
+    async def _should_not_be_called(_user):
+        raise AssertionError("RemnaWave should not be called when subscription is missing")
+
+    monkeypatch.setattr(
+        user_module.remnawave_client.users,
+        "get_subscription_url",
+        _should_not_be_called,
+    )
+
+    state = await user_module._resolve_subscription_url_state(
+        types.SimpleNamespace(
+            id=3304,
+            remnawave_uuid="00000000-0000-0000-0000-000000003304",
+            expired_at=None,
+        ),
+        source="test",
+    )
+
+    assert state["subscription_url_status"] == "needs_purchase"
+    assert state["subscription_url_error_code"] == "no_active_subscription"
+
+
+@pytest.mark.asyncio
+async def test_subscription_url_state_uses_explicit_effective_expired_at_for_family_member(
+    monkeypatch,
+):
+    from bloobcat.routes import user as user_module
+
+    async def _ready_subscription_url(_user):
+        return "https://example.invalid/family-key"
+
+    monkeypatch.setattr(
+        user_module.remnawave_client.users,
+        "get_subscription_url",
+        _ready_subscription_url,
+    )
+
+    # Member with own trial expired, but owner has an active plan in the future.
+    state = await user_module._resolve_subscription_url_state(
+        types.SimpleNamespace(
+            id=3305,
+            remnawave_uuid="00000000-0000-0000-0000-000000003305",
+            expired_at=date.today() - timedelta(days=5),
+        ),
+        source="test",
+        effective_expired_at=date.today() + timedelta(days=20),
+    )
+
+    assert state["subscription_url"] == "https://example.invalid/family-key"
+    assert state["subscription_url_status"] == "ready"
+    assert state["subscription_url_error"] is None
+    assert state["subscription_url_error_code"] is None
 
 
 @pytest.mark.asyncio
@@ -837,6 +933,7 @@ async def test_subscription_url_state_hides_backend_exception_text(monkeypatch):
         types.SimpleNamespace(
             id=3302,
             remnawave_uuid="00000000-0000-0000-0000-000000003302",
+            expired_at=date.today() + timedelta(days=30),
         ),
         source="test",
     )

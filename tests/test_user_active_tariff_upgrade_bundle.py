@@ -104,6 +104,8 @@ async def _setup_user_with_active_tariff(
     days_remaining: int = 20,
     price: int = 600,
     months: int = 1,
+    is_trial: bool = False,
+    is_promo_synthetic: bool = False,
 ):
     from bloobcat.db.active_tariff import ActiveTariffs
     from bloobcat.db.tariff import Tariffs
@@ -132,6 +134,7 @@ async def _setup_user_with_active_tariff(
         hwid_limit=hwid_limit,
         lte_gb_total=lte_gb_total,
         expired_at=today + timedelta(days=days_remaining),
+        is_trial=is_trial,
     )
 
     active = await ActiveTariffs.create(
@@ -143,6 +146,7 @@ async def _setup_user_with_active_tariff(
         lte_gb_total=lte_gb_total,
         lte_price_per_gb=lte_price_per_gb,
         progressive_multiplier=0.9,
+        is_promo_synthetic=is_promo_synthetic,
         user_id=user.id,
     )
 
@@ -446,18 +450,74 @@ async def test_quote_lte_uses_live_price_not_snapshot(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_quote_lte_falls_back_to_snapshot_when_tariff_missing(monkeypatch):
-    """When the original Tariffs row was deleted from Directus (exotic
-    edge — admin retired a tariff but a user still has an active subscription
-    of it), fall back to the snapshot price so we don't crash the quote."""
+async def test_quote_lte_fallback_uses_any_live_tariff_with_lte(monkeypatch):
+    """Bug 1 (BE v4): when the strict (name, months) lookup misses — e.g.
+    admin renamed a tariff in Directus, leaving the user's snapshot pointing
+    at a now-nonexistent line — the quote MUST broaden the search to "any
+    live tariff with lte_enabled" so the user sees the current Directus LTE
+    rate, not the stale snapshot. This is the failure mode the user reported:
+    "видел 2 ₽ вместо 1.5 ₽" after a rename.
+    """
     from bloobcat.db.tariff import Tariffs
     from bloobcat.routes.user import UpgradeBundleRequest, upgrade_bundle
 
     _silence_side_effects(monkeypatch)
     user, _active, tariff = await _setup_user_with_active_tariff(
-        user_id=9021, balance=100_000, lte_gb_total=10, lte_price_per_gb=3.0
+        user_id=9021,
+        balance=100_000,
+        lte_gb_total=10,
+        # Snapshot price the user paid at purchase: 2.0 ₽/ГБ.
+        lte_price_per_gb=2.0,
     )
-    # Simulate the live tariff being removed.
+    # Admin renamed the original tariff (so name+months lookup misses) AND
+    # dropped Directus LTE to 1.5. We seed a different tariff line that
+    # still has lte_enabled — fallback should land on it.
+    await Tariffs.filter(id=tariff.id).delete()
+    await Tariffs.create(
+        id=99021,
+        name="1m-renamed",
+        months=2,  # different months too, to avoid the second-stage fallback
+        base_price=300,
+        progressive_multiplier=0.9,
+        order=2,
+        devices_limit_family=30,
+        lte_max_gb=500,
+        lte_price_per_gb=1.5,
+        lte_enabled=True,
+    )
+
+    payload = UpgradeBundleRequest(
+        target_device_count=2,
+        target_lte_gb=15,
+        target_extra_days=0,
+        dry_run=True,
+    )
+    result = await upgrade_bundle(payload=payload, user=user)
+
+    assert result["status"] == "quote"
+    # Live fallback price (1.5) × 5 = 7 (ROUND_DOWN of 7.5) — NOT snapshot
+    # 2.0 × 5 = 10. This proves the fallback escaped the snapshot.
+    assert result["lte_price_per_gb"] == 1.5
+    assert result["lte_extra_cost_rub"] == 7
+
+
+@pytest.mark.asyncio
+async def test_quote_lte_falls_back_to_snapshot_when_no_live_tariff_with_lte(monkeypatch):
+    """Final fallback (Bug 1, BE v4): if NO live tariff with lte_enabled
+    exists at all (extreme exotic edge — admin retired every tariff or
+    disabled LTE everywhere), the quote falls back to the historical
+    snapshot price so we don't crash. This is the only path where
+    `lte_price_per_gb` reads from `active_tariff.lte_price_per_gb`.
+    """
+    from bloobcat.db.tariff import Tariffs
+    from bloobcat.routes.user import UpgradeBundleRequest, upgrade_bundle
+
+    _silence_side_effects(monkeypatch)
+    user, _active, tariff = await _setup_user_with_active_tariff(
+        user_id=90211, balance=100_000, lte_gb_total=10, lte_price_per_gb=3.0
+    )
+    # Wipe every Tariffs row — both the name+months match AND the
+    # broadened lte_enabled fallback now miss.
     await Tariffs.filter(id=tariff.id).delete()
 
     payload = UpgradeBundleRequest(
@@ -472,6 +532,127 @@ async def test_quote_lte_falls_back_to_snapshot_when_tariff_missing(monkeypatch)
     # snapshot 3.0 × 5 = 15
     assert result["lte_extra_cost_rub"] == 15
     assert result["lte_price_per_gb"] == 3.0
+
+
+@pytest.mark.asyncio
+async def test_device_cost_includes_extra_days(monkeypatch):
+    """Bug 2 (BE v4): when a user upgrades +1 device AND +N extra days in
+    one bundle, the new device serves for the FULL window (days_remaining
+    + extra_days), not just the current remaining days. Charging only
+    `days_remaining_now` left the extra-days portion of the device cost
+    unpaid. This test asserts combined > devices-only at the same
+    device_delta — the only way that holds is if extra_days widened
+    the prorated window for the device axis.
+    """
+    from bloobcat.routes.user import UpgradeBundleRequest, upgrade_bundle
+
+    _silence_side_effects(monkeypatch)
+    # 12-month tariff (base_price=300, multiplier=0.9 from fixture →
+    # geometric sum for 2 seats = 570, for 3 seats = 813). 100 days
+    # remaining out of ~365. With +1 device:
+    #   devices_only: device cost ∝ (813-570) × 100 / 365
+    #   combined +30 days: device cost ∝ (813-570) × 130 / 365 → strictly larger.
+    # The price=570 keeps the snapshot consistent with the geometric sum,
+    # avoiding a negative full_price_delta that would zero out both quotes.
+    user, _active, _tariff = await _setup_user_with_active_tariff(
+        user_id=9100,
+        balance=100_000,
+        hwid_limit=2,
+        days_remaining=100,
+        price=570,
+        months=12,
+    )
+
+    devices_only = await upgrade_bundle(
+        payload=UpgradeBundleRequest(
+            target_device_count=3,
+            target_lte_gb=10,
+            target_extra_days=0,
+            dry_run=True,
+        ),
+        user=user,
+    )
+    combined = await upgrade_bundle(
+        payload=UpgradeBundleRequest(
+            target_device_count=3,
+            target_lte_gb=10,
+            target_extra_days=30,
+            dry_run=True,
+        ),
+        user=user,
+    )
+
+    assert devices_only["status"] == "quote"
+    assert combined["status"] == "quote"
+    assert devices_only["device_delta"] == 1
+    assert combined["device_delta"] == 1
+    # Same device_delta, but combined paid for a longer window for the
+    # new device → strictly larger device extra cost.
+    assert combined["device_extra_cost_rub"] > devices_only["device_extra_cost_rub"]
+
+
+@pytest.mark.asyncio
+async def test_quote_returns_device_discount_breakdown(monkeypatch):
+    """Bug 3 (BE v4): quote response must include `device_discount_rub`
+    and `device_discount_percent` so the frontend can render the
+    progressive-discount badge («−10% прогрессивная скидка за 3 устройства»)
+    without re-deriving math client-side.
+    """
+    from bloobcat.routes.user import UpgradeBundleRequest, upgrade_bundle
+
+    _silence_side_effects(monkeypatch)
+    user, _active, _tariff = await _setup_user_with_active_tariff(
+        user_id=9101,
+        balance=100_000,
+        hwid_limit=1,
+        days_remaining=30,
+        price=300,
+        months=1,
+    )
+
+    payload = UpgradeBundleRequest(
+        target_device_count=3,
+        target_lte_gb=10,
+        target_extra_days=0,
+        dry_run=True,
+    )
+    result = await upgrade_bundle(payload=payload, user=user)
+
+    assert result["status"] == "quote"
+    assert result["applies_progressive_discount"] is True
+    assert result["device_discount_rub"] > 0
+    assert 0 < result["device_discount_percent"] <= 100
+
+
+@pytest.mark.asyncio
+async def test_quote_no_discount_when_single_device(monkeypatch):
+    """Discount breakdown stays zeroed when only one seat is requested —
+    no progressive multiplier applies, so the badge must not render.
+    """
+    from bloobcat.routes.user import UpgradeBundleRequest, upgrade_bundle
+
+    _silence_side_effects(monkeypatch)
+    user, _active, _tariff = await _setup_user_with_active_tariff(
+        user_id=9102,
+        balance=100_000,
+        hwid_limit=1,
+        days_remaining=30,
+        price=300,
+        months=1,
+    )
+
+    payload = UpgradeBundleRequest(
+        target_device_count=1,  # same as current — no device delta
+        target_lte_gb=15,  # only LTE changes
+        target_extra_days=0,
+        dry_run=True,
+    )
+    result = await upgrade_bundle(payload=payload, user=user)
+
+    assert result["status"] == "quote"
+    assert result["applies_progressive_discount"] is False
+    assert result["device_discount_rub"] == 0
+    assert result["device_discount_percent"] == 0.0
 
 
 @pytest.mark.asyncio
@@ -737,6 +918,39 @@ async def test_family_member_cannot_upgrade(monkeypatch):
         assert exc_info.value.status_code == 403
     finally:
         StubFM._next_value = False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("is_trial", "is_promo_synthetic"),
+    [
+        (True, False),
+        (False, True),
+    ],
+)
+async def test_freebie_subscription_cannot_upgrade_bundle(
+    monkeypatch, is_trial, is_promo_synthetic
+):
+    from bloobcat.routes.user import UpgradeBundleRequest, upgrade_bundle
+
+    _silence_side_effects(monkeypatch)
+    user, _active, _tariff = await _setup_user_with_active_tariff(
+        user_id=9106 + int(is_promo_synthetic),
+        balance=10_000,
+        is_trial=is_trial,
+        is_promo_synthetic=is_promo_synthetic,
+    )
+
+    payload = UpgradeBundleRequest(
+        target_device_count=3,
+        target_lte_gb=10,
+        target_extra_days=0,
+        dry_run=False,
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        await upgrade_bundle(payload=payload, user=user)
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "Апгрейд доступен только для платной подписки"
 
 
 @pytest.mark.asyncio
