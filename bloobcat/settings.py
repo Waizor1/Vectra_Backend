@@ -374,6 +374,19 @@ class AppSettings(BaseSettings):
     device_per_user_enabled_for_new_users: bool = False
     temp_setup_site_public_base_url: str | None = None
 
+    # Reverse Trial (PR2 of referral v2): grants 7 days of full-feature access
+    # to brand new users instead of the legacy 1-GB free-trial state. Disabled
+    # by default — enable in production only after the FE banners + downgrade
+    # modal land. See bloobcat/services/reverse_trial.py for the full lifecycle.
+    reverse_trial_enabled: bool = False
+    reverse_trial_days: int = 7
+    reverse_trial_discount_percent: int = 50
+    reverse_trial_discount_ttl_days: int = 14
+    # When empty, the service picks the highest-priced active Tariff at
+    # runtime. Override with a tariff name (e.g. "premium_12m") to pin a
+    # specific SKU regardless of price ranking.
+    reverse_trial_tariff_sku: str = ""
+
 
 app_settings = AppSettings()
 
