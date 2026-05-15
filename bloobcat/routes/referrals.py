@@ -15,6 +15,8 @@ from bloobcat.services.home_screen_rewards import (
     HOME_SCREEN_DISCOUNT_PERCENT,
     HOME_SCREEN_DISCOUNT_TTL_DAYS,
     claim_home_screen_reward,
+    repair_home_screen_reward,
+    scan_home_screen_orphans,
 )
 from bloobcat.services.referral_gamification import (
     build_referral_status,
@@ -161,6 +163,80 @@ async def home_screen_claim(
         platform_hint=payload.platform_hint,
     )
     return HomeScreenClaimResponse(**result)
+
+
+# ── Self-serve repair: "my bonus didn't arrive" ───────────────────────
+# The frontend exposes this behind a CTA on `HomeScreenInstallCard` /
+# `PwaInstalledRewardModal` when a user has the local "claimed" gate set
+# but `/my-rewards` shows no install-discount and no recent balance
+# bump. Calling this either confirms the bonus IS there (frontend
+# reconciles its local gate) or detects an orphan and clears the flag
+# so the user can retry the regular claim flow.
+#
+# Safety: clear-mode only. Credit-mode requires admin context
+# (`/admin/integration/users/{id}/home-screen-reward/repair`) so an
+# adversary can't spam this for free balance.
+
+
+class HomeScreenRepairResponse(BaseModel):
+    repaired: bool
+    state: Literal[
+        "no_claim", "consistent", "cleared_orphan_can_retry"
+    ]
+    has_install_discount: bool
+    granted_at: Optional[str] = None
+
+
+@router.post(
+    "/home-screen-claim/repair", response_model=HomeScreenRepairResponse
+)
+async def home_screen_claim_repair(
+    user: Users = Depends(validate),
+) -> HomeScreenRepairResponse:
+    user_id = int(user.id)
+    orphans = await scan_home_screen_orphans(user_id=user_id, limit=1)
+    if not orphans:
+        # Two sub-cases: never claimed (flag NULL) vs claimed and consistent.
+        granted = getattr(user, "home_screen_reward_granted_at", None)
+        if granted is None:
+            return HomeScreenRepairResponse(
+                repaired=False,
+                state="no_claim",
+                has_install_discount=False,
+                granted_at=None,
+            )
+        # Flag set and discount row exists (or balance variant — no
+        # orphan possible for balance because the original UPDATE was
+        # atomic). State is already consistent; frontend should re-fetch
+        # /my-rewards to surface the actual reward.
+        from bloobcat.db.discounts import PersonalDiscount
+
+        has_discount = await PersonalDiscount.filter(
+            user_id=user_id, source="home_screen_install"
+        ).exists()
+        return HomeScreenRepairResponse(
+            repaired=False,
+            state="consistent",
+            has_install_discount=bool(has_discount),
+            granted_at=granted.isoformat() if granted else None,
+        )
+
+    # Orphan confirmed: discount-kind claim with the flag set but no
+    # PersonalDiscount row. Clear the flag so the user can retry.
+    result = await repair_home_screen_reward(
+        user_id=user_id, mode="clear", actor="self-serve",
+    )
+    logger.warning(
+        "home-screen self-serve repair (clear): user=%s before=%s",
+        user_id,
+        result["before"],
+    )
+    return HomeScreenRepairResponse(
+        repaired=True,
+        state="cleared_orphan_can_retry",
+        has_install_discount=False,
+        granted_at=None,
+    )
 
 
 # ── Story-share payload ────────────────────────────────────────────────

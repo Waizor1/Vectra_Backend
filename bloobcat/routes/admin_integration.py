@@ -201,3 +201,85 @@ async def push_broadcast(payload: PushBroadcastPayload):
         icon=payload.icon,
     )
     return {"ok": True, "result": result}
+
+
+# ── Home-screen install reward: orphan repair ──────────────────────────
+# Frontend `HomeScreenInstallCard` and `PwaInstalledRewardModal` flip
+# `users.home_screen_reward_granted_at` after `POST /referrals/home-screen-claim`
+# succeeds. The pre-1.79.0 discount path could leave the flag set without a
+# `PersonalDiscount(source='home_screen_install')` row when create()
+# raised post-commit. This endpoint (and `scripts/repair_home_screen_orphans.py`)
+# is the operational tool to detect and repair those stuck states without
+# manual SQL.
+
+
+class HomeScreenRewardRepairPayload(BaseModel):
+    mode: Literal["clear", "credit"] = Field(
+        ...,
+        description=(
+            "clear: drop home_screen_reward_granted_at so user can retry; "
+            "credit: deliver the reward now (reward_kind required)"
+        ),
+    )
+    reward_kind: Optional[Literal["balance", "discount"]] = Field(
+        default=None,
+        description="Required for mode=credit. balance forces +50 ₽; discount creates a PersonalDiscount row if absent.",
+    )
+    actor: Optional[str] = Field(
+        default=None,
+        max_length=128,
+        description="Free-text actor identifier for the audit log (admin email, script name).",
+    )
+
+
+class HomeScreenOrphanScanResponse(BaseModel):
+    orphans: list[dict]
+    scanned_user_id: Optional[int] = None
+    total: int
+
+
+@router.get(
+    "/home-screen-rewards/orphans",
+    dependencies=[Depends(require_admin_integration_token)],
+)
+async def list_home_screen_orphans(
+    user_id: Optional[int] = None,
+    limit: int = 200,
+    include_balance_suspects: bool = False,
+) -> HomeScreenOrphanScanResponse:
+    from bloobcat.services.home_screen_rewards import scan_home_screen_orphans
+
+    orphans = await scan_home_screen_orphans(
+        user_id=user_id,
+        limit=max(1, min(int(limit or 200), 1000)),
+        include_balance_suspects=include_balance_suspects,
+    )
+    return HomeScreenOrphanScanResponse(
+        orphans=list(orphans),
+        scanned_user_id=user_id,
+        total=len(orphans),
+    )
+
+
+@router.post(
+    "/users/{user_id}/home-screen-reward/repair",
+    dependencies=[Depends(require_admin_integration_token)],
+)
+async def repair_home_screen_reward_endpoint(
+    user_id: int,
+    payload: HomeScreenRewardRepairPayload,
+):
+    from bloobcat.services.home_screen_rewards import repair_home_screen_reward
+
+    try:
+        result = await repair_home_screen_reward(
+            user_id=int(user_id),
+            mode=payload.mode,
+            reward_kind=payload.reward_kind,
+            actor=payload.actor,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from exc
+    return {"ok": True, "result": result}
