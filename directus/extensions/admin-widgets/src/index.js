@@ -726,8 +726,18 @@ export default function registerEndpoint(router, { database }) {
       const asInt = isInt ? queryRaw : null; // pass as string to dodge BigInt JS limits
 
       // Hit 1: users.email ILIKE q  (and numeric id exact-match shortcut).
+      // `id::text` keeps the value as a string in JS regardless of how
+      // pg-types is configured — web user ids reach ~9e15 (within
+      // Number.MAX_SAFE_INTEGER but barely), so we never round-trip the
+      // primary key through Number on the response or the sort key below.
       const usersByEmail = await database("users")
-        .select("id", "username", "full_name", "email", "registration_date")
+        .select(
+          database.raw("id::text AS id"),
+          "username",
+          "full_name",
+          "email",
+          "registration_date",
+        )
         .limit(limit)
         .orderBy("registration_date", "desc")
         .where((inner) => {
@@ -740,7 +750,7 @@ export default function registerEndpoint(router, { database }) {
         ? await database("auth_identities AS ai")
             .innerJoin("users AS u", "u.id", "ai.user_id")
             .select(
-              "u.id AS id",
+              database.raw("u.id::text AS id"),
               "u.username AS username",
               "u.full_name AS full_name",
               "u.email AS email",
@@ -759,11 +769,13 @@ export default function registerEndpoint(router, { database }) {
       // canonical user.email — keep both.
       const merged = new Map();
       const remember = (row, providerInfo) => {
+        // `row.id` is a string here (see `id::text` in the SELECTs above),
+        // so this Map key and the user_id payload below are always exact.
         const key = String(row.id);
         if (!merged.has(key)) {
           merged.set(key, {
-            user_id: row.id, // BigInt-safe: knex returns Number for int8 in pg ≤ JS_MAX
-            user_id_str: String(row.id),
+            user_id: row.id,
+            user_id_str: row.id,
             username: row.username ?? null,
             full_name: row.full_name ?? null,
             email: row.email ?? null,
@@ -815,10 +827,15 @@ export default function registerEndpoint(router, { database }) {
       // Telegram ids live in [1, 8e15); web/OAuth ids live in [8e15, ~9e15].
       // Show telegram users first (they're typically the long-tenured core
       // users), then web. Within each bucket, newest registration first.
-      const WEB_FLOOR = 8_000_000_000_000_000;
+      // `user_id` is a decimal string here — compare by length first
+      // (shorter == smaller for non-negative decimals), then lexicographically
+      // for ties. Avoids any Number() coercion at the safe-int boundary.
+      const WEB_FLOOR = "8000000000000000";
+      const isWebId = (id) =>
+        id.length > WEB_FLOOR.length || (id.length === WEB_FLOOR.length && id >= WEB_FLOOR);
       const matches = Array.from(merged.values()).sort((a, b) => {
-        const aWeb = Number(a.user_id) >= WEB_FLOOR ? 1 : 0;
-        const bWeb = Number(b.user_id) >= WEB_FLOOR ? 1 : 0;
+        const aWeb = isWebId(a.user_id) ? 1 : 0;
+        const bWeb = isWebId(b.user_id) ? 1 : 0;
         if (aWeb !== bWeb) return aWeb - bWeb;
         const aT = a.registration_date ? new Date(a.registration_date).getTime() : 0;
         const bT = b.registration_date ? new Date(b.registration_date).getTime() : 0;
