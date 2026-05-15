@@ -385,9 +385,24 @@ def install_stubs() -> Callable[[], None]:
     async def reset_user_failed_count(*args, **kwargs):
         return True
 
+    def _coerce_user_id(value, *, caller="stub"):
+        """Stub mirror of bloobcat.bot.error_handler._coerce_user_id.
+        Real version is in bloobcat/bot/error_handler.py — this just keeps the
+        test isolation pattern from breaking when other tests import it."""
+        if isinstance(value, int):
+            return value
+        fallback_id = getattr(value, "id", None)
+        if isinstance(fallback_id, int):
+            return fallback_id
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
     error_handler_mod.handle_telegram_forbidden_error = handle_telegram_forbidden_error
     error_handler_mod.handle_telegram_bad_request = handle_telegram_bad_request
     error_handler_mod.reset_user_failed_count = reset_user_failed_count
+    error_handler_mod._coerce_user_id = _coerce_user_id
     sys.modules["bloobcat.bot.error_handler"] = error_handler_mod
     # Trial granted notification stub
     trial_granted_mod = types.ModuleType("bloobcat.bot.notifications.trial.granted")
