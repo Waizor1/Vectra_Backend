@@ -1562,23 +1562,26 @@ def test_admin_widgets_users_lookup_finds_oauth_users_by_email():
         // Scenario A: query "test@example.com" — match in users.email AND
         // a second match in auth_identities.email pointing to a different
         // (web) user. Expect 2 matches, telegram-id first.
+        // NB: row.id is a STRING here because the SELECTs cast `id::text`
+        // to avoid Number precision loss at the safe-int boundary (web ids
+        // reach ~9e15). Test fixtures mirror that.
         const scenarioA = (state) => {{
           if (state.table === 'information_schema.tables') return [];
           if (state.table === 'users') {{
             return [
-              {{ id: 12345, username: 'tg_user', full_name: 'Telegram User', email: 'test@example.com', registration_date: '2026-05-01T00:00:00Z' }},
+              {{ id: '12345', username: 'tg_user', full_name: 'Telegram User', email: 'test@example.com', registration_date: '2026-05-01T00:00:00Z' }},
             ];
           }}
           if (state.table === 'auth_identities AS ai') {{
             return [
-              {{ id: 8500000000000001, username: null, full_name: 'Google User', email: 'test@example.com', registration_date: '2026-05-10T00:00:00Z', provider: 'google', provider_email: 'test@example.com' }},
+              {{ id: '8500000000000001', username: null, full_name: 'Google User', email: 'test@example.com', registration_date: '2026-05-10T00:00:00Z', provider: 'google', provider_email: 'test@example.com' }},
             ];
           }}
           if (state.table === 'auth_identities') {{
             // Second-pass enrichment for already-matched user ids.
             return [
-              {{ user_id: 12345, provider: 'telegram', email: null }},
-              {{ user_id: 8500000000000001, provider: 'google', email: 'test@example.com' }},
+              {{ user_id: '12345', provider: 'telegram', email: null }},
+              {{ user_id: '8500000000000001', provider: 'google', email: 'test@example.com' }},
             ];
           }}
           return [];
@@ -1602,9 +1605,13 @@ def test_admin_widgets_users_lookup_finds_oauth_users_by_email():
         if (body.query !== 'test@example.com') throw new Error(`scenario A: query echo wrong: ${{body.query}}`);
         if (!Array.isArray(body.matches)) throw new Error('scenario A: matches not array');
         if (body.matches.length !== 2) throw new Error(`scenario A: expected 2 matches, got ${{body.matches.length}}`);
-        // Telegram id (< 8e15) must be first.
-        if (Number(body.matches[0].user_id) >= 8_000_000_000_000_000) {{
-          throw new Error('scenario A: telegram user must sort before web user');
+        // user_id must be a string (we cast id::text in SQL).
+        if (typeof body.matches[0].user_id !== 'string') {{
+          throw new Error(`scenario A: user_id must be string, got ${{typeof body.matches[0].user_id}}`);
+        }}
+        // Telegram id (< 8e15, length < 16) must be first.
+        if (body.matches[0].user_id !== '12345') {{
+          throw new Error(`scenario A: telegram user must sort before web user, got first=${{body.matches[0].user_id}}`);
         }}
         // Providers must be aggregated from enrichment pass.
         const webRow = body.matches[1];
@@ -1615,11 +1622,13 @@ def test_admin_widgets_users_lookup_finds_oauth_users_by_email():
           throw new Error(`scenario A: user_card_url wrong: ${{webRow.user_card_url}}`);
         }}
 
-        // Scenario B: empty query → empty matches, no DB hit beyond table check.
+        // Scenario B: empty/whitespace query → 200 + empty matches, no DB hit beyond table check.
+        // The handler returns 200 implicitly via res.json() without res.status(), so we
+        // seed statusB=200 to assert the absence of an error-path status flip.
         const router2 = {{ use() {{}}, get(path, fn) {{ routes.set(path, fn); }}, post() {{}}, patch() {{}}, delete() {{}} }};
         registerEndpoint(router2, {{ database: makeDb(() => []) }});
         const handler2 = routes.get('/users/lookup');
-        let statusB = 0;
+        let statusB = 200;
         let bodyB = null;
         await handler2(
           {{ query: {{ q: '   ' }} }},
@@ -1628,7 +1637,7 @@ def test_admin_widgets_users_lookup_finds_oauth_users_by_email():
             json(payload) {{ bodyB = payload; return payload; }},
           }},
         );
-        if (statusB !== 200 && statusB !== 0) throw new Error(`scenario B expected 200 default, got ${{statusB}}`);
+        if (statusB !== 200) throw new Error(`scenario B expected status 200, got ${{statusB}}`);
         if (!bodyB || !Array.isArray(bodyB.matches) || bodyB.matches.length !== 0) {{
           throw new Error('scenario B: empty-query must return empty matches array');
         }}
@@ -1639,11 +1648,11 @@ def test_admin_widgets_users_lookup_finds_oauth_users_by_email():
           if (state.table === 'users') return [];
           if (state.table === 'auth_identities AS ai') {{
             return [
-              {{ id: 8500000000000002, username: null, full_name: 'Apple User', email: null, registration_date: '2026-04-20T00:00:00Z', provider: 'apple', provider_email: 'apple@example.com' }},
+              {{ id: '8500000000000002', username: null, full_name: 'Apple User', email: null, registration_date: '2026-04-20T00:00:00Z', provider: 'apple', provider_email: 'apple@example.com' }},
             ];
           }}
           if (state.table === 'auth_identities') {{
-            return [{{ user_id: 8500000000000002, provider: 'apple', email: 'apple@example.com' }}];
+            return [{{ user_id: '8500000000000002', provider: 'apple', email: 'apple@example.com' }}];
           }}
           return [];
         }};
