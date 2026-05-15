@@ -272,6 +272,9 @@ async def test_webhook_applies_all_three_effects(monkeypatch):
     # how the bug used to silently leave price stale.
     metadata["new_active_tariff_price"] = 1500
     metadata["new_progressive_multiplier"] = 0.9
+    # Simulate admin raising LTE price-per-gb between user's purchase
+    # (5.0 in active_tariff snapshot) and invoice creation (7.5 quoted live).
+    metadata["new_lte_price_per_gb"] = 7.5
     payment_id = "platega-upgrade-bundle-01"
     await ProcessedPayments.create(
         payment_id=payment_id,
@@ -313,6 +316,11 @@ async def test_webhook_applies_all_three_effects(monkeypatch):
     assert int(active_after.price or 0) > 0
     assert active_after.progressive_multiplier is not None
     assert 0 < float(active_after.progressive_multiplier) <= 1.0
+    # v3 invariant: webhook updates lte_price_per_gb snapshot to the live
+    # quote price the user paid (here: 7.5 from metadata override). Without
+    # this, the per-GB display in the UI would forever lag the actual
+    # debited rate.
+    assert float(active_after.lte_price_per_gb) == 7.5
 
     # BLOCKER 2 invariant: scheduler is re-armed at least once for this user.
     # (Users.save() auto-reschedules on expired_at change, AND the webhook

@@ -383,7 +383,12 @@ async def test_quote_exceeds_devices_cap(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_quote_exceeds_lte_cap(monkeypatch):
+async def test_quote_lte_topup_above_tariff_line_is_allowed(monkeypatch):
+    """Business principle: «человек платит — получает услугу». Tariff-level
+    `lte_max_gb` is informational; top-up flow allows up to the absolute
+    cap (`LTE_TOPUP_FALLBACK_TOTAL_MAX_GB`) so a user at 500/500 can always
+    pay for more. Verifies the regression from v2 where tariff cap blocked
+    revenue."""
     from bloobcat.routes.user import UpgradeBundleRequest, upgrade_bundle
 
     _silence_side_effects(monkeypatch)
@@ -391,16 +396,101 @@ async def test_quote_exceeds_lte_cap(monkeypatch):
         user_id=9007, balance=100_000, lte_gb_total=10
     )
 
+    # tariff.lte_max_gb=500 (default) but we target 1500 ГБ — should succeed.
     payload = UpgradeBundleRequest(
         target_device_count=2,
-        target_lte_gb=501,
+        target_lte_gb=1500,
         target_extra_days=0,
         dry_run=True,
     )
     result = await upgrade_bundle(payload=payload, user=user)
 
     assert result["status"] == "quote"
-    assert "target_lte_exceeds_cap" in result["validation_errors"]
+    assert "target_lte_exceeds_cap" not in result["validation_errors"]
+    assert result["lte_delta_gb"] == 1490
+
+
+@pytest.mark.asyncio
+async def test_quote_lte_uses_live_price_not_snapshot(monkeypatch):
+    """Fix 3 (Live LTE pricing): when admin raised Directus
+    `Tariffs.lte_price_per_gb` from 1.5 → 2.0 after user's purchase, the
+    snapshot stays at 1.5 (cohort) but new GB MUST be priced at the live 2.0
+    rate. Verifies UI shows the same price backend charges — eliminating
+    «UI says 1.5, debit 2» confusion the user reported."""
+    from bloobcat.db.tariff import Tariffs
+    from bloobcat.routes.user import UpgradeBundleRequest, upgrade_bundle
+
+    _silence_side_effects(monkeypatch)
+    user, active, tariff = await _setup_user_with_active_tariff(
+        user_id=9020,
+        balance=100_000,
+        lte_gb_total=10,
+        lte_price_per_gb=1.5,  # snapshot
+    )
+    # Admin raised the live price after user's purchase.
+    await Tariffs.filter(id=tariff.id).update(lte_price_per_gb=2.0)
+
+    payload = UpgradeBundleRequest(
+        target_device_count=2,
+        target_lte_gb=15,  # +5 GB
+        target_extra_days=0,
+        dry_run=True,
+    )
+    result = await upgrade_bundle(payload=payload, user=user)
+
+    assert result["status"] == "quote"
+    assert result["lte_delta_gb"] == 5
+    # Live price (2.0) × 5 GB = 10 — not snapshot 1.5 × 5 = 7.
+    assert result["lte_extra_cost_rub"] == 10
+    assert result["lte_price_per_gb"] == 2.0
+
+
+@pytest.mark.asyncio
+async def test_quote_lte_falls_back_to_snapshot_when_tariff_missing(monkeypatch):
+    """When the original Tariffs row was deleted from Directus (exotic
+    edge — admin retired a tariff but a user still has an active subscription
+    of it), fall back to the snapshot price so we don't crash the quote."""
+    from bloobcat.db.tariff import Tariffs
+    from bloobcat.routes.user import UpgradeBundleRequest, upgrade_bundle
+
+    _silence_side_effects(monkeypatch)
+    user, _active, tariff = await _setup_user_with_active_tariff(
+        user_id=9021, balance=100_000, lte_gb_total=10, lte_price_per_gb=3.0
+    )
+    # Simulate the live tariff being removed.
+    await Tariffs.filter(id=tariff.id).delete()
+
+    payload = UpgradeBundleRequest(
+        target_device_count=2,
+        target_lte_gb=15,
+        target_extra_days=0,
+        dry_run=True,
+    )
+    result = await upgrade_bundle(payload=payload, user=user)
+
+    assert result["status"] == "quote"
+    # snapshot 3.0 × 5 = 15
+    assert result["lte_extra_cost_rub"] == 15
+    assert result["lte_price_per_gb"] == 3.0
+
+
+@pytest.mark.asyncio
+async def test_quote_pydantic_rejects_over_absolute_lte_cap():
+    """Pydantic guard rejects `target_lte_gb > 10000` before reaching the
+    service. This protects RemnaWave + DB from absurd inputs and matches
+    `LTE_TOPUP_FALLBACK_TOTAL_MAX_GB=10000`."""
+    import pytest
+    from pydantic import ValidationError
+    from bloobcat.routes.user import UpgradeBundleRequest
+
+    with pytest.raises(ValidationError) as exc_info:
+        UpgradeBundleRequest(
+            target_device_count=2,
+            target_lte_gb=10001,
+            target_extra_days=0,
+            dry_run=True,
+        )
+    assert "target_lte_gb" in str(exc_info.value)
 
 
 @pytest.mark.asyncio

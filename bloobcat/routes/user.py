@@ -2029,10 +2029,20 @@ async def upgrade_bundle(
                         update_fields=["hwid_limit", "price", "progressive_multiplier"]
                     )
 
-                # LTE delta
+                # LTE delta — also refresh the price-per-gb snapshot to the
+                # live price the user actually paid. This keeps `active_tariff.
+                # lte_price_per_gb` in sync with what the UI showed at quote
+                # time and matches what backend charged, eliminating the
+                # "UI says 1.5, charged 2" confusion. Snapshot is preserved
+                # only when quote could not resolve a live price.
                 if quote.lte_delta_gb > 0:
                     active_tariff.lte_gb_total = new_lte_gb_total
-                    await active_tariff.save(update_fields=["lte_gb_total"])
+                    lte_save_fields = ["lte_gb_total"]
+                    quoted_price = float(getattr(quote, "lte_price_per_gb", 0.0) or 0.0)
+                    if quoted_price > 0:
+                        active_tariff.lte_price_per_gb = quoted_price
+                        lte_save_fields.append("lte_price_per_gb")
+                    await active_tariff.save(update_fields=lte_save_fields)
                     user.lte_gb_total = new_lte_gb_total
                     await user.save(update_fields=["lte_gb_total"])
 
@@ -2217,6 +2227,13 @@ async def upgrade_bundle(
         "total_extra_cost_rub": int(total_extra_cost),
         "amount_from_balance": amount_from_balance,
     }
+    # Persist the live LTE price the user saw at invoice time so the
+    # webhook updates active_tariff.lte_price_per_gb to the same value —
+    # any subsequent admin price change won't retroactively confuse the
+    # user's paid receipt.
+    quoted_lte_price = float(getattr(quote, "lte_price_per_gb", 0.0) or 0.0)
+    if quoted_lte_price > 0:
+        metadata["new_lte_price_per_gb"] = quoted_lte_price
     if new_active_tariff_price is not None:
         metadata["new_active_tariff_price"] = new_active_tariff_price
     if new_progressive_multiplier is not None:
