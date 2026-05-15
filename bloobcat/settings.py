@@ -386,6 +386,13 @@ class AppSettings(BaseSettings):
     # runtime. Override with a tariff name (e.g. "premium_12m") to pin a
     # specific SKU regardless of price ranking.
     reverse_trial_tariff_sku: str = ""
+    # Trial Early-Bird discount: −50 % stimulus issued to brand new trial users
+    # at trial-grant time. The discount is anchored to the trial expiry date —
+    # users who pay during the trial get the discount, users who let the trial
+    # lapse lose it. Disabled by default; flip on after FE banner lands. See
+    # bloobcat/services/trial_early_bird.py for the lifecycle.
+    trial_early_bird_enabled: bool = False
+    trial_early_bird_percent: int = 50
     # Golden Period — 24h invite blitz (PR 3/4 of referral v2). The feature
     # itself is gated by the DB row `golden_period_configs.is_enabled`. These
     # env-driven knobs are runtime guard-rails that the DB row cannot override:

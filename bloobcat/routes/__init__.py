@@ -21,6 +21,7 @@ from .notifications import router as notifications_router
 from .welcome_vpn import router as welcome_vpn_router
 from .push import router as push_router
 from .reverse_trial import router as reverse_trial_router
+from .trial_early_bird import router as trial_early_bird_router
 from .golden_period import router as golden_period_router
 from .admin_golden_period import router as admin_golden_period_router
 
@@ -48,6 +49,7 @@ main_router.include_router(notifications_router)
 main_router.include_router(welcome_vpn_router)
 main_router.include_router(push_router)
 main_router.include_router(reverse_trial_router)
+main_router.include_router(trial_early_bird_router)
 main_router.include_router(golden_period_router)
 main_router.include_router(admin_golden_period_router)
 
