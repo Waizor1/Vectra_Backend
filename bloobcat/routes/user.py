@@ -410,6 +410,14 @@ async def check(user: Users = Depends(validate)) -> Dict[str, Any]:
                     "devices_decrease_count": int(tariff.devices_decrease_count or 0),
                     "devices_decrease_limit": devices_decrease_limit or None,
                     "devices_decrease_remaining": remaining_decreases,
+                    # Hotfix: flag synthetic promo/trial subscriptions so the
+                    # frontend can decide whether to show the upgrade
+                    # constructor (paid users) or the classic purchase flow
+                    # (trial/promo users — they need to BUY a real tariff first,
+                    # not upgrade their freebie).
+                    "is_promo_synthetic": bool(
+                        getattr(tariff, "is_promo_synthetic", False)
+                    ),
                 }
 
         if active_tariff_data is None and (
