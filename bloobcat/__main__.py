@@ -263,6 +263,15 @@ async def _apply_concurrent_index_patches(conn) -> None:
         '    ON "push_subscriptions" ("user_id", "is_active")',
         'CREATE INDEX CONCURRENTLY IF NOT EXISTS "idx_push_subscriptions_active"\n'
         '    ON "push_subscriptions" ("is_active")',
+        # Reverse-trial downgrade scheduler scans (status, expires_at) every
+        # day; the per-user index supports the /reverse-trial/state lookup
+        # and the cancel-on-paid-purchase path. Migration 118 creates the
+        # empty table; indexes ship here so the brand-new table also
+        # satisfies the post-107 CONCURRENTLY policy.
+        'CREATE INDEX CONCURRENTLY IF NOT EXISTS "ix_reverse_trial_states_status_expires"\n'
+        '    ON "reverse_trial_states" ("status", "expires_at")',
+        'CREATE INDEX CONCURRENTLY IF NOT EXISTS "ix_reverse_trial_states_user"\n'
+        '    ON "reverse_trial_states" ("user_id")',
     ]
     for stmt in concurrent_index_statements:
         try:

@@ -679,11 +679,68 @@ class Users(models.Model):
                     expire_at_date = current_user.expired_at
                     today = date.today()
                     if expire_at_date is None:
-                        if not current_user.used_trial:
+                        # Reverse Trial (PR2 of referral v2): feature-flag gated.
+                        # When enabled, grant 7 days of full-feature paid tariff
+                        # to brand new users instead of the legacy 1-GB free trial.
+                        # Skipped for referral invitees (they have their own 20d
+                        # bundle) and for any user that already received a state.
+                        # See `bloobcat/services/reverse_trial.py` for lifecycle.
+                        from bloobcat.funcs.referral_attribution import is_qr_source_utm
+                        _rt_referred_by_id = int(getattr(current_user, "referred_by", 0) or 0)
+                        _rt_referrer_is_registered = False
+                        if _rt_referred_by_id > 0:
+                            _rt_referrer_row = await Users.filter(id=_rt_referred_by_id).only(
+                                "id", "is_registered"
+                            ).first()
+                            _rt_referrer_is_registered = bool(
+                                getattr(_rt_referrer_row, "is_registered", False)
+                            ) if _rt_referrer_row else False
+                        _rt_is_referral_invite = (
+                            _rt_referred_by_id > 0
+                            and _rt_referrer_is_registered
+                            and not is_qr_source_utm(getattr(current_user, "utm", None))
+                            and getattr(current_user, "story_trial_used_at", None) is None
+                        )
+                        if (
+                            app_settings.reverse_trial_enabled
+                            and not _rt_is_referral_invite
+                            and not current_user.used_trial
+                        ):
+                            try:
+                                from bloobcat.services.reverse_trial import (
+                                    grant_reverse_trial,
+                                )
+
+                                rt_state = await grant_reverse_trial(
+                                    current_user,
+                                    is_referral_invite=_rt_is_referral_invite,
+                                )
+                            except Exception as e_rt:
+                                logger.error(
+                                    "Ошибка при выдаче reverse-trial пользователю %s: %s",
+                                    self.id,
+                                    e_rt,
+                                )
+                                rt_state = None
+
+                            if rt_state is not None:
+                                # Reverse trial owns the trial slot — bypass the
+                                # standard trial-grant branch entirely and reload
+                                # the now-mutated user fields.
+                                refreshed_rt = await Users.get_or_none(id=current_user.id)
+                                if refreshed_rt:
+                                    current_user.is_trial = refreshed_rt.is_trial
+                                    current_user.used_trial = refreshed_rt.used_trial
+                                    current_user.trial_started_at = refreshed_rt.trial_started_at
+                                    current_user.expired_at = refreshed_rt.expired_at
+                                    current_user.active_tariff_id = refreshed_rt.active_tariff_id
+                                    current_user.hwid_limit = refreshed_rt.hwid_limit
+                                    current_user.lte_gb_total = refreshed_rt.lte_gb_total
+                                expire_at_date = current_user.expired_at
+                        if expire_at_date is None and not current_user.used_trial:
                             # Referral-invitee trial gets a richer bundle (20d / 1 dev / 1 GB).
                             # Applies to any non-QR referral (story_*, ref_*, plain partner-<id>, etc.).
                             # See `_grant_referral_trial_if_unclaimed` for the full reasoning.
-                            from bloobcat.funcs.referral_attribution import is_qr_source_utm
                             referred_by_id = int(getattr(current_user, "referred_by", 0) or 0)
                             # NOTE: pull from `utm` column (campaign tag), not `invite_source`. The QR
                             # exclusion is driven by the campaign tag, which is what `is_qr_source_utm`

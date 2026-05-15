@@ -20,6 +20,7 @@ from .error_reports import router as error_reports_router
 from .notifications import router as notifications_router
 from .welcome_vpn import router as welcome_vpn_router
 from .push import router as push_router
+from .reverse_trial import router as reverse_trial_router
 
 main_router = APIRouter()
 
@@ -44,6 +45,7 @@ main_router.include_router(admin_integration_router)
 main_router.include_router(notifications_router)
 main_router.include_router(welcome_vpn_router)
 main_router.include_router(push_router)
+main_router.include_router(reverse_trial_router)
 
 # Флаг для отслеживания, был ли уже включен маршрутизатор бота
 _bot_router_included = False

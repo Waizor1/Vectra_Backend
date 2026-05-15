@@ -54,6 +54,12 @@ from bloobcat.tasks.auto_payment_reminders import (
     run_auto_payment_reminders_scheduler,
     send_auto_payment_reminder_if_needed,
 )
+from bloobcat.tasks.reverse_trial_downgrade import (
+    run_reverse_trial_downgrade_scheduler,
+)
+from bloobcat.tasks.reverse_trial_pre_warning import (
+    run_reverse_trial_pre_warning_scheduler,
+)
 
 logger = get_logger("scheduler")
 
@@ -826,6 +832,9 @@ async def schedule_all_tasks():
     asyncio.create_task(run_subscription_resume_scheduler())
     # Cleanup expired device setup links and unbound temporary device-users.
     asyncio.create_task(run_temp_setup_cleanup_scheduler())
+    # Daily reverse-trial downgrade pass (09:00 MSK) and pre-expiry warning (12:00 MSK).
+    asyncio.create_task(run_reverse_trial_downgrade_scheduler())
+    asyncio.create_task(run_reverse_trial_pre_warning_scheduler())
     # Start automatic statistics scheduler
     from bloobcat.statistics.scheduler import statistics_scheduler
     asyncio.create_task(statistics_scheduler()) 
