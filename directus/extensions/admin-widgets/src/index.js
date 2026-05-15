@@ -700,6 +700,143 @@ export default function registerEndpoint(router, { database }) {
     }
   });
 
+  // Resolve a user by email (or numeric id) across `users.email` and
+  // `auth_identities.email`. Built for support: Google-only users have their
+  // email in both tables, but Directus's default content search does not always
+  // surface a hit on the `users` collection — and there is no built-in
+  // "find user by oauth email" flow. Returns a small array of matches each
+  // with `providers[]` so the admin can pick the right row by signup method.
+  router.get("/users/lookup", async (req, res) => {
+    try {
+      const queryRaw = String(req.query.q ?? "").trim();
+      const limit = toInt(req.query.limit, 25, 1, 100);
+      if (!queryRaw) {
+        res.json({ query: "", limit, matches: [] });
+        return;
+      }
+
+      if (!(await hasTable("users"))) {
+        res.json({ query: queryRaw, limit, matches: [] });
+        return;
+      }
+
+      const hasIdentities = await hasTable("auth_identities");
+      const queryLowerLike = `%${queryRaw.toLowerCase()}%`;
+      const isInt = /^[0-9]+$/.test(queryRaw);
+      const asInt = isInt ? queryRaw : null; // pass as string to dodge BigInt JS limits
+
+      // Hit 1: users.email ILIKE q  (and numeric id exact-match shortcut).
+      const usersByEmail = await database("users")
+        .select("id", "username", "full_name", "email", "registration_date")
+        .limit(limit)
+        .orderBy("registration_date", "desc")
+        .where((inner) => {
+          if (isInt) inner.orWhereRaw("CAST(id AS text) = ?", [asInt]);
+          inner.orWhereRaw("LOWER(COALESCE(email, '')) LIKE ?", [queryLowerLike]);
+        });
+
+      // Hit 2: auth_identities.email ILIKE q → JOIN users.
+      const usersByIdentity = hasIdentities
+        ? await database("auth_identities AS ai")
+            .innerJoin("users AS u", "u.id", "ai.user_id")
+            .select(
+              "u.id AS id",
+              "u.username AS username",
+              "u.full_name AS full_name",
+              "u.email AS email",
+              "u.registration_date AS registration_date",
+              "ai.provider AS provider",
+              "ai.email AS provider_email",
+            )
+            .limit(limit)
+            .orderBy("u.registration_date", "desc")
+            .whereRaw("LOWER(COALESCE(ai.email, '')) LIKE ?", [queryLowerLike])
+        : [];
+
+      // Merge by user id. We dedupe rows and accumulate `providers[]` from
+      // auth_identities. The same user may surface in both buckets; rows from
+      // bucket #2 carry provider+provider_email, bucket #1 carries the
+      // canonical user.email — keep both.
+      const merged = new Map();
+      const remember = (row, providerInfo) => {
+        const key = String(row.id);
+        if (!merged.has(key)) {
+          merged.set(key, {
+            user_id: row.id, // BigInt-safe: knex returns Number for int8 in pg ≤ JS_MAX
+            user_id_str: String(row.id),
+            username: row.username ?? null,
+            full_name: row.full_name ?? null,
+            email: row.email ?? null,
+            registration_date: row.registration_date ?? null,
+            providers: [],
+            provider_emails: [],
+            user_card_url: `/admin/content/users/${row.id}`,
+          });
+        }
+        if (providerInfo) {
+          const bucket = merged.get(key);
+          if (providerInfo.provider && !bucket.providers.includes(providerInfo.provider)) {
+            bucket.providers.push(providerInfo.provider);
+          }
+          if (
+            providerInfo.provider_email &&
+            !bucket.provider_emails.includes(providerInfo.provider_email)
+          ) {
+            bucket.provider_emails.push(providerInfo.provider_email);
+          }
+        }
+      };
+
+      for (const r of usersByEmail) remember(r, null);
+      for (const r of usersByIdentity) {
+        remember(r, { provider: r.provider, provider_email: r.provider_email });
+      }
+
+      // For any user we matched, also fetch their *other* identities so the
+      // provider list is complete (e.g. matched by users.email but the row also
+      // has a linked Google identity). Bounded by current match set.
+      if (hasIdentities && merged.size > 0) {
+        const ids = Array.from(merged.keys());
+        const extras = await database("auth_identities")
+          .select("user_id", "provider", "email")
+          .whereIn("user_id", ids);
+        for (const r of extras) {
+          const bucket = merged.get(String(r.user_id));
+          if (!bucket) continue;
+          if (r.provider && !bucket.providers.includes(r.provider)) {
+            bucket.providers.push(r.provider);
+          }
+          if (r.email && !bucket.provider_emails.includes(r.email)) {
+            bucket.provider_emails.push(r.email);
+          }
+        }
+      }
+
+      // Telegram ids live in [1, 8e15); web/OAuth ids live in [8e15, ~9e15].
+      // Show telegram users first (they're typically the long-tenured core
+      // users), then web. Within each bucket, newest registration first.
+      const WEB_FLOOR = 8_000_000_000_000_000;
+      const matches = Array.from(merged.values()).sort((a, b) => {
+        const aWeb = Number(a.user_id) >= WEB_FLOOR ? 1 : 0;
+        const bWeb = Number(b.user_id) >= WEB_FLOOR ? 1 : 0;
+        if (aWeb !== bWeb) return aWeb - bWeb;
+        const aT = a.registration_date ? new Date(a.registration_date).getTime() : 0;
+        const bT = b.registration_date ? new Date(b.registration_date).getTime() : 0;
+        return bT - aT;
+      });
+
+      res.json({
+        query: queryRaw,
+        limit,
+        matches: matches.slice(0, limit),
+      });
+    } catch (err) {
+      res
+        .status(500)
+        .json({ error: "Failed to look up users", details: String(err?.message || err) });
+    }
+  });
+
   router.get("/promo-studio/bootstrap", async (_req, res) => {
     try {
       const hasPromoCodes = await hasTable("promo_codes");
