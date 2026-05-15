@@ -628,3 +628,79 @@ async def test_report_error_persists_user_id_none_for_numeric_auth(monkeypatch):
     )
     assert result["ok"] is True
     assert captured["user_id"] is None
+
+
+# --- _truncate_field tests ---------------------------------------------------
+# Bug observed in production 2026-05-15: FE sent /errors/report with
+# tgWebApp `route` field of 736 chars, breaking the 512-cap CharField with
+# tortoise ValidationError 500. Truncation in the route handler keeps the
+# pipeline open instead of dropping reports on the floor.
+
+
+def test_truncate_field_passes_through_short_values():
+    from bloobcat.routes.error_reports import _truncate_field
+
+    assert _truncate_field("short", "route") == "short"
+    assert _truncate_field("/welcome", "route") == "/welcome"
+
+
+def test_truncate_field_passes_through_none():
+    from bloobcat.routes.error_reports import _truncate_field
+
+    assert _truncate_field(None, "route") is None
+    assert _truncate_field(None, "message") is None
+
+
+def test_truncate_field_clips_route_at_512_with_marker():
+    from bloobcat.routes.error_reports import _truncate_field
+
+    # Reproduces the production crash: a 736-char tgWebApp URL.
+    long_url = "/#tgWebAppData=" + "x" * 720
+    assert len(long_url) > 512
+
+    result = _truncate_field(long_url, "route")
+    assert result is not None
+    assert len(result) == 512
+    assert result.endswith("…[truncated]")
+
+
+def test_truncate_field_clips_href_at_1024():
+    from bloobcat.routes.error_reports import _truncate_field
+
+    big = "https://example.com/?" + "q=" * 800
+    assert len(big) > 1024
+    result = _truncate_field(big, "href")
+    assert result is not None
+    assert len(result) == 1024
+    assert result.endswith("…[truncated]")
+
+
+def test_truncate_field_unknown_field_passes_through():
+    from bloobcat.routes.error_reports import _truncate_field
+
+    # Defensive: unmapped field name = no clipping (pretend the schema is wider).
+    long = "x" * 5000
+    assert _truncate_field(long, "not_in_map") == long
+
+
+def test_truncate_field_exact_max_length_unchanged():
+    from bloobcat.routes.error_reports import _truncate_field
+
+    exact = "x" * 512
+    result = _truncate_field(exact, "route")
+    assert result == exact
+    assert len(result) == 512  # No suffix appended for exact-length values.
+
+
+def test_truncate_field_marker_fits_within_max_length():
+    """Suffix length is subtracted from the head so the result is always
+    <= max_length. Off-by-one in suffix math would silently re-trigger the
+    ValidationError this PR is fixing."""
+    from bloobcat.routes.error_reports import _truncate_field, _TRUNCATION_SUFFIX
+
+    long = "x" * 2000
+    for field, expected_max in [("route", 512), ("href", 1024), ("user_agent", 512)]:
+        result = _truncate_field(long, field)
+        assert result is not None
+        assert len(result) <= expected_max, f"{field} overflowed: {len(result)}"
+        assert result.endswith(_TRUNCATION_SUFFIX)
