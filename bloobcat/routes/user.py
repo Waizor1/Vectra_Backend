@@ -1932,6 +1932,12 @@ async def upgrade_bundle(
     active_tariff = await ActiveTariffs.get_or_none(id=user.active_tariff_id)
     if not active_tariff:
         raise HTTPException(status_code=404, detail="Активный тариф не найден")
+    if bool(getattr(user, "is_trial", False)) or bool(
+        getattr(active_tariff, "is_promo_synthetic", False)
+    ):
+        raise HTTPException(
+            status_code=400, detail="Апгрейд доступен только для платной подписки"
+        )
 
     is_family_member = await FamilyMembers.filter(
         member_id=user.id, status="active"
@@ -2037,20 +2043,16 @@ async def upgrade_bundle(
                         update_fields=["hwid_limit", "price", "progressive_multiplier"]
                     )
 
-                # LTE delta — also refresh the price-per-gb snapshot to the
-                # live price the user actually paid. This keeps `active_tariff.
-                # lte_price_per_gb` in sync with what the UI showed at quote
-                # time and matches what backend charged, eliminating the
-                # "UI says 1.5, charged 2" confusion. Snapshot is preserved
-                # only when quote could not resolve a live price.
+                # LTE delta — Bug 1 (BE v4): we do NOT touch
+                # `active_tariff.lte_price_per_gb` anymore. The snapshot is
+                # the original purchase price (audit trail); the quote /
+                # webhook always read the LIVE Directus price for new GB.
+                # Writing the snapshot here historically caused users to
+                # keep seeing the price from their first top-up even after
+                # admin lowered Directus pricing.
                 if quote.lte_delta_gb > 0:
                     active_tariff.lte_gb_total = new_lte_gb_total
-                    lte_save_fields = ["lte_gb_total"]
-                    quoted_price = float(getattr(quote, "lte_price_per_gb", 0.0) or 0.0)
-                    if quoted_price > 0:
-                        active_tariff.lte_price_per_gb = quoted_price
-                        lte_save_fields.append("lte_price_per_gb")
-                    await active_tariff.save(update_fields=lte_save_fields)
+                    await active_tariff.save(update_fields=["lte_gb_total"])
                     user.lte_gb_total = new_lte_gb_total
                     await user.save(update_fields=["lte_gb_total"])
 
@@ -2235,13 +2237,11 @@ async def upgrade_bundle(
         "total_extra_cost_rub": int(total_extra_cost),
         "amount_from_balance": amount_from_balance,
     }
-    # Persist the live LTE price the user saw at invoice time so the
-    # webhook updates active_tariff.lte_price_per_gb to the same value —
-    # any subsequent admin price change won't retroactively confuse the
-    # user's paid receipt.
-    quoted_lte_price = float(getattr(quote, "lte_price_per_gb", 0.0) or 0.0)
-    if quoted_lte_price > 0:
-        metadata["new_lte_price_per_gb"] = quoted_lte_price
+    # Bug 1 (BE v4): we used to persist `new_lte_price_per_gb` here so the
+    # webhook would overwrite `active_tariff.lte_price_per_gb`. That broke
+    # the live-pricing contract — once written, the snapshot became the
+    # floor the user kept seeing. The snapshot is now immutable after the
+    # original purchase; quote+webhook always read live Directus pricing.
     if new_active_tariff_price is not None:
         metadata["new_active_tariff_price"] = new_active_tariff_price
     if new_progressive_multiplier is not None:

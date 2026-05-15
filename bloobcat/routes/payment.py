@@ -3866,8 +3866,14 @@ async def _apply_upgrade_bundle_effect(
         async with in_transaction():
             if amount_from_balance > 0:
                 initial_balance = user.balance
-                user.balance = max(0, user.balance - amount_from_balance)
-                await user.save(update_fields=["balance"])
+                updated_rows = await Users.filter(
+                    id=user.id, balance__gte=int(amount_from_balance)
+                ).update(balance=F("balance") - int(amount_from_balance))
+                if not updated_rows:
+                    raise RuntimeError(
+                        "Insufficient bonus balance for upgrade_bundle debit"
+                    )
+                await user.refresh_from_db(fields=["balance"])
                 logger.info(
                     "Upgrade bundle: списано %.2f с бонусного баланса пользователя %s. "
                     "Баланс до: %s, после: %s (provider=%s)",
@@ -3904,20 +3910,15 @@ async def _apply_upgrade_bundle_effect(
                 await active_tariff.save(update_fields=update_fields)
 
             if lte_delta_gb > 0:
+                # Bug 1 (BE v4): do NOT update `active_tariff.lte_price_per_gb`
+                # here. The snapshot is the original purchase price; live
+                # Directus pricing is read fresh on every quote. Writing
+                # the snapshot caused users to keep seeing yesterday's
+                # rate after admin price changes. Metadata key
+                # `new_lte_price_per_gb` is no longer emitted by the
+                # quote builder either.
                 active_tariff.lte_gb_total = new_lte_gb_total
-                # Refresh the price-per-gb snapshot to the price quoted at
-                # invoice time (live Tariffs.lte_price_per_gb). Matches the
-                # value charged so user's saved tariff reflects what they
-                # actually paid for the new GB.
-                lte_save_fields = ["lte_gb_total"]
-                try:
-                    quoted_lte_price = float(meta.get("new_lte_price_per_gb") or 0.0)
-                except (TypeError, ValueError):
-                    quoted_lte_price = 0.0
-                if quoted_lte_price > 0:
-                    active_tariff.lte_price_per_gb = quoted_lte_price
-                    lte_save_fields.append("lte_price_per_gb")
-                await active_tariff.save(update_fields=lte_save_fields)
+                await active_tariff.save(update_fields=["lte_gb_total"])
                 user.lte_gb_total = new_lte_gb_total
                 await user.save(update_fields=["lte_gb_total"])
     except Exception as effect_exc:
