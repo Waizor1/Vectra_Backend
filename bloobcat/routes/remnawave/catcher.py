@@ -674,6 +674,26 @@ async def remnawave_updater():
                                 user.key_activated = True
                                 user.is_registered = True
                                 registration_changed = True
+                                # Golden Period (PR3) — optimistic payout fires
+                                # on key_activated flip, not on payment. Safe
+                                # no-op when feature is disabled or referrer has
+                                # no active period. Wrapped so any failure here
+                                # never blocks the activation pipeline.
+                                try:
+                                    if referrer is not None:
+                                        from bloobcat.services.golden_period import (
+                                            attempt_optimistic_payout,
+                                        )
+
+                                        await attempt_optimistic_payout(
+                                            referrer=referrer, referred=user
+                                        )
+                                except Exception as e_gp_act:
+                                    logger.warning(
+                                        "golden_period_key_activated_hook_failed user=%s err=%s",
+                                        user.id,
+                                        e_gp_act,
+                                    )
                                 if delivered:
                                     activation_notify_sent_count += 1
                                     logger.info(

@@ -128,6 +128,271 @@ def should_freeze_cashback(signals: dict[str, Any]) -> bool:
     return bool(overlap)
 
 
+DEFAULT_GOLDEN_THRESHOLDS: dict[str, int] = {
+    "ip_cidr": 24,
+    "tg_id_distance": 5,
+    "registration_window_seconds": 60,
+}
+
+# Priority order for the `primary_reason` decision when multiple signals fire.
+# HWID is the strongest signal (real device fingerprint), then TG-id family
+# (proxies for sock-puppet farms), then network-level overlaps.
+_GOLDEN_REASON_PRIORITY = (
+    "hwid_overlap",
+    "tg_family",
+    "ip_block",
+    "device_fp",
+    "velocity",
+)
+
+
+def _ip_to_cidr_block(ip: str | None, prefix: int) -> str | None:
+    """Project an IPv4 address onto its /prefix block as a normalized string."""
+    if not ip:
+        return None
+    try:
+        from ipaddress import ip_address, ip_network
+
+        addr = ip_address(str(ip).strip())
+        if addr.version != 4:  # IPv6 disabled for this comparison
+            return str(addr)
+        net = ip_network(f"{addr}/{int(prefix)}", strict=False)
+        return str(net.network_address)
+    except Exception:  # noqa: BLE001 - fail-open: caller treats None as no match
+        return None
+
+
+async def _collect_user_ip_blocks(
+    user: Users, *, prefix: int
+) -> set[str]:
+    """Project a user's recently-seen IPs onto their /prefix CIDR blocks.
+
+    Reads from the `connections` table when available — that's the pure-data
+    table where session metadata is recorded. Fail-open on any error.
+    """
+    try:
+        from bloobcat.db.user_devices import UserDevice  # noqa: WPS433
+
+        rows = await _safe_values_list(
+            UserDevice.filter(user_id=int(user.id))
+            .exclude(metadata__isnull=True)
+            .values_list("metadata", flat=True)
+        )
+    except Exception:  # noqa: BLE001
+        rows = []
+
+    blocks: set[str] = set()
+    for raw in rows:
+        ip = None
+        if isinstance(raw, dict):
+            ip = (
+                raw.get("ip")
+                or raw.get("last_ip")
+                or raw.get("client_ip")
+                or raw.get("source_ip")
+            )
+        if not ip:
+            continue
+        block = _ip_to_cidr_block(str(ip), prefix)
+        if block:
+            blocks.add(block)
+    return blocks
+
+
+async def _collect_user_device_fingerprints(user: Users) -> set[str]:
+    """Hashes of (user_agent, platform) across the user's PushSubscription rows."""
+    try:
+        from hashlib import sha256
+
+        from bloobcat.db.push_subscriptions import PushSubscription  # noqa: WPS433
+
+        rows = await _safe_values_list(
+            PushSubscription.filter(user_id=int(user.id)).values_list(
+                "user_agent", "platform"
+            )
+        )
+    except Exception:  # noqa: BLE001
+        return set()
+
+    fingerprints: set[str] = set()
+    for ua, platform in rows or []:
+        if not ua:
+            continue
+        material = f"{str(ua).strip().lower()}|{str(platform or '').strip().lower()}"
+        fingerprints.add(sha256(material.encode("utf-8")).hexdigest()[:16])
+    return fingerprints
+
+
+def _tg_id_distance(referrer: Users, referred: Users) -> int | None:
+    """Absolute |tg_id - tg_id| for users registered via Telegram. None for web users."""
+    try:
+        a = int(referrer.id or 0)
+        b = int(referred.id or 0)
+    except Exception:  # noqa: BLE001
+        return None
+    if a <= 0 or b <= 0:
+        return None
+    # Web-only users are above this floor — exclude from the family heuristic.
+    if a >= 8_000_000_000_000_000 or b >= 8_000_000_000_000_000:
+        return None
+    return abs(a - b)
+
+
+def _registration_velocity_seconds(
+    referrer: Users, referred: Users
+) -> int | None:
+    """Seconds between the two registrations. None if either is missing the field."""
+    a = getattr(referrer, "registration_date", None)
+    b = getattr(referred, "registration_date", None)
+    if a is None or b is None:
+        return None
+    try:
+        delta = (a - b).total_seconds()
+    except Exception:  # noqa: BLE001
+        return None
+    return int(abs(delta))
+
+
+async def detect_golden_overlap_signals(
+    referrer: Users,
+    referred: Users,
+    thresholds: dict | None = None,
+) -> dict[str, Any]:
+    """Collect Golden-Period clawback signals between a referrer and a referred user.
+
+    Pure detection — does NOT mutate any state. The caller (clawback scanner)
+    decides whether to act on `should_clawback`. Fail-open on any error so a
+    transient DB issue can't lock up the scanner.
+
+    Returns a JSON-safe dict:
+
+        {
+            "hwid_overlap": bool,
+            "ip_block_overlap": bool,
+            "device_fingerprint_overlap": bool,
+            "tg_id_family": bool,
+            "registration_velocity": bool,
+            "should_clawback": bool,
+            "primary_reason": str,           # "hwid_overlap" | ... | "none"
+            "snapshot": {                    # raw values for audit
+                "hwid_overlap_count": int,
+                "ip_blocks_overlap": [str],
+                "device_fingerprint_overlap": [str],
+                "tg_id_distance": int | None,
+                "registration_velocity_seconds": int | None,
+                "thresholds": {...},
+            }
+        }
+    """
+    merged_thresholds = dict(DEFAULT_GOLDEN_THRESHOLDS)
+    if thresholds:
+        for k, v in thresholds.items():
+            if v is not None:
+                try:
+                    merged_thresholds[str(k)] = int(v)
+                except (TypeError, ValueError):
+                    continue
+
+    out: dict[str, Any] = {
+        "hwid_overlap": False,
+        "ip_block_overlap": False,
+        "device_fingerprint_overlap": False,
+        "tg_id_family": False,
+        "registration_velocity": False,
+        "should_clawback": False,
+        "primary_reason": "none",
+        "snapshot": {
+            "hwid_overlap_count": 0,
+            "ip_blocks_overlap": [],
+            "device_fingerprint_overlap": [],
+            "tg_id_distance": None,
+            "registration_velocity_seconds": None,
+            "thresholds": dict(merged_thresholds),
+        },
+    }
+
+    if not referrer or not referred:
+        return out
+
+    if int(referrer.id or 0) == int(referred.id or 0):
+        # Same user — treat as the strongest possible signal.
+        out["hwid_overlap"] = True
+        out["should_clawback"] = True
+        out["primary_reason"] = "hwid_overlap"
+        return out
+
+    try:
+        # 1. HWID overlap (re-uses the existing private)
+        a_hwids = await _collect_user_hwids(referrer)
+        b_hwids = await _collect_user_hwids(referred)
+        hwid_overlap = sorted(a_hwids & b_hwids)
+        if hwid_overlap:
+            out["hwid_overlap"] = True
+            out["snapshot"]["hwid_overlap_count"] = len(hwid_overlap)
+
+        # 2. IP /CIDR overlap from user_devices.metadata.
+        ip_prefix = int(merged_thresholds.get("ip_cidr", 24) or 24)
+        a_blocks = await _collect_user_ip_blocks(referrer, prefix=ip_prefix)
+        b_blocks = await _collect_user_ip_blocks(referred, prefix=ip_prefix)
+        ip_overlap = sorted(a_blocks & b_blocks)
+        if ip_overlap:
+            out["ip_block_overlap"] = True
+            out["snapshot"]["ip_blocks_overlap"] = ip_overlap[:5]
+
+        # 3. Device fingerprint hash overlap from push_subscriptions.user_agent.
+        a_fp = await _collect_user_device_fingerprints(referrer)
+        b_fp = await _collect_user_device_fingerprints(referred)
+        fp_overlap = sorted(a_fp & b_fp)
+        if fp_overlap:
+            out["device_fingerprint_overlap"] = True
+            out["snapshot"]["device_fingerprint_overlap"] = fp_overlap[:5]
+
+        # 4. TG ID family proximity.
+        tg_distance = _tg_id_distance(referrer, referred)
+        out["snapshot"]["tg_id_distance"] = tg_distance
+        if (
+            tg_distance is not None
+            and tg_distance > 0
+            and tg_distance
+            < int(merged_thresholds.get("tg_id_distance", 5) or 5)
+        ):
+            out["tg_id_family"] = True
+
+        # 5. Registration velocity.
+        velocity = _registration_velocity_seconds(referrer, referred)
+        out["snapshot"]["registration_velocity_seconds"] = velocity
+        if velocity is not None and velocity < int(
+            merged_thresholds.get("registration_window_seconds", 60) or 60
+        ):
+            out["registration_velocity"] = True
+    except Exception as exc:  # noqa: BLE001 - fail-open
+        logger.debug("golden_signals_collection_failed err=%s", exc)
+        return out
+
+    # Decision: any single strong signal triggers a clawback. Velocity alone
+    # is the weakest and only triggers when paired with another signal.
+    triggered: set[str] = set()
+    if out["hwid_overlap"]:
+        triggered.add("hwid_overlap")
+    if out["tg_id_family"]:
+        triggered.add("tg_family")
+    if out["ip_block_overlap"]:
+        triggered.add("ip_block")
+    if out["device_fingerprint_overlap"]:
+        triggered.add("device_fp")
+    if out["registration_velocity"] and triggered:
+        triggered.add("velocity")
+
+    if triggered:
+        for reason in _GOLDEN_REASON_PRIORITY:
+            if reason in triggered:
+                out["primary_reason"] = reason
+                break
+        out["should_clawback"] = True
+
+    return out
+
+
 def build_admin_review_text(
     *,
     earning_id: str,

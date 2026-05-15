@@ -21,6 +21,8 @@ from .notifications import router as notifications_router
 from .welcome_vpn import router as welcome_vpn_router
 from .push import router as push_router
 from .reverse_trial import router as reverse_trial_router
+from .golden_period import router as golden_period_router
+from .admin_golden_period import router as admin_golden_period_router
 
 main_router = APIRouter()
 
@@ -46,6 +48,8 @@ main_router.include_router(notifications_router)
 main_router.include_router(welcome_vpn_router)
 main_router.include_router(push_router)
 main_router.include_router(reverse_trial_router)
+main_router.include_router(golden_period_router)
+main_router.include_router(admin_golden_period_router)
 
 # Флаг для отслеживания, был ли уже включен маршрутизатор бота
 _bot_router_included = False

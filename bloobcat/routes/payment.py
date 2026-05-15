@@ -1562,6 +1562,31 @@ async def _award_standard_referral_cashback(
             amount_rub=int(amount_external_rub or 0),
             first_payment_res=first_payment_res,
         )
+        # Golden Period (PR3) optimistic payout. Fires after the standard
+        # cashback so the GP credit is *additive* on top of the regular
+        # cashback ladder. Wrapped in try/except so a Golden Period failure
+        # never breaks the existing cashback path. The service itself
+        # double-checks key_activated and the feature flag, so this is a
+        # safe no-op when GP is off or the referred user hasn't activated.
+        try:
+            referrer_id = getattr(referral_user, "referred_by", None)
+            if referrer_id:
+                from bloobcat.services.golden_period import (
+                    attempt_optimistic_payout,
+                )
+
+                referrer = await Users.get_or_none(id=int(referrer_id))
+                if referrer is not None:
+                    await attempt_optimistic_payout(
+                        referrer=referrer, referred=referral_user
+                    )
+        except Exception as e_gp:  # noqa: BLE001
+            logger.warning(
+                "golden_period_payment_hook_failed user=%s payment=%s err=%s",
+                getattr(referral_user, "id", None),
+                payment_id,
+                e_gp,
+            )
         return cashback_res
     except Exception as e_cashback:
         logger.warning(
