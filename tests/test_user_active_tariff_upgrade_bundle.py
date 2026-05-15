@@ -1075,6 +1075,65 @@ async def test_upgrade_uses_live_multiplier_matches_regular_constructor(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_progressive_multiplier_above_one_is_clamped_to_design_range(monkeypatch):
+    """Regression guard: a Directus admin can accidentally save
+    `progressive_multiplier` outside the documented [0.1, 1.0] range
+    (the field's docstring says smaller = bigger discount, and 1.0 means
+    no discount; a value > 1.0 inverts the math into per-device escalation).
+
+    The user-reported symptom: 2→3 devices showed «87 ₽/устр/мес» while
+    2→7 showed «101 ₽/устр/мес» — per-device cost was rising with delta,
+    the opposite of a volume discount. Root cause: snapshot fallback and
+    the returned `multiplier` scalar from `_compute_progressive_full_price`
+    were not running through `Tariffs._sanitize_multiplier`, so values
+    above 1.0 escaped into the geometric-sum math and into
+    `applies_progressive_discount` (which then read False because the raw
+    1.2 was > 1.0).
+
+    After the clamp: live + snapshot paths both clamp into
+    [0.1, 0.9999]; downstream `applies_progressive_discount` flips back
+    to True, and per-device-per-month math monotonically falls (or stays
+    flat at 0.9999) with growing delta.
+    """
+    from bloobcat.db.tariff import Tariffs
+    from bloobcat.services.upgrade_quote import _compute_progressive_full_price
+
+    _silence_side_effects(monkeypatch)
+    user, active, tariff = await _setup_user_with_active_tariff(
+        user_id=9305, balance=10_000, hwid_limit=2
+    )
+
+    # Drift the live tariff multiplier to an invalid escalation value.
+    tariff.progressive_multiplier = 1.2
+    await tariff.save(update_fields=["progressive_multiplier"])
+    tariff = await tariff.__class__.get(id=tariff.id)
+
+    _, returned_multiplier = _compute_progressive_full_price(
+        active, tariff, target_device_count=3
+    )
+    assert returned_multiplier <= 0.9999, (
+        f"live-path multiplier {returned_multiplier} escaped the "
+        "[0.1, 0.9999] design range — escalation will leak into "
+        "applies_progressive_discount and discount-breakdown math"
+    )
+    assert returned_multiplier == Tariffs._sanitize_multiplier(1.2), (
+        f"live-path multiplier {returned_multiplier} not equal to the "
+        "documented clamp output"
+    )
+
+    # Snapshot fallback (original_tariff=None) must also clamp.
+    active.progressive_multiplier = 1.2
+    await active.save(update_fields=["progressive_multiplier"])
+    _, snapshot_multiplier = _compute_progressive_full_price(
+        active, None, target_device_count=3
+    )
+    assert snapshot_multiplier <= 0.9999, (
+        f"snapshot-fallback multiplier {snapshot_multiplier} escaped "
+        "the [0.1, 0.9999] design range"
+    )
+
+
+@pytest.mark.asyncio
 async def test_upgrade_delta_matches_regular_constructor_delta(monkeypatch):
     """Regression guard: the prorated `device_extra_cost_rub` returned by
     `build_upgrade_bundle_quote` MUST equal (within ≤1₽ truncation) the
