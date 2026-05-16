@@ -67,5 +67,5 @@ async def send_home_screen_install_promo(user: Users) -> bool:
         )
         return False
 
-    await reset_user_failed_count(user)
+    await reset_user_failed_count(user.id)
     return True
