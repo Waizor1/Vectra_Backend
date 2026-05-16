@@ -85,7 +85,29 @@ def setup_logging():
         encoding="utf-8",
         filter=message_filter
     )
-    
+
+    # ── Optional JSON sink ──────────────────────────────────────────────────
+    # Дополнительный sink для машиночитаемых JSON-логов (Loki/ELK ingestion).
+    # Параллельный, НЕ заменяет существующие stdout/file sinks. Включается
+    # флагом OBSERVABILITY_LOG_JSON_SINK_ENABLED=true. Пишется в отдельный
+    # файл bloobcat_json_*.log (не в stderr — pytest captures и может
+    # перехватить вывод). При сбое этого sink (например, диск полный) два
+    # существующих sink'а продолжают работать независимо.
+    json_sink_enabled = os.environ.get(
+        "OBSERVABILITY_LOG_JSON_SINK_ENABLED", "false"
+    ).strip().lower() in ("true", "1", "yes", "on")
+    if json_sink_enabled:
+        logger.add(
+            os.path.join(log_dir, f"bloobcat_json_{current_time}.log"),
+            serialize=True,           # JSON output (Loguru built-in)
+            level=log_level,
+            rotation="10 MB",
+            compression="zip",
+            retention=30,
+            encoding="utf-8",
+            filter=message_filter,    # тот же фильтр — иначе spam утечёт в JSON
+        )
+
     # Класс для перехвата стандартных логов Python
     class InterceptHandler(logging.Handler):
         def __init__(self):

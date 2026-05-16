@@ -70,6 +70,16 @@ jobs:
       - name: Run tests
         run: python -m pytest tests -q
 
+      # Advisory type-check. `continue-on-error` keeps it visible without
+      # blocking deploys while the codebase grows annotations. Scope is strictly
+      # `bloobcat/` — tests, scripts, and migrations are skipped. mypy version
+      # pinned so a future major release cannot silently break CI.
+      - name: Type check (advisory)
+        continue-on-error: true
+        run: |
+          pip install "mypy==1.14.*"
+          mypy bloobcat/ --config-file mypy.ini
+
       - name: Audit Python dependencies
         run: python -m pip_audit -r requirements.txt
 
