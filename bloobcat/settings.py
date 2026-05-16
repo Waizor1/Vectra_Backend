@@ -622,13 +622,31 @@ class ObservabilitySettings(BaseSettings):
     sentry_traces_sample_rate: float = 0.05
     metrics_enabled: bool = True
     log_json_sink_enabled: bool = False
+    # Shared secret embedded in the Sentry → Telegram webhook URL path.
+    # Sentry alert rule action posts to `/admin/sentry-webhook/<secret>`;
+    # request is rejected with 401 if the path segment does not match.
+    # When unset, the endpoint returns 503 (not configured).
+    sentry_webhook_secret: SecretStr | None = None
+    # Optional dedicated Telegram chat/channel for Sentry-bridged alerts.
+    # When set, the Sentry webhook posts to this chat instead of the shared
+    # admin logs channel (TELEGRAM_LOGS_CHANNEL). Leave empty to fall back
+    # to the existing admin channel.
+    sentry_telegram_chat_id: int | None = None
 
-    @field_validator("sentry_dsn", mode="before")
+    @field_validator("sentry_telegram_chat_id", mode="before")
+    @classmethod
+    def parse_sentry_telegram_chat_id(cls, value):
+        if value in (None, ""):
+            return None
+        return int(value)
+
+    @field_validator("sentry_dsn", "sentry_webhook_secret", mode="before")
     @classmethod
     def normalize_optional_secret(cls, value):
-        # `OBSERVABILITY_SENTRY_DSN=` (empty value) must produce None, not
-        # SecretStr(""), so the truthy `if sentry_dsn:` guard in __main__.py
-        # correctly skips sentry_sdk.init() when DSN is intentionally blank.
+        # Empty-string env values (e.g. `OBSERVABILITY_SENTRY_DSN=`) must
+        # produce None, not SecretStr(""), so truthy `if dsn:` guards work
+        # correctly. Same for sentry_webhook_secret — empty means "endpoint
+        # disabled".
         if value is None:
             return None
         if isinstance(value, str) and not value.strip():

@@ -13,6 +13,7 @@ from .prize_wheel import router as prize_wheel_router
 from .discounts import router as discounts_router
 from .captain_user_lookup import router as captain_lookup_router
 from .admin_integration import router as admin_integration_router
+from .sentry_webhook import router as sentry_webhook_router
 from .partner import router as partner_router
 from .referrals import router as referrals_router
 from .subscription import router as subscription_router
@@ -45,6 +46,7 @@ main_router.include_router(prize_wheel_router)
 main_router.include_router(discounts_router)
 main_router.include_router(captain_lookup_router)
 main_router.include_router(admin_integration_router)
+main_router.include_router(sentry_webhook_router)
 main_router.include_router(notifications_router)
 main_router.include_router(welcome_vpn_router)
 main_router.include_router(push_router)
