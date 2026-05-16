@@ -7,9 +7,14 @@ Lifecycle:
        ``TRIAL_EARLY_BIRD_ENABLED`` flag and skipped for partners and
        referral invitees (those have their own bundles). Creates a single
        ``PersonalDiscount`` row with ``source='trial_early_bird'``,
-       ``percent=50`` (configurable), ``max_months=1``, ``remaining_uses=1``,
-       and ``expires_at`` pinned to ``user.expired_at`` — the discount dies
-       with the trial, no extra grace period.
+       ``percent=50`` (configurable), ``remaining_uses=1``, and
+       ``expires_at`` pinned to ``user.expired_at`` — the discount dies
+       with the trial, no extra grace period. ``max_months`` is left
+       unset so the −50 % applies uniformly across 1/3/6/12-month
+       options. Earlier the row was created with ``max_months=1``, which
+       made 1-month cheaper per-month than 3-month (75 ₽/мес vs 133 ₽/мес)
+       and broke the monotonic price-per-month curve — see
+       ``test_subscription_pricing_curve_with_early_bird``.
     2. Idempotent: re-calling the helper for a user that already has a
        ``trial_early_bird`` row returns the existing row rather than creating
        a duplicate. Safe under retry / re-grant flows.
@@ -79,7 +84,7 @@ async def grant_trial_early_bird_discount(
         source=TRIAL_EARLY_BIRD_DISCOUNT_SOURCE,
         metadata={"trial_expired_at": trial_expiry.isoformat()},
         min_months=None,
-        max_months=1,
+        max_months=None,
     )
 
     logger.info(
