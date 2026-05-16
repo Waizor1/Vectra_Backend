@@ -123,7 +123,10 @@ async def validate(init_data: str = Depends(oauth2_scheme), request: Request = N
         header_start_param = _extract_start_param_from_request(request)
         
         if not init_data:
-            logger.error("Отсутствует заголовок Authorization")
+            # Unauthenticated probes (mobile cold-start, link previews, bots, expired SW)
+            # routinely hit protected routes without a token. This is client-side and
+            # expected — `warning` keeps it greppable in logs without paging Sentry.
+            logger.warning("Отсутствует заголовок Authorization")
             raise HTTPException(status_code=403, detail="Missing Authorization header")
 
         if init_data.lower().startswith("bearer "):
