@@ -123,7 +123,11 @@ async def test_grant_creates_discount_when_enabled():
     assert discount is not None
     assert discount.percent == 50
     assert discount.source == TRIAL_EARLY_BIRD_DISCOUNT_SOURCE
-    assert discount.max_months == 1
+    # max_months is intentionally None: the trial early-bird applies uniformly
+    # across 1/3/6/12-month purchases so the per-month price curve stays
+    # monotonic. Earlier `max_months=1` made 1m (75 ₽/мес) cheaper than 3m
+    # (133 ₽/мес) — see test_subscription_pricing_curve_with_early_bird.
+    assert discount.max_months is None
     assert discount.min_months is None
     assert discount.remaining_uses == 1
     assert discount.is_permanent is False
@@ -357,3 +361,48 @@ def test_route_adapter_emits_camelcase():
     assert dumped_inactive["active"] is False
     assert dumped_inactive["expiresAtMs"] is None
     assert dumped_inactive["used"] is True
+
+
+@pytest.mark.asyncio
+async def test_subscription_pricing_curve_with_early_bird():
+    """Regression guard: with the trial early-bird active the per-month price
+    must stay monotonically non-increasing across 1/3/6/12-month options.
+
+    Earlier the `max_months=1` constraint on the early-bird PersonalDiscount
+    only discounted the 1-month tariff. Result for base 150 ₽/мес: 1m=75,
+    3m=133, 6m=125, 12m=108 — a clear inversion (1m cheaper per-month than
+    3m). The fix removes that constraint so the −50 % stimulus applies to
+    every period and the curve restores to 1m=75 ≥ 3m=67 ≥ 6m=63 ≥ 12m=54.
+    """
+    from bloobcat.services.discounts import apply_personal_discount
+    from bloobcat.services.trial_early_bird import grant_trial_early_bird_discount
+
+    user = await _make_user()
+    await grant_trial_early_bird_discount(user)
+
+    # Mirror the four storefront periods. The "base" price per month is 150
+    # ₽/мес — matches the user-reported screenshot baseline.
+    periods = [(1, 150), (3, 400), (6, 750), (12, 1296)]
+    per_month_prices: list[int] = []
+    for months, bulk_price in periods:
+        discounted, discount_id, applied_percent = await apply_personal_discount(
+            int(user.id), bulk_price, months
+        )
+        # The discount must apply at every period — `discount_id` is not None
+        # only when the early-bird row matched (which requires max_months to
+        # be unset or >= months).
+        assert discount_id is not None, (
+            f"early-bird must apply at months={months} "
+            f"(was {applied_percent}% before max_months fix)"
+        )
+        assert applied_percent == 50
+        per_month_prices.append(int(round(discounted / months)))
+
+    # Monotonic non-increasing curve.
+    assert per_month_prices == sorted(per_month_prices, reverse=True), (
+        f"price-per-month must non-increase across 1→12 months, "
+        f"got {per_month_prices}"
+    )
+    # Anchored exact values for the base=150 scenario (avoids silent drift).
+    # 6m = 375 / 6 = 62.5 rounds to 62 (banker's rounding to even).
+    assert per_month_prices == [75, 67, 62, 54]
