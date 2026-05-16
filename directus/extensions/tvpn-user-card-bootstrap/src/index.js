@@ -6,6 +6,10 @@
 // so the columns are explicitly visible (hidden=false) in the admin UI — without
 // this, Google-only registrations are easy to miss in the content search bar.
 //
+// Also seeds a global `directus_presets` bookmark "Заблокировавшие бота" that
+// pre-filters the `users` collection by `is_blocked = true` — gives admins a
+// one-click sidebar entry to triage users who blocked the Telegram bot.
+//
 // Idempotent: inserts only when missing; never overwrites a manually-tuned row.
 
 const PRESENTATION_FIELD = {
@@ -68,6 +72,40 @@ const FIELDS_TO_ENSURE = [
   AUTH_IDENTITIES_EMAIL_FIELD,
 ];
 
+// Global bookmark on `/admin/content/users` — appears in the left sidebar
+// nav under the Users collection. user=null + role=null = visible to all roles
+// with read access. Filter is the Directus JSON filter format; layout_query
+// drives the tabular columns + in-layout sort.
+const BLOCKED_USERS_BOOKMARK = {
+  bookmark: "Заблокировавшие бота",
+  user: null,
+  role: null,
+  collection: "users",
+  search: null,
+  layout: "tabular",
+  layout_query: JSON.stringify({
+    tabular: {
+      sort: ["-blocked_at"],
+      fields: [
+        "id",
+        "username",
+        "full_name",
+        "email",
+        "balance",
+        "expired_at",
+        "blocked_at",
+      ],
+    },
+  }),
+  layout_options: null,
+  refresh_interval: null,
+  filter: JSON.stringify({ is_blocked: { _eq: true } }),
+  icon: "block",
+  color: "#E35169",
+};
+
+const BOOKMARKS_TO_ENSURE = [BLOCKED_USERS_BOOKMARK];
+
 export default function registerHook({ init }, { database, logger }) {
   const log = (level, msg) => {
     try {
@@ -112,7 +150,57 @@ export default function registerHook({ init }, { database, logger }) {
     }
   };
 
+  const ensureBookmark = async (row) => {
+    if (!database) {
+      log("warn", "no database accessor — skipping bookmark bootstrap");
+      return;
+    }
+
+    let existing = null;
+    try {
+      existing = await database("directus_presets")
+        .where({ bookmark: row.bookmark, collection: row.collection })
+        .whereNull("user")
+        .whereNull("role")
+        .first();
+    } catch (err) {
+      log(
+        "error",
+        `lookup bookmark "${row.bookmark}" on ${row.collection} failed: ${err?.message || err}`,
+      );
+      return;
+    }
+
+    if (existing) {
+      log(
+        "info",
+        `bookmark "${row.bookmark}" on ${row.collection} already exists — leaving as-is`,
+      );
+      return;
+    }
+
+    try {
+      await database("directus_presets").insert(row);
+      log(
+        "info",
+        `created bookmark "${row.bookmark}" on ${row.collection}`,
+      );
+    } catch (err) {
+      log(
+        "error",
+        `insert bookmark "${row.bookmark}" on ${row.collection} failed: ${err?.message || err}`,
+      );
+    }
+  };
+
+  const ensureAllBookmarks = async () => {
+    for (const row of BOOKMARKS_TO_ENSURE) {
+      await ensureBookmark(row);
+    }
+  };
+
   init("app.after", async () => {
     await ensureAll();
+    await ensureAllBookmarks();
   });
 }
