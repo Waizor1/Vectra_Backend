@@ -123,7 +123,7 @@ async def test_grant_creates_discount_when_enabled():
     assert discount is not None
     assert discount.percent == 50
     assert discount.source == TRIAL_EARLY_BIRD_DISCOUNT_SOURCE
-    assert discount.max_months == 1
+    assert discount.max_months is None
     assert discount.min_months is None
     assert discount.remaining_uses == 1
     assert discount.is_permanent is False
