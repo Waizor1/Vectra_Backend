@@ -63,6 +63,25 @@ _STRONG_TRIGGERS: frozenset[str] = frozenset(
     {"appinstalled", "first_standalone", "pending_flag"}
 )
 
+# Telegram Mini App platforms (per Telegram.WebApp.platform). A Telegram WA
+# never registers a web-push subscription — Telegram uses bot notifications
+# instead — so absence of a PushSubscription row tells us nothing about
+# install state. Manual claims from these platforms get their own verdict
+# bucket so the suspicious `manual_no_push` count isn't contaminated.
+_TELEGRAM_PLATFORMS: frozenset[str] = frozenset(
+    {
+        "android",
+        "android_x",
+        "ios",
+        "macos",
+        "tdesktop",
+        "web",
+        "weba",
+        "webk",
+        "unigram",
+    }
+)
+
 
 class HomeScreenClaimResult(TypedDict, total=False):
     already_claimed: bool
@@ -109,7 +128,9 @@ async def claim_home_screen_reward(
     now = datetime.now(timezone.utc)
     normalized_trigger = _normalize_trigger(trigger)
     had_active_push_sub = await _has_active_push_subscription(int(user_id))
-    verdict = _compute_verdict(normalized_trigger, had_active_push_sub)
+    verdict = _compute_verdict(
+        normalized_trigger, had_active_push_sub, platform_hint
+    )
 
     async with in_transaction() as conn:
         user = await _fetch_user_locked(int(user_id), conn)
@@ -293,21 +314,44 @@ def _normalize_trigger(trigger: HomeScreenTrigger | str | None) -> str:
     return candidate if candidate in allowed else "unknown"
 
 
-def _compute_verdict(trigger: str, had_active_push_sub: bool) -> str:
+def _compute_verdict(
+    trigger: str, had_active_push_sub: bool, platform_hint: str | None
+) -> str:
     """Classify a claim signal for the install-funnel analytics.
 
-    `strong` / `weak` / `manual_with_push` / `manual_no_push` are observed
-    only — none of them block the grant in v1.99.0. The `manual_no_push`
-    bucket is the candidate for a future hard-gate; v1.99.0 just logs
-    a WARNING so we can sample its volume.
+    Buckets:
+    * `strong`               — strong W3C / first-standalone signal
+    * `weak`                 — repeat standalone boot
+    * `manual_telegram`      — Telegram WA platform; web-push N/A there
+                               (Telegram uses bot notifications, not
+                               PushManager), so absence of push proves
+                               nothing. Separated from `manual_no_push`
+                               to keep the fraud-signal bucket clean.
+    * `manual_with_push`     — manual confirm + active web-push subscription
+    * `manual_no_push`       — manual confirm + no push + non-Telegram
+                               (most suspicious bucket; logged as WARNING)
+    * `unknown`              — legacy / coerced
+
+    v1.100.0 is observation-only — none of these block the grant. The
+    `manual_no_push` bucket is the only candidate for a future hard-gate;
+    Telegram and push-having manuals are explicitly safer-by-design.
     """
     if trigger in _STRONG_TRIGGERS:
         return "strong"
     if trigger == "boot":
         return "weak"
     if trigger == "manual":
+        if _is_telegram_platform(platform_hint):
+            return "manual_telegram"
         return "manual_with_push" if had_active_push_sub else "manual_no_push"
     return "unknown"
+
+
+def _is_telegram_platform(platform_hint: str | None) -> bool:
+    """Return True if the platform_hint matches a Telegram Mini App client."""
+    if not platform_hint:
+        return False
+    return platform_hint.strip().lower() in _TELEGRAM_PLATFORMS
 
 
 async def _has_active_push_subscription(user_id: int) -> bool:

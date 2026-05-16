@@ -291,14 +291,19 @@ async def test_signal_ledger_records_manual_no_push_verdict():
     """The escape-hatch path (`Я уже добавил иконку`) without an active
     push subscription is the most suspicious bucket — verdict must be
     `manual_no_push` so the funnel dashboard can highlight it. Shadow
-    mode: the grant still succeeds."""
+    mode: the grant still succeeds. This path is BROWSER-only (no
+    Telegram platform_hint) — see test_signal_ledger_records_manual_telegram
+    for the Telegram WA exception."""
     from bloobcat.db.home_screen_install_signals import HomeScreenInstallSignal
     from bloobcat.db.users import Users
     from bloobcat.services.home_screen_rewards import claim_home_screen_reward
 
     user = await Users.create(id=110002, full_name="manual-no-push", balance=0)
     result = await claim_home_screen_reward(
-        user.id, "discount", platform_hint="ios", trigger="manual"
+        user.id,
+        "discount",
+        platform_hint="web_pwa_ios",  # browser PWA, NOT Telegram
+        trigger="manual",
     )
     assert result["already_claimed"] is False
     assert result["verdict"] == "manual_no_push"
@@ -310,6 +315,84 @@ async def test_signal_ledger_records_manual_no_push_verdict():
     # Reward still landed — shadow mode does not block.
     refreshed = await Users.get(id=user.id)
     assert refreshed.home_screen_reward_granted_at is not None
+
+
+@pytest.mark.asyncio
+async def test_signal_ledger_records_manual_telegram_verdict():
+    """Telegram Mini Apps never register web-push subscriptions (Telegram
+    uses bot notifications instead), so a `manual` claim from a Telegram
+    platform_hint MUST NOT be classified as the suspicious `manual_no_push`
+    — that would flag every legitimate iOS Telegram user (known SDK bug:
+    checkHomeScreenStatus always returns 'unknown' on iOS Telegram)."""
+    from bloobcat.db.home_screen_install_signals import HomeScreenInstallSignal
+    from bloobcat.db.users import Users
+    from bloobcat.services.home_screen_rewards import claim_home_screen_reward
+
+    # iOS Telegram WA, no push sub (typical), manual confirm path.
+    user = await Users.create(id=110008, full_name="ios-tg", balance=0)
+    result = await claim_home_screen_reward(
+        user.id, "balance", platform_hint="ios", trigger="manual"
+    )
+    assert result["verdict"] == "manual_telegram"
+
+    row = await HomeScreenInstallSignal.filter(user_id=user.id).first()
+    assert row is not None
+    assert row.verdict == "manual_telegram"
+    # Push subscription absence is informational, not suspicious for TG.
+    assert row.had_active_push_sub is False
+
+
+@pytest.mark.asyncio
+async def test_manual_telegram_verdict_covers_all_telegram_platforms():
+    """Every Telegram.WebApp.platform value must be recognized — not just
+    ios/android. A regression here would split iOS users into one bucket
+    and macOS Telegram into the suspicious bucket."""
+    from bloobcat.db.users import Users
+    from bloobcat.services.home_screen_rewards import claim_home_screen_reward
+
+    cases = [
+        (110100, "android"),
+        (110101, "android_x"),
+        (110102, "ios"),
+        (110103, "macos"),
+        (110104, "tdesktop"),
+        (110105, "web"),
+        (110106, "weba"),
+        (110107, "webk"),
+        (110108, "unigram"),
+    ]
+    for uid, platform in cases:
+        await Users.create(id=uid, full_name=f"tg-{platform}", balance=0)
+        result = await claim_home_screen_reward(
+            uid, "balance", platform_hint=platform, trigger="manual"
+        )
+        assert result["verdict"] == "manual_telegram", (
+            f"platform_hint={platform!r} got verdict={result['verdict']!r} "
+            f"— expected manual_telegram (Telegram WA cannot register web-push)"
+        )
+
+
+@pytest.mark.asyncio
+async def test_browser_pwa_platform_hints_stay_in_manual_no_push():
+    """Browser-PWA platform_hints (web_pwa_*) must keep falling through to
+    manual_no_push when there is no push subscription — those users have
+    a real web-push API available, so its absence IS a signal."""
+    from bloobcat.services.home_screen_rewards import claim_home_screen_reward
+    from bloobcat.db.users import Users
+
+    for uid, platform in [
+        (110200, "web_pwa_ios"),
+        (110201, "web_pwa_android"),
+        (110202, "web_pwa_desktop"),
+        (110203, None),
+    ]:
+        await Users.create(id=uid, full_name=f"web-{platform}", balance=0)
+        result = await claim_home_screen_reward(
+            uid, "balance", platform_hint=platform, trigger="manual"
+        )
+        assert result["verdict"] == "manual_no_push", (
+            f"platform_hint={platform!r} unexpectedly got verdict={result['verdict']!r}"
+        )
 
 
 @pytest.mark.asyncio
@@ -332,8 +415,10 @@ async def test_signal_ledger_promotes_manual_to_with_push_when_subscribed():
         is_active=True,
     )
 
+    # Use a browser-PWA platform_hint (not 'web' which is Telegram WebK).
+    # web_pwa_desktop is the value emitted by PwaInstalledRewardModal.
     result = await claim_home_screen_reward(
-        user.id, "balance", platform_hint="web", trigger="manual"
+        user.id, "balance", platform_hint="web_pwa_desktop", trigger="manual"
     )
     assert result["verdict"] == "manual_with_push"
 
