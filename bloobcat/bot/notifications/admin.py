@@ -97,10 +97,20 @@ async def _retry_admin_message(text: str, reply_markup=None) -> None:
 
 
 async def send_admin_message(
-    text: str, reply_markup=None, *, _schedule_retry: bool = True
+    text: str,
+    reply_markup=None,
+    *,
+    chat_id: int | None = None,
+    _schedule_retry: bool = True,
 ) -> bool:
-    """Send a log message to the admin/log channel without blocking critical flows."""
-    chat_id = get_admin_log_chat_id()
+    """Send a log message to the admin/log channel without blocking critical flows.
+
+    `chat_id` overrides the default (TELEGRAM_LOGS_CHANNEL / ADMIN_TELEGRAM_ID)
+    when a caller wants to route a notification to a dedicated channel — used
+    e.g. by the Sentry webhook bridge so error alerts can land in a separate
+    Telegram chat from regular admin notifications.
+    """
+    chat_id = chat_id if chat_id is not None else get_admin_log_chat_id()
     try:
         logger.info(f"Отправка сообщения в чат {chat_id}: {text[:100]}...")
         try:
