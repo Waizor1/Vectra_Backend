@@ -2090,3 +2090,172 @@ class TestFreshEquivalentMode:
         assert result["pricing_mode"] == "delta_legacy_shadow"
         assert result["lte_extra_cost_rub"] == 15
         assert result["total_extra_cost_rub"] == 15
+
+    @pytest.mark.asyncio
+    async def test_fresh_mode_devices_only_huge_refund_invariants(self, monkeypatch):
+        """Symmetric sanity for the device axis under the same «freshly-bought
+        yearly» refund profile that broke LTE.
+
+        Unlike LTE, the device axis legitimately participates in the
+        fresh_minus_refund flip: a +N-device upgrade on a tariff the user
+        almost just bought IS a fairness-bound exchange (refund of unused
+        period vs. fresh price of the upgraded pack). The test asserts the
+        invariants that protect the user from the LTE-style accidental
+        zeroing without forcing a magic number:
+
+        - total ≥ 0 (no negative quotes ever leak),
+        - lte and period axes stay at 0 when their delta is 0,
+        - axes always sum to total,
+        - device cost <= legacy delta cost (Phase 2 fairness contract).
+        """
+        import bloobcat.services.upgrade_quote as _uq
+        from bloobcat.routes.user import UpgradeBundleRequest, upgrade_bundle
+
+        _silence_side_effects(monkeypatch)
+        user, _active, _tariff = await _setup_user_with_active_tariff(
+            user_id=89020,
+            balance=200_000,
+            hwid_limit=1,
+            lte_gb_total=10,
+            lte_price_per_gb=1.5,
+            days_remaining=350,
+            price=1800,
+            months=12,
+        )
+        await _setup_four_prod_skus(base_id=90000)
+
+        # Legacy total for comparison.
+        monkeypatch.setattr(_uq, "_upgrade_fresh_mode_enabled", lambda: False)
+        legacy = await upgrade_bundle(
+            payload=UpgradeBundleRequest(
+                target_device_count=3,
+                target_lte_gb=10,
+                target_extra_days=0,
+                dry_run=True,
+            ),
+            user=user,
+        )
+
+        monkeypatch.setattr(_uq, "_upgrade_fresh_mode_enabled", lambda: True)
+        result = await upgrade_bundle(
+            payload=UpgradeBundleRequest(
+                target_device_count=3,
+                target_lte_gb=10,
+                target_extra_days=0,
+                dry_run=True,
+            ),
+            user=user,
+        )
+
+        assert result["pricing_mode"] == "fresh_minus_refund"
+        assert result["lte_extra_cost_rub"] == 0
+        assert result["period_extra_cost_rub"] == 0
+        assert result["total_extra_cost_rub"] >= 0
+        axis_sum = (
+            result["device_extra_cost_rub"]
+            + result["lte_extra_cost_rub"]
+            + result["period_extra_cost_rub"]
+        )
+        assert axis_sum == result["total_extra_cost_rub"]
+        # Phase 2 fairness contract: fresh-mode total <= legacy delta.
+        assert result["total_extra_cost_rub"] <= legacy["total_extra_cost_rub"]
+
+    @pytest.mark.asyncio
+    async def test_fresh_mode_period_only_huge_refund_may_be_zero_by_design(
+        self, monkeypatch
+    ):
+        """Period-only upgrade on a freshly-bought yearly tariff: total CAN
+        legitimately be 0 because the user has already paid for the days in
+        the current window (refund eats the fresh period cost). This is the
+        intended Phase 2 fairness behavior — NOT a bug like the LTE clamp
+        was. The test pins the axes-coherence invariants so a future change
+        cannot accidentally re-introduce «period uses LTE-style preservation»
+        semantics by mistake.
+        """
+        import bloobcat.services.upgrade_quote as _uq
+        from bloobcat.routes.user import UpgradeBundleRequest, upgrade_bundle
+
+        _silence_side_effects(monkeypatch)
+        monkeypatch.setattr(_uq, "_upgrade_fresh_mode_enabled", lambda: True)
+        user, _active, _tariff = await _setup_user_with_active_tariff(
+            user_id=89021,
+            balance=200_000,
+            hwid_limit=1,
+            lte_gb_total=10,
+            lte_price_per_gb=1.5,
+            days_remaining=350,
+            price=1800,
+            months=12,
+        )
+        await _setup_four_prod_skus(base_id=90100)
+
+        result = await upgrade_bundle(
+            payload=UpgradeBundleRequest(
+                target_device_count=1,
+                target_lte_gb=10,
+                target_extra_days=10,   # +10 days
+                dry_run=True,
+            ),
+            user=user,
+        )
+
+        assert result["pricing_mode"] == "fresh_minus_refund"
+        # No LTE / device delta → those stay 0 (axis isolation).
+        assert result["lte_extra_cost_rub"] == 0
+        assert result["device_extra_cost_rub"] == 0
+        # total may be 0 by Phase 2 design when fresh_period < refund.
+        assert result["total_extra_cost_rub"] >= 0
+        # Axes sum to total — coherence even when total == 0.
+        assert (
+            result["device_extra_cost_rub"]
+            + result["lte_extra_cost_rub"]
+            + result["period_extra_cost_rub"]
+        ) == result["total_extra_cost_rub"]
+
+    @pytest.mark.asyncio
+    async def test_fresh_mode_devices_plus_lte_lte_never_loses_to_refund(
+        self, monkeypatch
+    ):
+        """When devices + LTE are upgraded together on a fresh paid tariff,
+        the LTE component is ALWAYS the live linear cost — refund only
+        reduces the non-LTE (device) component, never the LTE one. This is
+        the explicit invariant the bug-fix establishes.
+        """
+        import bloobcat.services.upgrade_quote as _uq
+        from bloobcat.routes.user import UpgradeBundleRequest, upgrade_bundle
+
+        _silence_side_effects(monkeypatch)
+        monkeypatch.setattr(_uq, "_upgrade_fresh_mode_enabled", lambda: True)
+        user, _active, _tariff = await _setup_user_with_active_tariff(
+            user_id=89022,
+            balance=200_000,
+            hwid_limit=1,
+            lte_gb_total=0,
+            lte_price_per_gb=1.5,
+            days_remaining=350,
+            price=1800,
+            months=12,
+        )
+        await _setup_four_prod_skus(base_id=90200)
+
+        result = await upgrade_bundle(
+            payload=UpgradeBundleRequest(
+                target_device_count=2,
+                target_lte_gb=20,
+                target_extra_days=0,
+                dry_run=True,
+            ),
+            user=user,
+        )
+
+        assert result["pricing_mode"] == "fresh_minus_refund"
+        # LTE = 20 × 1.5 = 30, ALWAYS, regardless of refund eating devices.
+        assert result["lte_extra_cost_rub"] == 30
+        assert result["period_extra_cost_rub"] == 0
+        # total = lte + non_lte_after_refund (device only here).
+        assert result["total_extra_cost_rub"] >= result["lte_extra_cost_rub"]
+        assert (
+            result["device_extra_cost_rub"]
+            + result["lte_extra_cost_rub"]
+            + result["period_extra_cost_rub"]
+        ) == result["total_extra_cost_rub"]
