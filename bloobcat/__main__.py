@@ -294,6 +294,15 @@ async def _apply_concurrent_index_patches(conn) -> None:
         # Drives the clawback scanner: WHERE status='optimistic' AND paid_at >= cutoff.
         'CREATE INDEX CONCURRENTLY IF NOT EXISTS "ix_golden_payouts_status_paid_at"\n'
         '    ON "golden_period_payouts" ("status", "paid_at")',
+        # PWA install-signal ledger (migration 121) — analytics queries
+        # filter by user (per-account replay), by created_at (funnel
+        # window), and by verdict (bypass rate).
+        'CREATE INDEX CONCURRENTLY IF NOT EXISTS "ix_hs_signals_user"\n'
+        '    ON "home_screen_install_signals" ("user_id")',
+        'CREATE INDEX CONCURRENTLY IF NOT EXISTS "ix_hs_signals_created"\n'
+        '    ON "home_screen_install_signals" ("created_at")',
+        'CREATE INDEX CONCURRENTLY IF NOT EXISTS "ix_hs_signals_verdict"\n'
+        '    ON "home_screen_install_signals" ("verdict")',
     ]
     for stmt in concurrent_index_statements:
         try:
