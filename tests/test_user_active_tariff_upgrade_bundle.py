@@ -1848,3 +1848,245 @@ class TestFreshEquivalentMode:
         # The picked SKU id must be one of the seeded SKUs.
         seeded_ids = {sku.id for sku in skus}
         assert result["optimal_sku_id"] in seeded_ids
+
+    @pytest.mark.asyncio
+    async def test_fresh_mode_huge_refund_preserves_lte_cost(self, monkeypatch):
+        """Regression for the «LTE расчёт уходит в минус» bug (2026-05-16).
+
+        Scenario: user freshly bought an annual paid tariff (price=1800₽,
+        ~350 days remaining). They want +10 GB LTE at the tariff's live rate
+        of 1.5 ₽/GB.
+
+        Before the fix, the `fresh_minus_refund` block clamped
+        `new_lte = min(shadow_lte_share, new_total)`, and `new_total` was
+        `max(0, fresh_total - huge_refund) = 0`, so `lte_extra_cost_rub`
+        silently dropped to 0. The user was charged ~0 ₽ for 10 fresh GB —
+        in production this looked like "kнопка не активируется".
+
+        Contract: `lte_extra_cost_rub == lte_delta_gb × live_lte_price_per_gb`
+        regardless of how big the refund is on the period axis.
+        """
+        import bloobcat.services.upgrade_quote as _uq
+        from bloobcat.routes.user import UpgradeBundleRequest, upgrade_bundle
+
+        _silence_side_effects(monkeypatch)
+        monkeypatch.setattr(_uq, "_upgrade_fresh_mode_enabled", lambda: True)
+        user, _active, _tariff = await _setup_user_with_active_tariff(
+            user_id=89010,
+            balance=200_000,
+            hwid_limit=1,
+            lte_gb_total=0,
+            lte_price_per_gb=1.5,
+            days_remaining=350,
+            price=1800,
+            months=12,
+        )
+        await _setup_four_prod_skus(base_id=89800)
+
+        result = await upgrade_bundle(
+            payload=UpgradeBundleRequest(
+                target_device_count=1,   # no device delta
+                target_lte_gb=10,        # +10 GB
+                target_extra_days=0,     # no period extension
+                dry_run=True,
+            ),
+            user=user,
+        )
+
+        assert result["pricing_mode"] == "fresh_minus_refund"
+        # LTE component must be 10 × 1.5 = 15 ₽ — never zeroed by refund.
+        assert result["lte_extra_cost_rub"] == 15, (
+            f"LTE was clamped: got {result['lte_extra_cost_rub']}, expected 15"
+        )
+        # Total ≥ LTE component (period/device may add to it via reallocation,
+        # but the LTE cost itself stays linear).
+        assert result["total_extra_cost_rub"] >= 15
+
+    @pytest.mark.asyncio
+    async def test_fresh_mode_lte_uses_live_price_not_shadow_sku(self, monkeypatch):
+        """The user's CURRENT tariff rate is the source of truth for the LTE
+        line cost — NOT the optimal SKU's `lte_price_per_gb`. This keeps the
+        fairness chip (`fresh_equivalent_total_rub`) consistent with what the
+        user is actually charged and matches what the user saw in their pricing
+        hint before clicking «Pay».
+        """
+        import bloobcat.services.upgrade_quote as _uq
+        from bloobcat.db.tariff import Tariffs
+        from bloobcat.routes.user import UpgradeBundleRequest, upgrade_bundle
+
+        _silence_side_effects(monkeypatch)
+        monkeypatch.setattr(_uq, "_upgrade_fresh_mode_enabled", lambda: True)
+        # Current tariff: live LTE rate 1.5 ₽/GB.
+        user, _active, _tariff = await _setup_user_with_active_tariff(
+            user_id=89011,
+            balance=50_000,
+            hwid_limit=1,
+            lte_gb_total=0,
+            lte_price_per_gb=1.5,
+            days_remaining=30,
+            price=300,
+            months=1,
+        )
+        # Seed a "cheaper LTE" optimal SKU candidate for the 12mo window.
+        # Without the override, the SKU's 0.5 ₽/GB would dilute the line —
+        # with the override the user pays the 1.5 ₽/GB their tariff page
+        # advertised.
+        await Tariffs.create(
+            id=89900,
+            name="12m_cheap_lte",
+            months=12,
+            base_price=1299,
+            progressive_multiplier=0.9164,
+            order=99,
+            is_active=True,
+            devices_limit_default=1,
+            devices_limit_family=30,
+            final_price_default=1299,
+            final_price_family=14399,
+            lte_max_gb=500,
+            lte_price_per_gb=0.5,   # ← cheaper than user's current tariff
+            lte_enabled=True,
+        )
+
+        result = await upgrade_bundle(
+            payload=UpgradeBundleRequest(
+                target_device_count=1,
+                target_lte_gb=10,
+                target_extra_days=0,
+                dry_run=True,
+            ),
+            user=user,
+        )
+
+        assert result["pricing_mode"] == "fresh_minus_refund"
+        # Must charge by USER'S current tariff rate (1.5), not SKU's (0.5).
+        assert result["lte_extra_cost_rub"] == 15
+        assert result["lte_price_per_gb"] == 1.5
+
+    @pytest.mark.asyncio
+    async def test_fresh_mode_lte_with_all_three_axes(self, monkeypatch):
+        """+devices, +LTE, +period combined. LTE line stays linear at live ×
+        delta; non-LTE total is `max(0, fresh_non_lte - refund)`; axes sum to
+        total.
+        """
+        import bloobcat.services.upgrade_quote as _uq
+        from bloobcat.routes.user import UpgradeBundleRequest, upgrade_bundle
+
+        _silence_side_effects(monkeypatch)
+        monkeypatch.setattr(_uq, "_upgrade_fresh_mode_enabled", lambda: True)
+        user, _active, _tariff = await _setup_user_with_active_tariff(
+            user_id=89012,
+            balance=50_000,
+            hwid_limit=2,
+            lte_gb_total=0,
+            lte_price_per_gb=1.5,
+            days_remaining=30,
+            price=300,
+            months=1,
+        )
+        await _setup_four_prod_skus(base_id=89930)
+
+        result = await upgrade_bundle(
+            payload=UpgradeBundleRequest(
+                target_device_count=5,
+                target_lte_gb=20,
+                target_extra_days=60,
+                dry_run=True,
+            ),
+            user=user,
+        )
+
+        assert result["pricing_mode"] == "fresh_minus_refund"
+        # LTE always = 20 × 1.5 = 30 (linear, refund-independent).
+        assert result["lte_extra_cost_rub"] == 30
+        # Axes sum to total.
+        axis_sum = (
+            result["device_extra_cost_rub"]
+            + result["lte_extra_cost_rub"]
+            + result["period_extra_cost_rub"]
+        )
+        assert axis_sum == result["total_extra_cost_rub"]
+
+    @pytest.mark.asyncio
+    async def test_fresh_mode_lte_unavailable_still_errors(self, monkeypatch):
+        """When the user's tariff has no live LTE price (rate 0) AND the
+        legacy LTE block errored with `lte_unavailable_for_tariff`, the fix
+        must not silently inject a non-zero LTE cost via the fresh-mode
+        path. Behavior must stay: 0 LTE cost, error preserved.
+        """
+        import bloobcat.services.upgrade_quote as _uq
+        from bloobcat.routes.user import UpgradeBundleRequest, upgrade_bundle
+
+        _silence_side_effects(monkeypatch)
+        monkeypatch.setattr(_uq, "_upgrade_fresh_mode_enabled", lambda: True)
+        # lte_price_per_gb=0 in BOTH active tariff AND the only seeded Tariffs
+        # row → `effective_lte_price_per_gb == 0` → LTE delta dropped, error
+        # appended. Use the tariff seeded by `_setup_user_with_active_tariff`
+        # which mirrors the active_tariff price-per-gb (here 0).
+        user, _active, _tariff = await _setup_user_with_active_tariff(
+            user_id=89013,
+            balance=50_000,
+            hwid_limit=1,
+            lte_gb_total=0,
+            lte_price_per_gb=0.0,
+            days_remaining=30,
+            price=300,
+            months=1,
+        )
+        # Wipe any other LTE-enabled tariffs so the wide-fallback can't find
+        # a live LTE price elsewhere.
+        from bloobcat.db.tariff import Tariffs as _T
+        await _T.filter(id__not=user.id).delete()
+        # Also disable LTE on the only remaining (active-tariff) row so the
+        # fallback doesn't pick it via `lte_enabled=True`.
+        await _T.filter(id=user.id).update(lte_enabled=False, lte_price_per_gb=0)
+
+        result = await upgrade_bundle(
+            payload=UpgradeBundleRequest(
+                target_device_count=1,
+                target_lte_gb=10,
+                target_extra_days=0,
+                dry_run=True,
+            ),
+            user=user,
+        )
+
+        assert result["lte_extra_cost_rub"] == 0
+        assert "lte_unavailable_for_tariff" in result.get("validation_errors", [])
+
+    @pytest.mark.asyncio
+    async def test_legacy_mode_lte_unchanged_by_fresh_fix(self, monkeypatch):
+        """With UPGRADE_PRICING_FRESH_MODE=false the legacy delta path is the
+        source of truth. The LTE preservation fix lives in the fresh-mode
+        branch only, so the legacy total must equal the simple linear formula
+        regardless of refund size.
+        """
+        import bloobcat.services.upgrade_quote as _uq
+        from bloobcat.routes.user import UpgradeBundleRequest, upgrade_bundle
+
+        _silence_side_effects(monkeypatch)
+        monkeypatch.setattr(_uq, "_upgrade_fresh_mode_enabled", lambda: False)
+        user, _active, _tariff = await _setup_user_with_active_tariff(
+            user_id=89014,
+            balance=50_000,
+            hwid_limit=1,
+            lte_gb_total=0,
+            lte_price_per_gb=1.5,
+            days_remaining=350,
+            price=1800,
+            months=12,
+        )
+
+        result = await upgrade_bundle(
+            payload=UpgradeBundleRequest(
+                target_device_count=1,
+                target_lte_gb=10,
+                target_extra_days=0,
+                dry_run=True,
+            ),
+            user=user,
+        )
+
+        assert result["pricing_mode"] == "delta_legacy_shadow"
+        assert result["lte_extra_cost_rub"] == 15
+        assert result["total_extra_cost_rub"] == 15

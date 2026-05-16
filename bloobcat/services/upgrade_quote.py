@@ -338,12 +338,20 @@ def _compute_fresh_equivalent(
     target_lte_gb: int,
     target_total_days: int,
     today: date,
+    lte_price_per_gb_override: float | None = None,
 ) -> tuple[int, int, int]:
     """Returns (total_rub, devices_share_rub, lte_share_rub).
 
     devices_share = sku.calculate_price(target_devices) × target_total_days / sku_natural_days
-    lte_share = target_lte_gb × sku.lte_price_per_gb if lte_enabled, else 0.
+    lte_share = target_lte_gb × effective_lte_price_per_gb if lte_enabled, else 0.
     All Decimal, ROUND_DOWN.
+
+    `lte_price_per_gb_override` lets the caller pin the LTE share to the
+    SAME live rate it uses for the charged amount (the user's current tariff
+    rate, not the optimal-SKU rate). Without this pin, `shadow_fresh_total`
+    and `lte_extra_cost_rub` diverged whenever the optimal SKU had a
+    different `lte_price_per_gb` than the user's active tariff — confusing
+    the "fairness chip" and obscuring the real LTE cost.
     """
     getcontext().prec = 28
     sku_natural_days = compute_total_period_days(sku.months, anchor=today)
@@ -359,7 +367,10 @@ def _compute_fresh_equivalent(
     lte_share = 0
     lte_enabled = getattr(sku, "lte_enabled", False)
     if lte_enabled and target_lte_gb > 0:
-        lte_price = _to_float(getattr(sku, "lte_price_per_gb", 0.0), 0.0)
+        if lte_price_per_gb_override is not None:
+            lte_price = float(lte_price_per_gb_override)
+        else:
+            lte_price = _to_float(getattr(sku, "lte_price_per_gb", 0.0), 0.0)
         if lte_price > 0:
             lte_share = int(
                 Decimal(str(target_lte_gb * lte_price)).to_integral_value(rounding=ROUND_DOWN)
@@ -685,8 +696,25 @@ async def build_upgrade_bundle_quote(
     shadow_sku_months = 0
     shadow_sku_id: int | None = None
     if shadow_sku is not None and target_total_days > 0:
+        # Pin the LTE share inside `shadow_fresh_total` to the SAME live rate
+        # we use to bill the user (effective_lte_price_per_gb from the user's
+        # current tariff). Without this pin, an "optimal SKU" with a cheaper
+        # LTE rate would silently dilute the fairness chip and the charged
+        # LTE-component would not match the LTE share inside fresh_total.
+        # Pass `None` only when the active tariff itself has no live LTE
+        # price (legacy snapshot path), so the SKU's own rate is used.
+        lte_pin = (
+            effective_lte_price_per_gb
+            if effective_lte_price_per_gb and effective_lte_price_per_gb > 0
+            else None
+        )
         shadow_fresh_total, _shadow_devices_share, shadow_lte_share = _compute_fresh_equivalent(
-            shadow_sku, target_devices, target_lte_gb, target_total_days, today
+            shadow_sku,
+            target_devices,
+            target_lte_gb,
+            target_total_days,
+            today,
+            lte_price_per_gb_override=lte_pin,
         )
         shadow_refund = _compute_refund(active_tariff, days_remaining_now, today)
         shadow_sku_months = int(getattr(shadow_sku, "months", 0) or 0)
@@ -698,20 +726,35 @@ async def build_upgrade_bundle_quote(
 
     pricing_mode_str = "delta_legacy_shadow"
     legacy_total = total_extra_cost_rub
+    # `live_lte_cost` keeps the linear LTE charge (live_price × delta_gb)
+    # computed in the legacy section above (line ~644). It is the authoritative
+    # cost of NEW GB the user is buying right now — refund/reallocation must
+    # NOT touch it.
+    live_lte_cost = int(lte_extra_cost_rub)
+    non_lte_after_refund = 0
 
     if _fresh_mode_on and has_any_upgrade and shadow_sku is not None and target_total_days > 0:
-        # Flip: user pays fresh_equivalent - refund instead of legacy delta.
-        new_total = max(0, int(shadow_fresh_total) - int(shadow_refund))
+        # Flip: user pays live_lte + max(0, non_lte_fresh - refund).
+        #
+        # LTE is a linear additive resource (the user is buying NEW GB at the
+        # current live rate). Refund compensates the unused fraction of the
+        # CURRENT period — it does not entitle the user to free LTE. The
+        # earlier `min(new_lte, new_total)` clamp obliterated the LTE cost
+        # whenever `refund > fresh_total` (typical for a freshly-bought paid
+        # tariff with many days remaining), silently zeroing the bill for
+        # +10 GB top-ups. New rule: live LTE cost is preserved, refund is
+        # applied ONLY to the non-LTE (device + period) portion.
+        non_lte_fresh = max(0, int(shadow_fresh_total) - int(shadow_lte_share))
+        non_lte_after_refund = max(0, non_lte_fresh - int(shadow_refund))
+        new_total = live_lte_cost + non_lte_after_refund
 
-        # Re-allocate axis breakdown so axes sum to new_total.
-        new_lte = int(shadow_lte_share) if lte_delta_gb > 0 else 0
-        new_lte = min(new_lte, new_total)
-        non_lte_total = max(0, new_total - new_lte)
+        # Re-allocate non-LTE axes proportionally to the legacy device/period
+        # ratio. LTE stays at live_lte_cost; we never clamp it down here.
+        new_lte = live_lte_cost
 
         has_devices = device_delta > 0
         has_period = target_extra_days > 0
         if has_devices and has_period:
-            # Split non-LTE proportionally to legacy device/period ratio.
             legacy_dev = max(0, int(device_extra_cost_rub))
             legacy_per = max(0, int(period_extra_cost_rub))
             legacy_split = legacy_dev + legacy_per
@@ -719,19 +762,19 @@ async def build_upgrade_bundle_quote(
                 getcontext().prec = 28
                 new_dev = int(
                     (
-                        Decimal(non_lte_total) * Decimal(legacy_dev) / Decimal(legacy_split)
+                        Decimal(non_lte_after_refund) * Decimal(legacy_dev) / Decimal(legacy_split)
                     ).to_integral_value(rounding=ROUND_DOWN)
                 )
-                new_per = max(0, non_lte_total - new_dev)
+                new_per = max(0, non_lte_after_refund - new_dev)
             else:
-                new_dev = non_lte_total // 2
-                new_per = non_lte_total - new_dev
+                new_dev = non_lte_after_refund // 2
+                new_per = non_lte_after_refund - new_dev
         elif has_devices:
-            new_dev = non_lte_total
+            new_dev = non_lte_after_refund
             new_per = 0
         elif has_period:
             new_dev = 0
-            new_per = non_lte_total
+            new_per = non_lte_after_refund
         else:
             new_dev = 0
             new_per = 0
@@ -755,7 +798,9 @@ async def build_upgrade_bundle_quote(
         "upgrade_bundle_shadow user_id=%s pricing_mode=%s legacy_total=%d "
         "charged_total=%d shadow_fresh_total=%d shadow_refund=%d shadow_diff=%d "
         "shadow_sku_months=%d target_devices=%d target_lte_gb=%d "
-        "target_total_days=%d active_months=%d",
+        "target_total_days=%d active_months=%d "
+        "effective_lte_price_per_gb=%.4f shadow_lte_share=%d live_lte_cost=%d "
+        "non_lte_after_refund=%d",
         user_id,
         pricing_mode_str,
         int(legacy_total),
@@ -768,6 +813,10 @@ async def build_upgrade_bundle_quote(
         int(target_lte_gb),
         int(target_total_days),
         int(getattr(active_tariff, "months", 0) or 0),
+        float(effective_lte_price_per_gb),
+        int(shadow_lte_share),
+        int(live_lte_cost),
+        int(non_lte_after_refund),
     )
 
     return UpgradeBundleQuote(
