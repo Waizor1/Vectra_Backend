@@ -170,9 +170,12 @@ async def validate(init_data: str = Depends(oauth2_scheme), request: Request = N
             telegram_settings.token.get_secret_value(), init_data
         )
 
-        # Проверка на None после парсинга - защита от некорректных данных
+        # Проверка на None после парсинга - защита от некорректных данных.
+        # Корректный, но "пустой" парс означает что клиент прислал malformed/
+        # expired initData — это client-side, 403, и не должно паджировать
+        # Sentry. `warning` оставляет след в логах без срабатывания alert rule.
         if not user or not user.user:
-            logger.error("Парсинг вернул пустой объект пользователя")
+            logger.warning("Парсинг вернул пустой объект пользователя")
             raise HTTPException(status_code=403, detail="Invalid user data")
 
         logger.debug(f"Успешная валидация для пользователя {user.user.id}")
@@ -217,7 +220,12 @@ async def validate(init_data: str = Depends(oauth2_scheme), request: Request = N
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Ошибка валидации: {str(e)}")
+        # Любое исключение во время парсинга initData всегда конвертируется
+        # в 403 ниже — это client-side ошибка (битый/просроченный initData,
+        # ошибка подписи, нестандартный формат от старых клиентов). Лог на
+        # уровне warning сохраняет диагностику без бомбардировки Sentry,
+        # exc_info=True чтобы stack trace всё ещё попадал в файловый лог.
+        logger.warning("Ошибка валидации initData: {}", str(e), exc_info=True)
         raise HTTPException(status_code=403, detail=str(e))
 
     # Явно передаем параметры по имени для большей ясности
