@@ -501,10 +501,11 @@ async def test_quote_lte_fallback_uses_any_live_tariff_with_lte(monkeypatch):
     result = await upgrade_bundle(payload=payload, user=user)
 
     assert result["status"] == "quote"
-    # Live fallback price (1.5) × 5 = 7 (ROUND_DOWN of 7.5) — NOT snapshot
-    # 2.0 × 5 = 10. This proves the fallback escaped the snapshot.
+    # Live fallback price (1.5) × 5 = 7.5 → ROUND_HALF_UP → 8 ₽ (2026-05-16
+    # rounding fix). NOT snapshot 2.0 × 5 = 10 — that would mean the
+    # fallback failed to escape the snapshot.
     assert result["lte_price_per_gb"] == 1.5
-    assert result["lte_extra_cost_rub"] == 7
+    assert result["lte_extra_cost_rub"] == 8
 
 
 @pytest.mark.asyncio
@@ -2259,3 +2260,113 @@ class TestFreshEquivalentMode:
             + result["lte_extra_cost_rub"]
             + result["period_extra_cost_rub"]
         ) == result["total_extra_cost_rub"]
+
+    @pytest.mark.asyncio
+    async def test_fresh_mode_lte_fractional_rate_rounds_half_up(self, monkeypatch):
+        """Regression for the «1 GB at 1.5 ₽ charged 1 ₽ instead of 2»
+        rounding bug (2026-05-16). The user-facing per-GB hint shows the
+        live tariff rate literally (e.g. «1.5 ₽/ГБ»); since the balance
+        can't hold half-rubles, the LTE charge MUST round to the nearest
+        integer (ROUND_HALF_UP), not ROUND_DOWN. This matches what
+        `payment.py:_round_rub` already does for the standalone LTE
+        top-up flow.
+        """
+        import bloobcat.services.upgrade_quote as _uq
+        from bloobcat.routes.user import UpgradeBundleRequest, upgrade_bundle
+
+        _silence_side_effects(monkeypatch)
+        monkeypatch.setattr(_uq, "_upgrade_fresh_mode_enabled", lambda: True)
+        user, _active, _tariff = await _setup_user_with_active_tariff(
+            user_id=89030,
+            balance=50_000,
+            hwid_limit=1,
+            lte_gb_total=0,
+            lte_price_per_gb=1.5,
+            days_remaining=30,
+            price=300,
+            months=1,
+        )
+        await _setup_four_prod_skus(base_id=90400)
+
+        # 1 GB × 1.5 ₽ = 1.5 → ROUND_HALF_UP → 2 ₽ (was 1 ₽ under ROUND_DOWN).
+        result_1gb = await upgrade_bundle(
+            payload=UpgradeBundleRequest(
+                target_device_count=1,
+                target_lte_gb=1,
+                target_extra_days=0,
+                dry_run=True,
+            ),
+            user=user,
+        )
+        assert result_1gb["lte_extra_cost_rub"] == 2, (
+            f"1 GB × 1.5 must round half-up to 2, got {result_1gb['lte_extra_cost_rub']}"
+        )
+
+        # 3 GB × 1.5 ₽ = 4.5 → ROUND_HALF_UP → 5 ₽.
+        result_3gb = await upgrade_bundle(
+            payload=UpgradeBundleRequest(
+                target_device_count=1,
+                target_lte_gb=3,
+                target_extra_days=0,
+                dry_run=True,
+            ),
+            user=user,
+        )
+        assert result_3gb["lte_extra_cost_rub"] == 5
+
+        # 10 GB × 1.5 ₽ = 15 → integer, unchanged either way.
+        result_10gb = await upgrade_bundle(
+            payload=UpgradeBundleRequest(
+                target_device_count=1,
+                target_lte_gb=10,
+                target_extra_days=0,
+                dry_run=True,
+            ),
+            user=user,
+        )
+        assert result_10gb["lte_extra_cost_rub"] == 15
+
+    @pytest.mark.asyncio
+    async def test_fresh_mode_lte_integer_rate_unchanged(self, monkeypatch):
+        """Sanity: integer rates (e.g. 2 ₽/ГБ) behave identically under
+        ROUND_HALF_UP — no surprise change for tariffs that already use
+        whole-ruble pricing.
+        """
+        import bloobcat.services.upgrade_quote as _uq
+        from bloobcat.routes.user import UpgradeBundleRequest, upgrade_bundle
+
+        _silence_side_effects(monkeypatch)
+        monkeypatch.setattr(_uq, "_upgrade_fresh_mode_enabled", lambda: True)
+        user, _active, _tariff = await _setup_user_with_active_tariff(
+            user_id=89031,
+            balance=50_000,
+            hwid_limit=1,
+            lte_gb_total=0,
+            lte_price_per_gb=2.0,
+            days_remaining=30,
+            price=300,
+            months=1,
+        )
+        await _setup_four_prod_skus(base_id=90500)
+
+        result_1 = await upgrade_bundle(
+            payload=UpgradeBundleRequest(
+                target_device_count=1,
+                target_lte_gb=1,
+                target_extra_days=0,
+                dry_run=True,
+            ),
+            user=user,
+        )
+        assert result_1["lte_extra_cost_rub"] == 2
+
+        result_10 = await upgrade_bundle(
+            payload=UpgradeBundleRequest(
+                target_device_count=1,
+                target_lte_gb=10,
+                target_extra_days=0,
+                dry_run=True,
+            ),
+            user=user,
+        )
+        assert result_10["lte_extra_cost_rub"] == 20

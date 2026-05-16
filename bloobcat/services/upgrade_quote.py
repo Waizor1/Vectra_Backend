@@ -15,7 +15,7 @@ import logging
 import os
 from dataclasses import dataclass, asdict
 from datetime import date
-from decimal import Decimal, ROUND_DOWN, getcontext
+from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP, getcontext
 from typing import Any
 
 from bloobcat.db.active_tariff import ActiveTariffs
@@ -372,8 +372,13 @@ def _compute_fresh_equivalent(
         else:
             lte_price = _to_float(getattr(sku, "lte_price_per_gb", 0.0), 0.0)
         if lte_price > 0:
+            # ROUND_HALF_UP for LTE — keeps shadow_lte_share symmetric with
+            # the live `lte_extra_cost_rub` charge above (which switched to
+            # half-up in 2026-05-16 fix). If these two diverged,
+            # `non_lte_fresh = fresh_total - shadow_lte_share` would leak a
+            # rounding fraction into device/period axes.
             lte_share = int(
-                Decimal(str(target_lte_gb * lte_price)).to_integral_value(rounding=ROUND_DOWN)
+                Decimal(str(target_lte_gb * lte_price)).to_integral_value(rounding=ROUND_HALF_UP)
             )
 
     return devices_share + lte_share, devices_share, lte_share
@@ -651,10 +656,17 @@ async def build_upgrade_bundle_quote(
             errors.append("lte_unavailable_for_tariff")
             lte_delta_gb = 0
         else:
-            # Fix B — ROUND_DOWN, symmetric with period & device axes.
+            # ROUND_HALF_UP (2026-05-16 fix): the user-facing per-GB hint
+            # displays `lte_price_per_gb` literally (e.g. «1.5 ₽/ГБ»), and
+            # the integer balance can't carry a half-ruble. Rounding the
+            # charge to the NEAREST integer (1 GB × 1.5 → 2 ₽) keeps the
+            # quote symmetric with `payment.py:_round_rub` used by the
+            # standalone LTE top-up flow. ROUND_DOWN systematically
+            # under-charged for fractional rates ("1 GB by 1.5 ₽ = 1 ₽")
+            # and looked broken next to the «1.5 ₽/ГБ» hint.
             lte_extra_cost_rub = int(
                 Decimal(str(lte_delta_gb * effective_lte_price_per_gb)).to_integral_value(
-                    rounding=ROUND_DOWN
+                    rounding=ROUND_HALF_UP
                 )
             )
 
