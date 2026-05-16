@@ -61,6 +61,8 @@ async def db(_install_stubs_once):
                         "bloobcat.db.payments",
                         "bloobcat.db.discounts",
                         "bloobcat.db.referral_rewards",
+                        "bloobcat.db.push_subscriptions",
+                        "bloobcat.db.home_screen_install_signals",
                     ],
                     "default_connection": "default",
                 }
@@ -254,6 +256,182 @@ async def test_claim_logs_already_claimed_cache_path(monkeypatch):
         f"captured: {captured!r}"
     )
     assert str(user.id) in cache_hits[-1]
+
+
+# ── install-signal ledger (shadow-mode verdict) ──────────────────────
+
+
+@pytest.mark.asyncio
+async def test_signal_ledger_records_strong_verdict_for_appinstalled():
+    from bloobcat.db.home_screen_install_signals import HomeScreenInstallSignal
+    from bloobcat.db.users import Users
+    from bloobcat.services.home_screen_rewards import claim_home_screen_reward
+
+    user = await Users.create(id=110001, full_name="strong", balance=0)
+    result = await claim_home_screen_reward(
+        user.id, "balance", platform_hint="android", trigger="appinstalled"
+    )
+    assert result["already_claimed"] is False
+    assert result["verdict"] == "strong"
+
+    rows = await HomeScreenInstallSignal.filter(user_id=user.id).all()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.trigger == "appinstalled"
+    assert row.platform_hint == "android"
+    assert row.reward_kind == "balance"
+    assert row.verdict == "strong"
+    assert row.already_claimed is False
+    # No push subscription was inserted in this test.
+    assert row.had_active_push_sub is False
+
+
+@pytest.mark.asyncio
+async def test_signal_ledger_records_manual_no_push_verdict():
+    """The escape-hatch path (`Я уже добавил иконку`) without an active
+    push subscription is the most suspicious bucket — verdict must be
+    `manual_no_push` so the funnel dashboard can highlight it. Shadow
+    mode: the grant still succeeds."""
+    from bloobcat.db.home_screen_install_signals import HomeScreenInstallSignal
+    from bloobcat.db.users import Users
+    from bloobcat.services.home_screen_rewards import claim_home_screen_reward
+
+    user = await Users.create(id=110002, full_name="manual-no-push", balance=0)
+    result = await claim_home_screen_reward(
+        user.id, "discount", platform_hint="ios", trigger="manual"
+    )
+    assert result["already_claimed"] is False
+    assert result["verdict"] == "manual_no_push"
+
+    row = await HomeScreenInstallSignal.filter(user_id=user.id).first()
+    assert row is not None
+    assert row.verdict == "manual_no_push"
+    assert row.had_active_push_sub is False
+    # Reward still landed — shadow mode does not block.
+    refreshed = await Users.get(id=user.id)
+    assert refreshed.home_screen_reward_granted_at is not None
+
+
+@pytest.mark.asyncio
+async def test_signal_ledger_promotes_manual_to_with_push_when_subscribed():
+    """A user who already has an active web-push subscription is
+    proven to have a working standalone client somewhere, so manual
+    claims from that account are far less suspicious. Verdict bumps
+    to `manual_with_push`."""
+    from bloobcat.db.home_screen_install_signals import HomeScreenInstallSignal
+    from bloobcat.db.push_subscriptions import PushSubscription
+    from bloobcat.db.users import Users
+    from bloobcat.services.home_screen_rewards import claim_home_screen_reward
+
+    user = await Users.create(id=110003, full_name="manual-with-push", balance=0)
+    await PushSubscription.create(
+        user_id=user.id,
+        endpoint="https://push.example.test/abc",
+        p256dh="p256",
+        auth="auth",
+        is_active=True,
+    )
+
+    result = await claim_home_screen_reward(
+        user.id, "balance", platform_hint="web", trigger="manual"
+    )
+    assert result["verdict"] == "manual_with_push"
+
+    row = await HomeScreenInstallSignal.filter(user_id=user.id).first()
+    assert row is not None
+    assert row.verdict == "manual_with_push"
+    assert row.had_active_push_sub is True
+
+
+@pytest.mark.asyncio
+async def test_signal_ledger_unknown_for_legacy_frontend_without_trigger():
+    """Older frontends call the endpoint without `trigger`. The ledger
+    must accept this and tag the row as `unknown` so we can measure
+    rollout adoption."""
+    from bloobcat.db.home_screen_install_signals import HomeScreenInstallSignal
+    from bloobcat.db.users import Users
+    from bloobcat.services.home_screen_rewards import claim_home_screen_reward
+
+    user = await Users.create(id=110004, full_name="legacy", balance=0)
+    result = await claim_home_screen_reward(user.id, "balance", platform_hint="tdesktop")
+    assert result["verdict"] == "unknown"
+
+    row = await HomeScreenInstallSignal.filter(user_id=user.id).first()
+    assert row is not None
+    assert row.trigger == "unknown"
+    assert row.verdict == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_signal_ledger_normalizes_garbage_trigger_to_unknown():
+    """Defensive: if the FE somehow sends an invalid trigger string,
+    we coerce it to `unknown` instead of polluting the ledger with
+    arbitrary user-controlled values."""
+    from bloobcat.db.home_screen_install_signals import HomeScreenInstallSignal
+    from bloobcat.db.users import Users
+    from bloobcat.services.home_screen_rewards import claim_home_screen_reward
+
+    user = await Users.create(id=110005, full_name="garbage", balance=0)
+    result = await claim_home_screen_reward(
+        user.id, "balance", trigger="hax0r"  # type: ignore[arg-type]
+    )
+    assert result["verdict"] == "unknown"
+
+    row = await HomeScreenInstallSignal.filter(user_id=user.id).first()
+    assert row is not None
+    assert row.trigger == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_signal_ledger_records_duplicate_claim_attempts():
+    """Idempotent re-claims must still write a ledger row tagged
+    `already_claimed=True` so we can measure how often users tap the
+    bonus button multiple times (incl. cross-tab / cross-device)."""
+    from bloobcat.db.home_screen_install_signals import HomeScreenInstallSignal
+    from bloobcat.db.users import Users
+    from bloobcat.services.home_screen_rewards import claim_home_screen_reward
+
+    user = await Users.create(id=110006, full_name="repeat", balance=0)
+    await claim_home_screen_reward(
+        user.id, "balance", platform_hint="ios", trigger="first_standalone"
+    )
+    await claim_home_screen_reward(
+        user.id, "balance", platform_hint="ios", trigger="boot"
+    )
+
+    rows = await HomeScreenInstallSignal.filter(user_id=user.id).order_by("id").all()
+    assert len(rows) == 2
+    assert rows[0].already_claimed is False
+    assert rows[0].verdict == "strong"
+    assert rows[1].already_claimed is True
+    assert rows[1].verdict == "weak"
+
+
+@pytest.mark.asyncio
+async def test_signal_ledger_rolls_back_with_failed_discount_create(monkeypatch):
+    """The ledger row is written inside the same transaction as the
+    reward grant, so a discount-create failure must also roll back the
+    pending signal row — otherwise the ledger would diverge from the
+    actual reward state."""
+    from bloobcat.db.discounts import PersonalDiscount
+    from bloobcat.db.home_screen_install_signals import HomeScreenInstallSignal
+    from bloobcat.db.users import Users
+    from bloobcat.services import home_screen_rewards as svc
+
+    user = await Users.create(id=110007, full_name="rollback-signal", balance=0)
+
+    async def _failing_create(*args, **kwargs):  # noqa: ANN001
+        raise RuntimeError("simulated discount-create failure")
+
+    monkeypatch.setattr(PersonalDiscount, "create", _failing_create)
+    with pytest.raises(RuntimeError, match="simulated"):
+        await svc.claim_home_screen_reward(
+            user.id, "discount", platform_hint="ios", trigger="appinstalled"
+        )
+
+    assert (
+        await HomeScreenInstallSignal.filter(user_id=user.id).count() == 0
+    ), "ledger row must roll back together with the failed reward grant"
 
 
 # ── orphan repair tooling ────────────────────────────────────────────
