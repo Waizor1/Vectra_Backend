@@ -73,18 +73,41 @@ def setup_logging():
     
     # Текущее время для имен файлов
     current_time = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-    
-    # Добавляем обработчик для основного файла логов
-    logger.add(
-        os.path.join(log_dir, f"bloobcat_{current_time}.log"),
-        format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}",
-        level=log_level,
-        rotation="10 MB",
-        compression="zip",
-        retention=30,
-        encoding="utf-8",
-        filter=message_filter
-    )
+
+    # Файловый sink. По умолчанию сохраняет историческое поведение:
+    # имя файла включает timestamp старта (`bloobcat_2026-05-16_19-21-01.log`),
+    # ротация по размеру 10 MB, retention = 30 файлов. При частых рестартах
+    # это накапливает много файлов, поэтому есть опт-ин на daily rotation
+    # через флаг OBSERVABILITY_LOG_DAILY_ROTATION_ENABLED=true. Включай
+    # ТОЛЬКО после проверки что log-shipping pipeline не зависит от
+    # текущего паттерна имени файла (timestamp-per-startup).
+    daily_rotation_enabled = os.environ.get(
+        "OBSERVABILITY_LOG_DAILY_ROTATION_ENABLED", "false"
+    ).strip().lower() in ("true", "1", "yes", "on")
+
+    if daily_rotation_enabled:
+        logger.add(
+            os.path.join(log_dir, "bloobcat.log"),
+            format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}",
+            level=log_level,
+            rotation="00:00",            # daily в полночь
+            retention="30 days",         # хранить 30 дней
+            compression="zip",
+            encoding="utf-8",
+            filter=message_filter,
+        )
+    else:
+        # Legacy: timestamp-per-startup имя + size-based rotation.
+        logger.add(
+            os.path.join(log_dir, f"bloobcat_{current_time}.log"),
+            format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}",
+            level=log_level,
+            rotation="10 MB",
+            compression="zip",
+            retention=30,
+            encoding="utf-8",
+            filter=message_filter,
+        )
 
     # ── Optional JSON sink ──────────────────────────────────────────────────
     # Дополнительный sink для машиночитаемых JSON-логов (Loki/ELK ingestion).
@@ -97,16 +120,31 @@ def setup_logging():
         "OBSERVABILITY_LOG_JSON_SINK_ENABLED", "false"
     ).strip().lower() in ("true", "1", "yes", "on")
     if json_sink_enabled:
-        logger.add(
-            os.path.join(log_dir, f"bloobcat_json_{current_time}.log"),
-            serialize=True,           # JSON output (Loguru built-in)
-            level=log_level,
-            rotation="10 MB",
-            compression="zip",
-            retention=30,
-            encoding="utf-8",
-            filter=message_filter,    # тот же фильтр — иначе spam утечёт в JSON
-        )
+        # JSON sink honours the same daily-rotation flag so both sinks rotate
+        # consistently. Two filename patterns to stay backward-compatible with
+        # whatever the operator currently ships.
+        if daily_rotation_enabled:
+            logger.add(
+                os.path.join(log_dir, "bloobcat_json.log"),
+                serialize=True,
+                level=log_level,
+                rotation="00:00",
+                retention="30 days",
+                compression="zip",
+                encoding="utf-8",
+                filter=message_filter,
+            )
+        else:
+            logger.add(
+                os.path.join(log_dir, f"bloobcat_json_{current_time}.log"),
+                serialize=True,           # JSON output (Loguru built-in)
+                level=log_level,
+                rotation="10 MB",
+                compression="zip",
+                retention=30,
+                encoding="utf-8",
+                filter=message_filter,    # тот же фильтр — иначе spam утечёт в JSON
+            )
 
     # Класс для перехвата стандартных логов Python
     class InterceptHandler(logging.Handler):
