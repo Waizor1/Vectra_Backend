@@ -5,7 +5,7 @@ src_folder = "./bloobcat"
 
 [tool.poetry]
 name = "bloobcat"
-version = "1.103.0"
+version = "1.104.0"
 description = ""
 authors = ["Your Name <you@example.com>"]
 readme = "README.md"
@@ -27,7 +27,7 @@ websockets = "^16.0"
 yookassa = "^2.5.0"
 loguru = "^0.7.2"
 pydantic = {version = "^2.12.5", extras = ["email"]}
-redis = "^4.6.0"
+redis = "^5.2.0"
 aiohttp = "^3.13.5"
 aiosqlite = "^0.22.1"
 # Pinned as a direct dep so `poetry update` / future regenerations of
@@ -39,6 +39,11 @@ Pillow = "^12.0.0"
 # Web Push (PWA) delivery — VAPID-signed messages to browsers via push services.
 # Brings in `cryptography`, `http-ece`, `py-vapid`.
 pywebpush = "^2.0.0"
+# Observability stack (feature-flagged; safe defaults — no-op without ENV config).
+# See bloobcat/settings.py::ObservabilitySettings and the observability PR plan.
+sentry-sdk = {extras = ["fastapi"], version = "^2.20.0"}
+prometheus-fastapi-instrumentator = "^7.0.0"
+asgi-correlation-id = "^4.3.0"
 
 
 

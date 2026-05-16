@@ -24,6 +24,17 @@ api-app.vectra-pro.net {
     Alt-Svc "clear"
   }
 
+  # Prometheus /metrics is exposed by bloobcat via prometheus-fastapi-instrumentator.
+  # Block external scrapers by returning 404 (not 403, to avoid revealing endpoint
+  # existence). Internal Prometheus scrapers stay on the bloobcat_network bridge
+  # and hit bloobcat:33083/metrics directly without traversing Caddy.
+  # Has nothing to do with Yandex.Metrika (which is FE JS to mc.yandex.ru).
+  @public_metrics {
+    path /metrics
+    not remote_ip private_ranges
+  }
+  respond @public_metrics 404
+
   reverse_proxy bloobcat:33083 {
     lb_try_duration 10s
     lb_try_interval 250ms

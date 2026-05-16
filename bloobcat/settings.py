@@ -598,3 +598,54 @@ class CaptainUserLookupSettings(BaseSettings):
 
 
 captain_lookup_settings = CaptainUserLookupSettings()
+
+
+class ObservabilitySettings(BaseSettings):
+    """Observability stack — all knobs are feature-flagged via ENV.
+
+    Safe defaults: without explicit DSN/flags the entire observability stack is
+    no-op, so this settings class can ship to prod before Sentry/Prometheus
+    infrastructure exists.
+
+    ENV var convention (env_prefix="OBSERVABILITY_"):
+      * OBSERVABILITY_SENTRY_DSN              — leave empty to disable Sentry
+      * OBSERVABILITY_SENTRY_ENV              — Sentry environment tag
+      * OBSERVABILITY_SENTRY_TRACES_SAMPLE_RATE — 0.0..1.0, performance sample
+      * OBSERVABILITY_METRICS_ENABLED         — expose /metrics for Prometheus
+      * OBSERVABILITY_LOG_JSON_SINK_ENABLED   — add parallel JSON log file
+    """
+
+    model_config = SettingsConfigDict(env_prefix="OBSERVABILITY_")
+
+    sentry_dsn: SecretStr | None = None
+    sentry_env: str = "production"
+    sentry_traces_sample_rate: float = 0.05
+    metrics_enabled: bool = True
+    log_json_sink_enabled: bool = False
+
+    @field_validator("sentry_dsn", mode="before")
+    @classmethod
+    def normalize_optional_secret(cls, value):
+        # `OBSERVABILITY_SENTRY_DSN=` (empty value) must produce None, not
+        # SecretStr(""), so the truthy `if sentry_dsn:` guard in __main__.py
+        # correctly skips sentry_sdk.init() when DSN is intentionally blank.
+        if value is None:
+            return None
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @field_validator("sentry_traces_sample_rate", mode="before")
+    @classmethod
+    def clamp_traces_sample_rate(cls, value):
+        if value is None or value == "":
+            return 0.05
+        parsed = float(value)
+        if parsed < 0.0:
+            return 0.0
+        if parsed > 1.0:
+            return 1.0
+        return parsed
+
+
+observability_settings = ObservabilitySettings()
