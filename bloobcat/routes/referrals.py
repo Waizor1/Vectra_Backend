@@ -175,7 +175,24 @@ class HomeScreenClaimRequest(BaseModel):
     platform_hint: Optional[str] = Field(
         default=None,
         max_length=32,
-        description="Diagnostic only (ios / android / web / tdesktop); not persisted",
+        description="Diagnostic only (ios / android / web / tdesktop); not persisted on users",
+    )
+    trigger: Optional[
+        Literal[
+            "appinstalled",
+            "first_standalone",
+            "pending_flag",
+            "boot",
+            "manual",
+            "unknown",
+        ]
+    ] = Field(
+        default=None,
+        description=(
+            "Detection signal that opened the reward modal. Persisted to the "
+            "home_screen_install_signals ledger for funnel analytics. "
+            "Omit to log as 'unknown' (legacy frontends)."
+        ),
     )
 
 
@@ -184,6 +201,7 @@ class HomeScreenClaimResponse(BaseModel):
     reward_kind: Optional[Literal["balance", "discount"]] = None
     amount: Optional[int] = None
     expires_at: Optional[str] = None
+    verdict: Optional[str] = None
 
 
 @router.post("/home-screen-claim", response_model=HomeScreenClaimResponse)
@@ -195,6 +213,7 @@ async def home_screen_claim(
         user_id=int(user.id),
         reward_kind=payload.reward_kind,
         platform_hint=payload.platform_hint,
+        trigger=payload.trigger,
     )
     return HomeScreenClaimResponse(**result)
 

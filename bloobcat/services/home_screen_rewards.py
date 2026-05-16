@@ -37,6 +37,7 @@ from typing import Any, Literal, TypedDict
 from tortoise.transactions import in_transaction
 
 from bloobcat.db.discounts import PersonalDiscount
+from bloobcat.db.home_screen_install_signals import HomeScreenInstallSignal
 from bloobcat.db.users import Users
 from bloobcat.logger import get_logger
 
@@ -49,6 +50,37 @@ HOME_SCREEN_DISCOUNT_TTL_DAYS = 90
 
 HomeScreenRewardKind = Literal["balance", "discount"]
 HomeScreenRepairMode = Literal["clear", "credit"]
+HomeScreenTrigger = Literal[
+    "appinstalled",        # W3C event (Chrome/Edge desktop, Android Chrome)
+    "first_standalone",    # iOS Safari, Android Yandex — first standalone open
+    "pending_flag",        # cross-tab bridge after appinstalled in another tab
+    "boot",                # repeat standalone open (weakest signal)
+    "manual",              # "Я уже добавил иконку" escape hatch
+    "unknown",             # legacy frontend that doesn't send trigger
+]
+
+_STRONG_TRIGGERS: frozenset[str] = frozenset(
+    {"appinstalled", "first_standalone", "pending_flag"}
+)
+
+# Telegram Mini App platforms (per Telegram.WebApp.platform). A Telegram WA
+# never registers a web-push subscription — Telegram uses bot notifications
+# instead — so absence of a PushSubscription row tells us nothing about
+# install state. Manual claims from these platforms get their own verdict
+# bucket so the suspicious `manual_no_push` count isn't contaminated.
+_TELEGRAM_PLATFORMS: frozenset[str] = frozenset(
+    {
+        "android",
+        "android_x",
+        "ios",
+        "macos",
+        "tdesktop",
+        "web",
+        "weba",
+        "webk",
+        "unigram",
+    }
+)
 
 
 class HomeScreenClaimResult(TypedDict, total=False):
@@ -56,6 +88,7 @@ class HomeScreenClaimResult(TypedDict, total=False):
     reward_kind: HomeScreenRewardKind
     amount: int  # rub for 'balance', percent for 'discount'
     expires_at: str | None  # ISO date for 'discount', None for 'balance'
+    verdict: str  # strong / weak / manual_with_push / manual_no_push / unknown
 
 
 async def claim_home_screen_reward(
@@ -63,12 +96,23 @@ async def claim_home_screen_reward(
     reward_kind: HomeScreenRewardKind,
     *,
     platform_hint: str | None = None,
+    trigger: HomeScreenTrigger | None = None,
 ) -> HomeScreenClaimResult:
     """Grant the home-screen install bonus exactly once per user.
 
-    `platform_hint` is logged but not stored — it is a "where the click
-    came from" diagnostic (iOS/Android/web/tdesktop) useful for funnel
-    debugging and not interesting after the reward lands.
+    `platform_hint` (ios/android/web/tdesktop) and `trigger` (which
+    detection signal opened the reward modal) are recorded in the
+    `home_screen_install_signals` ledger for every call — including
+    the duplicate `already_claimed` cases — so we can analyze the
+    install-detection funnel and the manual-bypass rate post-fact.
+
+    `trigger=None` is accepted for backward compatibility with frontends
+    that haven't been updated yet; the signal is logged as `unknown`.
+
+    Verdict policy (shadow mode in v1.99.0): the verdict is computed and
+    stored but does NOT block the grant. Once we have a week of real
+    data we will decide whether to convert `manual_no_push` into a hard
+    `403 install_unverified`.
 
     Idempotency guarantee: the row update is gated on
     `home_screen_reward_granted_at IS NULL` so two concurrent claims race
@@ -82,6 +126,11 @@ async def claim_home_screen_reward(
         raise ValueError(f"unknown reward_kind: {reward_kind!r}")
 
     now = datetime.now(timezone.utc)
+    normalized_trigger = _normalize_trigger(trigger)
+    had_active_push_sub = await _has_active_push_subscription(int(user_id))
+    verdict = _compute_verdict(
+        normalized_trigger, had_active_push_sub, platform_hint
+    )
 
     async with in_transaction() as conn:
         user = await _fetch_user_locked(int(user_id), conn)
@@ -89,13 +138,27 @@ async def claim_home_screen_reward(
             raise ValueError(f"user {user_id} not found")
 
         if user.home_screen_reward_granted_at is not None:
+            await _record_signal(
+                conn,
+                user_id=int(user_id),
+                trigger=normalized_trigger,
+                platform_hint=platform_hint,
+                reward_kind=reward_kind,
+                had_active_push_sub=had_active_push_sub,
+                verdict=verdict,
+                already_claimed=True,
+            )
             logger.info(
-                "home-screen claim already-claimed (cache): user=%s kind=%s platform=%s",
+                "home-screen claim already-claimed (cache): user=%s kind=%s "
+                "platform=%s trigger=%s verdict=%s push=%s",
                 user_id,
                 reward_kind,
                 platform_hint,
+                normalized_trigger,
+                verdict,
+                had_active_push_sub,
             )
-            return {"already_claimed": True}
+            return {"already_claimed": True, "verdict": verdict}
 
         if reward_kind == "balance":
             # Single-row UPDATE so a concurrent caller cannot double-credit
@@ -113,23 +176,49 @@ async def claim_home_screen_reward(
                 )
             )
             if rows == 0:
+                await _record_signal(
+                    conn,
+                    user_id=int(user_id),
+                    trigger=normalized_trigger,
+                    platform_hint=platform_hint,
+                    reward_kind=reward_kind,
+                    had_active_push_sub=had_active_push_sub,
+                    verdict=verdict,
+                    already_claimed=True,
+                )
                 logger.info(
-                    "home-screen claim already-claimed (race): user=%s kind=balance platform=%s",
+                    "home-screen claim already-claimed (race): user=%s kind=balance "
+                    "platform=%s trigger=%s verdict=%s",
                     user_id,
                     platform_hint,
+                    normalized_trigger,
+                    verdict,
                 )
-                return {"already_claimed": True}
-            logger.info(
-                "home-screen reward (balance) granted: user=%s +%s RUB platform=%s",
-                user_id,
-                HOME_SCREEN_BALANCE_BONUS_RUB,
-                platform_hint,
+                return {"already_claimed": True, "verdict": verdict}
+            await _record_signal(
+                conn,
+                user_id=int(user_id),
+                trigger=normalized_trigger,
+                platform_hint=platform_hint,
+                reward_kind=reward_kind,
+                had_active_push_sub=had_active_push_sub,
+                verdict=verdict,
+                already_claimed=False,
+            )
+            _log_grant(
+                reward_kind="balance",
+                user_id=user_id,
+                platform_hint=platform_hint,
+                trigger=normalized_trigger,
+                verdict=verdict,
+                had_active_push_sub=had_active_push_sub,
             )
             return {
                 "already_claimed": False,
                 "reward_kind": "balance",
                 "amount": HOME_SCREEN_BALANCE_BONUS_RUB,
                 "expires_at": None,
+                "verdict": verdict,
             }
 
         # reward_kind == "discount" — deliver discount FIRST, set flag LAST.
@@ -147,9 +236,11 @@ async def claim_home_screen_reward(
             )
         except Exception:
             logger.error(
-                "home-screen claim discount-create failed: user=%s platform=%s — transaction rolled back",
+                "home-screen claim discount-create failed: user=%s platform=%s "
+                "trigger=%s — transaction rolled back",
                 user_id,
                 platform_hint,
+                normalized_trigger,
                 exc_info=True,
             )
             raise
@@ -170,27 +261,188 @@ async def claim_home_screen_reward(
             # back. The losing caller will see ValueError → 500 once; on
             # retry they hit the cache-path early return.
             logger.warning(
-                "home-screen claim race after discount create: user=%s platform=%s — rolling back",
+                "home-screen claim race after discount create: user=%s "
+                "platform=%s trigger=%s — rolling back",
                 user_id,
                 platform_hint,
+                normalized_trigger,
             )
             raise _ConcurrentClaimError(
                 f"home-screen claim race after discount create for user {user_id}"
             )
 
-        logger.info(
-            "home-screen reward (discount) granted: user=%s %s%% TTL=%sd platform=%s",
-            user_id,
-            HOME_SCREEN_DISCOUNT_PERCENT,
-            HOME_SCREEN_DISCOUNT_TTL_DAYS,
-            platform_hint,
+        await _record_signal(
+            conn,
+            user_id=int(user_id),
+            trigger=normalized_trigger,
+            platform_hint=platform_hint,
+            reward_kind=reward_kind,
+            had_active_push_sub=had_active_push_sub,
+            verdict=verdict,
+            already_claimed=False,
+        )
+        _log_grant(
+            reward_kind="discount",
+            user_id=user_id,
+            platform_hint=platform_hint,
+            trigger=normalized_trigger,
+            verdict=verdict,
+            had_active_push_sub=had_active_push_sub,
         )
         return {
             "already_claimed": False,
             "reward_kind": "discount",
             "amount": HOME_SCREEN_DISCOUNT_PERCENT,
             "expires_at": expires_at.isoformat(),
+            "verdict": verdict,
         }
+
+
+def _normalize_trigger(trigger: HomeScreenTrigger | str | None) -> str:
+    """Coerce caller-supplied trigger to a known string; fall back to 'unknown'."""
+    if trigger is None:
+        return "unknown"
+    candidate = str(trigger).strip().lower()
+    allowed = {
+        "appinstalled",
+        "first_standalone",
+        "pending_flag",
+        "boot",
+        "manual",
+        "unknown",
+    }
+    return candidate if candidate in allowed else "unknown"
+
+
+def _compute_verdict(
+    trigger: str, had_active_push_sub: bool, platform_hint: str | None
+) -> str:
+    """Classify a claim signal for the install-funnel analytics.
+
+    Buckets:
+    * `strong`               — strong W3C / first-standalone signal
+    * `weak`                 — repeat standalone boot
+    * `manual_telegram`      — Telegram WA platform; web-push N/A there
+                               (Telegram uses bot notifications, not
+                               PushManager), so absence of push proves
+                               nothing. Separated from `manual_no_push`
+                               to keep the fraud-signal bucket clean.
+    * `manual_with_push`     — manual confirm + active web-push subscription
+    * `manual_no_push`       — manual confirm + no push + non-Telegram
+                               (most suspicious bucket; logged as WARNING)
+    * `unknown`              — legacy / coerced
+
+    v1.100.0 is observation-only — none of these block the grant. The
+    `manual_no_push` bucket is the only candidate for a future hard-gate;
+    Telegram and push-having manuals are explicitly safer-by-design.
+    """
+    if trigger in _STRONG_TRIGGERS:
+        return "strong"
+    if trigger == "boot":
+        return "weak"
+    if trigger == "manual":
+        if _is_telegram_platform(platform_hint):
+            return "manual_telegram"
+        return "manual_with_push" if had_active_push_sub else "manual_no_push"
+    return "unknown"
+
+
+def _is_telegram_platform(platform_hint: str | None) -> bool:
+    """Return True if the platform_hint matches a Telegram Mini App client."""
+    if not platform_hint:
+        return False
+    return platform_hint.strip().lower() in _TELEGRAM_PLATFORMS
+
+
+async def _has_active_push_subscription(user_id: int) -> bool:
+    """Return True if the user has at least one active web-push subscription.
+
+    A push subscription can only be registered from a standalone PWA
+    context (the SW must be installed), so an active row is a strong
+    proxy for "this user has the app installed somewhere". A False
+    result is NOT proof of "no install" (user may have declined push,
+    cleared the subscription, or installed via Telegram Bot API which
+    never registers a web-push subscription) — it's just one signal.
+    """
+    try:
+        from bloobcat.db.push_subscriptions import PushSubscription
+
+        return await PushSubscription.filter(
+            user_id=int(user_id), is_active=True
+        ).exists()
+    except Exception:  # pragma: no cover — never break the claim flow
+        logger.exception(
+            "home-screen claim push-sub probe failed: user=%s", user_id
+        )
+        return False
+
+
+async def _record_signal(
+    conn: Any,
+    *,
+    user_id: int,
+    trigger: str,
+    platform_hint: str | None,
+    reward_kind: HomeScreenRewardKind,
+    had_active_push_sub: bool,
+    verdict: str,
+    already_claimed: bool,
+) -> None:
+    """Append an install-signal row to the ledger inside the active transaction."""
+    try:
+        await HomeScreenInstallSignal.create(
+            using_db=conn,
+            user_id=int(user_id),
+            trigger=trigger,
+            platform_hint=platform_hint,
+            reward_kind=reward_kind,
+            had_active_push_sub=had_active_push_sub,
+            verdict=verdict,
+            already_claimed=already_claimed,
+        )
+    except Exception:  # pragma: no cover — ledger never blocks reward
+        logger.exception(
+            "home-screen install-signal write failed: user=%s trigger=%s verdict=%s",
+            user_id,
+            trigger,
+            verdict,
+        )
+
+
+def _log_grant(
+    *,
+    reward_kind: HomeScreenRewardKind,
+    user_id: int,
+    platform_hint: str | None,
+    trigger: str,
+    verdict: str,
+    had_active_push_sub: bool,
+) -> None:
+    """Single log entry per successful grant — INFO normally, WARNING if suspicious."""
+    log_fn = logger.warning if verdict == "manual_no_push" else logger.info
+    if reward_kind == "balance":
+        log_fn(
+            "home-screen reward (balance) granted: user=%s +%s RUB "
+            "platform=%s trigger=%s verdict=%s push=%s",
+            user_id,
+            HOME_SCREEN_BALANCE_BONUS_RUB,
+            platform_hint,
+            trigger,
+            verdict,
+            had_active_push_sub,
+        )
+    else:
+        log_fn(
+            "home-screen reward (discount) granted: user=%s %s%% TTL=%sd "
+            "platform=%s trigger=%s verdict=%s push=%s",
+            user_id,
+            HOME_SCREEN_DISCOUNT_PERCENT,
+            HOME_SCREEN_DISCOUNT_TTL_DAYS,
+            platform_hint,
+            trigger,
+            verdict,
+            had_active_push_sub,
+        )
 
 
 class _ConcurrentClaimError(RuntimeError):

@@ -34,6 +34,7 @@ TORTOISE_ORM = {
                 "bloobcat.db.analytics",
                 "bloobcat.db.segment_campaigns",
                 "bloobcat.db.push_subscriptions",
+                "bloobcat.db.home_screen_install_signals",
                 "bloobcat.db.reverse_trial",
                 "bloobcat.db.golden_period",
             ],
