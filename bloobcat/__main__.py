@@ -317,6 +317,13 @@ async def _apply_concurrent_index_patches(conn) -> None:
         '    ON "home_screen_install_signals" ("created_at")',
         'CREATE INDEX CONCURRENTLY IF NOT EXISTS "ix_hs_signals_verdict"\n'
         '    ON "home_screen_install_signals" ("verdict")',
+        # processed_payments.payment_method (migration 122) — analytics queries
+        # group by method (SBPQR / CRYPTO / CARD / ...) over the recent
+        # window; partial index limits the cost to rows where the value is
+        # actually populated (legacy rows stay NULL).
+        'CREATE INDEX CONCURRENTLY IF NOT EXISTS "idx_processed_payments_payment_method_processed_at"\n'
+        '    ON "processed_payments" ("payment_method", "processed_at")\n'
+        '    WHERE "payment_method" IS NOT NULL',
     ]
     for stmt in concurrent_index_statements:
         try:
