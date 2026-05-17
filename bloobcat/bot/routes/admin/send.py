@@ -21,6 +21,7 @@ import traceback
 from html import escape as html_escape
 
 from aiogram import Bot, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
@@ -29,6 +30,13 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     Message,
 )
+
+# Telegram-side hard limits (Bot API):
+#   * caption under media (photo/video/document/animation/voice/audio): 1024 chars
+#   * plain text message: 4096 chars
+# Source: https://core.telegram.org/bots/api#sendphoto (and siblings).
+TELEGRAM_CAPTION_MAX_LENGTH = 1024
+TELEGRAM_TEXT_MAX_LENGTH = 4096
 
 from bloobcat.bot.notifications.broadcast import (
     BroadcastChannels,
@@ -219,6 +227,39 @@ async def receive_tg_message(message: Message, state: FSMContext) -> None:
     if not (message.text or message.photo or message.video or message.document):
         await message.answer("Сообщение должно содержать текст или вложение. Попробуйте ещё раз.")
         return
+
+    has_media = bool(message.photo or message.video or message.document or message.animation or message.audio or message.voice)
+    caption_text = message.caption or ""
+    plain_text = message.text or ""
+
+    if has_media and len(caption_text) > TELEGRAM_CAPTION_MAX_LENGTH:
+        excess = len(caption_text) - TELEGRAM_CAPTION_MAX_LENGTH
+        await message.answer(
+            "⚠️ <b>Подпись под медиа слишком длинная для Telegram</b>\n\n"
+            f"У вас <b>{len(caption_text)}</b> символов в подписи, "
+            f"а Telegram разрешает максимум <b>{TELEGRAM_CAPTION_MAX_LENGTH}</b> "
+            f"(лишних: <b>{excess}</b>).\n\n"
+            "Варианты:\n"
+            "• Сократить текст под медиа.\n"
+            "• Отправить медиа и текст разными сообщениями (тогда пришлите медиа без подписи, "
+            "а текст добавьте через обычное текстовое сообщение в отдельной рассылке).\n\n"
+            "Пришлите исправленное сообщение ещё раз.",
+            parse_mode="HTML",
+        )
+        return
+
+    if not has_media and len(plain_text) > TELEGRAM_TEXT_MAX_LENGTH:
+        excess = len(plain_text) - TELEGRAM_TEXT_MAX_LENGTH
+        await message.answer(
+            "⚠️ <b>Текст сообщения слишком длинный для Telegram</b>\n\n"
+            f"У вас <b>{len(plain_text)}</b> символов, "
+            f"а Telegram разрешает максимум <b>{TELEGRAM_TEXT_MAX_LENGTH}</b> "
+            f"(лишних: <b>{excess}</b>).\n\n"
+            "Сократите текст и пришлите сообщение ещё раз.",
+            parse_mode="HTML",
+        )
+        return
+
     await state.update_data(
         orig_chat_id=message.chat.id,
         orig_message_id=message.message_id,
@@ -290,6 +331,12 @@ def _confirm_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
+def _cancel_only_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Отменить", callback_data="send_cancel")],
+    ])
+
+
 def _rows_from_serialized(serialized: list[list[dict[str, str]]] | None) -> list[list[InlineKeyboardButton]] | None:
     if not serialized:
         return None
@@ -339,6 +386,7 @@ async def _show_preview(message: Message, state: FSMContext) -> None:
         )
 
     # First — copy the source TG message so the admin can verify rendering with the actual buttons
+    preview_copy_error: str | None = None
     if channel_key in {"tg", "both"}:
         orig_chat_id = data.get("orig_chat_id")
         orig_message_id = data.get("orig_message_id")
@@ -350,16 +398,35 @@ async def _show_preview(message: Message, state: FSMContext) -> None:
                     message_id=orig_message_id,
                     reply_markup=InlineKeyboardMarkup(inline_keyboard=rows) if rows else None,
                 )
+            except TelegramBadRequest as exc:
+                # Telegram rejected the copy — surface the reason to the admin so the
+                # broadcast isn't started against the same broken source. The most
+                # common cause is caption-too-long, but the early-validate in
+                # receive_tg_message should make that unreachable from /send.
+                preview_copy_error = (getattr(exc, "message", None) or str(exc) or "Bad Request").strip()
+                logger.error(f"preview copy failed (TelegramBadRequest): {exc}")
             except Exception as exc:
+                preview_copy_error = "Не удалось скопировать сообщение в превью"
                 logger.error(f"preview copy failed: {exc}")
+
+    if preview_copy_error:
+        summary_lines.append(
+            "\n⚠️ <b>Telegram отказался показать превью</b>\n"
+            f"Причина: <code>{html_escape(preview_copy_error)[:300]}</code>\n"
+            "Рассылка с такого сообщения не пройдёт. Отмените и пришлите исправленное сообщение."
+        )
 
     if audience_count == 0:
         await message.answer(
             "\n".join(summary_lines)
             + "\n\n⚠️ Сегмент пустой — рассылка не имеет получателей.",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="❌ Отменить", callback_data="send_cancel")],
-            ]),
+            reply_markup=_cancel_only_keyboard(),
+            parse_mode="HTML",
+        )
+    elif preview_copy_error:
+        await message.answer(
+            "\n".join(summary_lines),
+            reply_markup=_cancel_only_keyboard(),
             parse_mode="HTML",
         )
     else:
