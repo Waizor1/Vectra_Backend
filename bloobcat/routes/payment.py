@@ -114,6 +114,7 @@ from bloobcat.services.platega import (
     PlategaClient,
     PlategaConfigError,
     map_platega_status_to_internal,
+    normalize_platega_payment_method,
     normalize_platega_status,
     parse_platega_payload,
 )
@@ -1072,6 +1073,7 @@ async def _upsert_processed_payment(
     client_request_id: str | None = None,
     payment_url: str | None = None,
     provider_payload: str | None = None,
+    payment_method: str | None = None,
 ) -> ProcessedPayments:
     """
     Idempotent write to `processed_payments`.
@@ -1105,6 +1107,12 @@ async def _upsert_processed_payment(
         if provider_payload is not None:
             existing.provider_payload = str(provider_payload)
             update_fields.append("provider_payload")
+        # payment_method разрешается только дополнять (None → value).
+        # Webhook может прийти позже create()-вызова и принести реальный method;
+        # повторные апсерты без method не должны затирать ранее установленное.
+        if payment_method is not None and getattr(existing, "payment_method", None) is None:
+            existing.payment_method = str(payment_method)[:32]
+            update_fields.append("payment_method")
         # Только повышаем разрешение purpose: NULL → topup. Не перетираем
         # уже выставленное значение из колонки (например, если апсерт
         # пришёл с пустым payload, а row уже размечена явно).
@@ -1130,6 +1138,7 @@ async def _upsert_processed_payment(
             payment_id=payment_id,
             user_id=int(user_id),
             provider=str(provider),
+            payment_method=(str(payment_method)[:32] if payment_method else None),
             client_request_id=client_request_id,
             payment_url=payment_url,
             provider_payload=provider_payload,
@@ -2514,6 +2523,7 @@ async def _ensure_platega_pending_row(
     metadata: dict[str, Any],
     provider_status: str,
     payment_url: str | None = None,
+    payment_method: str | None = None,
 ) -> ProcessedPayments:
     existing = await ProcessedPayments.get_or_none(payment_id=payment_id)
     if existing and (
@@ -2543,6 +2553,7 @@ async def _ensure_platega_pending_row(
         ),
         payment_url=payment_url,
         provider_payload=provider_payload,
+        payment_method=payment_method,
     )
 
 
@@ -2553,6 +2564,7 @@ async def _apply_confirmed_platega_payment(
     metadata: dict[str, Any],
     amount_external: float,
     fast_status: bool = False,
+    payment_method: str | None = None,
 ) -> bool:
     amount_from_balance = _round_rub(metadata.get("amount_from_balance", 0))
     await _ensure_platega_pending_row(
@@ -2563,6 +2575,7 @@ async def _apply_confirmed_platega_payment(
         status="pending",
         metadata=metadata,
         provider_status=PLATEGA_STATUS_CONFIRMED,
+        payment_method=payment_method,
     )
 
     # Route LTE / devices top-ups to shared provider-agnostic helpers BEFORE
@@ -3006,6 +3019,7 @@ async def platega_webhook(request: Request):
     except (TypeError, ValueError):
         amount_external = 0.0
     currency = str(body.get("currency") or PAYMENT_CURRENCY_RUB).strip().upper()
+    platega_payment_method = normalize_platega_payment_method(body.get("paymentMethod"))
 
     processed = await ProcessedPayments.get_or_none(payment_id=payment_id)
     if provider_status == PLATEGA_STATUS_CONFIRMED and processed is None:
@@ -3066,12 +3080,14 @@ async def platega_webhook(request: Request):
             status="pending",
             metadata=metadata,
             provider_status=provider_status,
+            payment_method=platega_payment_method,
         )
         await _apply_confirmed_platega_payment(
             payment_id=payment_id,
             user=user,
             metadata=metadata,
             amount_external=float(amount_external),
+            payment_method=platega_payment_method,
         )
         return {"status": "ok"}
 
@@ -3090,6 +3106,7 @@ async def platega_webhook(request: Request):
                 else None
             ),
             provider_payload=provider_payload,
+            payment_method=platega_payment_method,
         )
         if not _meta_bool(metadata.get("is_auto"), False):
             await _send_manual_payment_canceled_notifications_if_needed(
@@ -3117,6 +3134,7 @@ async def platega_webhook(request: Request):
             status="refunded",
             provider=PAYMENT_PROVIDER_PLATEGA,
             provider_payload=provider_payload,
+            payment_method=platega_payment_method,
         )
         logger.info(
             "Platega chargeback processed",
@@ -6177,9 +6195,14 @@ async def pay(
                             "transactionId": platega_payment.transaction_id,
                             "status": platega_payment.status,
                             "redirect": platega_payment.redirect_url,
+                            "paymentMethod": platega_payment.payment_method,
                         },
                     }
                 ),
+                # На v2-эндпоинте Платега возвращает paymentMethod=None
+                # (клиент выберет метод на пейформе), реальное значение
+                # придёт в первом webhook'е и допишется в _update_existing.
+                payment_method=platega_payment.payment_method,
             )
             return {
                 "redirect_to": platega_payment.redirect_url,

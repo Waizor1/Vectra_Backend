@@ -43,6 +43,7 @@ class PlategaCreateResult:
     status: str
     redirect_url: str
     raw: dict[str, Any]
+    payment_method: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,10 +54,20 @@ class PlategaStatusResult:
     currency: str | None
     payload: str | None
     raw: dict[str, Any]
+    payment_method: str | None = None
 
 
 def normalize_platega_status(status: Any) -> str:
     return str(status or "").strip().upper()
+
+
+def normalize_platega_payment_method(value: Any) -> str | None:
+    if value is None:
+        return None
+    cleaned = str(value).strip().upper()
+    if not cleaned:
+        return None
+    return cleaned[:32]
 
 
 def map_platega_status_to_internal(status: Any) -> str:
@@ -151,6 +162,7 @@ class PlategaClient:
             transaction_id=transaction_id,
             status=status or PLATEGA_STATUS_PENDING,
             redirect_url=redirect_url,
+            payment_method=normalize_platega_payment_method(data.get("paymentMethod")),
             raw=data,
         )
 
@@ -177,6 +189,7 @@ class PlategaClient:
                 else None
             ),
             payload=data.get("payload"),
+            payment_method=normalize_platega_payment_method(data.get("paymentMethod")),
             raw=data,
         )
 
