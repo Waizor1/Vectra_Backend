@@ -6,6 +6,10 @@ class ProcessedPayments(models.Model):
     id = fields.IntField(primary_key=True)
     payment_id = fields.CharField(max_length=100, unique=True)
     provider = fields.CharField(max_length=32, default="yookassa")
+    # Конкретный метод оплаты внутри провайдера, если известен. Для Platega это
+    # значения вида "SBPQR" / "CRYPTO" / "CARD" / "INTERNATIONAL", приходят из
+    # ответа /transaction/process и webhook. NULL — метод неизвестен.
+    payment_method = fields.CharField(max_length=32, null=True)
     client_request_id = fields.CharField(max_length=100, null=True)
     payment_url = fields.TextField(null=True)
     provider_payload = fields.TextField(null=True)
