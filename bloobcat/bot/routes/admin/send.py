@@ -351,7 +351,7 @@ async def _show_preview(message: Message, state: FSMContext) -> None:
                     reply_markup=InlineKeyboardMarkup(inline_keyboard=rows) if rows else None,
                 )
             except Exception as exc:
-                logger.error("preview copy failed: %s", exc)
+                logger.error(f"preview copy failed: {exc}")
 
     if audience_count == 0:
         await message.answer(
@@ -509,7 +509,7 @@ async def confirm_broadcast(callback_query: CallbackQuery, state: FSMContext, bo
         )
     except Exception as exc:
         tb = traceback.format_exc()
-        logger.error("Broadcast error: %s\n%s", exc, tb)
+        logger.error(f"Broadcast error: {exc}\n{tb}")
         try:
             await progress_message.edit_text(
                 f"❌ <b>Ошибка рассылки</b>\n\n<code>{html_escape(str(exc))[:500]}</code>",

@@ -8,8 +8,17 @@ from bloobcat.settings import app_settings
 from bloobcat.bot.error_handler import handle_telegram_forbidden_error, handle_telegram_bad_request, reset_user_failed_count
 
 logger = get_logger("notifications.trial.no_trial")
+WEB_USER_ID_FLOOR = 8_000_000_000_000_000
+
 
 async def notify_no_trial_taken(user, hours_passed: int) -> bool:
+    if int(user.id) >= WEB_USER_ID_FLOOR:
+        logger.info(
+            "Пропуск Telegram-уведомления о невзятом триале для web-only пользователя %s",
+            user.id,
+        )
+        return False
+
     lang = get_user_locale(user)
     logger.info(f"Подготовка уведомления пользователю {user.id}, не взявшему пробную подписку (прошло {hours_passed} ч.)")
     has_payments = await ProcessedPayments.filter(
